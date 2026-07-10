@@ -1,0 +1,818 @@
+import {
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import {
+  blockedReason,
+  createTask,
+  findTask,
+  isRunnable,
+  loadBoard,
+  saveBoard,
+  setStatus,
+  stateDir,
+} from "./board.js";
+import { describeConfig, loadConfig } from "./config.js";
+import { COMMAND, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
+import {
+  boardUsage,
+  formatUsage,
+  STATUS_GLYPHS,
+  STATUS_LABELS,
+  taskLine,
+  taskUsage,
+  truncateText,
+} from "./format.js";
+import {
+  buildExecutorPrompt,
+  buildOrchestratorBriefing,
+  buildReviewPrompt,
+  parseVerdict,
+} from "./prompts.js";
+import { findSessionFile, mapWithConcurrencyLimit, startExecutor } from "./runner.js";
+import { type Board, type Task, type TaskStatus, type TierConfig } from "./types.js";
+
+interface LiveRun {
+  taskId: string;
+  kind: "execute" | "review";
+  turns: number;
+  cost: number;
+  lastActivity: string;
+}
+
+interface TaskSnapshot {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  tier: string;
+  attempts: number;
+  cost: number;
+  turns: number;
+  note?: string;
+}
+
+interface ConductorDetails {
+  action: string;
+  tasks: TaskSnapshot[];
+}
+
+function snapshot(task: Task, note?: string): TaskSnapshot {
+  const usage = taskUsage(task);
+  const snap: TaskSnapshot = {
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    tier: task.tier,
+    attempts: task.attempts.length,
+    cost: usage.cost,
+    turns: usage.turns,
+  };
+  if (note !== undefined) snap.note = note;
+  return snap;
+}
+
+function lastReport(task: Task): string | undefined {
+  return task.attempts.at(-1)?.finalReport;
+}
+
+function notify(
+  ctx: ExtensionContext,
+  message: string,
+  level: "info" | "warning" | "error" = "info"
+): void {
+  if (ctx.hasUI) ctx.ui.notify(message, level);
+  else console.log(message);
+}
+
+export default function conductor(pi: ExtensionAPI) {
+  const liveRuns = new Map<string, LiveRun>();
+
+  function refreshUI(ctx: ExtensionContext): void {
+    if (!ctx.hasUI) return;
+    const board = loadBoard(ctx.cwd);
+
+    if (board.tasks.length === 0) {
+      ctx.ui.setStatus(COMMAND, undefined);
+      ctx.ui.setWidget(COMMAND, undefined);
+      return;
+    }
+
+    const approved = board.tasks.filter((t) => t.status === "approved").length;
+    const running = liveRuns.size;
+    const usage = boardUsage(board.tasks);
+    const runningPart = running > 0 ? ` · ${running} running` : "";
+    ctx.ui.setStatus(
+      COMMAND,
+      ctx.ui.theme.fg(
+        running > 0 ? "warning" : "muted",
+        `⚡ conductor ${approved}/${board.tasks.length}${runningPart} · $${usage.cost.toFixed(4)}`
+      )
+    );
+
+    if (running === 0) {
+      ctx.ui.setWidget(COMMAND, undefined);
+      return;
+    }
+    ctx.ui.setWidget(COMMAND, (_tui, theme) => {
+      const lines = [...liveRuns.values()].map((run) => {
+        const task = findTask(board, run.taskId);
+        const title = task ? task.title : run.taskId;
+        const label = run.kind === "review" ? "reviewing" : "running";
+        return (
+          theme.fg("warning", "◐ ") +
+          theme.fg("accent", `${run.taskId} `) +
+          title +
+          theme.fg(
+            "dim",
+            ` · ${label} · ${run.turns} turns · $${run.cost.toFixed(4)} · ${run.lastActivity}`
+          )
+        );
+      });
+      return { render: () => lines, invalidate: () => {} };
+    });
+  }
+
+  function trackRun(ctx: ExtensionContext, run: LiveRun): () => void {
+    liveRuns.set(run.taskId, run);
+    refreshUI(ctx);
+    return () => {
+      liveRuns.delete(run.taskId);
+      refreshUI(ctx);
+    };
+  }
+
+  async function executeTask(
+    board: Board,
+    task: Task,
+    tier: TierConfig,
+    ctx: ExtensionContext,
+    signal: AbortSignal | undefined,
+    onProgress: () => void
+  ): Promise<TaskSnapshot> {
+    const dependencyReports = task.dependsOn
+      .map((depId) => findTask(board, depId))
+      .filter((dep): dep is Task => dep !== undefined && lastReport(dep) !== undefined)
+      .map((dep) => ({ id: dep.id, title: dep.title, report: lastReport(dep) ?? "" }));
+
+    const attemptIndex = task.attempts.length + 1;
+    const live: LiveRun = {
+      taskId: task.id,
+      kind: "execute",
+      turns: 0,
+      cost: 0,
+      lastActivity: "starting…",
+    };
+    const untrack = trackRun(ctx, live);
+
+    const runOptions: Parameters<typeof startExecutor>[0] = {
+      stateDir: stateDir(ctx.cwd),
+      runId: `${task.id}-attempt-${attemptIndex}`,
+      cwd: ctx.cwd,
+      prompt: buildExecutorPrompt(task, dependencyReports),
+      tier,
+      onUpdate: (update) => {
+        live.turns = update.turns;
+        live.cost = update.cost;
+        live.lastActivity = update.lastActivity;
+        refreshUI(ctx);
+        onProgress();
+      },
+    };
+    if (signal) runOptions.signal = signal;
+    const run = startExecutor(runOptions);
+    run.attempt.index = attemptIndex;
+
+    setStatus(task, "running");
+    task.attempts.push(run.attempt);
+    saveBoard(ctx.cwd, board);
+
+    const outcome = await run.outcome;
+    untrack();
+
+    if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
+    if (outcome.model !== undefined) run.attempt.model = outcome.model;
+
+    if (outcome.exitCode !== 0 || outcome.errorMessage) {
+      setStatus(task, "failed");
+      saveBoard(ctx.cwd, board);
+      return snapshot(task, outcome.errorMessage ?? `exit code ${outcome.exitCode}`);
+    }
+
+    setStatus(task, "ready_for_review");
+    saveBoard(ctx.cwd, board);
+    return snapshot(task);
+  }
+
+  async function reviewTask(
+    board: Board,
+    task: Task,
+    tier: TierConfig,
+    ctx: ExtensionContext,
+    signal: AbortSignal | undefined,
+    onProgress: () => void
+  ): Promise<TaskSnapshot> {
+    const report = lastReport(task);
+    if (!report) {
+      return snapshot(task, "no executor report to review");
+    }
+
+    const live: LiveRun = {
+      taskId: task.id,
+      kind: "review",
+      turns: 0,
+      cost: 0,
+      lastActivity: "starting…",
+    };
+    const untrack = trackRun(ctx, live);
+
+    const runOptions: Parameters<typeof startExecutor>[0] = {
+      stateDir: stateDir(ctx.cwd),
+      runId: `${task.id}-review-${task.attempts.length}`,
+      cwd: ctx.cwd,
+      prompt: buildReviewPrompt(task, report),
+      tier,
+      onUpdate: (update) => {
+        live.turns = update.turns;
+        live.cost = update.cost;
+        live.lastActivity = update.lastActivity;
+        refreshUI(ctx);
+        onProgress();
+      },
+    };
+    if (signal) runOptions.signal = signal;
+    const run = startExecutor(runOptions);
+
+    const outcome = await run.outcome;
+    untrack();
+
+    // Reviewer usage is billed against the task for honest per-task cost.
+    const attempt = task.attempts.at(-1);
+    if (attempt) {
+      attempt.usage.input += outcome.usage.input;
+      attempt.usage.output += outcome.usage.output;
+      attempt.usage.cost += outcome.usage.cost;
+      attempt.usage.turns += outcome.usage.turns;
+    }
+
+    if (outcome.exitCode !== 0 || outcome.errorMessage) {
+      saveBoard(ctx.cwd, board);
+      return snapshot(task, `review failed: ${outcome.errorMessage ?? outcome.exitCode}`);
+    }
+
+    const verdict = parseVerdict(outcome.finalReport);
+    if (!verdict) {
+      saveBoard(ctx.cwd, board);
+      return snapshot(task, "reviewer gave no VERDICT line; review again or inspect manually");
+    }
+
+    if (verdict.approved) {
+      setStatus(task, "approved");
+      delete task.reviewNotes;
+    } else {
+      setStatus(task, "changes_requested");
+      task.reviewNotes = verdict.notes || outcome.finalReport;
+    }
+    saveBoard(ctx.cwd, board);
+    return snapshot(task, verdict.approved ? "approved" : truncateText(verdict.notes, 10));
+  }
+
+  // ---------------------------------------------------------------- tools
+
+  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
+    name: "conductor_plan",
+    label: "Conductor Plan",
+    description:
+      "Create tasks on the conductor board. Each brief must be fully self-contained: executors run with a fresh context and see only the brief plus approved dependency reports. Tiers control executor model and thinking level (trivial, standard, complex).",
+    promptSnippet: "Plan tasks for fresh-context executor agents (conductor board)",
+    parameters: Type.Object({
+      tasks: Type.Array(
+        Type.Object({
+          title: Type.String({ description: "Short task title" }),
+          brief: Type.String({
+            description:
+              "Self-contained instructions: goal, relevant file paths, constraints, acceptance criteria, verification command",
+          }),
+          tier: Type.String({ description: "Complexity tier: trivial, standard, or complex" }),
+          dependsOn: Type.Optional(
+            Type.Array(Type.String({ description: "Task id like T1" }), {
+              description: "Tasks that must be approved before this one runs",
+            })
+          ),
+        }),
+        { description: "Tasks to add to the board" }
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const config = loadConfig(ctx.cwd);
+      const board = loadBoard(ctx.cwd);
+      const created: Task[] = [];
+      for (const input of params.tasks as {
+        title: string;
+        brief: string;
+        tier: string;
+        dependsOn?: string[];
+      }[]) {
+        if (!config.tiers[input.tier]) {
+          throw new Error(
+            `Unknown tier "${input.tier}". Available tiers: ${Object.keys(config.tiers).join(", ")}`
+          );
+        }
+        const taskInput: Parameters<typeof createTask>[1] = {
+          title: input.title,
+          brief: input.brief,
+          tier: input.tier,
+        };
+        if (input.dependsOn) taskInput.dependsOn = input.dependsOn;
+        created.push(createTask(board, taskInput));
+      }
+      saveBoard(ctx.cwd, board);
+      refreshUI(ctx);
+
+      const lines = created.map((task) => `${task.id}: ${task.title} (${task.tier})`);
+      return {
+        content: [
+          { type: "text", text: `Created ${created.length} task(s):\n${lines.join("\n")}` },
+        ],
+        details: { action: "plan", tasks: created.map((task) => snapshot(task)) },
+      };
+    },
+    renderCall(args, theme) {
+      const tasks = (args.tasks ?? []) as { title?: string; tier?: string }[];
+      let text =
+        theme.fg("toolTitle", theme.bold("conductor plan ")) +
+        theme.fg("accent", `${tasks.length} task(s)`);
+      for (const task of tasks.slice(0, 6)) {
+        text += `\n  ${theme.fg("muted", "•")} ${task.title ?? "…"}${theme.fg("dim", ` [${task.tier ?? "?"}]`)}`;
+      }
+      if (tasks.length > 6) text += `\n  ${theme.fg("muted", `… +${tasks.length - 6} more`)}`;
+      return new Text(text, 0, 0);
+    },
+    renderResult: renderTaskListResult,
+  });
+
+  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
+    name: "conductor_run",
+    label: "Conductor Run",
+    description:
+      "Execute runnable tasks from the conductor board in fresh-context executor agents. Independent tasks run in parallel. Tasks with changes_requested are retried with the review notes. Pass taskIds to run a subset, otherwise all runnable tasks run.",
+    promptSnippet: "Run planned tasks in parallel fresh-context executors (conductor board)",
+    parameters: Type.Object({
+      taskIds: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Specific task ids to run. Omit to run all runnable tasks.",
+        })
+      ),
+    }),
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const config = loadConfig(ctx.cwd);
+      const board = loadBoard(ctx.cwd);
+      const requestedIds = params.taskIds as string[] | undefined;
+
+      const candidates = requestedIds
+        ? requestedIds.map((id) => findTask(board, id)).filter((t): t is Task => t !== undefined)
+        : board.tasks;
+      const runnable = candidates.filter((task) => isRunnable(board, task));
+      const blocked = candidates
+        .filter(
+          (task) =>
+            !isRunnable(board, task) &&
+            (task.status === "todo" || task.status === "changes_requested")
+        )
+        .map((task) => snapshot(task, blockedReason(board, task)));
+
+      if (runnable.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No runnable tasks. Check dependencies and statuses with conductor_status.",
+            },
+          ],
+          details: { action: "run", tasks: blocked },
+        };
+      }
+
+      const emitProgress = () => {
+        onUpdate?.({
+          content: [{ type: "text", text: `Running ${liveRuns.size} executor(s)…` }],
+          details: { action: "run", tasks: runnable.map((task) => snapshot(task)) },
+        });
+      };
+
+      const results = await mapWithConcurrencyLimit(runnable, config.maxParallel, (task) => {
+        const tier = config.tiers[task.tier] ?? config.tiers.standard;
+        if (!tier) throw new Error(`No tier config for "${task.tier}" and no standard fallback`);
+        return executeTask(board, task, tier, ctx, signal, emitProgress);
+      });
+
+      const all = [...results, ...blocked];
+      const summary = all
+        .map((snap) => {
+          const detail = snap.note ? ` — ${snap.note}` : "";
+          const report = snap.status === "ready_for_review" ? getReportPreview(board, snap.id) : "";
+          return `${snap.id} (${snap.title}): ${STATUS_LABELS[snap.status]}${detail}${report}`;
+        })
+        .join("\n\n");
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${results.length} executor(s) finished.\n\n${summary}\n\nNext: call conductor_review for tasks that are ready for review.`,
+          },
+        ],
+        details: { action: "run", tasks: all },
+      };
+    },
+    renderCall(args, theme) {
+      const ids = args.taskIds as string[] | undefined;
+      const scope = ids && ids.length > 0 ? ids.join(", ") : "all runnable tasks";
+      return new Text(
+        theme.fg("toolTitle", theme.bold("conductor run ")) + theme.fg("accent", scope),
+        0,
+        0
+      );
+    },
+    renderResult: renderTaskListResult,
+  });
+
+  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
+    name: "conductor_review",
+    label: "Conductor Review",
+    description:
+      "Run adversarial fresh-context reviewers over tasks that are ready for review. Reviewers have read-only tools, independently verify the executor's claims, and either approve the task or request changes (stored as review notes for the next run).",
+    promptSnippet:
+      "Adversarially review executor work and approve or request changes (conductor board)",
+    parameters: Type.Object({
+      taskIds: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Task ids to review. Omit to review everything that is ready for review.",
+        })
+      ),
+    }),
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const config = loadConfig(ctx.cwd);
+      const board = loadBoard(ctx.cwd);
+      const requestedIds = params.taskIds as string[] | undefined;
+
+      const candidates = requestedIds
+        ? requestedIds.map((id) => findTask(board, id)).filter((t): t is Task => t !== undefined)
+        : board.tasks;
+      const reviewable = candidates.filter((task) => task.status === "ready_for_review");
+
+      if (reviewable.length === 0) {
+        return {
+          content: [{ type: "text", text: "No tasks are ready for review." }],
+          details: { action: "review", tasks: [] },
+        };
+      }
+
+      const reviewTier = config.tiers.review ?? {
+        thinking: "high",
+        tools: "read,bash,grep,find,ls",
+      };
+      const emitProgress = () => {
+        onUpdate?.({
+          content: [{ type: "text", text: `Reviewing ${liveRuns.size} task(s)…` }],
+          details: { action: "review", tasks: reviewable.map((task) => snapshot(task)) },
+        });
+      };
+
+      const results = await mapWithConcurrencyLimit(reviewable, config.maxParallel, (task) =>
+        reviewTask(board, task, reviewTier, ctx, signal, emitProgress)
+      );
+
+      const summary = results
+        .map(
+          (snap) =>
+            `${snap.id} (${snap.title}): ${STATUS_LABELS[snap.status]}${snap.note ? `\n${snap.note}` : ""}`
+        )
+        .join("\n\n");
+      const needsRerun = results.some((snap) => snap.status === "changes_requested");
+      const next = needsRerun
+        ? "\n\nNext: call conductor_run to retry tasks with requested changes."
+        : "";
+      return {
+        content: [{ type: "text", text: `${summary}${next}` }],
+        details: { action: "review", tasks: results },
+      };
+    },
+    renderCall(args, theme) {
+      const ids = args.taskIds as string[] | undefined;
+      const scope = ids && ids.length > 0 ? ids.join(", ") : "all ready tasks";
+      return new Text(
+        theme.fg("toolTitle", theme.bold("conductor review ")) + theme.fg("accent", scope),
+        0,
+        0
+      );
+    },
+    renderResult: renderTaskListResult,
+  });
+
+  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
+    name: "conductor_status",
+    label: "Conductor Status",
+    description:
+      "Cheap status pulse of the conductor board: every task with its status, tier, attempts, and cost. Use this instead of re-reading executor output.",
+    promptSnippet: "Check status of conductor board tasks",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const board = loadBoard(ctx.cwd);
+      if (board.tasks.length === 0) {
+        return {
+          content: [{ type: "text", text: "Board is empty. Plan tasks with conductor_plan." }],
+          details: { action: "status", tasks: [] },
+        };
+      }
+      const lines = board.tasks.map((task) => {
+        const blocked = blockedReason(board, task);
+        return taskLine(task) + (blocked ? ` (${blocked})` : "");
+      });
+      const usage = boardUsage(board.tasks);
+      return {
+        content: [{ type: "text", text: `${lines.join("\n")}\n\nTotal: ${formatUsage(usage)}` }],
+        details: { action: "status", tasks: board.tasks.map((task) => snapshot(task)) },
+      };
+    },
+    renderCall(_args, theme) {
+      return new Text(theme.fg("toolTitle", theme.bold("conductor status")), 0, 0);
+    },
+    renderResult: renderTaskListResult,
+  });
+
+  function getReportPreview(board: Board, taskId: string): string {
+    const task = findTask(board, taskId);
+    const report = task ? lastReport(task) : undefined;
+    if (!report) return "";
+    return `\nReport:\n${truncateText(report, REPORT_PREVIEW_LINES)}`;
+  }
+
+  function renderTaskListResult(
+    result: { content: { type: string; text?: string }[]; details?: ConductorDetails },
+    { expanded }: { expanded: boolean },
+    theme: Theme
+  ) {
+    const details = result.details;
+    if (!details || details.tasks.length === 0) {
+      const text = result.content[0];
+      return new Text(text?.type === "text" ? (text.text ?? "") : "", 0, 0);
+    }
+
+    const statusColor = (
+      status: TaskStatus
+    ): "success" | "error" | "warning" | "accent" | "muted" => {
+      if (status === "approved") return "success";
+      if (status === "failed" || status === "cancelled") return "error";
+      if (status === "running" || status === "changes_requested") return "warning";
+      if (status === "ready_for_review") return "accent";
+      return "muted";
+    };
+
+    let text = "";
+    for (const snap of details.tasks) {
+      const glyph = theme.fg(statusColor(snap.status), STATUS_GLYPHS[snap.status]);
+      const cost = snap.cost
+        ? theme.fg("dim", ` · ${snap.turns} turns · $${snap.cost.toFixed(4)}`)
+        : "";
+      text += `${glyph} ${theme.fg("accent", snap.id)} ${snap.title} ${theme.fg(statusColor(snap.status), STATUS_LABELS[snap.status])}${theme.fg("dim", ` [${snap.tier}]`)}${cost}\n`;
+      if (
+        snap.note &&
+        (expanded || snap.status === "failed" || snap.status === "changes_requested")
+      ) {
+        const note = expanded ? snap.note : truncateText(snap.note, 3);
+        text += `${theme.fg("dim", note.replace(/^/gm, "    "))}\n`;
+      }
+    }
+    return new Text(text.trimEnd(), 0, 0);
+  }
+
+  // ------------------------------------------------------------- commands
+
+  pi.registerCommand(COMMAND, {
+    description:
+      "Orchestrator/executor workflows: start <goal> | board | open <taskId> | config | reset",
+    getArgumentCompletions: (prefix) => {
+      const options = ["start", "board", "open", "config", "reset"];
+      const matches = options.filter((option) => option.startsWith(prefix.toLowerCase()));
+      return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+    },
+    handler: async (args, ctx) => {
+      const [sub, ...restParts] = args.trim().split(/\s+/);
+      const rest = restParts.join(" ");
+
+      switch ((sub ?? "").toLowerCase()) {
+        case "start": {
+          if (!rest) {
+            notify(ctx, "Usage: /conductor start <goal>", "warning");
+            return;
+          }
+          pi.sendMessage(
+            { customType: MESSAGE_TYPE, content: buildOrchestratorBriefing(rest), display: true },
+            { triggerTurn: true }
+          );
+          return;
+        }
+        case "board":
+          await showBoard(ctx);
+          return;
+        case "open": {
+          if (!rest) {
+            notify(ctx, "Usage: /conductor open <taskId>", "warning");
+            return;
+          }
+          await openTaskSession(ctx, rest);
+          return;
+        }
+        case "config":
+          notify(ctx, describeConfig(loadConfig(ctx.cwd)));
+          return;
+        case "reset": {
+          const board = loadBoard(ctx.cwd);
+          if (board.tasks.length === 0) {
+            notify(ctx, "Board is already empty.");
+            return;
+          }
+          const ok = await ctx.ui.confirm(
+            "Reset board?",
+            `Delete all ${board.tasks.length} task(s) from the board?`
+          );
+          if (!ok) return;
+          saveBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+          refreshUI(ctx);
+          notify(ctx, "Board reset.");
+          return;
+        }
+        default:
+          notify(
+            ctx,
+            [
+              `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
+              `/${COMMAND} board          interactive task board`,
+              `/${COMMAND} open <taskId>  switch into an executor session`,
+              `/${COMMAND} config         show resolved tier configuration`,
+              `/${COMMAND} reset          clear the board`,
+            ].join("\n")
+          );
+      }
+    },
+  });
+
+  pi.registerShortcut("ctrl+alt+b", {
+    description: "Open the conductor board",
+    handler: (ctx) => {
+      if (!ctx.hasUI) return;
+      // Route through the command so the handler gets ExtensionCommandContext
+      // (needed for switchSession when opening an executor session).
+      pi.sendUserMessage(`/${COMMAND} board`);
+    },
+  });
+
+  async function showBoard(ctx: ExtensionCommandContext): Promise<void> {
+    const board = loadBoard(ctx.cwd);
+    if (board.tasks.length === 0) {
+      notify(ctx, "Board is empty. Use /conductor start <goal> or ask the model to plan tasks.");
+      return;
+    }
+
+    const items: SelectItem[] = board.tasks.map((task) => ({
+      value: task.id,
+      label: taskLine(task),
+      description: truncateText(task.brief, 1),
+    }));
+
+    const taskId = await pickFromList(
+      ctx,
+      `Conductor Board · ${formatUsage(boardUsage(board.tasks))}`,
+      items
+    );
+    if (!taskId) return;
+    await showTaskActions(ctx, taskId);
+  }
+
+  async function showTaskActions(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
+    const board = loadBoard(ctx.cwd);
+    const task = findTask(board, taskId);
+    if (!task) return;
+
+    const actions: SelectItem[] = [{ value: "report", label: "View last report" }];
+    if (task.attempts.length > 0) {
+      actions.push({
+        value: "open",
+        label: "Open executor session",
+        description: "Switch this TUI into the executor's session",
+      });
+    }
+    for (const status of [
+      "todo",
+      "ready_for_review",
+      "changes_requested",
+      "approved",
+      "cancelled",
+    ] as TaskStatus[]) {
+      if (status !== task.status) {
+        actions.push({ value: `status:${status}`, label: `Mark as ${STATUS_LABELS[status]}` });
+      }
+    }
+
+    const action = await pickFromList(
+      ctx,
+      `${task.id} ${task.title} · ${STATUS_LABELS[task.status]}`,
+      actions
+    );
+    if (!action) return;
+
+    if (action === "report") {
+      const report = lastReport(task) ?? "(no report yet)";
+      pi.sendMessage({
+        customType: MESSAGE_TYPE,
+        content: `## ${task.id} ${task.title} — last report\n\n${report}`,
+        display: true,
+      });
+      return;
+    }
+    if (action === "open") {
+      await openTaskSession(ctx, task.id);
+      return;
+    }
+    if (action.startsWith("status:")) {
+      setStatus(task, action.slice("status:".length) as TaskStatus);
+      saveBoard(ctx.cwd, board);
+      refreshUI(ctx);
+      notify(ctx, `${task.id} → ${STATUS_LABELS[task.status]}`);
+    }
+  }
+
+  async function openTaskSession(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
+    const board = loadBoard(ctx.cwd);
+    const task = findTask(board, taskId);
+    if (!task) {
+      notify(ctx, `Unknown task: ${taskId}`, "error");
+      return;
+    }
+    if (liveRuns.has(task.id)) {
+      notify(
+        ctx,
+        `${task.id} is still running. Wait for it to finish, or watch its log: ${task.attempts.at(-1)?.logFile}`,
+        "warning"
+      );
+      return;
+    }
+    const attempt = task.attempts.at(-1);
+    const sessionFile = attempt ? findSessionFile(attempt.sessionDir) : undefined;
+    if (!sessionFile) {
+      notify(ctx, `${task.id} has no executor session yet.`, "warning");
+      return;
+    }
+    const ok = await ctx.ui.confirm(
+      `Open executor session for ${task.id}?`,
+      "This switches the current TUI into the executor's session. Use /resume to come back to the orchestrator."
+    );
+    if (!ok) return;
+    await ctx.switchSession(sessionFile);
+  }
+
+  async function pickFromList(
+    ctx: ExtensionCommandContext,
+    title: string,
+    items: SelectItem[]
+  ): Promise<string | null> {
+    return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+      const container = new Container();
+      container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+      const list = new SelectList(items, Math.min(items.length, 12), {
+        selectedPrefix: (t) => theme.fg("accent", t),
+        selectedText: (t) => theme.fg("accent", t),
+        description: (t) => theme.fg("muted", t),
+        scrollInfo: (t) => theme.fg("dim", t),
+        noMatch: (t) => theme.fg("warning", t),
+      });
+      list.onSelect = (item) => done(item.value);
+      list.onCancel = () => done(null);
+      container.addChild(list);
+      container.addChild(new Text(theme.fg("dim", "↑↓ navigate · enter select · esc close"), 1, 0));
+      return {
+        render: (width: number) => container.render(width),
+        invalidate: () => container.invalidate(),
+        handleInput: (data: string) => {
+          list.handleInput(data);
+          tui.requestRender();
+        },
+      };
+    });
+  }
+
+  // ------------------------------------------------------------ rendering
+
+  pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, theme) => {
+    const content = typeof message.content === "string" ? message.content : "";
+    return new Text(theme.fg("accent", "⚡ conductor\n") + content, 0, 0);
+  });
+
+  pi.on("session_start", (_event, ctx) => {
+    liveRuns.clear();
+    refreshUI(ctx);
+  });
+}

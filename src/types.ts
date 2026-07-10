@@ -1,0 +1,63 @@
+export type TaskStatus =
+  | "todo"
+  | "running"
+  | "ready_for_review"
+  | "changes_requested"
+  | "approved"
+  | "failed"
+  | "cancelled";
+
+export interface Usage {
+  input: number;
+  output: number;
+  cost: number;
+  turns: number;
+}
+
+export interface Attempt {
+  index: number;
+  sessionDir: string;
+  logFile: string;
+  model?: string;
+  thinking: string;
+  startedAt: number;
+  endedAt?: number;
+  exitCode?: number;
+  usage: Usage;
+  finalReport?: string;
+  touchedFiles: string[];
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  brief: string;
+  tier: string;
+  status: TaskStatus;
+  dependsOn: string[];
+  reviewNotes?: string;
+  attempts: Attempt[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface Board {
+  version: 1;
+  nextTaskNumber: number;
+  tasks: Task[];
+}
+
+export interface TierConfig {
+  /** Model pattern like "openai/gpt-5-mini". Omit to inherit pi's default model. */
+  model?: string;
+  /** Thinking level: off, minimal, low, medium, high, xhigh. */
+  thinking: string;
+  /** Comma-separated tool allowlist passed to the executor. Omit for all tools. */
+  tools?: string;
+}
+
+export interface ConductorConfig {
+  maxParallel: number;
+  /** Named tiers. "review" is used for adversarial review runs. */
+  tiers: Record<string, TierConfig>;
+}

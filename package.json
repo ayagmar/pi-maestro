@@ -1,0 +1,54 @@
+{
+  "name": "pi-conductor",
+  "version": "0.1.0",
+  "description": "Orchestrator/executor workflows for pi: plan tasks, run cheap fresh-context executors in parallel, adversarially review, and track everything on a live board",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "orchestrator",
+    "subagents",
+    "multi-agent"
+  ],
+  "type": "module",
+  "main": "./src/index.ts",
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "lint": "biome lint . --error-on-warnings",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke-test": "node --import=tsx ./scripts/smoke-test.mjs",
+    "test": "node --import=tsx --test ./test/*.test.ts",
+    "check": "tsc --noEmit -p tsconfig.json && node --import=tsx ./scripts/smoke-test.mjs && node --import=tsx --test ./test/*.test.ts && pnpm run lint && pnpm run format:check"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "image": "https://placehold.co/1200x630/png?text=pi-conductor"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.9",
+    "@earendil-works/pi-ai": "^0.80.0",
+    "@earendil-works/pi-coding-agent": "^0.80.0",
+    "@earendil-works/pi-tui": "^0.80.0",
+    "@types/node": "^22.19.10",
+    "tsx": "^4.21.0",
+    "typebox": "^1.1.38",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}
