@@ -79,8 +79,16 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
 
 - **Footer status**: `⚡ conductor 2/5 · 2 running · $0.1234` — live while executors run.
 - **Live widget** above the editor shows each running executor: task, turns, cost, current tool.
-- **`/conductor board`** (or `ctrl+alt+b`): interactive board. Pick a task to view its last
-  report, override its status (e.g. force `approved` or back to `todo`), or open its session.
+- **`/conductor board`** (or `ctrl+alt+b`): full-screen live dashboard — task list on the left,
+  live transcript of the selected task on the right (tailed from the executor's event log,
+  auto-refreshing twice a second). From the dashboard you can:
+  - `↑↓` switch between executors, `PgUp/PgDn` scroll the transcript
+  - `s` **steer a running executor** — type a correction and it is queued into that executor's
+    next LLM call (executors run in RPC mode, so mid-run steering works like it does in pi itself)
+  - `x` abort a running executor (task becomes `cancelled`)
+  - `a` approve / `r` reopen a finished task without spawning a reviewer
+  - `enter` open the executor's full session in your TUI
+- **`/conductor list`**: compact task picker (report view, status overrides, open session).
 - **`/conductor open T3`**: switches your TUI into that executor's persisted session so you can
   inspect exactly what it did — or continue working in it by hand. Use `/resume` to return.
 
@@ -113,7 +121,8 @@ Check the resolved config with `/conductor config`.
 
 ```
 /conductor start <goal>   plan + delegate a goal with the orchestrator
-/conductor board          interactive task board (also ctrl+alt+b)
+/conductor board          full-screen live dashboard (also ctrl+alt+b)
+/conductor list           compact task picker
 /conductor open <taskId>  switch into an executor's session
 /conductor config         show resolved tier configuration
 /conductor reset          clear the board
@@ -123,8 +132,10 @@ Check the resolved config with `/conductor config`.
 
 - The board (`.pi/conductor/board.json`) is the single source of truth, written atomically.
   Restarting pi loses nothing; the status bar and board rebuild from disk.
-- Executors are plain `pi --mode json -p` child processes with persisted sessions under
+- Executors are `pi --mode rpc` child processes with persisted sessions under
   `.pi/conductor/sessions/<task>-attempt-<n>/` and raw event logs under `.pi/conductor/logs/`.
+  RPC mode is what makes mid-run steering and clean aborts possible. Executor-side extension
+  dialogs (e.g. permission gates) are auto-cancelled so headless runs can never hang.
 - Dependencies gate execution: a task only runs when everything it `dependsOn` is `approved`.
 - Reviewers must end with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`; anything else leaves
   the task in `ready_for_review` for you or the orchestrator to re-review.

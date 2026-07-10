@@ -23,6 +23,7 @@ export function buildExecutorPrompt(
     [
       "## Rules",
       "- Work only on this task. Do not expand scope.",
+      "- The user may send steering messages mid-run; treat them as authoritative corrections.",
       "- Verify your work (run tests/build/typecheck where applicable).",
       "- End your final message with a `## Report` section containing:",
       "  - What was done (short bullets)",

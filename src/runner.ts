@@ -10,6 +10,7 @@ export interface RunOutcome {
   finalReport: string;
   touchedFiles: string[];
   model?: string;
+  aborted: boolean;
   errorMessage?: string;
 }
 
@@ -19,9 +20,13 @@ export interface RunUpdate {
   lastActivity: string;
 }
 
-export interface ExecutorRun {
+export interface ExecutorHandle {
   attempt: Attempt;
   outcome: Promise<RunOutcome>;
+  /** Queue a steering message into the running executor (delivered before its next LLM call). */
+  steer(message: string): void;
+  /** Abort the executor. The outcome resolves with aborted: true. */
+  abort(): void;
 }
 
 function piInvocation(args: string[]): { command: string; args: string[] } {
@@ -34,6 +39,9 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
 
 export interface JsonEvent {
   type: string;
+  id?: string;
+  toolName?: string;
+  args?: Record<string, unknown> | null;
   message?: {
     role?: string;
     model?: string;
@@ -42,8 +50,6 @@ export interface JsonEvent {
     errorMessage?: string;
     content?: { type: string; text?: string }[];
   };
-  toolName?: string;
-  args?: Record<string, unknown>;
 }
 
 function extractText(message: JsonEvent["message"]): string {
@@ -63,9 +69,12 @@ export function touchedFile(event: JsonEvent, cwd: string): string | undefined {
 }
 
 /**
- * Spawn a fresh-context pi executor as a child process in JSON mode.
- * The session is persisted under stateDir/sessions/<runId> so the user
- * can attach to it later with /conductor open.
+ * Spawn a fresh-context pi executor as a child process in RPC mode.
+ *
+ * RPC mode (vs plain JSON print mode) lets the caller steer or abort the
+ * executor mid-run via stdin commands. The session is persisted under
+ * stateDir/sessions/<runId> so the user can attach to it later, and every
+ * stdout event is mirrored to stateDir/logs/<runId>.jsonl for live tailing.
  */
 export function startExecutor(options: {
   stateDir: string;
@@ -75,7 +84,7 @@ export function startExecutor(options: {
   tier: TierConfig;
   signal?: AbortSignal;
   onUpdate?: (update: RunUpdate) => void;
-}): ExecutorRun {
+}): ExecutorHandle {
   const sessionDir = join(options.stateDir, SESSIONS_DIR, options.runId);
   const logFile = join(options.stateDir, LOGS_DIR, `${options.runId}.jsonl`);
   mkdirSync(sessionDir, { recursive: true });
@@ -92,33 +101,43 @@ export function startExecutor(options: {
   };
   if (options.tier.model !== undefined) attempt.model = options.tier.model;
 
-  const args = [
-    "--mode",
-    "json",
-    "-p",
-    "--session-dir",
-    sessionDir,
-    "--thinking",
-    options.tier.thinking,
-  ];
+  const args = ["--mode", "rpc", "--session-dir", sessionDir, "--thinking", options.tier.thinking];
   if (options.tier.model) args.push("--model", options.tier.model);
   if (options.tier.tools) args.push("--tools", options.tier.tools);
-  args.push(options.prompt);
+
+  const invocation = piInvocation(args);
+  const proc = spawn(invocation.command, invocation.args, {
+    cwd: options.cwd,
+    shell: false,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  const send = (command: Record<string, unknown>) => {
+    if (proc.stdin.writable) proc.stdin.write(`${JSON.stringify(command)}\n`);
+  };
+
+  let wasAborted = false;
+  const abort = () => {
+    if (wasAborted) return;
+    wasAborted = true;
+    send({ type: "abort" });
+    proc.stdin.end();
+    setTimeout(() => {
+      if (proc.exitCode === null) proc.kill("SIGTERM");
+    }, KILL_GRACE_MS);
+    setTimeout(() => {
+      if (proc.exitCode === null) proc.kill("SIGKILL");
+    }, KILL_GRACE_MS * 2);
+  };
 
   const outcome = new Promise<RunOutcome>((resolve) => {
-    const invocation = piInvocation(args);
-    const proc = spawn(invocation.command, invocation.args, {
-      cwd: options.cwd,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
     const log = createWriteStream(logFile);
     const result: RunOutcome = {
       exitCode: 0,
       usage: attempt.usage,
       finalReport: "",
       touchedFiles: attempt.touchedFiles,
+      aborted: false,
     };
     let stderr = "";
     let buffer = "";
@@ -131,6 +150,13 @@ export function startExecutor(options: {
       try {
         event = JSON.parse(line) as JsonEvent;
       } catch {
+        return;
+      }
+
+      // Executors run headless: auto-cancel any extension dialog so
+      // permission gates fail safe instead of hanging the run.
+      if (event.type === "extension_ui_request" && event.id) {
+        send({ type: "extension_ui_response", id: event.id, cancelled: true });
         return;
       }
 
@@ -155,6 +181,14 @@ export function startExecutor(options: {
         attempt.touchedFiles.push(touched);
       }
 
+      if (event.type === "agent_end") {
+        // Work is done; closing stdin triggers RPC shutdown and session flush.
+        proc.stdin.end();
+        setTimeout(() => {
+          if (proc.exitCode === null) proc.kill("SIGTERM");
+        }, KILL_GRACE_MS);
+      }
+
       options.onUpdate?.({ turns: attempt.usage.turns, cost: attempt.usage.cost, lastActivity });
     };
 
@@ -173,7 +207,8 @@ export function startExecutor(options: {
       if (buffer.trim()) processLine(buffer);
       log.end();
       result.exitCode = code ?? 0;
-      if (result.exitCode !== 0 && !result.errorMessage) {
+      result.aborted = wasAborted;
+      if (result.exitCode !== 0 && !result.errorMessage && !wasAborted) {
         result.errorMessage = stderr.trim() || `executor exited with code ${result.exitCode}`;
       }
       attempt.endedAt = Date.now();
@@ -191,18 +226,19 @@ export function startExecutor(options: {
     });
 
     if (options.signal) {
-      const kill = () => {
-        proc.kill("SIGTERM");
-        setTimeout(() => {
-          if (!proc.killed) proc.kill("SIGKILL");
-        }, KILL_GRACE_MS);
-      };
-      if (options.signal.aborted) kill();
-      else options.signal.addEventListener("abort", kill, { once: true });
+      if (options.signal.aborted) abort();
+      else options.signal.addEventListener("abort", abort, { once: true });
     }
+
+    send({ type: "prompt", message: options.prompt });
   });
 
-  return { attempt, outcome };
+  return {
+    attempt,
+    outcome,
+    steer: (message: string) => send({ type: "steer", message }),
+    abort,
+  };
 }
 
 /** Locate the persisted session file for an attempt, for attaching in the TUI. */

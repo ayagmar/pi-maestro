@@ -33,7 +33,13 @@ import {
   buildReviewPrompt,
   parseVerdict,
 } from "./prompts.js";
-import { findSessionFile, mapWithConcurrencyLimit, startExecutor } from "./runner.js";
+import { Dashboard } from "./dashboard.js";
+import {
+  type ExecutorHandle,
+  findSessionFile,
+  mapWithConcurrencyLimit,
+  startExecutor,
+} from "./runner.js";
 import { type Board, type Task, type TaskStatus, type TierConfig } from "./types.js";
 
 interface LiveRun {
@@ -42,6 +48,7 @@ interface LiveRun {
   turns: number;
   cost: number;
   lastActivity: string;
+  handle: ExecutorHandle;
 }
 
 interface TaskSnapshot {
@@ -136,6 +143,22 @@ export default function conductor(pi: ExtensionAPI) {
     });
   }
 
+  function applyUpdate(
+    ctx: ExtensionContext,
+    taskId: string,
+    update: { turns: number; cost: number; lastActivity: string },
+    onProgress: () => void
+  ): void {
+    const live = liveRuns.get(taskId);
+    if (live) {
+      live.turns = update.turns;
+      live.cost = update.cost;
+      live.lastActivity = update.lastActivity;
+    }
+    refreshUI(ctx);
+    onProgress();
+  }
+
   function trackRun(ctx: ExtensionContext, run: LiveRun): () => void {
     liveRuns.set(run.taskId, run);
     refreshUI(ctx);
@@ -159,32 +182,27 @@ export default function conductor(pi: ExtensionAPI) {
       .map((dep) => ({ id: dep.id, title: dep.title, report: lastReport(dep) ?? "" }));
 
     const attemptIndex = task.attempts.length + 1;
-    const live: LiveRun = {
-      taskId: task.id,
-      kind: "execute",
-      turns: 0,
-      cost: 0,
-      lastActivity: "starting…",
-    };
-    const untrack = trackRun(ctx, live);
-
     const runOptions: Parameters<typeof startExecutor>[0] = {
       stateDir: stateDir(ctx.cwd),
       runId: `${task.id}-attempt-${attemptIndex}`,
       cwd: ctx.cwd,
       prompt: buildExecutorPrompt(task, dependencyReports),
       tier,
-      onUpdate: (update) => {
-        live.turns = update.turns;
-        live.cost = update.cost;
-        live.lastActivity = update.lastActivity;
-        refreshUI(ctx);
-        onProgress();
-      },
+      onUpdate: (update) => applyUpdate(ctx, task.id, update, onProgress),
     };
     if (signal) runOptions.signal = signal;
     const run = startExecutor(runOptions);
     run.attempt.index = attemptIndex;
+
+    const live: LiveRun = {
+      taskId: task.id,
+      kind: "execute",
+      turns: 0,
+      cost: 0,
+      lastActivity: "starting…",
+      handle: run,
+    };
+    const untrack = trackRun(ctx, live);
 
     setStatus(task, "running");
     task.attempts.push(run.attempt);
@@ -195,6 +213,12 @@ export default function conductor(pi: ExtensionAPI) {
 
     if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
     if (outcome.model !== undefined) run.attempt.model = outcome.model;
+
+    if (outcome.aborted) {
+      setStatus(task, "cancelled");
+      saveBoard(ctx.cwd, board);
+      return snapshot(task, "aborted by user");
+    }
 
     if (outcome.exitCode !== 0 || outcome.errorMessage) {
       setStatus(task, "failed");
@@ -220,31 +244,26 @@ export default function conductor(pi: ExtensionAPI) {
       return snapshot(task, "no executor report to review");
     }
 
-    const live: LiveRun = {
-      taskId: task.id,
-      kind: "review",
-      turns: 0,
-      cost: 0,
-      lastActivity: "starting…",
-    };
-    const untrack = trackRun(ctx, live);
-
     const runOptions: Parameters<typeof startExecutor>[0] = {
       stateDir: stateDir(ctx.cwd),
       runId: `${task.id}-review-${task.attempts.length}`,
       cwd: ctx.cwd,
       prompt: buildReviewPrompt(task, report),
       tier,
-      onUpdate: (update) => {
-        live.turns = update.turns;
-        live.cost = update.cost;
-        live.lastActivity = update.lastActivity;
-        refreshUI(ctx);
-        onProgress();
-      },
+      onUpdate: (update) => applyUpdate(ctx, task.id, update, onProgress),
     };
     if (signal) runOptions.signal = signal;
     const run = startExecutor(runOptions);
+
+    const live: LiveRun = {
+      taskId: task.id,
+      kind: "review",
+      turns: 0,
+      cost: 0,
+      lastActivity: "starting…",
+      handle: run,
+    };
+    const untrack = trackRun(ctx, live);
 
     const outcome = await run.outcome;
     untrack();
@@ -256,6 +275,11 @@ export default function conductor(pi: ExtensionAPI) {
       attempt.usage.output += outcome.usage.output;
       attempt.usage.cost += outcome.usage.cost;
       attempt.usage.turns += outcome.usage.turns;
+    }
+
+    if (outcome.aborted) {
+      saveBoard(ctx.cwd, board);
+      return snapshot(task, "review aborted by user; task stays ready for review");
     }
 
     if (outcome.exitCode !== 0 || outcome.errorMessage) {
@@ -595,7 +619,7 @@ export default function conductor(pi: ExtensionAPI) {
     description:
       "Orchestrator/executor workflows: start <goal> | board | open <taskId> | config | reset",
     getArgumentCompletions: (prefix) => {
-      const options = ["start", "board", "open", "config", "reset"];
+      const options = ["start", "board", "list", "open", "config", "reset"];
       const matches = options.filter((option) => option.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
     },
@@ -616,6 +640,11 @@ export default function conductor(pi: ExtensionAPI) {
           return;
         }
         case "board":
+        case "dash":
+        case "dashboard":
+          await showDashboard(ctx);
+          return;
+        case "list":
           await showBoard(ctx);
           return;
         case "open": {
@@ -650,7 +679,8 @@ export default function conductor(pi: ExtensionAPI) {
             ctx,
             [
               `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
-              `/${COMMAND} board          interactive task board`,
+              `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
+              `/${COMMAND} list           compact task picker`,
               `/${COMMAND} open <taskId>  switch into an executor session`,
               `/${COMMAND} config         show resolved tier configuration`,
               `/${COMMAND} reset          clear the board`,
@@ -661,7 +691,7 @@ export default function conductor(pi: ExtensionAPI) {
   });
 
   pi.registerShortcut("ctrl+alt+b", {
-    description: "Open the conductor board",
+    description: "Open the conductor dashboard",
     handler: (ctx) => {
       if (!ctx.hasUI) return;
       // Route through the command so the handler gets ExtensionCommandContext
@@ -669,6 +699,56 @@ export default function conductor(pi: ExtensionAPI) {
       pi.sendUserMessage(`/${COMMAND} board`);
     },
   });
+
+  async function showDashboard(ctx: ExtensionCommandContext): Promise<void> {
+    if (ctx.mode !== "tui") {
+      await showBoard(ctx);
+      return;
+    }
+    const board = loadBoard(ctx.cwd);
+    if (board.tasks.length === 0) {
+      notify(ctx, "Board is empty. Use /conductor start <goal> or ask the model to plan tasks.");
+      return;
+    }
+
+    const openTaskId = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+      const dashboard = new Dashboard(theme, {
+        getBoard: () => loadBoard(ctx.cwd),
+        isLive: (taskId) => liveRuns.has(taskId),
+        liveActivity: (taskId) => {
+          const live = liveRuns.get(taskId);
+          if (!live) return undefined;
+          const label = live.kind === "review" ? "reviewing" : "running";
+          return `${label} · ${live.turns} turns · ${live.lastActivity}`;
+        },
+        steer: (taskId, message) => {
+          liveRuns.get(taskId)?.handle.steer(message);
+        },
+        abort: (taskId) => {
+          liveRuns.get(taskId)?.handle.abort();
+        },
+        setTaskStatus: (taskId, status) => {
+          const current = loadBoard(ctx.cwd);
+          const task = findTask(current, taskId);
+          if (!task) return;
+          setStatus(task, status);
+          saveBoard(ctx.cwd, current);
+          refreshUI(ctx);
+        },
+        openSession: (taskId) => done(taskId),
+        close: () => done(null),
+        requestRender: () => tui.requestRender(),
+      });
+      return {
+        render: (width: number) => dashboard.render(width),
+        invalidate: () => dashboard.invalidate(),
+        handleInput: (data: string) => dashboard.handleInput(data),
+        dispose: () => dashboard.dispose(),
+      };
+    });
+
+    if (openTaskId) await openTaskSession(ctx, openTaskId);
+  }
 
   async function showBoard(ctx: ExtensionCommandContext): Promise<void> {
     const board = loadBoard(ctx.cwd);
