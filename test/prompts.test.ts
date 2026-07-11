@@ -123,19 +123,70 @@ test("parseVerdict handles approve, request changes, and missing verdicts", () =
   assert.equal(parseVerdict("I think it looks fine"), undefined);
 });
 
-test("supervisor briefing carries goal and board, and forbids re-planning", () => {
-  const briefing = buildSupervisorBriefing(
-    "Migrate auth",
-    "○ T1 add middleware · todo\n● T2 write tests · ready for review",
-    "tier guidance here"
-  );
+test("supervisor briefing renders structured task blocks in stable field order", () => {
+  const task = makeTask({
+    status: "ready_for_review",
+    tier: "complex",
+    dependsOn: ["T0", "T2"],
+    reviewNotes: "r".repeat(501),
+    attempts: [
+      {
+        index: 1,
+        logFile: "attempt.log",
+        thinking: "high",
+        startedAt: 0,
+        usage: { input: 100, output: 20, cost: 0.01234, turns: 2 },
+        touchedFiles: [],
+      },
+      {
+        index: 2,
+        logFile: "attempt-2.log",
+        thinking: "high",
+        startedAt: 1,
+        usage: { input: 50, output: 10, cost: 0.00006, turns: 1 },
+        touchedFiles: [],
+      },
+    ],
+  });
+  const briefing = buildSupervisorBriefing("Migrate auth", [task], "tier guidance here");
+  const expectedBlock = [
+    "id: T1",
+    "title: Add health endpoint",
+    "status: ready_for_review",
+    "tier: complex",
+    "dependsOn: T0, T2",
+    "attempts: 2",
+    "cost: $0.0124",
+    `reviewNotes: ${"r".repeat(500)}`,
+  ].join("\n");
+
+  assert.ok(briefing.includes(`## Board\n${expectedBlock}\n\n## Success criteria`));
+  assert.doesNotMatch(briefing, new RegExp(`reviewNotes: ${"r".repeat(501)}`));
   assert.match(briefing, /fresh context/);
   assert.match(briefing, /Migrate auth/);
-  assert.match(briefing, /T2 write tests/);
   assert.match(briefing, /Do not re-plan/);
   assert.match(briefing, /you do not implement tasks yourself/);
-  // Missing goal degrades gracefully
-  assert.match(buildSupervisorBriefing(undefined, "board", "tiers"), /infer from the board/);
+  assert.match(briefing, /tier guidance here/);
+});
+
+test("supervisor briefing keeps multiline review notes on one capped field line", () => {
+  const reviewNotes = `first line\r\nsecond line\n${"r".repeat(500)}`;
+  const briefing = buildSupervisorBriefing("Migrate auth", [makeTask({ reviewNotes })], "tiers");
+  const reviewNotesLine = briefing.split("\n").find((line) => line.startsWith("reviewNotes: "));
+
+  assert.equal(
+    reviewNotesLine,
+    `reviewNotes: ${reviewNotes.replace(/\r\n?|\n/g, "\\n").slice(0, 500)}`
+  );
+  assert.equal(reviewNotesLine?.slice("reviewNotes: ".length).length, 500);
+  assert.match(reviewNotesLine ?? "", /^reviewNotes: first line\\nsecond line\\n/);
+});
+
+test("supervisor briefing formats empty task fields and a missing goal gracefully", () => {
+  const briefing = buildSupervisorBriefing(undefined, [makeTask()], "tiers");
+  assert.match(briefing, /infer from the board/);
+  assert.match(briefing, /dependsOn: \(none\)\nattempts: 0\ncost: \$0\.0000/);
+  assert.doesNotMatch(briefing, /reviewNotes:/);
 });
 
 test("parseVerdict uses the last verdict when the reviewer quotes the instruction", () => {

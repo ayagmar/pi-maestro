@@ -115,13 +115,32 @@ export function parseVerdict(report: string): { approved: boolean; notes: string
  */
 export function buildSupervisorBriefing(
   goal: string | undefined,
-  boardSummary: string,
+  tasks: Task[],
   tierGuidance: string
 ): string {
+  const taskBlocks = tasks.map((task) => {
+    const cost = task.attempts.reduce((total, attempt) => total + attempt.usage.cost, 0);
+    const fields = [
+      `id: ${task.id}`,
+      `title: ${task.title}`,
+      `status: ${task.status}`,
+      `tier: ${task.tier}`,
+      `dependsOn: ${task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "(none)"}`,
+      `attempts: ${task.attempts.length}`,
+      `cost: $${cost.toFixed(4)}`,
+    ];
+    if (task.reviewNotes) {
+      const reviewNotes = task.reviewNotes.replace(/\r\n?|\n/g, "\\n").slice(0, 500);
+      fields.push(`reviewNotes: ${reviewNotes}`);
+    }
+    return fields.join("\n");
+  });
+  const board = taskBlocks.length > 0 ? taskBlocks.join("\n\n") : "(no tasks)";
+
   return [
     "Role: supervising orchestrator taking over an existing maestro board with a fresh context. Planning is done. You drive execution and review; you do not implement tasks yourself.",
     `## Goal\n${goal ?? "(not recorded — infer from the board)"}`,
-    `## Board\n${boardSummary}`,
+    `## Board\n${board}`,
     [
       "## Success criteria",
       "- Every task on the board is approved by an adversarial review.",

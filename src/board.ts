@@ -1,9 +1,26 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { STATE_DIR } from "./constants.js";
 import { type Board, type Task, type TaskStatus } from "./types.js";
 
 export const BOARD_FILE = "board.json";
+const HISTORY_FILE = "history.jsonl";
+
+export interface StatusHistoryEntry {
+  ts: string;
+  taskId: string;
+  from: TaskStatus;
+  to: TaskStatus;
+  revision: number;
+}
 
 const EMPTY_BOARD: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
 
@@ -34,10 +51,45 @@ export function saveBoard(cwd: string, board: Board): void {
     // Runtime state (board, logs) has no place in version control.
     writeFileSync(join(dir, ".gitignore"), "*\n", "utf-8");
   }
+  board.revision = (board.revision ?? 0) + 1;
   const file = boardFile(cwd);
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(board, null, 2)}\n`, "utf-8");
   renameSync(tmp, file);
+}
+
+export function recordStatusChange(
+  cwd: string,
+  taskId: string,
+  from: TaskStatus,
+  to: TaskStatus,
+  revision: number
+): void {
+  const dir = stateDir(cwd);
+  mkdirSync(dir, { recursive: true });
+  const record = { ts: new Date().toISOString(), taskId, from, to, revision };
+  appendFileSync(join(dir, HISTORY_FILE), `${JSON.stringify(record)}\n`, "utf-8");
+}
+
+export function archiveBoard(cwd: string): string | undefined {
+  const file = boardFile(cwd);
+  if (!existsSync(file)) return undefined;
+
+  const archiveDir = join(stateDir(cwd), "archive");
+  mkdirSync(archiveDir, { recursive: true });
+  const archive = join(archiveDir, `${new Date().toISOString()}-board.json`);
+  copyFileSync(file, archive);
+  return archive;
+}
+
+export function loadStatusHistory(cwd: string): StatusHistoryEntry[] | undefined {
+  const file = join(stateDir(cwd), HISTORY_FILE);
+  if (!existsSync(file)) return undefined;
+
+  return readFileSync(file, "utf-8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as StatusHistoryEntry);
 }
 
 export function createTask(
@@ -74,9 +126,13 @@ export function updateTask(
   const board = loadBoard(cwd);
   const task = findTask(board, taskId);
   if (!task) return undefined;
+  const previousStatus = task.status;
   mutate(task, board);
   task.updatedAt = Date.now();
   saveBoard(cwd, board);
+  if (task.status !== previousStatus) {
+    recordStatusChange(cwd, task.id, previousStatus, task.status, board.revision as number);
+  }
   return task;
 }
 

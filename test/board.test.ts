@@ -12,12 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  archiveBoard,
   blockedReason,
   createTask,
   findTask,
   forceStatus,
   isRunnable,
   loadBoard,
+  loadStatusHistory,
   saveBoard,
   setStatus,
   transition,
@@ -151,16 +153,92 @@ test("updateTask mutates against fresh state so concurrent writers do not clobbe
   }
 });
 
-test("saveBoard/loadBoard round-trips", () => {
+test("saveBoard/loadBoard round-trips and increments revisions", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
     const board = emptyBoard();
     createTask(board, { title: "A", brief: "do a", tier: "complex" });
     saveBoard(cwd, board);
+    assert.equal(board.revision, 1);
+
+    saveBoard(cwd, board);
+    assert.equal(board.revision, 2);
+
     const loaded = loadBoard(cwd);
     assert.equal(loaded.tasks.length, 1);
     assert.equal(loaded.tasks[0]?.tier, "complex");
     assert.equal(loaded.nextTaskNumber, 2);
+    assert.equal(loaded.revision, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("updateTask records exactly one line for a status change", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const board = emptyBoard();
+    createTask(board, { title: "A", brief: "do a", tier: "standard" });
+    saveBoard(cwd, board);
+
+    updateTask(cwd, "T1", (task) => {
+      task.title = "Renamed";
+    });
+    const historyFile = join(cwd, ".pi", "maestro", "history.jsonl");
+    assert.equal(existsSync(historyFile), false);
+
+    updateTask(cwd, "T1", (task) => {
+      task.status = "running";
+      task.title = "Running";
+    });
+    const lines = readFileSync(historyFile, "utf-8").trim().split("\n");
+    assert.equal(lines.length, 1);
+    const record = JSON.parse(lines[0] as string) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(record), ["ts", "taskId", "from", "to", "revision"]);
+    assert.equal(typeof record.ts, "string");
+    assert.equal(record.taskId, "T1");
+    assert.equal(record.from, "todo");
+    assert.equal(record.to, "running");
+    assert.equal(record.revision, 3);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loadStatusHistory returns recorded status changes and distinguishes a missing file", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    assert.equal(loadStatusHistory(cwd), undefined);
+
+    const board = emptyBoard();
+    createTask(board, { title: "A", brief: "do a", tier: "standard" });
+    saveBoard(cwd, board);
+    updateTask(cwd, "T1", (task) => transition(task, "running"));
+
+    const history = loadStatusHistory(cwd);
+    assert.equal(history?.length, 1);
+    assert.equal(history?.[0]?.taskId, "T1");
+    assert.equal(history?.[0]?.from, "todo");
+    assert.equal(history?.[0]?.to, "running");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("archiveBoard copies the current board and returns its path", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    assert.equal(archiveBoard(cwd), undefined);
+    assert.equal(existsSync(join(cwd, ".pi", "maestro", "archive")), false);
+
+    const board = emptyBoard();
+    saveBoard(cwd, board);
+    const boardContents = readFileSync(join(cwd, ".pi", "maestro", "board.json"), "utf-8");
+    const archive = archiveBoard(cwd);
+
+    assert.ok(archive);
+    assert.match(archive, /archive[/\\].+-board\.json$/);
+    assert.equal(readFileSync(archive, "utf-8"), boardContents);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

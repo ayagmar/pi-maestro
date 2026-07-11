@@ -7,12 +7,14 @@ import {
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  archiveBoard,
   blockedReason,
   createTask,
   findTask,
   forceStatus,
   isRunnable,
   loadBoard,
+  loadStatusHistory,
   saveBoard,
   transition,
   updateTask,
@@ -603,7 +605,7 @@ export default function maestro(pi: ExtensionAPI) {
 
   pi.registerCommand(COMMAND, {
     description:
-      "Orchestrator/executor workflows: start <goal> | board | open <taskId> | config | reset",
+      "Orchestrator/executor workflows: start <goal> | board | open <taskId> | history [n] | config | reset",
     getArgumentCompletions: (prefix) => {
       const options = [
         "start",
@@ -615,6 +617,7 @@ export default function maestro(pi: ExtensionAPI) {
         "config",
         "config project",
         "config show",
+        "history",
         "reset",
       ];
       const matches = options.filter((option) => option.startsWith(prefix.toLowerCase()));
@@ -707,7 +710,7 @@ export default function maestro(pi: ExtensionAPI) {
           await ctx.waitForIdle();
           const briefing = buildSupervisorBriefing(
             board.goal,
-            board.tasks.map((task) => taskLine(task)).join("\n"),
+            board.tasks,
             describeTiersForPlanning(loadConfig(ctx.cwd))
           );
           const parentSession = ctx.sessionManager.getSessionFile();
@@ -725,6 +728,21 @@ export default function maestro(pi: ExtensionAPI) {
           });
           return;
         }
+        case "history": {
+          const history = loadStatusHistory(ctx.cwd);
+          if (!history) {
+            notify(ctx, "No history yet.");
+            return;
+          }
+          const requestedCount = Number.parseInt(rest, 10);
+          const count =
+            Number.isInteger(requestedCount) && requestedCount > 0 ? requestedCount : 20;
+          const lines = history
+            .slice(-count)
+            .map((entry) => `${entry.ts} ${entry.taskId} ${entry.from} → ${entry.to}`);
+          notify(ctx, lines.join("\n"));
+          return;
+        }
         case "reset": {
           const board = loadBoard(ctx.cwd);
           if (board.tasks.length === 0) {
@@ -735,16 +753,21 @@ export default function maestro(pi: ExtensionAPI) {
             notify(ctx, "Executors are still running. Abort them before resetting.", "warning");
             return;
           }
+          const archivePath = archiveBoard(ctx.cwd);
+          if (!archivePath) {
+            notify(ctx, "Could not archive the board; reset cancelled.", "error");
+            return;
+          }
           if (ctx.hasUI) {
             const ok = await ctx.ui.confirm(
               "Reset board?",
-              `Delete all ${board.tasks.length} task(s) from the board?`
+              `Delete all ${board.tasks.length} task(s) from the board? Archived at ${archivePath}`
             );
             if (!ok) return;
           }
           saveBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] }); // also drops goal
           refreshUI(ctx);
-          notify(ctx, "Board reset.");
+          notify(ctx, `Board reset. Archived at ${archivePath}`);
           return;
         }
         default:
@@ -758,7 +781,8 @@ export default function maestro(pi: ExtensionAPI) {
               `/${COMMAND} open <taskId>  switch into an executor session`,
               `/${COMMAND} back           switch back to the previous session`,
               `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
-              `/${COMMAND} reset          clear the board`,
+              `/${COMMAND} history [n]    show recent task status changes (default 20)`,
+              `/${COMMAND} reset          archive and clear the board`,
             ].join("\n")
           );
       }

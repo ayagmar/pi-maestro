@@ -50,6 +50,7 @@ export interface Task {
 
 export interface Board {
   version: 1;
+  revision?: number;
   nextTaskNumber: number;
   /** Goal from /maestro start; lets a fresh orchestrator take over via /maestro handoff. */
   goal?: string;
