@@ -16,6 +16,7 @@ export const REVIEW_TOOLS = "read,bash,grep,find,ls";
  */
 export const DEFAULT_CONFIG: MaestroConfig = {
   maxParallel: 3,
+  planGate: false,
   useWorktrees: false,
   autoCommit: true,
   maxAttempts: 3,
@@ -60,6 +61,7 @@ export const PRESETS: Preset[] = [
       "Best cost/quality per tier: terra-high trivial ($1.13), sol-medium standard ($1.86), sol-high complex+review ($3.47, 69% pass@1).",
     config: {
       maxParallel: 3,
+      planGate: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -80,6 +82,7 @@ export const PRESETS: Preset[] = [
       "Cheapest sensible run: luna-high trivial ($0.78), terra-high standard ($1.13), terra-xhigh complex+review ($2.13, 60% pass@1).",
     config: {
       maxParallel: 4,
+      planGate: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -100,6 +103,7 @@ export const PRESETS: Preset[] = [
       "Frontier executors on every tier: sol-medium trivial, sol-high standard, sol-xhigh complex ($4.70, 71% pass@1), sol-high review.",
     config: {
       maxParallel: 3,
+      planGate: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
@@ -134,6 +138,7 @@ export function mergeConfig(
   if (!override) return base;
   return {
     maxParallel: override.maxParallel ?? base.maxParallel,
+    planGate: override.planGate ?? base.planGate,
     useWorktrees: override.useWorktrees ?? base.useWorktrees,
     autoCommit: override.autoCommit ?? base.autoCommit,
     maxAttempts: override.maxAttempts ?? base.maxAttempts,
@@ -183,6 +188,7 @@ export function describeConfig(config: MaestroConfig): string {
   const lines = [
     `preset: ${matchingPreset(config)}`,
     `maxParallel: ${config.maxParallel}`,
+    `planGate: ${config.planGate}`,
     `useWorktrees: ${config.useWorktrees}`,
     `maxAttempts: ${config.maxAttempts}`,
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,

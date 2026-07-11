@@ -12,6 +12,7 @@ import { executeTask, reviewTask, type StartExecutor, taskCommitMessage } from "
 const tier = { thinking: "low" };
 const config: MaestroConfig = {
   maxParallel: 1,
+  planGate: false,
   useWorktrees: false,
   autoCommit: false,
   maxAttempts: 3,

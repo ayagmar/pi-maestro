@@ -66,6 +66,8 @@ export interface Board {
   goal?: string;
   /** Sessions that own this board (started/adopted the run). Other sessions in the same repo don't render its status. */
   ownerSessions?: string[];
+  /** Planned tasks cannot start until the user approves them. */
+  planPending?: boolean;
   tasks: Task[];
 }
 
@@ -82,6 +84,8 @@ export interface TierConfig {
 
 export interface MaestroConfig {
   maxParallel: number;
+  /** Require explicit user approval after planning before executors can start. */
+  planGate: boolean;
   /** Isolate tasks in per-task git worktrees when a batch dispatches in parallel. */
   useWorktrees: boolean;
   /** Hard attempt cap per task; exceeded tasks need an explicit maestro-run or a brief rewrite. */

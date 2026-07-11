@@ -59,6 +59,14 @@ export async function showSettings(
         description: presetDescription(matchingPreset(config)),
       },
       {
+        id: "planGate",
+        label: "Approve plans before running",
+        currentValue: config.planGate ? "on" : "off",
+        values: ["off", "on"],
+        description:
+          "Pause newly planned tasks until you review and approve them with /maestro plan.",
+      },
+      {
         id: "maxParallel",
         label: "Max parallel executors",
         currentValue: String(config.maxParallel),
@@ -131,6 +139,11 @@ export async function showSettings(
     if (id === "preset") {
       const preset = findPreset(value);
       if (preset) config = structuredClone(preset.config);
+      persist();
+      return;
+    }
+    if (id === "planGate") {
+      config.planGate = value === "on";
       persist();
       return;
     }

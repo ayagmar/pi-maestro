@@ -181,6 +181,7 @@ export function setStatus(task: Task, status: TaskStatus): void {
  * cancelled tasks are also runnable so dead ends can be retried on purpose.
  */
 export function isRunnable(board: Board, task: Task, explicit = false): boolean {
+  if (board.planPending) return false;
   const pending = task.status === "todo" || task.status === "changes_requested";
   const retryable = explicit && (task.status === "failed" || task.status === "cancelled");
   if (!pending && !retryable) return false;

@@ -246,13 +246,20 @@ export default function maestro(pi: ExtensionAPI) {
         if (input.dependsOn) taskInput.dependsOn = input.dependsOn;
         created.push(createTask(board, taskInput));
       }
+      if (config.planGate && created.length > 0) board.planPending = true;
       saveBoard(ctx.cwd, board);
       refreshUI(ctx);
 
       const lines = created.map((task) => `${task.id}: ${task.title} (${task.tier})`);
+      const approval = config.planGate
+        ? `\n\nPlan awaits user approval via /${COMMAND} plan. Do not call maestro_run yet.`
+        : "";
       return {
         content: [
-          { type: "text", text: `Created ${created.length} task(s):\n${lines.join("\n")}` },
+          {
+            type: "text",
+            text: `Created ${created.length} task(s):\n${lines.join("\n")}${approval}`,
+          },
         ],
         details: { action: "plan", tasks: created.map((task) => snapshot(task)) },
       };
@@ -289,6 +296,18 @@ export default function maestro(pi: ExtensionAPI) {
       const config = loadConfig(ctx.cwd);
       const board = loadBoard(ctx.cwd);
       const requestedIds = params.taskIds as string[] | undefined;
+
+      if (board.planPending) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Plan approval is pending. Ask the user to review it with /${COMMAND} plan before running executors.`,
+            },
+          ],
+          details: { action: "run", tasks: [] },
+        };
+      }
 
       // Explicitly named tasks may also retry failed/cancelled ones.
       const explicit = requestedIds !== undefined;
@@ -659,13 +678,14 @@ export default function maestro(pi: ExtensionAPI) {
 
   pi.registerCommand(COMMAND, {
     description:
-      "Orchestrator/executor workflows: start <goal> | board | open <taskId> | history [n] | config | reset",
+      "Orchestrator/executor workflows: start <goal> | plan | board | open <taskId> | history [n] | config | reset",
     getArgumentCompletions: (prefix) => {
       const options = [
         "start",
         "handoff",
         "back",
         "board",
+        "plan",
         "list",
         "open",
         "config",
@@ -729,6 +749,9 @@ export default function maestro(pi: ExtensionAPI) {
           await ctx.switchSession(target);
           return;
         }
+        case "plan":
+          await showPlan(ctx);
+          return;
         case "board":
         case "dash":
         case "dashboard":
@@ -845,6 +868,7 @@ export default function maestro(pi: ExtensionAPI) {
             [
               `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
               `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
+              `/${COMMAND} plan           review, approve, or reject a gated plan`,
               `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
               `/${COMMAND} list           compact task picker`,
               `/${COMMAND} open <taskId>  switch into an executor session`,
@@ -926,6 +950,81 @@ export default function maestro(pi: ExtensionAPI) {
 
   function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
     return "switchSession" in ctx;
+  }
+
+  async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
+    const board = loadBoard(ctx.cwd);
+    if (board.tasks.length === 0) {
+      notify(ctx, "Board is empty. Plan tasks with maestro_plan.", "warning");
+      return;
+    }
+    if (liveRuns.size > 0) {
+      notify(
+        ctx,
+        "Executors are still running. Finish or abort them before reviewing a plan.",
+        "warning"
+      );
+      return;
+    }
+    if (!board.planPending) {
+      notify(ctx, "No plan is awaiting approval.");
+      return;
+    }
+
+    const pending = board.tasks.filter((task) => task.status === "todo");
+    const items: SelectItem[] = pending.map((task) => ({
+      value: `task:${task.id}`,
+      label: `${task.id} ${task.title} [${task.tier}] · dependsOn: ${task.dependsOn.join(", ") || "none"} · commit: ${task.commitMessage ?? `feat: ${task.title}`}`,
+      description: truncateText(task.brief, 2),
+    }));
+    items.push(
+      {
+        value: "approve",
+        label: "Approve plan",
+        description: "Allow maestro_run to start executors",
+      },
+      {
+        value: "reject",
+        label: "Reject plan",
+        description: "Archive and clear this board",
+      }
+    );
+
+    const choice = await pickFromList(ctx, "Maestro Plan · awaiting approval", items);
+    if (!choice) return;
+    if (choice.startsWith("task:")) {
+      const task = findTask(board, choice.slice("task:".length));
+      if (!task) return;
+      pi.sendMessage({
+        customType: MESSAGE_TYPE,
+        content: `## ${task.id} ${task.title}\n\n${task.brief}`,
+        display: true,
+      });
+      return;
+    }
+    if (choice === "approve") {
+      board.planPending = false;
+      saveBoard(ctx.cwd, board);
+      refreshUI(ctx);
+      notify(ctx, "Plan approved. Executors may now be started with maestro_run.");
+      return;
+    }
+
+    const archivePath = archiveBoard(ctx.cwd);
+    if (!archivePath) {
+      notify(ctx, "Could not archive the board; rejection cancelled.", "error");
+      return;
+    }
+    if (ctx.hasUI) {
+      const ok = await ctx.ui.confirm(
+        "Reject plan?",
+        `Archive and clear all ${board.tasks.length} task(s)? Archived at ${archivePath}`
+      );
+      if (!ok) return;
+    }
+    saveBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+    refreshUI(ctx);
+    notify(ctx, `Plan rejected. Board archived at ${archivePath}`);
   }
 
   async function showBoard(ctx: ExtensionCommandContext): Promise<void> {

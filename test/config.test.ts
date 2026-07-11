@@ -54,6 +54,7 @@ test("default config has the documented tiers and no model overrides", () => {
     "trivial",
   ]);
   assert.equal(DEFAULT_CONFIG.maxParallel, 3);
+  assert.equal(DEFAULT_CONFIG.planGate, false);
   assert.equal(DEFAULT_CONFIG.useWorktrees, false);
   assert.equal(DEFAULT_CONFIG.maxRunCost, 0);
   for (const tier of Object.values(DEFAULT_CONFIG.tiers)) {
@@ -68,6 +69,7 @@ test("every preset defines all four tiers and keeps review read-only", () => {
       ["complex", "review", "standard", "trivial"],
       `preset ${preset.name}`
     );
+    assert.equal(preset.config.planGate, false, `preset ${preset.name}`);
     assert.equal(preset.config.useWorktrees, false, `preset ${preset.name}`);
     assert.equal(preset.config.maxRunCost, 0, `preset ${preset.name}`);
     assert.equal(preset.config.tiers.review?.tools, REVIEW_TOOLS, `preset ${preset.name}`);
@@ -88,6 +90,7 @@ test("describeConfig lists preset name and every tier", () => {
   const text = describeConfig(DEFAULT_CONFIG);
   assert.match(text, /preset: inherit/);
   assert.match(text, /maxParallel: 3/);
+  assert.match(text, /planGate: false/);
   assert.match(text, /useWorktrees: false/);
   assert.match(text, /maxRunCost: off/);
   assert.match(text, /trivial: \(pi default model\) thinking=low/);

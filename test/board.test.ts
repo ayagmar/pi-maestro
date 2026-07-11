@@ -103,6 +103,15 @@ test("isRunnable requires approved dependencies", () => {
   assert.equal(blockedReason(board, task), undefined);
 });
 
+test("isRunnable refuses every task while plan approval is pending", () => {
+  const board = emptyBoard();
+  const task = createTask(board, { title: "A", brief: "do a", tier: "standard" });
+  board.planPending = true;
+
+  assert.equal(isRunnable(board, task), false);
+  assert.equal(isRunnable(board, task, true), false);
+});
+
 test("changes_requested tasks are runnable again", () => {
   const board = emptyBoard();
   const task = createTask(board, { title: "A", brief: "do a", tier: "standard" });
@@ -157,6 +166,7 @@ test("saveBoard/loadBoard round-trips and increments revisions", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
     const board = emptyBoard();
+    board.planPending = true;
     createTask(board, { title: "A", brief: "do a", tier: "complex" });
     saveBoard(cwd, board);
     assert.equal(board.revision, 1);
@@ -166,6 +176,7 @@ test("saveBoard/loadBoard round-trips and increments revisions", () => {
 
     const loaded = loadBoard(cwd);
     assert.equal(loaded.tasks.length, 1);
+    assert.equal(loaded.planPending, true);
     assert.equal(loaded.tasks[0]?.tier, "complex");
     assert.equal(loaded.nextTaskNumber, 2);
     assert.equal(loaded.revision, 2);
