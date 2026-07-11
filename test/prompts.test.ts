@@ -176,6 +176,7 @@ test("supervisor briefing renders structured task blocks in stable field order",
   assert.doesNotMatch(briefing, new RegExp(`reviewNotes: ${"r".repeat(501)}`));
   assert.match(briefing, /fresh context/);
   assert.match(briefing, /Migrate auth/);
+  assert.match(briefing, /maestro_drive/);
   assert.match(briefing, /Do not re-plan/);
   assert.match(briefing, /you do not implement tasks yourself/);
   assert.match(briefing, /tier guidance here/);
@@ -227,6 +228,7 @@ test("orchestrator briefing embeds the goal, tier guidance, and workflow tools",
   assert.match(briefing, /cheapest tier/);
   assert.match(briefing, /Migrate to Spring Boot 4/);
   assert.match(briefing, /maestro_plan/);
+  assert.match(briefing, /maestro_drive/);
   assert.match(briefing, /maestro_run/);
   assert.match(briefing, /maestro_review/);
   assert.match(briefing, /You do not implement tasks yourself/);

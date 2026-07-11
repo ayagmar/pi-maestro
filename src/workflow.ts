@@ -1,9 +1,17 @@
 import { type ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { findTask, forceStatus, loadBoard, stateDir, transition, updateTask } from "./board.js";
+import {
+  findTask,
+  forceStatus,
+  isRunnable,
+  loadBoard,
+  stateDir,
+  transition,
+  updateTask,
+} from "./board.js";
 import { resolveTierModels } from "./config.js";
-import { taskUsage, truncateText } from "./format.js";
+import { runBudgetWarning, taskUsage, truncateText } from "./format.js";
 import { buildExecutorPrompt, buildReviewPrompt, parseVerdict } from "./prompts.js";
-import { type ExecutorHandle, type RunUpdate } from "./runner.js";
+import { mapWithConcurrencyLimit, type ExecutorHandle, type RunUpdate } from "./runner.js";
 import {
   type Board,
   type MaestroConfig,
@@ -11,7 +19,14 @@ import {
   type TaskStatus,
   type TierConfig,
 } from "./types.js";
-import { commitAll, mergeWorktree, removeWorktree, type WorktreeRef } from "./worktree.js";
+import {
+  commitAll,
+  createWorktree,
+  mergeWorktree,
+  removeWorktree,
+  type WorktreeRef,
+  worktreeExists,
+} from "./worktree.js";
 
 const mainTreeOperationTails = new Map<string, Promise<void>>();
 
@@ -54,6 +69,33 @@ export interface WorkflowRun {
 export type StartExecutor = typeof import("./runner.js").startExecutor;
 export type WorkflowUpdate = (taskId: string, update: RunUpdate) => void;
 export type TrackRun = (run: WorkflowRun) => () => void;
+
+export type DriveStopCode =
+  | "completed"
+  | "aborted"
+  | "plan_gate"
+  | "budget_blocked"
+  | "attempt_cap"
+  | "blocked"
+  | "round_limit"
+  | "error";
+
+export interface DriveStopReason {
+  code: DriveStopCode;
+  message: string;
+  taskIds?: string[];
+}
+
+export interface DriveSummary {
+  rounds: number;
+  tasks: TaskSnapshot[];
+  stoppedBecause: DriveStopReason;
+}
+
+export type DriveRoundPhase = "run" | "review";
+export type DriveRoundUpdate = (round: number, phase: DriveRoundPhase, taskIds: string[]) => void;
+
+const DRIVE_ROUND_LIMIT = 20;
 
 export function snapshot(task: Task, note?: string): TaskSnapshot {
   const usage = taskUsage(task);
@@ -101,6 +143,211 @@ export function preflightTaskTiers(
   }
 
   return resolvedTiers;
+}
+
+export async function driveBoard(options: {
+  cwd: string;
+  config: MaestroConfig;
+  resolvedTiers: Map<string, TierConfig>;
+  taskIds?: string[];
+  startExecutor: StartExecutor;
+  signal?: AbortSignal;
+  onUpdate: WorkflowUpdate;
+  onRoundUpdate?: DriveRoundUpdate;
+  trackRun: TrackRun;
+}): Promise<DriveSummary> {
+  const {
+    cwd,
+    config,
+    resolvedTiers,
+    taskIds,
+    startExecutor,
+    signal,
+    onUpdate,
+    onRoundUpdate,
+    trackRun,
+  } = options;
+  const selectedIds = taskIds ? new Set(taskIds) : undefined;
+  let rounds = 0;
+
+  const selectedTasks = (): Task[] => {
+    const board = loadBoard(cwd);
+    return selectedIds ? board.tasks.filter((task) => selectedIds.has(task.id)) : board.tasks;
+  };
+  const finish = (stoppedBecause: DriveStopReason): DriveSummary => ({
+    rounds,
+    tasks: loadBoard(cwd).tasks.map((task) => snapshot(task)),
+    stoppedBecause,
+  });
+
+  try {
+    while (rounds < DRIVE_ROUND_LIMIT) {
+      if (signal?.aborted) {
+        return finish({ code: "aborted", message: "drive aborted by user" });
+      }
+
+      const board = loadBoard(cwd);
+      const tasks = selectedIds
+        ? board.tasks.filter((task) => selectedIds.has(task.id))
+        : board.tasks;
+      if (tasks.every((task) => task.status === "approved")) {
+        return finish({ code: "completed", message: "all selected tasks are approved" });
+      }
+      if (board.planPending) {
+        return finish({
+          code: "plan_gate",
+          message: "plan approval is pending; review it with /maestro plan",
+        });
+      }
+
+      rounds += 1;
+      const capped = tasks.filter(
+        (task) =>
+          task.attempts.filter((attempt) => !attempt.providerFailure).length >=
+            config.maxAttempts && task.status !== "approved"
+      );
+      const runnable = tasks.filter(
+        (task) =>
+          !capped.includes(task) &&
+          task.status !== "cancelled" &&
+          isRunnable(board, task, task.status === "failed")
+      );
+      const budgetWarning =
+        runnable.length > 0 ? runBudgetWarning(board.tasks, config.maxRunCost) : undefined;
+
+      if (runnable.length > 0 && !budgetWarning) {
+        onRoundUpdate?.(
+          rounds,
+          "run",
+          runnable.map((task) => task.id)
+        );
+        const worktrees = new Map<string, WorktreeRef>();
+        const created: WorktreeRef[] = [];
+        const isolateBatch = config.useWorktrees && runnable.length > 1;
+        try {
+          for (const task of runnable) {
+            const previous = task.attempts.at(-1);
+            const retained =
+              task.status === "changes_requested" &&
+              previous?.worktreePath &&
+              previous.branch &&
+              worktreeExists({
+                worktreePath: previous.worktreePath,
+                branch: previous.branch,
+              })
+                ? { worktreePath: previous.worktreePath, branch: previous.branch }
+                : undefined;
+            if (retained) {
+              worktrees.set(task.id, retained);
+            } else if (isolateBatch) {
+              const ref = createWorktree(cwd, task.id, task.attempts.length + 1);
+              created.push(ref);
+              worktrees.set(task.id, ref);
+            }
+          }
+        } catch (error) {
+          for (const ref of created) removeWorktree(cwd, ref);
+          throw error;
+        }
+
+        await mapWithConcurrencyLimit(runnable, config.maxParallel, (task) => {
+          const tier = resolvedTiers.get(task.tier);
+          if (!tier) throw new Error(`No resolved tier for "${task.tier}"`);
+          const executeOptions: Parameters<typeof executeTask>[0] = {
+            cwd,
+            board,
+            task,
+            tier,
+            config,
+            startExecutor,
+            onUpdate,
+            trackRun,
+          };
+          const worktree = worktrees.get(task.id);
+          if (worktree) executeOptions.worktree = worktree;
+          if (signal) executeOptions.signal = signal;
+          return executeTask(executeOptions);
+        });
+      }
+
+      if (signal?.aborted) {
+        return finish({ code: "aborted", message: "drive aborted by user" });
+      }
+
+      const afterRuns = loadBoard(cwd);
+      const reviewable = afterRuns.tasks.filter(
+        (task) => task.status === "ready_for_review" && (!selectedIds || selectedIds.has(task.id))
+      );
+      if (reviewable.length > 0) {
+        onRoundUpdate?.(
+          rounds,
+          "review",
+          reviewable.map((task) => task.id)
+        );
+        const reviewTier = resolvedTiers.get("review");
+        if (!reviewTier) throw new Error('No resolved tier for "review"');
+        await mapWithConcurrencyLimit(reviewable, config.maxParallel, (task) => {
+          const reviewOptions: Parameters<typeof reviewTask>[0] = {
+            cwd,
+            task,
+            tier: reviewTier,
+            startExecutor,
+            autoCommit: config.autoCommit,
+            onUpdate,
+            trackRun,
+          };
+          if (signal) reviewOptions.signal = signal;
+          return reviewTask(reviewOptions);
+        });
+      }
+
+      if (budgetWarning) {
+        return finish({ code: "budget_blocked", message: budgetWarning });
+      }
+
+      const freshTasks = selectedTasks();
+      if (freshTasks.every((task) => task.status === "approved")) {
+        return finish({ code: "completed", message: "all selected tasks are approved" });
+      }
+      const attemptCapped = freshTasks.filter(
+        (task) =>
+          task.status !== "approved" &&
+          task.attempts.filter((attempt) => !attempt.providerFailure).length >= config.maxAttempts
+      );
+      if (attemptCapped.length > 0) {
+        return finish({
+          code: "attempt_cap",
+          message: `attempt cap reached (${config.maxAttempts}) for ${attemptCapped.map((task) => task.id).join(", ")}`,
+          taskIds: attemptCapped.map((task) => task.id),
+        });
+      }
+
+      const freshBoard = loadBoard(cwd);
+      const canContinue = freshTasks.some(
+        (task) =>
+          task.status === "ready_for_review" ||
+          (task.status !== "cancelled" && isRunnable(freshBoard, task, task.status === "failed"))
+      );
+      if (!canContinue) {
+        const terminal = freshTasks.filter((task) => task.status !== "approved");
+        return finish({
+          code: "blocked",
+          message: `no further tasks can run or be reviewed: ${terminal.map((task) => `${task.id} (${task.status})`).join(", ")}`,
+          taskIds: terminal.map((task) => task.id),
+        });
+      }
+    }
+  } catch (error) {
+    return finish({
+      code: "error",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return finish({
+    code: "round_limit",
+    message: `drive stopped after the hard limit of ${DRIVE_ROUND_LIMIT} rounds`,
+  });
 }
 
 export async function executeTask(options: {

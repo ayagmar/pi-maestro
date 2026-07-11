@@ -7,7 +7,13 @@ import test from "node:test";
 import { createTask, findTask, forceStatus, loadBoard, saveBoard } from "../src/board.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/types.js";
-import { executeTask, reviewTask, type StartExecutor, taskCommitMessage } from "../src/workflow.js";
+import {
+  driveBoard,
+  executeTask,
+  reviewTask,
+  type StartExecutor,
+  taskCommitMessage,
+} from "../src/workflow.js";
 
 const tier = { thinking: "low" };
 const config: MaestroConfig = {
@@ -63,6 +69,88 @@ function boardWithTask(status: Task["status"] = "todo"): { board: Board; task: T
 
 const onUpdate = () => {};
 const trackRun = () => () => {};
+
+test("driveBoard approves dependent tasks across multiple rounds", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-test-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const first = createTask(board, {
+      title: "First task",
+      brief: "Complete the prerequisite",
+      tier: "standard",
+    });
+    const second = createTask(board, {
+      title: "Second task",
+      brief: "Use the prerequisite",
+      tier: "standard",
+      dependsOn: [first.id],
+    });
+    saveBoard(cwd, board);
+    const startExecutor: StartExecutor = (options) =>
+      executor({
+        finalReport: options.prompt.includes("adversarial code reviewer")
+          ? "Verified.\nVERDICT: APPROVE"
+          : "Work completed",
+      })(options);
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.rounds, 2);
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.deepEqual(
+      result.tasks.map((task) => [task.id, task.status]),
+      [
+        [first.id, "approved"],
+        [second.id, "approved"],
+      ]
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("driveBoard stops repeated executor failures at the attempt cap", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 2 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: executor({
+        exitCode: 1,
+        errorMessage: "mechanical failure",
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+      }),
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.rounds, 2);
+    assert.equal(result.stoppedBecause.code, "attempt_cap");
+    assert.deepEqual(result.stoppedBecause.taskIds, [task.id]);
+    assert.match(result.stoppedBecause.message, /attempt cap reached \(2\)/);
+    assert.equal(result.tasks[0]?.attempts, 2);
+    assert.equal(result.tasks[0]?.status, "failed");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 test("successful execution persists ready_for_review", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));

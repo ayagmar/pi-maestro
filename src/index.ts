@@ -46,11 +46,13 @@ import {
 import { showSettings } from "./settings-ui.js";
 import { type Board, type Task, type TaskStatus, type TierConfig } from "./types.js";
 import {
+  driveBoard,
   executeTask,
   lastReport,
   preflightTaskTiers,
   reviewTask,
   snapshot,
+  type DriveSummary,
   type TaskSnapshot,
   type WorkflowRun,
 } from "./workflow.js";
@@ -65,6 +67,8 @@ import {
 interface MaestroDetails {
   action: string;
   tasks: TaskSnapshot[];
+  rounds?: number;
+  stoppedBecause?: DriveSummary["stoppedBecause"];
 }
 
 function notify(
@@ -185,6 +189,55 @@ export default function maestro(pi: ExtensionAPI) {
       liveRuns.delete(run.taskId);
       refreshUI(ctx);
     };
+  }
+
+  async function runDriveWorkflow(
+    ctx: ExtensionContext,
+    taskIds: string[] | undefined,
+    signal: AbortSignal | undefined,
+    reportProgress: (message: string) => void
+  ): Promise<DriveSummary> {
+    adoptBoard(ctx);
+    const config = loadConfig(ctx.cwd);
+    const board = loadBoard(ctx.cwd);
+    const selected = taskIds
+      ? taskIds.map((id) => findTask(board, id)).filter((task): task is Task => task !== undefined)
+      : board.tasks;
+    const unresolved = selected.filter((task) => task.status !== "approved");
+    const resolvedTiers = board.planPending
+      ? new Map<string, TierConfig>()
+      : preflightTaskTiers(unresolved, config, ctx.modelRegistry, ctx.model?.provider);
+
+    if (!board.planPending && unresolved.length > 0) {
+      const reviewTier: TierConfig = {
+        ...(config.tiers.review ?? { thinking: "high", tools: "read,bash,grep,find,ls" }),
+      };
+      const resolution = resolveTierModel(
+        "review",
+        reviewTier,
+        ctx.modelRegistry,
+        ctx.model?.provider
+      );
+      if (!resolution.ok) throw new Error(resolution.error);
+      if (resolution.modelArg === undefined) delete reviewTier.model;
+      else reviewTier.model = resolution.modelArg;
+      resolvedTiers.set("review", reviewTier);
+    }
+
+    const driveOptions: Parameters<typeof driveBoard>[0] = {
+      cwd: ctx.cwd,
+      config,
+      resolvedTiers,
+      startExecutor,
+      onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, () => {}),
+      onRoundUpdate: (round, phase, ids) => {
+        reportProgress(`Round ${round}: ${phase} ${ids.join(", ")}`);
+      },
+      trackRun: (run) => trackRun(ctx, run),
+    };
+    if (taskIds) driveOptions.taskIds = taskIds;
+    if (signal) driveOptions.signal = signal;
+    return driveBoard(driveOptions);
   }
 
   // ---------------------------------------------------------------- tools
@@ -530,6 +583,52 @@ export default function maestro(pi: ExtensionAPI) {
   });
 
   pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
+    name: "maestro_drive",
+    label: "Maestro Drive",
+    description:
+      "Autonomously run, review, and retry maestro tasks until they are approved or a plan gate, budget, attempt cap, abort, or other terminal condition requires intervention.",
+    promptSnippet: "Drive mechanical run/review/retry cycles to completion (maestro board)",
+    parameters: Type.Object({
+      taskIds: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Specific task ids to drive. Omit to drive the whole board.",
+        })
+      ),
+    }),
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const taskIds = params.taskIds as string[] | undefined;
+      const summary = await runDriveWorkflow(ctx, taskIds, signal, (message) => {
+        const current = loadBoard(ctx.cwd).tasks.filter(
+          (task) => !taskIds || taskIds.includes(task.id)
+        );
+        onUpdate?.({
+          content: [{ type: "text", text: message }],
+          details: { action: "drive", tasks: current.map((task) => snapshot(task)) },
+        });
+      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+        details: {
+          action: "drive",
+          rounds: summary.rounds,
+          tasks: summary.tasks,
+          stoppedBecause: summary.stoppedBecause,
+        },
+      };
+    },
+    renderCall(args, theme) {
+      const ids = args.taskIds as string[] | undefined;
+      const scope = ids && ids.length > 0 ? ids.join(", ") : "whole board";
+      return new Text(
+        theme.fg("toolTitle", theme.bold("maestro drive ")) + theme.fg("accent", scope),
+        0,
+        0
+      );
+    },
+    renderResult: renderTaskListResult,
+  });
+
+  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
     name: "maestro_update",
     label: "Maestro Update",
     description:
@@ -678,12 +777,13 @@ export default function maestro(pi: ExtensionAPI) {
 
   pi.registerCommand(COMMAND, {
     description:
-      "Orchestrator/executor workflows: start <goal> | plan | board | open <taskId> | history [n] | config | reset",
+      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | plan | board | open <taskId> | history [n] | config | reset",
     getArgumentCompletions: (prefix) => {
       const options = [
         "start",
         "handoff",
         "back",
+        "drive",
         "board",
         "plan",
         "list",
@@ -747,6 +847,24 @@ export default function maestro(pi: ExtensionAPI) {
           const target = previousSession;
           previousSession = ctx.sessionManager.getSessionFile();
           await ctx.switchSession(target);
+          return;
+        }
+        case "drive": {
+          if (liveRuns.size > 0) {
+            notify(ctx, "Executors are already running.", "warning");
+            return;
+          }
+          const taskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
+          notify(ctx, `Driving ${taskIds?.join(", ") ?? "the whole board"}…`);
+          const summary = await runDriveWorkflow(ctx, taskIds, undefined, (message) => {
+            notify(ctx, message);
+          });
+          refreshUI(ctx);
+          notify(
+            ctx,
+            `Drive stopped after ${summary.rounds} round(s): ${summary.stoppedBecause.message}`,
+            summary.stoppedBecause.code === "completed" ? "info" : "warning"
+          );
           return;
         }
         case "plan":
@@ -868,6 +986,7 @@ export default function maestro(pi: ExtensionAPI) {
             [
               `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
               `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
+              `/${COMMAND} drive [ids]    autonomously run, review, and retry tasks`,
               `/${COMMAND} plan           review, approve, or reject a gated plan`,
               `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
               `/${COMMAND} list           compact task picker`,
