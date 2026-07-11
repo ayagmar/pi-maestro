@@ -1,11 +1,16 @@
 import { type Theme } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { blockedReason, groupTasks, taskGroup } from "./board.js";
+import { blockedReason, findTask, groupTasks, taskGroup } from "./board.js";
 import { boardUsage, STATUS_GLYPHS, STATUS_LABELS, taskUsage } from "./format.js";
 import { TranscriptTail } from "./transcript.js";
 import { type Attempt, type Board, type Task, type TaskGroup, type TaskStatus } from "./types.js";
 
-export type DashboardTaskAction = "view_report" | "view_review" | "open_executor" | "open_reviewer";
+export type DashboardTaskAction =
+  | "retry"
+  | "view_report"
+  | "view_review"
+  | "open_executor"
+  | "open_reviewer";
 
 export interface DashboardActions {
   getBoard(): Board;
@@ -202,10 +207,15 @@ export class Dashboard {
     } else if (
       data === "r" &&
       task &&
-      (task.status === "approved" ||
-        task.status === "changes_requested" ||
-        task.status === "failed" ||
-        task.status === "cancelled") &&
+      (task.status === "changes_requested" || task.status === "failed") &&
+      !this.actions.isLive(task.id)
+    ) {
+      this.actions.selectTaskAction(task.id, "retry");
+      return;
+    } else if (
+      data === "r" &&
+      task &&
+      (task.status === "approved" || task.status === "cancelled") &&
       !this.actions.isLive(task.id)
     ) {
       this.actions.setTaskStatus(task.id, "todo");
@@ -265,16 +275,20 @@ export class Dashboard {
   }
 
   render(width: number): string[] {
+    width = Math.max(1, Math.floor(width));
     const theme = this.theme;
     const board = this.actions.getBoard();
     const visible = this.visibleTasks();
     if (this.selected >= visible.length) this.selected = Math.max(0, visible.length - 1);
 
-    const listWidth = Math.min(44, Math.max(24, Math.floor(width * 0.35)));
-    const transcriptWidth = width - listWidth - 3;
+    const narrow = width < 48;
+    const listWidth = narrow ? 0 : Math.min(44, Math.max(24, Math.floor(width * 0.35)));
+    const transcriptWidth = narrow ? width : Math.max(1, width - listWidth - 3);
     const bodyHeight = this.bodyHeight;
 
-    const left = this.renderTaskList(visible, board.tasks.length, listWidth, bodyHeight);
+    const left = narrow
+      ? []
+      : this.renderTaskList(visible, board.tasks.length, listWidth, bodyHeight);
     const right = this.renderTranscript(transcriptWidth, bodyHeight);
 
     const lines: string[] = [];
@@ -292,8 +306,12 @@ export class Dashboard {
     lines.push(theme.fg("accent", truncateToWidth(title + "─".repeat(width), width)));
 
     for (let i = 0; i < bodyHeight; i++) {
-      const l = left[i] ?? " ".repeat(listWidth);
       const r = right[i] ?? "";
+      if (narrow) {
+        lines.push(r);
+        continue;
+      }
+      const l = left[i] ?? " ".repeat(listWidth);
       lines.push(`${padToWidth(l, listWidth)} ${theme.fg("dim", "│")} ${r}`);
     }
 
@@ -354,6 +372,7 @@ export class Dashboard {
   }
 
   private renderTranscript(width: number, height: number): string[] {
+    width = Math.max(1, width);
     const theme = this.theme;
     const task = this.selectedTask();
     if (!task) return [];
@@ -374,10 +393,11 @@ export class Dashboard {
     for (const item of tail?.items ?? []) {
       if (item.kind === "tool") {
         wrapped.push(
-          theme.fg("muted", "→ ") + theme.fg("toolTitle", truncateToWidth(item.text, width - 2))
+          theme.fg("muted", "→ ") +
+            theme.fg("toolTitle", truncateToWidth(item.text, Math.max(1, width - 2)))
         );
       } else if (item.kind === "tool_error") {
-        wrapped.push(theme.fg("error", `→ ${truncateToWidth(item.text, width - 2)}`));
+        wrapped.push(theme.fg("error", `→ ${truncateToWidth(item.text, Math.max(1, width - 2))}`));
       } else if (item.kind === "status") {
         wrapped.push(theme.fg("dim", item.text));
       } else {
@@ -419,9 +439,10 @@ export class Dashboard {
     ];
 
     const blockers = task.dependsOn.flatMap((dependencyId) => {
-      const dependency = board.tasks.find((candidate) => candidate.id === dependencyId);
+      const dependency = findTask(board, dependencyId);
       if (dependency?.status === "approved") return [];
-      return [`${dependencyId} (${dependency ? STATUS_LABELS[dependency.status] : "missing"})`];
+      const label = dependency?.id ?? dependencyId.trim();
+      return [`${label} (${dependency ? STATUS_LABELS[dependency.status] : "missing"})`];
     });
     if (blockers.length > 0) {
       lines.push(
@@ -500,7 +521,8 @@ export class Dashboard {
   private renderSteerControls(width: number, height: number): string[] {
     if (this.mode === "steer") {
       return [
-        this.theme.fg("accent", "steer ▸ ") + (this.steerInput.render(width - 8)[0] ?? ""),
+        this.theme.fg("accent", "steer ▸ ") +
+          (this.steerInput.render(Math.max(1, width - 8))[0] ?? ""),
         this.theme.fg("dim", "enter send · esc cancel"),
       ].slice(0, height);
     }
@@ -559,13 +581,13 @@ function lastAttemptReport(task: Task): string | undefined {
 
 function latestFailure(task: Task): string | undefined {
   const attempt = task.attempts.at(-1);
-  if (task.status === "changes_requested") return "reviewer rejection";
-  if (task.status !== "failed") return undefined;
   const reason = attempt?.failureReason;
-  if (reason) {
+  if (reason && ["failed", "changes_requested", "ready_for_review"].includes(task.status)) {
     const retry = reason.retryable ? "retryable" : "not retryable";
     return `${reason.kind.replaceAll("_", " ")} · ${singleLine(reason.message)} · ${retry}`;
   }
+  if (task.status === "changes_requested") return "reviewer rejection";
+  if (task.status !== "failed") return undefined;
   if (attempt?.errorMessage) return singleLine(attempt.errorMessage);
   return "executor failed without a recorded reason";
 }

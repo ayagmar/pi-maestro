@@ -1576,6 +1576,27 @@ export default function maestro(
     );
 
     if (!selection) return;
+    if (selection.action === "retry") {
+      try {
+        const operation = startBackgroundDrive(ctx, [selection.taskId], undefined, (message) =>
+          notify(ctx, message)
+        );
+        void operation.promise.then(() => {
+          if (operation.summary) {
+            notify(
+              ctx,
+              formatDriveSummary(operation.summary),
+              operation.summary.stoppedBecause.code === "completed" ? "info" : "warning"
+            );
+          } else if (operation.error) {
+            notify(ctx, operation.error, "error");
+          }
+        });
+      } catch (error) {
+        notify(ctx, error instanceof Error ? error.message : String(error), "error");
+      }
+      return;
+    }
     if (selection.action === "view_report") {
       showTaskReport(ctx.cwd, selection.taskId);
       return;

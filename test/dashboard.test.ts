@@ -322,9 +322,13 @@ test("dashboard only applies task actions valid for the selected state", () => {
   const task = makeTask({ status: "ready_for_review" });
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
   const changes: string[] = [];
+  const actions: string[] = [];
   const dashboard = new Dashboard(
     fakeTheme,
-    makeActions(board, { setTaskStatus: (taskId, status) => changes.push(`${taskId}:${status}`) })
+    makeActions(board, {
+      setTaskStatus: (taskId, status) => changes.push(`${taskId}:${status}`),
+      selectTaskAction: (taskId, action) => actions.push(`${taskId}:${action}`),
+    })
   );
   try {
     dashboard.handleInput("a");
@@ -332,7 +336,8 @@ test("dashboard only applies task actions valid for the selected state", () => {
     task.status = "failed";
     dashboard.handleInput("a");
     dashboard.handleInput("r");
-    assert.deepEqual(changes, ["T1:approved", "T1:todo"]);
+    assert.deepEqual(changes, ["T1:approved"]);
+    assert.deepEqual(actions, ["T1:retry"]);
   } finally {
     dashboard.dispose();
   }
@@ -533,10 +538,12 @@ test("dashboard makes blockers and failure retry details prominent", () => {
     nextTaskNumber: 3,
     tasks: [failed, makeTask({ id: "T2", status: "running" })],
   };
-  const changes: string[] = [];
+  const actions: string[] = [];
   const dashboard = new Dashboard(
     fakeTheme,
-    makeActions(board, { setTaskStatus: (id, status) => changes.push(`${id}:${status}`) })
+    makeActions(board, {
+      selectTaskAction: (id, action) => actions.push(`${id}:${action}`),
+    })
   );
   try {
     dashboard.handleInput("\x1b[B");
@@ -545,7 +552,7 @@ test("dashboard makes blockers and failure retry details prominent", () => {
     assert.match(output, /Failure: provider failure · provider quota exhausted · retryable/);
     assert.match(output, /r retry/);
     dashboard.handleInput("r");
-    assert.deepEqual(changes, ["T1:todo"]);
+    assert.deepEqual(actions, ["T1:retry"]);
   } finally {
     dashboard.dispose();
   }
@@ -586,10 +593,12 @@ test("dashboard shows retryable review notes and compact attempt history", () =>
     ],
   });
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
-  const changes: string[] = [];
+  const actions: string[] = [];
   const dashboard = new Dashboard(
     fakeTheme,
-    makeActions(board, { setTaskStatus: (id, status) => changes.push(`${id}:${status}`) })
+    makeActions(board, {
+      selectTaskAction: (id, action) => actions.push(`${id}:${action}`),
+    })
   );
   try {
     const output = dashboard.render(160).join("\n");
@@ -606,7 +615,73 @@ test("dashboard shows retryable review notes and compact attempt history", () =>
     assert.match(output, /r retry/);
 
     dashboard.handleInput("r");
-    assert.deepEqual(changes, ["T1:todo"]);
+    assert.deepEqual(actions, ["T1:retry"]);
+    assert.equal(task.status, "changes_requested");
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard resolves blocker ids with the board's canonical lookup", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [
+      makeTask({ status: "todo", dependsOn: [" t2 "] }),
+      makeTask({ id: "T2", status: "approved" }),
+    ],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    const output = dashboard.render(120).join("\n");
+    assert.match(output, /ready · todo/);
+    assert.doesNotMatch(output, /Blocked by:|\(missing\)/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard shows reviewer failures while the task remains ready for review", () => {
+  const task = makeTask({
+    status: "ready_for_review",
+    attempts: [
+      {
+        index: 1,
+        logFile: "missing.jsonl",
+        thinking: "high",
+        startedAt: 0,
+        failureReason: {
+          kind: "reviewer_failure",
+          message: "reviewer gave no VERDICT line",
+          retryable: true,
+        },
+        usage: { input: 4, output: 2, cost: 0.02, turns: 1 },
+        touchedFiles: ["src/dashboard.ts"],
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    assert.match(
+      dashboard.render(140).join("\n"),
+      /Failure: reviewer failure · reviewer gave no VERDICT line · retryable/
+    );
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard is width-safe in its narrow single-pane layout", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    for (const width of [1, 20, 47]) {
+      const lines = dashboard.render(width);
+      assert.equal(lines.length, DEFAULT_DASHBOARD_BODY_HEIGHT + 3);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    }
+    assert.match(dashboard.render(20).join("\n"), /T1 · running/);
   } finally {
     dashboard.dispose();
   }
