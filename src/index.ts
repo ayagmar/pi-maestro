@@ -668,7 +668,22 @@ export default function maestro(pi: ExtensionAPI) {
             notify(ctx, "Usage: /maestro start <goal>", "warning");
             return;
           }
-          const board = loadBoard(ctx.cwd);
+          if (liveRuns.size > 0) {
+            notify(
+              ctx,
+              "Executors are still running. Abort them before starting a new goal.",
+              "warning"
+            );
+            return;
+          }
+          let board = loadBoard(ctx.cwd);
+          // A new goal is a new run: archive the previous board instead of
+          // piling tasks from different goals onto one endless list.
+          if (board.tasks.length > 0) {
+            const archivePath = archiveBoard(ctx.cwd);
+            board = { version: 1, nextTaskNumber: 1, tasks: [] };
+            if (archivePath) notify(ctx, `Previous board archived: ${archivePath}`);
+          }
           board.goal = rest;
           saveBoard(ctx.cwd, board);
           adoptBoard(ctx);

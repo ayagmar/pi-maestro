@@ -45,6 +45,7 @@ export class Dashboard {
   private selected = 0;
   private mode: Mode = "browse";
   private scrollUp = 0;
+  private hideDone = false;
   private steerInput = new Input();
   private tails = new Map<string, TranscriptTail>();
   private timer: ReturnType<typeof setInterval>;
@@ -72,8 +73,15 @@ export class Dashboard {
 
   invalidate(): void {}
 
+  /** Tasks currently shown: hideDone filters out settled work (approved/cancelled). */
+  private visibleTasks(): Task[] {
+    const tasks = this.actions.getBoard().tasks;
+    if (!this.hideDone) return tasks;
+    return tasks.filter((task) => task.status !== "approved" && task.status !== "cancelled");
+  }
+
   private selectedTask(): Task | undefined {
-    return this.actions.getBoard().tasks[this.selected];
+    return this.visibleTasks()[this.selected];
   }
 
   private tailFor(task: Task): TranscriptTail | undefined {
@@ -109,7 +117,7 @@ export class Dashboard {
       return;
     }
 
-    const board = this.actions.getBoard();
+    const visible = this.visibleTasks();
     const task = this.selectedTask();
 
     if (matchesKey(data, "escape") || data === "q") {
@@ -120,7 +128,11 @@ export class Dashboard {
       this.selected = Math.max(0, this.selected - 1);
       this.scrollUp = 0;
     } else if (matchesKey(data, "down")) {
-      this.selected = Math.min(Math.max(0, board.tasks.length - 1), this.selected + 1);
+      this.selected = Math.min(Math.max(0, visible.length - 1), this.selected + 1);
+      this.scrollUp = 0;
+    } else if (data === "f") {
+      this.hideDone = !this.hideDone;
+      this.selected = 0;
       this.scrollUp = 0;
     } else if (matchesKey(data, "pageUp")) {
       this.scrollUp += 10;
@@ -144,19 +156,22 @@ export class Dashboard {
   render(width: number): string[] {
     const theme = this.theme;
     const board = this.actions.getBoard();
-    if (this.selected >= board.tasks.length) this.selected = Math.max(0, board.tasks.length - 1);
+    const visible = this.visibleTasks();
+    if (this.selected >= visible.length) this.selected = Math.max(0, visible.length - 1);
 
     const listWidth = Math.min(44, Math.max(24, Math.floor(width * 0.35)));
     const transcriptWidth = width - listWidth - 3;
     const bodyHeight = this.bodyHeight;
 
-    const left = this.renderTaskList(board, listWidth, bodyHeight);
+    const left = this.renderTaskList(visible, listWidth, bodyHeight);
     const right = this.renderTranscript(transcriptWidth, bodyHeight);
 
     const lines: string[] = [];
     const usage = boardUsage(board.tasks);
     const running = board.tasks.filter((t) => this.actions.isLive(t.id)).length;
-    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)} `;
+    const hiddenCount = board.tasks.length - visible.length;
+    const filterPart = this.hideDone ? ` · hiding ${hiddenCount} done` : "";
+    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)}${filterPart} `;
     lines.push(theme.fg("accent", truncateToWidth(title + "─".repeat(width), width)));
 
     for (let i = 0; i < bodyHeight; i++) {
@@ -170,9 +185,12 @@ export class Dashboard {
     return lines.map((line) => truncateToWidth(line, width));
   }
 
-  private renderTaskList(board: Board, width: number, height: number): string[] {
+  private renderTaskList(tasks: Task[], width: number, height: number): string[] {
     const theme = this.theme;
-    if (board.tasks.length === 0) {
+    if (tasks.length === 0) {
+      if (this.hideDone) {
+        return [theme.fg("muted", "All tasks are done."), theme.fg("dim", "f show them again")];
+      }
       return [
         theme.fg("muted", "Board is empty."),
         theme.fg("dim", "Use /maestro start <goal>"),
@@ -182,10 +200,10 @@ export class Dashboard {
     const lines: string[] = [];
     const start = Math.max(
       0,
-      Math.min(this.selected - Math.floor(height / 4), board.tasks.length - height / 2)
+      Math.min(this.selected - Math.floor(height / 4), tasks.length - height / 2)
     );
-    for (let i = Math.floor(start); i < board.tasks.length && lines.length < height; i++) {
-      const task = board.tasks[i];
+    for (let i = Math.floor(start); i < tasks.length && lines.length < height; i++) {
+      const task = tasks[i];
       if (!task) continue;
       const isSelected = i === this.selected;
       const live = this.actions.isLive(task.id);
@@ -264,7 +282,7 @@ export class Dashboard {
       if (task.attempts.length > 0) parts.push("enter open session");
       parts.push("a approve", "r reopen");
     }
-    parts.push("esc close");
+    parts.push(this.hideDone ? "f show done" : "f hide done", "esc close");
     return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
   }
 }

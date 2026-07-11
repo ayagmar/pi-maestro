@@ -117,10 +117,13 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   - `x` abort a running executor (task becomes `cancelled`)
   - `a` approve / `r` reopen a finished task without spawning a reviewer (a manual lifecycle
     override that bypasses adversarial review)
+  - `f` hide/show settled tasks (approved and cancelled) to focus on remaining work
   - `enter` open the executor's full session in your TUI
 - **`/maestro list`**: compact task picker (report view, status overrides, open session).
 - **`/maestro open T3`**: switches your TUI into that executor's persisted session so you can
-  inspect exactly what it did — or continue working in it by hand. Use `/resume` to return.
+  inspect exactly what it did — or continue working in it by hand. `/maestro back` returns.
+- **`/maestro start`** on a non-empty board archives the previous run first — each goal gets a
+  fresh board, and old runs stay recoverable under `.pi/maestro/archive/`.
 
 ### Configuration
 
