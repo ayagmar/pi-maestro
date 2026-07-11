@@ -78,8 +78,10 @@ export function buildReviewPrompt(task: Task, report: string): string {
       `## Previous review findings\nAn earlier attempt was rejected for these reasons. Verify each one was addressed:\n${truncateInjectedContext(task.reviewNotes)}`
     );
   }
+  sections.push(`## Executor report\n${report}`);
+  const diff = task.attempts.at(-1)?.diff;
+  if (diff) sections.push(`## Diff of the attempt\n${truncateInjectedContext(diff)}`);
   sections.push(
-    `## Executor report\n${report}`,
     [
       "## Success criteria",
       "- Each claim in the report is checked against the actual files and, where possible, re-run checks.",

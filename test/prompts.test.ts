@@ -126,6 +126,24 @@ test("review prompt is adversarial, scoped, and demands a verdict", () => {
   assert.match(prompt, /VERDICT: REQUEST_CHANGES/);
 });
 
+test("review prompt includes only a bounded diff when the attempt has one", () => {
+  const attempt = {
+    index: 1,
+    logFile: "attempt.log",
+    thinking: "low",
+    startedAt: 0,
+    usage: { input: 0, output: 0, cost: 0, turns: 1 },
+    touchedFiles: ["src/file.ts"],
+    diff: "d".repeat(MAX_INJECTED_CONTEXT_LENGTH + 1),
+  };
+  const prompt = buildReviewPrompt(makeTask({ attempts: [attempt] }), "Done.");
+  const diff = injectedSection(prompt, "## Diff of the attempt\n");
+
+  assert.equal(diff.length, MAX_INJECTED_CONTEXT_LENGTH);
+  assert.match(diff, /\[\.\.\. injected context truncated \.\.\.\]$/);
+  assert.doesNotMatch(buildReviewPrompt(makeTask(), "Done."), /## Diff of the attempt/);
+});
+
 test("parseVerdict handles approve, request changes, and missing verdicts", () => {
   assert.deepEqual(parseVerdict("All good.\nVERDICT: APPROVE"), { approved: true, notes: "" });
   assert.deepEqual(parseVerdict("verdict: approve"), { approved: true, notes: "" });

@@ -20,6 +20,7 @@ import {
   type TierConfig,
 } from "./types.js";
 import {
+  captureDiff,
   commitAll,
   createWorktree,
   mergeWorktree,
@@ -437,6 +438,7 @@ export async function executeTask(options: {
     if (outcome.model !== undefined) run.attempt.model = outcome.model;
     if (outcome.errorMessage) run.attempt.errorMessage = outcome.errorMessage;
     run.attempt.exitCode = outcome.exitCode;
+    run.attempt.touchedFiles = outcome.touchedFiles;
 
     const status: TaskStatus = outcome.aborted
       ? "cancelled"
@@ -451,6 +453,16 @@ export async function executeTask(options: {
       models.length > 1;
     const canFallback = providerFailure && modelIndex < models.length - 1;
     if (providerFailure) run.attempt.providerFailure = true;
+
+    if (status === "ready_for_review") {
+      try {
+        const paths = worktree ? undefined : run.attempt.touchedFiles;
+        const diff = captureDiff(worktree?.worktreePath ?? cwd, paths);
+        if (diff) run.attempt.diff = diff;
+      } catch {
+        // Diff context is best-effort and must never change the executor outcome.
+      }
+    }
 
     updated = updateTask(cwd, task.id, (fresh) => {
       transition(fresh, status);

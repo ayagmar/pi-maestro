@@ -175,6 +175,43 @@ test("successful execution persists ready_for_review", async () => {
   }
 });
 
+test("successful main-tree execution captures only touched-file changes", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, "task.txt"), "base\n");
+    writeFileSync(join(cwd, "unrelated.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      startExecutor: (options) => {
+        writeFileSync(join(options.cwd, "task.txt"), "executor change\n");
+        writeFileSync(join(options.cwd, "unrelated.txt"), "unrelated change\n");
+        return executor({ finalReport: "Work completed", touchedFiles: ["task.txt"] })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    const diff = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.diff ?? "";
+    assert.match(diff, /executor change/);
+    assert.doesNotMatch(diff, /unrelated change/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("worktree execution records metadata and starts the executor in that checkout", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   try {

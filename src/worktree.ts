@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { MAX_INJECTED_CONTEXT_LENGTH } from "./prompts.js";
 
 export interface WorktreeRef {
   worktreePath: string;
@@ -44,6 +45,18 @@ export function createWorktree(mainCwd: string, taskId: string, attempt: number)
 
 export function worktreeExists(ref: WorktreeRef): boolean {
   return existsSync(ref.worktreePath);
+}
+
+/** Capture a bounded diff. An empty paths list deliberately captures nothing. */
+export function captureDiff(cwd: string, paths?: string[]): string {
+  if (paths?.length === 0) return "";
+
+  const diff = paths
+    ? [git(cwd, ["diff", "--", ...paths]), git(cwd, ["diff", "--cached", "--", ...paths])]
+        .filter(Boolean)
+        .join("\n")
+    : git(cwd, ["diff", "HEAD"]);
+  return diff.slice(0, MAX_INJECTED_CONTEXT_LENGTH);
 }
 
 /** Commit staged-and-unstaged changes in a tree. Returns false when there was nothing to commit. */

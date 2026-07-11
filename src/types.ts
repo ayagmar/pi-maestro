@@ -32,6 +32,8 @@ export interface Attempt {
   providerFailure?: boolean;
   usage: Usage;
   finalReport?: string;
+  /** Bounded git diff captured after this executor completed successfully. */
+  diff?: string;
   /** Isolated checkout used by this executor and its reviewer. */
   worktreePath?: string;
   /** Git branch checked out in worktreePath. */

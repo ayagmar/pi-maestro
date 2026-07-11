@@ -6,9 +6,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { createTask, findTask, forceStatus, loadBoard, saveBoard } from "../src/board.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
+import { MAX_INJECTED_CONTEXT_LENGTH } from "../src/prompts.js";
 import { type Attempt, type Board, type Task } from "../src/types.js";
 import { reviewTask, type StartExecutor } from "../src/workflow.js";
-import { createWorktree, sweepWorktrees, worktreeRef } from "../src/worktree.js";
+import { captureDiff, createWorktree, sweepWorktrees, worktreeRef } from "../src/worktree.js";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
@@ -89,6 +90,27 @@ test("worktree refs sanitize task ids deterministically", () => {
   const ref = worktreeRef("/repo", "../Feature / A", 2);
   assert.equal(ref.worktreePath, "/repo/.pi/maestro/worktrees/feature-a-attempt-2");
   assert.equal(ref.branch, "maestro/feature-a-attempt-2");
+});
+
+test("diff capture includes staged task files, excludes unrelated files, and is bounded", () => {
+  const cwd = repository();
+  try {
+    writeFileSync(join(cwd, "unrelated.txt"), "base\n");
+    git(cwd, "add", "unrelated.txt");
+    git(cwd, "commit", "-qm", "add unrelated file");
+    writeFileSync(join(cwd, "shared.txt"), `${"task change\n".repeat(2_000)}`);
+    git(cwd, "add", "shared.txt");
+    writeFileSync(join(cwd, "unrelated.txt"), "unrelated change\n");
+
+    const diff = captureDiff(cwd, ["shared.txt"]);
+
+    assert.equal(diff.length, MAX_INJECTED_CONTEXT_LENGTH);
+    assert.match(diff, /shared\.txt/);
+    assert.doesNotMatch(diff, /unrelated\.txt/);
+    assert.equal(captureDiff(cwd, []), "");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("orphan sweep is idempotent and preserves retained recovery worktrees", () => {
