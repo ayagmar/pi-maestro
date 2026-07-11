@@ -17,6 +17,7 @@ export const REVIEW_TOOLS = "read,bash,grep,find,ls";
 export const DEFAULT_CONFIG: MaestroConfig = {
   maxParallel: 3,
   useWorktrees: false,
+  autoCommit: true,
   maxAttempts: 3,
   maxCostPerTask: 0,
   tiers: {
@@ -59,6 +60,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       useWorktrees: false,
+      autoCommit: true,
       maxAttempts: 3,
       maxCostPerTask: 0,
       tiers: {
@@ -77,6 +79,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 4,
       useWorktrees: false,
+      autoCommit: true,
       maxAttempts: 3,
       maxCostPerTask: 2,
       tiers: {
@@ -95,6 +98,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       useWorktrees: false,
+      autoCommit: true,
       maxAttempts: 4,
       maxCostPerTask: 0,
       tiers: {
@@ -127,6 +131,7 @@ export function mergeConfig(
   return {
     maxParallel: override.maxParallel ?? base.maxParallel,
     useWorktrees: override.useWorktrees ?? base.useWorktrees,
+    autoCommit: override.autoCommit ?? base.autoCommit,
     maxAttempts: override.maxAttempts ?? base.maxAttempts,
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
     tiers: { ...base.tiers, ...override.tiers },

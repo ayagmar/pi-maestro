@@ -46,26 +46,30 @@ export function worktreeExists(ref: WorktreeRef): boolean {
   return existsSync(ref.worktreePath);
 }
 
+/** Commit staged-and-unstaged changes in a tree. Returns false when there was nothing to commit. */
+export function commitAll(cwd: string, message: string, paths?: string[]): boolean {
+  if (paths && paths.length > 0) git(cwd, ["add", "--", ...paths]);
+  else git(cwd, ["add", "-A"]);
+  const status = git(cwd, ["status", "--porcelain"]);
+  if (!status) return false;
+  if (paths && paths.length > 0) {
+    // Only commit what this task touched; other tasks' files stay staged-free.
+    git(cwd, ["commit", "-m", message, "--", ...paths]);
+  } else {
+    git(cwd, ["commit", "-m", message]);
+  }
+  return true;
+}
+
 /** Commit executor edits so the reviewed branch can be merged into the main tree. */
-function commitWorktreeChanges(ref: WorktreeRef): void {
-  git(ref.worktreePath, ["add", "-A"]);
-  const status = git(ref.worktreePath, ["status", "--porcelain"]);
-  if (!status) return;
-  git(ref.worktreePath, [
-    "-c",
-    "user.name=Maestro",
-    "-c",
-    "user.email=maestro@local",
-    "commit",
-    "-m",
-    `maestro: ${ref.branch}`,
-  ]);
+function commitWorktreeChanges(ref: WorktreeRef, message?: string): void {
+  commitAll(ref.worktreePath, message ?? `maestro: ${ref.branch}`);
 }
 
 /** Merge in the main tree. A failed merge is aborted and recovery state is retained. */
-export function mergeWorktree(mainCwd: string, ref: WorktreeRef): MergeResult {
+export function mergeWorktree(mainCwd: string, ref: WorktreeRef, message?: string): MergeResult {
   try {
-    commitWorktreeChanges(ref);
+    commitWorktreeChanges(ref, message);
     git(mainCwd, ["merge", "--no-edit", ref.branch]);
     return { ok: true };
   } catch (error) {

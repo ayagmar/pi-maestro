@@ -94,7 +94,13 @@ export function loadStatusHistory(cwd: string): StatusHistoryEntry[] | undefined
 
 export function createTask(
   board: Board,
-  input: { title: string; brief: string; tier: string; dependsOn?: string[] }
+  input: {
+    title: string;
+    brief: string;
+    tier: string;
+    commitMessage?: string;
+    dependsOn?: string[];
+  }
 ): Task {
   const task: Task = {
     id: `T${board.nextTaskNumber}`,
@@ -107,6 +113,7 @@ export function createTask(
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+  if (input.commitMessage) task.commitMessage = input.commitMessage;
   board.nextTaskNumber += 1;
   board.tasks.push(task);
   return task;

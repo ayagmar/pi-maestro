@@ -11,7 +11,7 @@ import {
   type TaskStatus,
   type TierConfig,
 } from "./types.js";
-import { mergeWorktree, removeWorktree, type WorktreeRef } from "./worktree.js";
+import { commitAll, mergeWorktree, removeWorktree, type WorktreeRef } from "./worktree.js";
 
 const mainTreeOperationTails = new Map<string, Promise<void>>();
 
@@ -226,16 +226,24 @@ function loadBoardAttemptCount(cwd: string, taskId: string): number | undefined 
   return findTask(loadBoard(cwd), taskId)?.attempts.length;
 }
 
+/** Conventional commit message for a task: orchestrator-provided, or derived from the title. */
+export function taskCommitMessage(task: Task): string {
+  if (task.commitMessage) return task.commitMessage;
+  const title = task.title.charAt(0).toLowerCase() + task.title.slice(1);
+  return `feat: ${title}`;
+}
+
 export async function reviewTask(options: {
   cwd: string;
   task: Task;
   tier: TierConfig;
   startExecutor: StartExecutor;
+  autoCommit?: boolean;
   signal?: AbortSignal;
   onUpdate: WorkflowUpdate;
   trackRun: TrackRun;
 }): Promise<TaskSnapshot> {
-  const { cwd, task, tier, startExecutor, signal, onUpdate, trackRun } = options;
+  const { cwd, task, tier, startExecutor, autoCommit, signal, onUpdate, trackRun } = options;
   const report = lastReport(task);
   if (!report) return snapshot(task, "no executor report to review");
 
@@ -274,13 +282,25 @@ export async function reviewTask(options: {
   let mergeConflict: string | undefined;
   if (verdict?.approved && worktree) {
     const merge = await serializeMainTreeOperation(cwd, () => {
-      const result = mergeWorktree(cwd, worktree);
+      const result = mergeWorktree(cwd, worktree, taskCommitMessage(task));
       if (result.ok) removeWorktree(cwd, worktree);
       return result;
     });
     if (!merge.ok) {
       mergeConflict = `Approved review could not be merged because of a git conflict. Recovery worktree: ${worktree.worktreePath}\nBranch: ${worktree.branch}\n${merge.error ?? "Merge failed"}`;
       verdict = { approved: false, notes: mergeConflict };
+    }
+  } else if (verdict?.approved && autoCommit) {
+    // Main-tree run: commit this task's files so each approval lands as one
+    // conventional commit. Failure must not block the approval - the work is
+    // done and reviewed; committing is bookkeeping.
+    const files = reviewedAttempt?.touchedFiles ?? [];
+    try {
+      await serializeMainTreeOperation(cwd, () =>
+        commitAll(cwd, taskCommitMessage(task), files.length > 0 ? files : undefined)
+      );
+    } catch {
+      // Not a git repo, nothing staged, or a hook rejected it - leave the tree as-is.
     }
   }
 

@@ -47,6 +47,8 @@ export interface Task {
   id: string;
   title: string;
   brief: string;
+  /** Conventional commit message used when auto-committing this task's approved work. */
+  commitMessage?: string;
   tier: string;
   status: TaskStatus;
   dependsOn: string[];
@@ -86,6 +88,8 @@ export interface MaestroConfig {
   maxAttempts: number;
   /** Abort an executor once its attempt cost (USD) exceeds this. 0 disables the cap. */
   maxCostPerTask: number;
+  /** Commit each task's work on approval (one conventional commit per task). */
+  autoCommit: boolean;
   /** Named tiers. "review" is used for adversarial review runs. */
   tiers: Record<string, TierConfig>;
 }

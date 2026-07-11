@@ -75,6 +75,14 @@ export async function showSettings(
           "Isolate each task in a parallel batch in its own git worktree. Approved branches merge into the original tree; conflicts are retained for recovery.",
       },
       {
+        id: "autoCommit",
+        label: "Auto-commit approved tasks",
+        currentValue: config.autoCommit ? "on" : "off",
+        values: ["on", "off"],
+        description:
+          "Commit each task's work when its review approves it — one conventional commit per task, scoped to the files it touched.",
+      },
+      {
         id: "maxAttempts",
         label: "Max attempts per task",
         currentValue: String(config.maxAttempts),
@@ -125,6 +133,11 @@ export async function showSettings(
     }
     if (id === "useWorktrees") {
       config.useWorktrees = value === "on";
+      persist();
+      return;
+    }
+    if (id === "autoCommit") {
+      config.autoCommit = value === "on";
       persist();
       return;
     }

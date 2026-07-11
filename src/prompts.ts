@@ -175,7 +175,7 @@ export function buildOrchestratorBriefing(goal: string, tierGuidance: string): s
       "",
       "## Workflow",
       "1. Investigate just enough to split the goal into small, independently verifiable tasks. Tasks that would edit the same files must not run in parallel: chain them with dependsOn even when logically independent.",
-      "2. `maestro_plan`: each brief must be self-contained (executors see only the brief plus approved dependency reports) and include goal, relevant file paths, constraints, acceptance criteria, and a verification command.",
+      "2. `maestro_plan`: each brief must be self-contained (executors see only the brief plus approved dependency reports) and include goal, relevant file paths, constraints, acceptance criteria, and a verification command. Give each task a conventional commitMessage (fix:/feat:/refactor:/test:/docs:) describing its change.",
       "3. `maestro_run`: executes all runnable tasks; independent tasks run in parallel, dependents wait for approval.",
       "4. `maestro_review`: adversarial fresh-context review for tasks that are ready. Rejected tasks carry the review notes into their next run automatically.",
       "5. Repeat run/review until all tasks are approved, then summarize.",

@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createTask, findTask, forceStatus, loadBoard, saveBoard } from "../src/board.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/types.js";
-import { executeTask, reviewTask, type StartExecutor } from "../src/workflow.js";
+import { executeTask, reviewTask, type StartExecutor, taskCommitMessage } from "../src/workflow.js";
 
 const tier = { thinking: "low" };
 const config: MaestroConfig = {
   maxParallel: 1,
   useWorktrees: false,
+  autoCommit: false,
   maxAttempts: 3,
   maxCostPerTask: 0,
   tiers: { standard: tier },
@@ -314,6 +316,60 @@ test("requested changes persist changes_requested status and reviewer notes", as
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "changes_requested");
     assert.equal(persisted?.reviewNotes, notes);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("taskCommitMessage prefers the planned message and falls back to feat: title", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const planned = createTask(board, {
+    title: "Handle empty board",
+    brief: "x",
+    tier: "standard",
+    commitMessage: "fix: handle empty board on reset",
+  });
+  assert.equal(taskCommitMessage(planned), "fix: handle empty board on reset");
+  const bare = createTask(board, { title: "Add history command", brief: "x", tier: "standard" });
+  assert.equal(taskCommitMessage(bare), "feat: add history command");
+});
+
+test("approval auto-commits the task's touched files as one conventional commit", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-autocommit-test-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "chore: base");
+
+    const { board, task } = boardWithTask("ready_for_review");
+    task.commitMessage = "fix: adjust the widget";
+    const done = attempt("Executor completed the task");
+    done.touchedFiles = ["widget.txt"];
+    task.attempts.push(done);
+    saveBoard(cwd, board);
+    // The task's file plus an unrelated dirty file that must NOT be committed.
+    writeFileSync(join(cwd, "widget.txt"), "fixed\n");
+    writeFileSync(join(cwd, "unrelated.txt"), "untouched\n");
+
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: executor({ finalReport: "Verified.\nVERDICT: APPROVE" }),
+      autoCommit: true,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(git("log", "-1", "--pretty=%s"), "fix: adjust the widget");
+    const committed = git("show", "--name-only", "--pretty=format:", "HEAD");
+    assert.match(committed, /widget\.txt/);
+    assert.doesNotMatch(committed, /unrelated\.txt/);
+    assert.match(git("status", "--porcelain"), /unrelated\.txt/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

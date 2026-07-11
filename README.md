@@ -175,6 +175,11 @@ whole tier object replacing the earlier object of the same name:
   serializes merges into the original tree, then deletes the worktree and branch. A merge conflict
   is aborted, changes the task to `changes_requested`, and retains the checkout, branch, and
   recovery notes; the next retry reuses that worktree (default false).
+- `autoCommit` — commit each task's approved work as one conventional commit (default on).
+  The commit message comes from the task's `commitMessage` (the orchestrator plans one per
+  task, e.g. `fix: handle empty board`) or falls back to `feat: <title>`. Main-tree runs
+  commit only the files the executor touched; worktree runs use the message for the merge
+  commit. A failed commit (no repo, hooks) never blocks the approval.
 - `maxAttempts` — hard cap on execute attempts per task (default 3). Stops orchestrator retry
   loops; a capped task fails with a hint to rewrite its brief via `maestro_update`.
 - `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default 0 =

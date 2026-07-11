@@ -203,6 +203,12 @@ export default function maestro(pi: ExtensionAPI) {
               "Self-contained instructions: goal, relevant file paths, constraints, acceptance criteria, verification command",
           }),
           tier: Type.String({ description: "Complexity tier: trivial, standard, or complex" }),
+          commitMessage: Type.Optional(
+            Type.String({
+              description:
+                "Conventional commit message (e.g. 'fix: handle empty board') used when this task's approved work is committed. Defaults to 'feat: <title>'.",
+            })
+          ),
           dependsOn: Type.Optional(
             Type.Array(Type.String({ description: "Task id like T1" }), {
               description:
@@ -222,6 +228,7 @@ export default function maestro(pi: ExtensionAPI) {
         title: string;
         brief: string;
         tier: string;
+        commitMessage?: string;
         dependsOn?: string[];
       }[]) {
         if (!config.tiers[input.tier]) {
@@ -234,6 +241,7 @@ export default function maestro(pi: ExtensionAPI) {
           brief: input.brief,
           tier: input.tier,
         };
+        if (input.commitMessage) taskInput.commitMessage = input.commitMessage;
         if (input.dependsOn) taskInput.dependsOn = input.dependsOn;
         created.push(createTask(board, taskInput));
       }
@@ -457,6 +465,7 @@ export default function maestro(pi: ExtensionAPI) {
           task,
           tier: reviewTier,
           startExecutor,
+          autoCommit: config.autoCommit,
           onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
           trackRun: (run) => trackRun(ctx, run),
         };
