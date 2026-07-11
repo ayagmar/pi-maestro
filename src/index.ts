@@ -62,7 +62,7 @@ import {
   findSessionFile,
   mapWithConcurrencyLimit,
   type RunUpdate,
-  startExecutor,
+  startExecutor as defaultStartExecutor,
 } from "./runner.js";
 import { showSettings } from "./settings-ui.js";
 import {
@@ -107,6 +107,12 @@ interface ActiveDriveControl {
   taskIds?: string[];
   pauseRequested: boolean;
   abortController: AbortController;
+}
+
+interface BackgroundDrive {
+  promise: Promise<void>;
+  summary?: DriveSummary;
+  error?: string;
 }
 
 export function maestroBoardCwd(cwd: string): string {
@@ -165,7 +171,14 @@ function notify(
   }
 }
 
-export default function maestro(pi: ExtensionAPI) {
+export interface MaestroDependencies {
+  startExecutor: typeof defaultStartExecutor;
+}
+
+export default function maestro(
+  pi: ExtensionAPI,
+  dependencies: MaestroDependencies = { startExecutor: defaultStartExecutor }
+) {
   // Inside a spawned executor the extension must be inert: no recursive
   // orchestration, and no session_start crash-recovery fighting the parent
   // over the shared board file.
@@ -173,6 +186,7 @@ export default function maestro(pi: ExtensionAPI) {
 
   const liveRuns = new Map<string, WorkflowRun>();
   let activeDrive: ActiveDriveControl | undefined;
+  let backgroundDrive: BackgroundDrive | undefined;
   let contextNudgeShown = false;
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
@@ -331,7 +345,7 @@ export default function maestro(pi: ExtensionAPI) {
       cwd: ctx.cwd,
       config,
       resolvedTiers,
-      startExecutor,
+      startExecutor: dependencies.startExecutor,
       onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, () => {}),
       onRoundUpdate: (round, phase, ids) => {
         reportProgress(`Round ${round}: ${phase} ${ids.join(", ")}`);
@@ -342,6 +356,27 @@ export default function maestro(pi: ExtensionAPI) {
     if (signal) driveOptions.signal = signal;
     if (shouldPause) driveOptions.shouldPause = shouldPause;
     return driveBoard(driveOptions);
+  }
+
+  function startBackgroundDrive(
+    ctx: ExtensionContext,
+    taskIds: string[] | undefined,
+    signal?: AbortSignal,
+    reportProgress: (message: string) => void = () => {}
+  ): BackgroundDrive {
+    if (activeDrive) throw new Error("An autonomous drive is already active.");
+
+    const operation: BackgroundDrive = { promise: Promise.resolve() };
+    backgroundDrive = operation;
+    operation.promise = runControlledDrive(ctx, taskIds, signal, reportProgress)
+      .then((summary) => {
+        operation.summary = summary;
+      })
+      .catch((error) => {
+        operation.error = error instanceof Error ? error.message : String(error);
+      })
+      .finally(() => refreshUI(ctx));
+    return operation;
   }
 
   function savePausedDrive(cwd: string, pausedDrive: PausedDriveState | undefined): void {
@@ -355,8 +390,7 @@ export default function maestro(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     taskIds: string[] | undefined,
     signal: AbortSignal | undefined,
-    reportProgress: (message: string) => void,
-    resuming = false
+    reportProgress: (message: string) => void
   ): Promise<DriveSummary> {
     if (activeDrive) throw new Error("An autonomous drive is already active.");
     const board = loadBoard(ctx.cwd);
@@ -374,7 +408,7 @@ export default function maestro(pi: ExtensionAPI) {
     if (ownerSession) control.ownerSession = ownerSession;
     if (taskIds) control.taskIds = taskIds;
     activeDrive = control;
-    if (!resuming) savePausedDrive(ctx.cwd, undefined);
+    savePausedDrive(ctx.cwd, undefined);
 
     const combinedSignal = signal
       ? AbortSignal.any([signal, control.abortController.signal])
@@ -397,14 +431,26 @@ export default function maestro(pi: ExtensionAPI) {
       if (taskIds) paused.taskIds = taskIds;
       if (ownerSession) paused.ownerSession = ownerSession;
       savePausedDrive(ctx.cwd, paused);
-    } else if (
-      !resuming ||
-      summary.stoppedBecause.code === "completed" ||
-      summary.stoppedBecause.code === "aborted"
-    ) {
-      savePausedDrive(ctx.cwd, undefined);
     }
     return summary;
+  }
+
+  function launchCommandDrive(ctx: ExtensionCommandContext, taskIds: string[] | undefined): void {
+    const operation = startBackgroundDrive(ctx, taskIds, undefined, (message) =>
+      notify(ctx, message)
+    );
+    void operation.promise.then(() => {
+      refreshUI(ctx);
+      if (operation.summary) {
+        notify(
+          ctx,
+          formatDriveSummary(operation.summary),
+          operation.summary.stoppedBecause.code === "completed" ? "info" : "warning"
+        );
+        return;
+      }
+      if (operation.error) notify(ctx, operation.error, "error");
+    });
   }
 
   // ---------------------------------------------------------------- tools
@@ -623,7 +669,7 @@ export default function maestro(pi: ExtensionAPI) {
           task,
           tier,
           config,
-          startExecutor,
+          startExecutor: dependencies.startExecutor,
           onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
           trackRun: (run) => trackRun(ctx, run),
         };
@@ -741,7 +787,7 @@ export default function maestro(pi: ExtensionAPI) {
           cwd: ctx.cwd,
           task,
           tier: reviewTier,
-          startExecutor,
+          startExecutor: dependencies.startExecutor,
           autoCommit: config.autoCommit,
           availableTiers: Object.keys(config.tiers),
           onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
@@ -783,7 +829,7 @@ export default function maestro(pi: ExtensionAPI) {
     name: "maestro_drive",
     label: "Maestro Drive",
     description:
-      "Autonomously run, review, and retry maestro tasks until they are approved or a plan gate, budget, attempt cap, abort, or other terminal condition requires intervention.",
+      "Start an autonomous background drive that runs, reviews, and retries maestro tasks. Returns immediately. While it is active, call maestro_status repeatedly; each status pulse waits for progress and lets you keep the user informed.",
     promptSnippet: "Drive mechanical run/review/retry cycles to completion (maestro board)",
     parameters: Type.Object({
       taskIds: Type.Optional(
@@ -792,25 +838,23 @@ export default function maestro(pi: ExtensionAPI) {
         })
       ),
     }),
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const taskIds = params.taskIds as string[] | undefined;
-      const summary = await runControlledDrive(ctx, taskIds, signal, (message) => {
-        const current = loadBoard(ctx.cwd).tasks.filter(
-          (task) => !taskIds || taskIds.includes(task.id)
-        );
-        onUpdate?.({
-          content: [{ type: "text", text: message }],
-          details: { action: "drive", tasks: current.map((task) => snapshot(task)) },
-        });
-      });
-      refreshUI(ctx);
+      if (activeDrive) throw new Error("An autonomous drive is already active.");
+      assertKnownTaskIds(loadBoard(ctx.cwd), taskIds);
+      startBackgroundDrive(ctx, taskIds, signal);
       return {
-        content: [{ type: "text", text: formatDriveSummary(summary) }],
+        content: [
+          {
+            type: "text",
+            text: `Drive started for ${taskIds?.join(", ") ?? "the whole board"}. Call maestro_status now and repeat until the drive finishes. Briefly tell the user what changed after each pulse.`,
+          },
+        ],
         details: {
           action: "drive",
-          rounds: summary.rounds,
-          tasks: summary.tasks,
-          stoppedBecause: summary.stoppedBecause,
+          tasks: loadBoard(ctx.cwd)
+            .tasks.filter((task) => !taskIds || taskIds.includes(task.id))
+            .map((task) => snapshot(task)),
         },
       };
     },
@@ -902,10 +946,40 @@ export default function maestro(pi: ExtensionAPI) {
     name: "maestro_status",
     label: "Maestro Status",
     description:
-      "Cheap status pulse of the maestro board: every task with its status, tier, attempts, and cost. Use this instead of re-reading executor output.",
-    promptSnippet: "Check status of maestro board tasks",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      "Wait for the active background drive to finish or reach the next progress pulse, then return task status plus live executor turns, cost, and activity. Default wait is configurable (60s). While a drive is active, briefly update the user after every pulse and call maestro_status again until completion.",
+    promptSnippet: "Wait for and report live maestro executor progress",
+    parameters: Type.Object({
+      waitSeconds: Type.Optional(
+        Type.Number({
+          minimum: 0,
+          maximum: 240,
+          description:
+            "Seconds to wait for drive completion before returning progress. Omit for the configured default; use 0 for an immediate snapshot.",
+        })
+      ),
+    }),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const requestedWait = (params as { waitSeconds?: number }).waitSeconds;
+      const configuredWait = loadConfig(ctx.cwd).statusWaitSeconds;
+      const waitSeconds = Math.min(240, Math.max(0, requestedWait ?? configuredWait));
+      const operation = backgroundDrive;
+      const driveRunning =
+        operation && operation.summary === undefined && operation.error === undefined;
+
+      if (driveRunning && waitSeconds > 0) {
+        await new Promise<void>((resolve) => {
+          const finish = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", finish);
+            resolve();
+          };
+          const timer = setTimeout(finish, waitSeconds * 1000);
+          void operation.promise.then(finish);
+          signal?.addEventListener("abort", finish, { once: true });
+          if (signal?.aborted) finish();
+        });
+      }
+
       const board = loadBoard(ctx.cwd);
       if (board.tasks.length === 0) {
         return {
@@ -913,16 +987,33 @@ export default function maestro(pi: ExtensionAPI) {
           details: { action: "status", tasks: [] },
         };
       }
+
       const lines = board.tasks.map((task) => {
         const blocked = blockedReason(board, task);
-        return taskLine(task) + (blocked ? ` (${blocked})` : "");
+        const live = liveRuns.get(task.id);
+        const activity = live
+          ? ` · ${live.kind === "review" ? "reviewing" : "executing"} · ${live.turns} turns · $${live.cost.toFixed(4)} · ${live.lastActivity}`
+          : "";
+        return taskLine(task) + activity + (blocked ? ` (${blocked})` : "");
       });
       const usage = boardUsage(board.tasks);
+      const settled = backgroundDrive;
+      let driveState = "No background drive is active.";
+      if (settled?.summary) {
+        driveState = formatDriveSummary(settled.summary);
+        backgroundDrive = undefined;
+      } else if (settled?.error) {
+        driveState = `Drive failed: ${settled.error}`;
+        backgroundDrive = undefined;
+      } else if (activeDrive || liveRuns.size > 0) {
+        driveState = `Drive still active with ${liveRuns.size} live executor(s). Briefly report this progress to the user, then call maestro_status again.`;
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: `${lines.join("\n")}\n\nTotal: ${formatUsage(usage)}\nCosts: ${formatCostSummary(board.tasks)}`,
+            text: `${lines.join("\n")}\n\n${driveState}\n\nTotal: ${formatUsage(usage)}\nCosts: ${formatCostSummary(board.tasks)}`,
           },
         ],
         details: { action: "status", tasks: board.tasks.map((task) => snapshot(task)) },
@@ -976,6 +1067,14 @@ export default function maestro(pi: ExtensionAPI) {
         const note = expanded ? snap.note : truncateText(snap.note, 3);
         text += `${theme.fg("dim", note.replace(/^/gm, "    "))}\n`;
       }
+    }
+    if (details.stoppedBecause) {
+      const summary = formatDriveSummary({
+        rounds: details.rounds ?? 0,
+        tasks: details.tasks,
+        stoppedBecause: details.stoppedBecause,
+      });
+      text += `\n${theme.fg("dim", summary)}\n`;
     }
     return new Text(text.trimEnd(), 0, 0);
   }
@@ -1073,15 +1172,7 @@ export default function maestro(pi: ExtensionAPI) {
           }
           const taskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
           notify(ctx, `Driving ${taskIds?.join(", ") ?? "the whole board"}…`);
-          const summary = await runControlledDrive(ctx, taskIds, undefined, (message) => {
-            notify(ctx, message);
-          });
-          refreshUI(ctx);
-          notify(
-            ctx,
-            formatDriveSummary(summary),
-            summary.stoppedBecause.code === "completed" ? "info" : "warning"
-          );
+          launchCommandDrive(ctx, taskIds);
           return;
         }
         case "pause": {
@@ -1122,19 +1213,7 @@ export default function maestro(pi: ExtensionAPI) {
             return;
           }
           notify(ctx, `Resuming ${paused.taskIds?.join(", ") ?? "the whole board"}…`);
-          const summary = await runControlledDrive(
-            ctx,
-            paused.taskIds,
-            undefined,
-            (message) => notify(ctx, message),
-            true
-          );
-          refreshUI(ctx);
-          notify(
-            ctx,
-            formatDriveSummary(summary),
-            summary.stoppedBecause.code === "completed" ? "info" : "warning"
-          );
+          launchCommandDrive(ctx, paused.taskIds);
           return;
         }
         case "abort": {
@@ -1240,9 +1319,10 @@ export default function maestro(pi: ExtensionAPI) {
             return;
           }
 
+          const confirmedPaths = new Set(candidates.map((entry) => entry.ref.worktreePath));
           const result = cleanupManagedWorktrees(
             ctx.cwd,
-            true,
+            confirmedPaths,
             () => loadBoard(ctx.cwd),
             (taskId) => liveRuns.has(taskId)
           );
