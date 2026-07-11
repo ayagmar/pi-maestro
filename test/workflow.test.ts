@@ -11,6 +11,7 @@ import {
   driveBoard,
   executeTask,
   reviewTask,
+  sessionLabel,
   type StartExecutor,
   taskCommitMessage,
 } from "../src/workflow.js";
@@ -69,6 +70,20 @@ function boardWithTask(status: Task["status"] = "todo"): { board: Board; task: T
 
 const onUpdate = () => {};
 const trackRun = () => () => {};
+
+test("sessionLabel numbers attempts and reviews while preserving the label format", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const task = createTask(board, {
+    title: "A deliberately long title that exceeds forty characters",
+    brief: "x",
+    tier: "standard",
+  });
+
+  assert.equal(sessionLabel(task, "attempt", 1), "T1 A deliberately long title that exceeds f… · attempt 1");
+  assert.equal(sessionLabel(task, "attempt", 2), "T1 A deliberately long title that exceeds f… · attempt 2");
+  assert.equal(sessionLabel(task, "review", 1), "T1 A deliberately long title that exceeds f… · review 1");
+  assert.equal(sessionLabel(task, "review", 2), "T1 A deliberately long title that exceeds f… · review 2");
+});
 
 test("driveBoard approves dependent tasks across multiple rounds", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-test-"));
