@@ -20,6 +20,7 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   autoCommit: true,
   maxAttempts: 3,
   maxCostPerTask: 0,
+  maxRunCost: 0,
   tiers: {
     trivial: { thinking: "low" },
     standard: { thinking: "medium" },
@@ -63,6 +64,7 @@ export const PRESETS: Preset[] = [
       autoCommit: true,
       maxAttempts: 3,
       maxCostPerTask: 0,
+      maxRunCost: 0,
       tiers: {
         trivial: { model: "gpt-5.6-terra", thinking: "high" },
         standard: { model: "gpt-5.6-sol", thinking: "medium" },
@@ -82,6 +84,7 @@ export const PRESETS: Preset[] = [
       autoCommit: true,
       maxAttempts: 3,
       maxCostPerTask: 2,
+      maxRunCost: 0,
       tiers: {
         trivial: { model: "gpt-5.6-luna", thinking: "high" },
         standard: { model: "gpt-5.6-terra", thinking: "high" },
@@ -101,6 +104,7 @@ export const PRESETS: Preset[] = [
       autoCommit: true,
       maxAttempts: 4,
       maxCostPerTask: 0,
+      maxRunCost: 0,
       tiers: {
         trivial: { model: "gpt-5.6-sol", thinking: "medium" },
         standard: { model: "gpt-5.6-sol", thinking: "high" },
@@ -134,6 +138,7 @@ export function mergeConfig(
     autoCommit: override.autoCommit ?? base.autoCommit,
     maxAttempts: override.maxAttempts ?? base.maxAttempts,
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
+    maxRunCost: override.maxRunCost ?? base.maxRunCost,
     tiers: { ...base.tiers, ...override.tiers },
   };
 }
@@ -181,6 +186,7 @@ export function describeConfig(config: MaestroConfig): string {
     `useWorktrees: ${config.useWorktrees}`,
     `maxAttempts: ${config.maxAttempts}`,
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
+    `maxRunCost: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,
     "tiers:",
   ];
   for (const [name, tier] of Object.entries(config.tiers)) {

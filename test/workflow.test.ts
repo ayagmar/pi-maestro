@@ -16,6 +16,7 @@ const config: MaestroConfig = {
   autoCommit: false,
   maxAttempts: 3,
   maxCostPerTask: 0,
+  maxRunCost: 0,
   tiers: { standard: tier },
 };
 

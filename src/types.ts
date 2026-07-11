@@ -88,6 +88,8 @@ export interface MaestroConfig {
   maxAttempts: number;
   /** Abort an executor once its attempt cost (USD) exceeds this. 0 disables the cap. */
   maxCostPerTask: number;
+  /** Stop starting executor batches once total board cost (USD) exceeds this. 0 disables the cap. */
+  maxRunCost: number;
   /** Commit each task's work on approval (one conventional commit per task). */
   autoCommit: boolean;
   /** Named tiers. "review" is used for adversarial review runs. */

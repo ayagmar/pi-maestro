@@ -58,6 +58,12 @@ export function boardUsage(tasks: Task[]): Usage {
   return total;
 }
 
+export function runBudgetWarning(tasks: Task[], maxRunCost: number): string | undefined {
+  const totalCost = boardUsage(tasks).cost;
+  if (maxRunCost <= 0 || totalCost <= maxRunCost) return undefined;
+  return `run budget exceeded ($${totalCost.toFixed(4)} of $${maxRunCost})`;
+}
+
 export function taskLine(task: Task): string {
   const glyph = STATUS_GLYPHS[task.status];
   const usage = taskUsage(task);

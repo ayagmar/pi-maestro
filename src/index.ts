@@ -31,6 +31,7 @@ import {
   formatUsage,
   STATUS_GLYPHS,
   STATUS_LABELS,
+  runBudgetWarning,
   taskLine,
   truncateText,
 } from "./format.js";
@@ -312,6 +313,15 @@ export default function maestro(pi: ExtensionAPI) {
             },
           ],
           details: { action: "run", tasks: blocked },
+        };
+      }
+
+      const budgetWarning = runBudgetWarning(board.tasks, config.maxRunCost);
+      if (budgetWarning) {
+        const budgetBlocked = runnable.map((task) => snapshot(task, budgetWarning));
+        return {
+          content: [{ type: "text", text: budgetWarning }],
+          details: { action: "run", tasks: [...budgetBlocked, ...blocked] },
         };
       }
 

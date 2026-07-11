@@ -4,6 +4,7 @@ import {
   boardUsage,
   formatTokens,
   formatUsage,
+  runBudgetWarning,
   taskLine,
   taskUsage,
   truncateText,
@@ -49,6 +50,13 @@ test("taskUsage sums attempts and boardUsage sums tasks", () => {
   assert.equal(taskUsage(task).turns, 5);
   const total = boardUsage([task, makeTask({ attempts: [makeAttempt(0.1, 1)] })]);
   assert.equal(total.cost.toFixed(2), "0.13");
+});
+
+test("run budget gates only when total board cost exceeds a positive cap", () => {
+  const tasks = [makeTask({ attempts: [makeAttempt(5, 1)] })];
+  assert.equal(runBudgetWarning(tasks, 0), undefined);
+  assert.equal(runBudgetWarning(tasks, 5), undefined);
+  assert.equal(runBudgetWarning(tasks, 4), "run budget exceeded ($5.0000 of $4)");
 });
 
 test("formatUsage renders compact parts", () => {

@@ -98,6 +98,14 @@ export async function showSettings(
         description:
           "Abort an executor when one attempt exceeds this cost. Safety net against a stuck executor burning tokens.",
       },
+      {
+        id: "maxRunCost",
+        label: "Run cost cap (USD)",
+        currentValue: config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`,
+        values: ["off", "$5", "$10", "$25", "$50"],
+        description:
+          "Gate starting new executors when total board cost exceeds this cap. Running executors continue; the per-attempt cap remains separate.",
+      },
     ];
 
     for (const [name, tier] of Object.entries(config.tiers)) {
@@ -148,6 +156,11 @@ export async function showSettings(
     }
     if (id === "maxCostPerTask") {
       config.maxCostPerTask = value === "off" ? 0 : Number(value.slice(1));
+      persist();
+      return;
+    }
+    if (id === "maxRunCost") {
+      config.maxRunCost = value === "off" ? 0 : Number(value.slice(1));
       persist();
       return;
     }
