@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -158,13 +166,32 @@ test("saveBoard/loadBoard round-trips", () => {
   }
 });
 
-test("loadBoard returns empty board when missing or corrupt", () => {
+test("loadBoard returns an empty board when the file is missing", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
-    assert.deepEqual(loadBoard(cwd).tasks, []);
-    mkdirSync(join(cwd, ".pi", "maestro"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "maestro", "board.json"), "not json");
-    assert.deepEqual(loadBoard(cwd).tasks, []);
+    assert.deepEqual(loadBoard(cwd), emptyBoard());
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loadBoard archives a corrupt board before returning an empty board", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  const directory = join(cwd, ".pi", "maestro");
+  const file = join(directory, "board.json");
+  const corruptContents = "not json";
+  try {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(file, corruptContents);
+
+    assert.deepEqual(loadBoard(cwd), emptyBoard());
+    assert.equal(existsSync(file), false);
+
+    const archives = readdirSync(directory).filter((name) =>
+      /^board\.json\.corrupt-\d+$/.test(name)
+    );
+    assert.equal(archives.length, 1);
+    assert.equal(readFileSync(join(directory, archives[0] as string), "utf-8"), corruptContents);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

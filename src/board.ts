@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { BOARD_FILE, STATE_DIR } from "./constants.js";
+import { STATE_DIR } from "./constants.js";
 import { type Board, type Task, type TaskStatus } from "./types.js";
+
+export const BOARD_FILE = "board.json";
 
 const EMPTY_BOARD: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
 
@@ -16,9 +18,11 @@ function boardFile(cwd: string): string {
 export function loadBoard(cwd: string): Board {
   const file = boardFile(cwd);
   if (!existsSync(file)) return structuredClone(EMPTY_BOARD);
+  const contents = readFileSync(file, "utf-8");
   try {
-    return JSON.parse(readFileSync(file, "utf-8")) as Board;
+    return JSON.parse(contents) as Board;
   } catch {
+    renameSync(file, `${file}.corrupt-${Date.now()}`);
     return structuredClone(EMPTY_BOARD);
   }
 }

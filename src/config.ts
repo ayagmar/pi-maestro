@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type ModelRegistry, getAgentDir, resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
@@ -135,9 +135,11 @@ export function configFile(scope: ConfigScope, cwd: string): string {
 
 function readConfigFile(file: string): Partial<MaestroConfig> | undefined {
   if (!existsSync(file)) return undefined;
+  const contents = readFileSync(file, "utf-8");
   try {
-    return JSON.parse(readFileSync(file, "utf-8")) as Partial<MaestroConfig>;
+    return JSON.parse(contents) as Partial<MaestroConfig>;
   } catch {
+    renameSync(file, `${file}.corrupt-${Date.now()}`);
     return undefined;
   }
 }

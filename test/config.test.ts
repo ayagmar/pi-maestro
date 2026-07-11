@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +19,7 @@ import {
   describeConfig,
   describeTiersForPlanning,
   findPreset,
+  loadConfig,
   matchingPreset,
   mergeConfig,
   resolveTierModel,
@@ -149,6 +158,30 @@ test("mergeConfig carries attempt and cost caps", () => {
   const untouched = mergeConfig(DEFAULT_CONFIG, {});
   assert.equal(untouched.maxAttempts, DEFAULT_CONFIG.maxAttempts);
   assert.equal(untouched.maxCostPerTask, 0);
+});
+
+test("loadConfig archives corrupt project config and falls back", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-"));
+  const baselineCwd = mkdtempSync(join(tmpdir(), "maestro-config-baseline-"));
+  const directory = join(cwd, ".pi");
+  const file = join(directory, "maestro.json");
+  const corruptContents = "{invalid config";
+  try {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(file, corruptContents);
+
+    assert.deepEqual(loadConfig(cwd), loadConfig(baselineCwd));
+    assert.equal(existsSync(file), false);
+
+    const archives = readdirSync(directory).filter((name) =>
+      /^maestro\.json\.corrupt-\d+$/.test(name)
+    );
+    assert.equal(archives.length, 1);
+    assert.equal(readFileSync(join(directory, archives[0] as string), "utf-8"), corruptContents);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(baselineCwd, { recursive: true, force: true });
+  }
 });
 
 test("saveConfig writes the scope file", () => {
