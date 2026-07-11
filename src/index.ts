@@ -47,7 +47,13 @@ import {
   startExecutor,
 } from "./runner.js";
 import { showSettings } from "./settings-ui.js";
-import { type Board, type Task, type TaskStatus, type TierConfig } from "./types.js";
+import {
+  type Board,
+  type MaestroConfig,
+  type Task,
+  type TaskStatus,
+  type TierConfig,
+} from "./types.js";
 
 interface LiveRun {
   taskId: string;
@@ -184,10 +190,20 @@ export default function maestro(pi: ExtensionAPI) {
     board: Board,
     task: Task,
     tier: TierConfig,
+    config: MaestroConfig,
     ctx: ExtensionContext,
     signal: AbortSignal | undefined,
     onProgress: () => void
   ): Promise<TaskSnapshot> {
+    if (task.attempts.length >= config.maxAttempts) {
+      const updated = updateTask(ctx.cwd, task.id, (fresh) => {
+        fresh.status = "failed";
+      });
+      return snapshot(
+        updated ?? task,
+        `attempt cap reached (${config.maxAttempts}); rewrite the brief with maestro_update or raise maxAttempts`
+      );
+    }
     const dependencyReports = task.dependsOn
       .map((depId) => findTask(board, depId))
       .filter((dep): dep is Task => dep !== undefined && lastReport(dep) !== undefined)
@@ -203,6 +219,7 @@ export default function maestro(pi: ExtensionAPI) {
       onUpdate: (update) => applyUpdate(ctx, task.id, update, onProgress),
     };
     if (signal) runOptions.signal = signal;
+    if (config.maxCostPerTask > 0) runOptions.maxCost = config.maxCostPerTask;
     const run = startExecutor(runOptions);
     run.attempt.index = attemptIndex;
 
@@ -468,7 +485,7 @@ export default function maestro(pi: ExtensionAPI) {
       const results = await mapWithConcurrencyLimit(runnable, config.maxParallel, (task) => {
         const tier = resolvedTiers.get(task.tier);
         if (!tier) throw new Error(`No tier config for "${task.tier}"`);
-        return executeTask(board, task, tier, ctx, signal, emitProgress);
+        return executeTask(board, task, tier, config, ctx, signal, emitProgress);
       });
 
       // Reports were written by executors after our board copy was loaded.

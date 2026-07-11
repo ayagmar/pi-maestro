@@ -16,6 +16,8 @@ export const REVIEW_TOOLS = "read,bash,grep,find,ls";
  */
 export const DEFAULT_CONFIG: MaestroConfig = {
   maxParallel: 3,
+  maxAttempts: 3,
+  maxCostPerTask: 0,
   tiers: {
     trivial: { thinking: "low" },
     standard: { thinking: "medium" },
@@ -55,6 +57,8 @@ export const PRESETS: Preset[] = [
       "Best cost/quality per tier: terra-high trivial ($1.13), sol-medium standard ($1.86), sol-high complex+review ($3.47, 69% pass@1).",
     config: {
       maxParallel: 3,
+      maxAttempts: 3,
+      maxCostPerTask: 0,
       tiers: {
         trivial: { model: "gpt-5.6-terra", thinking: "high" },
         standard: { model: "gpt-5.6-sol", thinking: "medium" },
@@ -70,6 +74,8 @@ export const PRESETS: Preset[] = [
       "Cheapest sensible run: luna-high trivial ($0.78), terra-high standard ($1.13), terra-xhigh complex+review ($2.13, 60% pass@1).",
     config: {
       maxParallel: 4,
+      maxAttempts: 3,
+      maxCostPerTask: 2,
       tiers: {
         trivial: { model: "gpt-5.6-luna", thinking: "high" },
         standard: { model: "gpt-5.6-terra", thinking: "high" },
@@ -85,6 +91,8 @@ export const PRESETS: Preset[] = [
       "Frontier executors on every tier: sol-medium trivial, sol-high standard, sol-xhigh complex ($4.70, 71% pass@1), sol-high review.",
     config: {
       maxParallel: 3,
+      maxAttempts: 4,
+      maxCostPerTask: 0,
       tiers: {
         trivial: { model: "gpt-5.6-sol", thinking: "medium" },
         standard: { model: "gpt-5.6-sol", thinking: "high" },
@@ -114,6 +122,8 @@ export function mergeConfig(
   if (!override) return base;
   return {
     maxParallel: override.maxParallel ?? base.maxParallel,
+    maxAttempts: override.maxAttempts ?? base.maxAttempts,
+    maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
     tiers: { ...base.tiers, ...override.tiers },
   };
 }
@@ -156,6 +166,8 @@ export function describeConfig(config: MaestroConfig): string {
   const lines = [
     `preset: ${matchingPreset(config)}`,
     `maxParallel: ${config.maxParallel}`,
+    `maxAttempts: ${config.maxAttempts}`,
+    `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
     "tiers:",
   ];
   for (const [name, tier] of Object.entries(config.tiers)) {

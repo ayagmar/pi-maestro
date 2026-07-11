@@ -142,6 +142,15 @@ test("resolveTierModel fails with an actionable error when nothing is authed", (
   }
 });
 
+test("mergeConfig carries attempt and cost caps", () => {
+  const merged = mergeConfig(DEFAULT_CONFIG, { maxAttempts: 5, maxCostPerTask: 2 });
+  assert.equal(merged.maxAttempts, 5);
+  assert.equal(merged.maxCostPerTask, 2);
+  const untouched = mergeConfig(DEFAULT_CONFIG, {});
+  assert.equal(untouched.maxAttempts, DEFAULT_CONFIG.maxAttempts);
+  assert.equal(untouched.maxCostPerTask, 0);
+});
+
 test("saveConfig writes the scope file", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-config-"));
   try {

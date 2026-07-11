@@ -66,6 +66,22 @@ export async function showSettings(
         description:
           "How many executors run at once. Higher is faster for independent tasks but multiplies burst API usage.",
       },
+      {
+        id: "maxAttempts",
+        label: "Max attempts per task",
+        currentValue: String(config.maxAttempts),
+        values: ["1", "2", "3", "4", "5"],
+        description:
+          "Hard cap on execute attempts per task. Stops runaway retry loops; exceeded tasks fail with a hint to rewrite the brief.",
+      },
+      {
+        id: "maxCostPerTask",
+        label: "Cost cap per attempt (USD)",
+        currentValue: config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`,
+        values: ["off", "$1", "$2", "$5", "$10"],
+        description:
+          "Abort an executor when one attempt exceeds this cost. Safety net against a stuck executor burning tokens.",
+      },
     ];
 
     for (const [name, tier] of Object.entries(config.tiers)) {
@@ -96,6 +112,16 @@ export async function showSettings(
     }
     if (id === "maxParallel") {
       config.maxParallel = Number(value);
+      persist();
+      return;
+    }
+    if (id === "maxAttempts") {
+      config.maxAttempts = Number(value);
+      persist();
+      return;
+    }
+    if (id === "maxCostPerTask") {
+      config.maxCostPerTask = value === "off" ? 0 : Number(value.slice(1));
       persist();
       return;
     }

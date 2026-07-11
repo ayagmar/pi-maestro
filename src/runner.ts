@@ -85,6 +85,8 @@ export function startExecutor(options: {
   cwd: string;
   prompt: string;
   tier: TierConfig;
+  /** Abort the run when attempt cost exceeds this (USD). 0 disables the cap. */
+  maxCost?: number;
   signal?: AbortSignal;
   onUpdate?: (update: RunUpdate) => void;
 }): ExecutorHandle {
@@ -188,6 +190,10 @@ export function startExecutor(options: {
         attempt.usage.input += usage?.input ?? 0;
         attempt.usage.output += usage?.output ?? 0;
         attempt.usage.cost += usage?.cost?.total ?? 0;
+        if (options.maxCost && attempt.usage.cost > options.maxCost && !wasAborted) {
+          result.errorMessage = `cost cap exceeded: $${attempt.usage.cost.toFixed(4)} > $${options.maxCost} (maxCostPerTask)`;
+          abort();
+        }
         if (!result.model && event.message.model) result.model = event.message.model;
         // The latest assistant message decides: a transient provider error
         // followed by a successful turn must not fail the whole run.
@@ -235,7 +241,9 @@ export function startExecutor(options: {
         result.errorMessage +=
           " — the provider's OAuth token is likely expired or out of quota. Re-run `pi /login` for it, or pick another model in /maestro config.";
       }
-      result.aborted = wasAborted;
+      // A cost-cap abort carries an errorMessage and must land as a failure
+      // (retryable, visible reason), not as a user cancellation.
+      result.aborted = wasAborted && !result.errorMessage;
       if (result.exitCode !== 0 && !result.errorMessage && !wasAborted) {
         result.errorMessage = stderr.trim() || `executor exited with code ${result.exitCode}`;
       }

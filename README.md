@@ -139,6 +139,8 @@ Config files are plain JSON if you prefer editing by hand — user scope
 ```json
 {
   "maxParallel": 4,
+  "maxAttempts": 3,
+  "maxCostPerTask": 2,
   "tiers": {
     "trivial":  { "model": "gpt-5.6-terra", "thinking": "high" },
     "standard": { "model": "gpt-5.6-sol", "thinking": "medium" },
@@ -148,6 +150,10 @@ Config files are plain JSON if you prefer editing by hand — user scope
 }
 ```
 
+- `maxAttempts` — hard cap on execute attempts per task (default 3). Stops orchestrator retry
+  loops; a capped task fails with a hint to rewrite its brief via `maestro_update`.
+- `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default 0 =
+  off). Safety net against a stuck executor burning tokens unattended.
 - `model` — a pi model pattern. Bare names like `gpt-5.6-terra` are resolved against providers
   you actually have auth for (preferring the orchestrator's provider); `provider/id` pins one
   provider. Omit to inherit pi's default model.
