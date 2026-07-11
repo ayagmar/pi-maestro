@@ -1,4 +1,4 @@
-import { type Task, type TaskStatus, type Usage } from "./types.js";
+import { type BoardUsageSummary, type Task, type TaskStatus, type Usage } from "./types.js";
 
 export const STATUS_GLYPHS: Record<TaskStatus, string> = {
   todo: "○",
@@ -56,6 +56,56 @@ export function boardUsage(tasks: Task[]): Usage {
     total.turns += usage.turns;
   }
   return total;
+}
+
+export function boardUsageSummary(tasks: Task[]): BoardUsageSummary {
+  let totalAttempts = 0;
+  let totalCost = 0;
+  let meaningfulAttempts = 0;
+  let meaningfulCost = 0;
+  const models = new Set<string>();
+  const providers = new Set<string>();
+
+  for (const task of tasks) {
+    for (const attempt of task.attempts) {
+      totalAttempts += 1;
+      totalCost += attempt.usage.cost;
+      if (attempt.usage.cost > 0) {
+        meaningfulAttempts += 1;
+        meaningfulCost += attempt.usage.cost;
+      }
+      if (attempt.model) models.add(attempt.model);
+      if (attempt.reviewModel) models.add(attempt.reviewModel);
+
+      if (attempt.provider) providers.add(attempt.provider);
+      else if (attempt.model?.includes("/"))
+        providers.add(attempt.model.split("/", 1)[0] as string);
+      if (attempt.reviewProvider) providers.add(attempt.reviewProvider);
+      else if (attempt.reviewModel?.includes("/")) {
+        providers.add(attempt.reviewModel.split("/", 1)[0] as string);
+      }
+    }
+  }
+
+  return {
+    totalAttempts,
+    totalCost,
+    averageMeaningfulCost: meaningfulAttempts === 0 ? 0 : meaningfulCost / meaningfulAttempts,
+    models: [...models],
+    providers: [...providers],
+  };
+}
+
+export function formatCostSummary(tasks: Task[]): string {
+  const usage = boardUsageSummary(tasks);
+  const parts = [
+    `${usage.totalAttempts} attempt${usage.totalAttempts === 1 ? "" : "s"}`,
+    `$${usage.totalCost.toFixed(4)} total`,
+    `$${usage.averageMeaningfulCost.toFixed(4)} avg billed attempt`,
+  ];
+  if (usage.models.length > 0) parts.push(`models: ${usage.models.join(", ")}`);
+  if (usage.providers.length > 0) parts.push(`providers: ${usage.providers.join(", ")}`);
+  return parts.join(" · ");
 }
 
 export function formatBoardProgress(tasks: Task[]): string {

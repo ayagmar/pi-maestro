@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, findPreset, saveConfig } from "../src/config.js";
+import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
 import {
   applySettingsChange,
   buildModelChoices,
@@ -53,20 +53,15 @@ test("settings model filtering matches provider, model id, and sentinels", () =>
   assert.deepEqual(filterModelChoices(choices, ""), choices);
 });
 
-test("picker selects preset bare primary and fallback values without qualifying them", () => {
+test("picker selects bare primary and fallback values without qualifying them", () => {
   const registry = registryWithModels([
     { provider: "openai", id: "gpt-5.6-sol" },
     { provider: "proxy", id: "gpt-5.6-sol" },
     { provider: "anthropic", id: "claude-sonnet-5" },
   ]);
   const choices = buildModelChoices(registry);
-  const preset = findPreset("balanced");
-  assert.ok(preset);
 
-  const config = structuredClone(preset.config);
-  const standard = config.tiers.standard;
-  assert.ok(standard?.model);
-  standard.fallbacks = ["claude-sonnet-5"];
+  const standard = { model: "gpt-5.6-sol", thinking: "medium", fallbacks: ["claude-sonnet-5"] };
 
   const primaryItems = buildModelPickerChoices(registry, choices.model, standard.model, "openai");
   const fallbackItems = buildModelPickerChoices(
@@ -93,6 +88,7 @@ test("picker selects preset bare primary and fallback values without qualifying 
   assert.equal(primaryItems.filter((item) => item.label === "openai/gpt-5.6-sol").length, 1);
   assert.ok(primaryItems.some((item) => item.value === "proxy/gpt-5.6-sol"));
 
+  const config = structuredClone(DEFAULT_CONFIG);
   applySettingsChange(config, "model:standard", standard.model);
   applySettingsChange(config, "fallback:standard", standard.fallbacks[0] as string);
   assert.equal(config.tiers.standard?.model, "gpt-5.6-sol");
@@ -107,7 +103,9 @@ test("settings model choices retain static menus when no authenticated models ar
     "gpt-5.6-luna",
     "gpt-5.6-terra",
     "gpt-5.6-sol",
+    "claude-haiku-4-5",
     "claude-sonnet-5",
+    "claude-opus-4-8",
     "claude-fable-5",
   ]);
   assert.deepEqual(choices.fallback, [

@@ -14,6 +14,20 @@ export interface Usage {
   turns: number;
 }
 
+export type FailureKind =
+  | "provider_failure"
+  | "executor_failure"
+  | "reviewer_rejection"
+  | "reviewer_failure"
+  | "user_abort"
+  | "cost_cap";
+
+export interface FailureReason {
+  kind: FailureKind;
+  message: string;
+  retryable: boolean;
+}
+
 export interface Attempt {
   index: number;
   /** Session file in pi's default session storage, reported by the executor via get_state. */
@@ -22,12 +36,16 @@ export interface Attempt {
   sessionDir?: string;
   logFile: string;
   model?: string;
+  /** Provider parsed from the resolved model id, when available. */
+  provider?: string;
   thinking: string;
   startedAt: number;
   endedAt?: number;
   exitCode?: number;
   /** Provider or executor error that ended this attempt. */
   errorMessage?: string;
+  /** Structured, redacted reason for the last failure or review rejection. */
+  failureReason?: FailureReason;
   /** Failed before any model turn and therefore does not consume maxAttempts. */
   providerFailure?: boolean;
   usage: Usage;
@@ -40,6 +58,13 @@ export interface Attempt {
   branch?: string;
   /** Full report of the last review run against this attempt. */
   reviewReport?: string;
+  /** Reviewer findings retained on this attempt after later retries. */
+  reviewNotes?: string;
+  /** Model and provider used by the reviewer. */
+  reviewModel?: string;
+  reviewProvider?: string;
+  /** Review-only usage, also included in the attempt's aggregate usage. */
+  reviewUsage?: Usage;
   /** Session file of the last review run, for post-hoc inspection. */
   reviewSessionFile?: string;
   touchedFiles: string[];
@@ -60,6 +85,51 @@ export interface Task {
   updatedAt: number;
 }
 
+export type TaskGroup =
+  | "blocked"
+  | "ready"
+  | "running"
+  | "review-needed"
+  | "approved"
+  | "failed"
+  | "cancelled";
+
+export interface MissingDependency {
+  taskId: string;
+  dependencyId: string;
+}
+
+export interface PlanValidation {
+  missingDependencies: MissingDependency[];
+  /** Each cycle repeats its first task ID at the end, for example T1 → T2 → T1. */
+  dependencyCycles: string[][];
+  invalidTiers: Array<{ taskId: string; tier: string }>;
+}
+
+export interface PlanTaskEdits {
+  title?: string;
+  brief?: string;
+  tier?: string;
+  dependsOn?: string[];
+  cancelled?: boolean;
+}
+
+export interface BoardUsageSummary {
+  totalAttempts: number;
+  totalCost: number;
+  /** Average of non-zero attempt costs. */
+  averageMeaningfulCost: number;
+  models: string[];
+  providers: string[];
+}
+
+export interface PausedDriveState {
+  /** Selected task scope. Omitted when the whole board is driven. */
+  taskIds?: string[];
+  /** Session that started the drive. Only that session may control or resume it. */
+  ownerSession?: string;
+}
+
 export interface Board {
   version: 1;
   revision?: number;
@@ -70,6 +140,8 @@ export interface Board {
   ownerSessions?: string[];
   /** Planned tasks cannot start until the user approves them. */
   planPending?: boolean;
+  /** A safely paused autonomous drive that can be resumed from fresh board state. */
+  pausedDrive?: PausedDriveState;
   tasks: Task[];
 }
 

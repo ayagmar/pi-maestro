@@ -100,11 +100,21 @@ Recommended flow for large goals:
 For small goals, skip the handoff — one session is fine. You can also start the autonomous loop
 from the current session with `/maestro drive` (or let the model call `maestro_drive`). It runs
 independent work in parallel, reviews completed attempts, carries review feedback into retries,
-and waits for approved dependencies before advancing them. The loop stops when work is complete
-or when a plan gate, run budget, attempt cap, abort, blocked state, error, or its 20-round safety
-limit requires intervention. An optional task-id list limits the drive to those tasks.
+and waits for approved dependencies before advancing them. `/maestro pause` requests a safe stop:
+active executors finish, but no new executor batch starts. `/maestro resume` later continues the same
+task scope from the board's fresh persisted state; `/maestro abort` instead aborts active executors.
+The loop stops when work is complete or when a pause, plan gate, run budget, attempt cap, abort,
+blocked state, error, or its 20-round safety limit requires intervention. An optional task-id list
+limits the drive to those tasks. Session switches are blocked while a drive or executor is active;
+pause and wait (or abort) before switching.
 
-With `planGate` enabled, use an explicit plan-approve-drive flow:
+With `planGate` enabled, use an explicit plan-approve-drive flow. The gate validates dependency
+references, dependency cycles, and configured tiers before any executor or reviewer starts.
+`/maestro plan` opens each pending task's title, full brief, tier, dependencies, and cancellation
+state for draft editing. Choose **Save changes** to validate and persist the draft, or **Cancel
+editing**/Esc to discard it. Invalid plans remain pending and unchanged until the listed task ids,
+references, cycles, or tiers are fixed. The same fields remain available through `maestro_update`.
+
 
 ```
 /maestro start <goal>          # maestro_plan leaves the new plan pending
@@ -136,9 +146,16 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
     The chooser scrolls to keep the selected template visible in short terminals.
   - `x` abort a running executor (task becomes `cancelled`)
   - `a` approve / `r` reopen a finished task without spawning a reviewer (a manual lifecycle
-    override that bypasses adversarial review)
+    override that bypasses adversarial review); `r` retries failed and changes-requested tasks
+  - `g` cycle compact workflow-group filters: blocked, ready, running, review needed, approved,
+    failed, and cancelled. The selected-task pane lists unresolved blockers, failure/review notes,
+    recent attempts, model/provider, turns, cost, and changed files.
   - `f` hide/show settled tasks (approved and cancelled) to focus on remaining work
   - `enter` open the executor's full session in your TUI
+- **Failure and retry actions**: failed and cancelled tasks can be retried by explicitly naming
+  them in `maestro_run`; changes-requested tasks carry reviewer notes into the next attempt.
+  Rewrite a repeatedly failing brief with `maestro_update`, or use the dashboard's reopen action.
+  Provider failures before useful work do not consume the task attempt cap.
 - **`/maestro list`**: compact task picker (report view, status overrides, open session).
 - **`/maestro open T3`**: switches your TUI into that executor's persisted session so you can
   inspect exactly what it did — or continue working in it by hand. `/maestro back` returns to the
@@ -159,9 +176,15 @@ and deep SWE leaderboard (pass@1 / avg cost per run):
 | Preset | trivial | standard | complex | review | Parallel / attempts / attempt cap / run cap | Rationale |
 |--------|---------|----------|---------|--------|----------------------------------------------|-----------|
 | `inherit` (default) | pi default · low | pi default · medium | pi default · high | pi default · high | 3 / 3 / off / off | Works with any provider, zero setup |
-| `balanced` | terra · high | sol · medium | sol · high | sol · medium | 3 / 3 / off / off | Best cost/quality knee per tier (sol-high: 69% @ $3.47) |
-| `budget` | luna · high | terra · high | terra · xhigh | terra · xhigh | 4 / 3 / $2 / off | Cheapest sensible run (terra-xhigh: 60% @ $2.13) |
-| `quality` | sol · medium | sol · high | sol · xhigh | sol · high | 3 / 4 / off / off | Frontier on every tier (sol-xhigh: 71% @ $4.70) |
+| `openai-balanced` | terra · high | sol · medium | sol · high | sol · medium | 3 / 3 / off / off | Best cost/quality knee per tier (sol-high: 69% @ $3.47) |
+| `openai-budget` | luna · high | terra · high | terra · xhigh | terra · xhigh | 4 / 3 / $2 / off | Cheapest sensible run (terra-xhigh: 60% @ $2.13) |
+| `openai-quality` | sol · medium | sol · high | sol · xhigh | sol · high | 3 / 4 / off / off | Frontier on every tier (sol-xhigh: 71% @ $4.70) |
+| `anthropic-balanced` | sonnet-5 · low | sonnet-5 · medium | opus-4-8 · high | fable-5 · high | 3 / 3 / off / off | Claude capability ladder; frontier model on read-only review |
+| `anthropic-budget` | haiku-4-5 · medium | sonnet-5 · medium | sonnet-5 · high | sonnet-5 · high | 4 / 3 / $2 / off | Cheapest sensible Claude run |
+| `anthropic-quality` | opus-4-8 · medium | opus-4-8 · high | fable-5 · high | fable-5 · high | 3 / 4 / off / off | Frontier Claude on every tier |
+
+Preset models are provider-qualified (`openai-codex/gpt-5.6-sol`, `anthropic/claude-sonnet-5`),
+so executors always run on that provider and fail fast with a `/login` hint if it is not authed.
 
 All presets set `planGate` and `useWorktrees` to `false`; all leave `maxRunCost` off.
 
@@ -241,9 +264,12 @@ that batch and fails with an actionable message if none are available. Before re
 checks the review tier's primary model. This happens before spawning executors.
 
 `/maestro doctor` prints a non-secret readiness report: user/project config files and precedence,
-effective limits and tier settings, authenticated model and fallback resolution, and git/worktree
-readiness. It never prints API keys. Missing authentication, unavailable models, invalid JSON, and
-a repository without an initial commit include next-step guidance.
+effective limits and tier settings, authenticated model and fallback resolution, git readiness, and
+managed worktrees classified as active, recoverable, retained after a merge conflict, orphaned, or
+stale. It never prints API keys. Missing authentication, unavailable models, invalid JSON, and a
+repository without an initial commit include next-step guidance. `/maestro doctor cleanup` offers a
+confirmation before removing stale/orphaned entries, then rechecks the board and live runs so active
+and recoverable worktrees remain untouched. In non-interactive mode, add `confirm` explicitly.
 
 ### Commands
 
@@ -251,6 +277,9 @@ a repository without an initial commit include next-step guidance.
 /maestro start <goal>     plan + delegate a goal with the orchestrator
 /maestro handoff          continue run/review in a fresh session (drops planning context)
 /maestro drive [taskIds]  autonomously run, review, and retry all or selected tasks
+/maestro pause            stop the drive after active executors finish; do not abort them
+/maestro resume           continue the paused task scope from fresh board state
+/maestro abort            abort an active drive/executors, or discard a paused drive
 /maestro plan             inspect and approve or reject a plan awaiting approval
 /maestro board            full-screen live dashboard (aliases: dash, dashboard; also ctrl+alt+b)
 /maestro list             compact task picker
@@ -259,11 +288,19 @@ a repository without an initial commit include next-step guidance.
 /maestro config           interactive settings editor (user scope)
 /maestro config project   interactive settings editor (repo scope)
 /maestro config show      print the resolved defaults + user + project configuration
-/maestro doctor           diagnose config, models, authentication, and git readiness
+/maestro costs            show attempts, total/average billed cost, models, and providers
+/maestro doctor           diagnose config, models, authentication, git, and worktrees
+/maestro doctor cleanup   confirm removal of rechecked stale/orphaned worktrees
 /maestro history [n]      show the last n audited status changes (default 20)
 /maestro replay [file]    restore an archived board (newest-first picker when omitted)
 /maestro reset            archive the current board, then clear tasks and goal
 ```
+
+Completed drives print a compact outcome summary with approved, failed, cancelled, and blocked
+counts, rounds and attempts, total cost, average cost across billed attempts, and the non-secret
+model/provider identifiers recorded by executors and reviewers. `maestro_status` includes the same
+cost rollup, and `/maestro costs` prints it directly without task details. Zero-cost startup/provider
+failures count as attempts but are excluded from the meaningful average.
 
 ## How it stays deterministic
 

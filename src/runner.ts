@@ -2,7 +2,9 @@ import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { KILL_GRACE_MS, LOGS_DIR } from "./constants.js";
-import { type Attempt, type TierConfig, type Usage } from "./types.js";
+import { type Attempt, type FailureReason, type TierConfig, type Usage } from "./types.js";
+
+export type RunFailureCause = "provider" | "process" | "user_abort" | "cost_cap";
 
 export interface RunOutcome {
   exitCode: number;
@@ -12,6 +14,47 @@ export interface RunOutcome {
   model?: string;
   aborted: boolean;
   errorMessage?: string;
+  failureCause?: RunFailureCause;
+  failureReason?: FailureReason;
+}
+
+export function providerFromModel(model?: string): string | undefined {
+  if (!model?.includes("/")) return undefined;
+  return model.split("/", 1)[0];
+}
+
+export function redactFailureMessage(message: string): string {
+  return message
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
+    .replace(/\b(sk-[A-Za-z0-9_-]{8,})\b/g, "[REDACTED]")
+    .replace(/\b(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]");
+}
+
+export function classifyFailure(
+  outcome: Pick<RunOutcome, "aborted" | "errorMessage" | "exitCode" | "failureCause" | "usage">,
+  phase: "executor" | "review" = "executor"
+): FailureReason | undefined {
+  if (outcome.failureCause === "user_abort" || outcome.aborted) {
+    return { kind: "user_abort", message: `${phase} aborted by user`, retryable: true };
+  }
+  if (outcome.exitCode === 0 && !outcome.errorMessage) return undefined;
+
+  const message = redactFailureMessage(
+    outcome.errorMessage ?? `${phase} exited with code ${outcome.exitCode}`
+  );
+  if (outcome.failureCause === "cost_cap" || message.startsWith("cost cap exceeded:")) {
+    return { kind: "cost_cap", message, retryable: true };
+  }
+  const providerFailure =
+    outcome.failureCause === "provider" ||
+    (outcome.failureCause === undefined &&
+      /usage limit|rate limit|quota|too many requests|resource.?exhausted/i.test(message));
+  if (providerFailure) return { kind: "provider_failure", message, retryable: true };
+  return {
+    kind: phase === "review" ? "reviewer_failure" : "executor_failure",
+    message,
+    retryable: true,
+  };
 }
 
 export interface RunUpdate {
@@ -64,6 +107,38 @@ function extractText(message: JsonEvent["message"]): string {
     .join("\n");
 }
 
+export function applyAssistantMessage(
+  result: RunOutcome,
+  attempt: Attempt,
+  message: NonNullable<JsonEvent["message"]>,
+  maxCost?: number
+): boolean {
+  const usage = message.usage;
+  attempt.usage.turns += 1;
+  attempt.usage.input += usage?.input ?? 0;
+  attempt.usage.output += usage?.output ?? 0;
+  attempt.usage.cost += usage?.cost?.total ?? 0;
+  if (!result.model && message.model) result.model = message.model;
+
+  if (message.errorMessage) {
+    result.errorMessage = message.errorMessage;
+    result.failureCause = "provider";
+  } else {
+    delete result.errorMessage;
+    if (result.failureCause === "provider") delete result.failureCause;
+  }
+
+  const exceededCostCap = Boolean(maxCost && attempt.usage.cost > maxCost);
+  if (exceededCostCap) {
+    result.errorMessage = `cost cap exceeded: $${attempt.usage.cost.toFixed(4)} > $${maxCost} (maxCostPerTask)`;
+    result.failureCause = "cost_cap";
+  }
+
+  const text = extractText(message);
+  if (text) result.finalReport = text;
+  return exceededCostCap;
+}
+
 export function touchedFile(event: JsonEvent, cwd: string): string | undefined {
   if (event.type !== "tool_execution_start") return undefined;
   if (event.toolName !== "edit" && event.toolName !== "write") return undefined;
@@ -104,7 +179,11 @@ export function startExecutor(options: {
     usage: { input: 0, output: 0, cost: 0, turns: 0 },
     touchedFiles: [],
   };
-  if (options.tier.model !== undefined) attempt.model = options.tier.model;
+  if (options.tier.model !== undefined) {
+    attempt.model = options.tier.model;
+    const provider = providerFromModel(options.tier.model);
+    if (provider !== undefined) attempt.provider = provider;
+  }
 
   // Sessions go to pi's default storage so /resume and usage reports see them;
   // the file path comes back via get_state and is stored on the attempt.
@@ -127,10 +206,10 @@ export function startExecutor(options: {
     if (proc.stdin.writable) proc.stdin.write(`${JSON.stringify(command)}\n`);
   };
 
-  let wasAborted = false;
-  const abort = () => {
-    if (wasAborted) return;
-    wasAborted = true;
+  let abortCause: "user_abort" | "cost_cap" | undefined;
+  const abortWithCause = (cause: "user_abort" | "cost_cap") => {
+    if (abortCause) return;
+    abortCause = cause;
     send({ type: "abort" });
     proc.stdin.end();
     setTimeout(() => {
@@ -140,6 +219,7 @@ export function startExecutor(options: {
       if (proc.exitCode === null) proc.kill("SIGKILL");
     }, KILL_GRACE_MS * 2).unref();
   };
+  const abort = () => abortWithCause("user_abort");
 
   const outcome = new Promise<RunOutcome>((resolve) => {
     const log = createWriteStream(logFile);
@@ -180,6 +260,7 @@ export function startExecutor(options: {
       // leave the process idle forever. Fail fast with the provider error.
       if (event.type === "response" && event.command === "prompt" && event.success === false) {
         result.errorMessage = event.error ?? "executor rejected the prompt";
+        result.failureCause = "provider";
         proc.stdin.end();
         setTimeout(() => {
           if (proc.exitCode === null) proc.kill("SIGTERM");
@@ -192,22 +273,15 @@ export function startExecutor(options: {
       }
 
       if (event.type === "message_end" && event.message?.role === "assistant") {
-        const usage = event.message.usage;
-        attempt.usage.turns += 1;
-        attempt.usage.input += usage?.input ?? 0;
-        attempt.usage.output += usage?.output ?? 0;
-        attempt.usage.cost += usage?.cost?.total ?? 0;
-        if (options.maxCost && attempt.usage.cost > options.maxCost && !wasAborted) {
-          result.errorMessage = `cost cap exceeded: $${attempt.usage.cost.toFixed(4)} > $${options.maxCost} (maxCostPerTask)`;
-          abort();
-        }
-        if (!result.model && event.message.model) result.model = event.message.model;
-        // The latest assistant message decides: a transient provider error
-        // followed by a successful turn must not fail the whole run.
-        if (event.message.errorMessage) result.errorMessage = event.message.errorMessage;
-        else delete result.errorMessage;
-        const text = extractText(event.message);
-        if (text) result.finalReport = text;
+        // Apply the cap after clearing a prior transient provider error. The
+        // successful message that crosses the cap must still end as cost_cap.
+        const exceededCostCap = applyAssistantMessage(
+          result,
+          attempt,
+          event.message,
+          options.maxCost
+        );
+        if (exceededCostCap && !abortCause) abortWithCause("cost_cap");
       }
 
       const touched = touchedFile(event, options.cwd);
@@ -248,11 +322,21 @@ export function startExecutor(options: {
         result.errorMessage +=
           " — the provider's OAuth token is likely expired or out of quota. Re-run `pi /login` for it, or pick another model in /maestro config.";
       }
+      if (result.errorMessage) result.errorMessage = redactFailureMessage(result.errorMessage);
       // A cost-cap abort carries an errorMessage and must land as a failure
       // (retryable, visible reason), not as a user cancellation.
-      result.aborted = wasAborted && !result.errorMessage;
-      if (result.exitCode !== 0 && !result.errorMessage && !wasAborted) {
-        result.errorMessage = stderr.trim() || `executor exited with code ${result.exitCode}`;
+      result.aborted = abortCause === "user_abort";
+      if (abortCause) result.failureCause = abortCause;
+      if (result.exitCode !== 0 && !result.errorMessage && !abortCause) {
+        result.errorMessage = redactFailureMessage(
+          stderr.trim() || `executor exited with code ${result.exitCode}`
+        );
+        result.failureCause = "process";
+      }
+      const failureReason = classifyFailure(result);
+      if (failureReason) {
+        result.failureReason = failureReason;
+        attempt.failureReason = failureReason;
       }
       attempt.endedAt = Date.now();
       attempt.exitCode = result.exitCode;
@@ -262,7 +346,13 @@ export function startExecutor(options: {
     proc.on("error", (error) => {
       log.end();
       result.exitCode = 1;
-      result.errorMessage = error.message;
+      result.errorMessage = redactFailureMessage(error.message);
+      result.failureCause = "process";
+      const failureReason = classifyFailure(result);
+      if (failureReason) {
+        result.failureReason = failureReason;
+        attempt.failureReason = failureReason;
+      }
       attempt.endedAt = Date.now();
       attempt.exitCode = 1;
       resolve(result);

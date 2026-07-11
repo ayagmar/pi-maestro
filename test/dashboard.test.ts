@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { type Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   Dashboard,
   type DashboardActions,
@@ -59,6 +60,7 @@ test("dashboard renders header, tasks, and footer within width", () => {
     const lines = dashboard.render(100);
     const joined = lines.join("\n");
     assert.equal(lines.length, DEFAULT_DASHBOARD_BODY_HEIGHT + 3);
+    assert.ok(lines.every((line) => visibleWidth(line) <= 100));
     assert.match(joined, /maestro dashboard · 2 task\(s\)/);
     assert.match(joined, /T1 Do thing/);
     assert.match(joined, /T2 Do thing/);
@@ -450,6 +452,161 @@ test("dashboard hides reviewer routing when the host cannot switch sessions", ()
 
     dashboard.handleInput("O");
     assert.deepEqual(selected, []);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard groups tasks and cycles through every status filter", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 9,
+    tasks: [
+      makeTask({ id: "T1", status: "todo", dependsOn: ["T7"] }),
+      makeTask({ id: "T2", status: "todo" }),
+      makeTask({ id: "T3", status: "running" }),
+      makeTask({ id: "T4", status: "ready_for_review" }),
+      makeTask({ id: "T5", status: "approved" }),
+      makeTask({ id: "T6", status: "failed" }),
+      makeTask({ id: "T7", status: "cancelled" }),
+    ],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    const all = dashboard.render(140).join("\n");
+    for (const label of [
+      "blocked · todo",
+      "ready · todo",
+      "running",
+      "review needed · ready for review",
+      "approved",
+      "failed",
+      "cancelled",
+    ]) {
+      assert.match(all, new RegExp(label));
+    }
+
+    for (const group of [
+      "blocked",
+      "ready",
+      "running",
+      "review needed",
+      "approved",
+      "failed",
+      "cancelled",
+    ]) {
+      dashboard.handleInput("g");
+      assert.match(dashboard.render(140)[0] ?? "", new RegExp(`filter: ${group}`));
+    }
+    dashboard.handleInput("g");
+    assert.doesNotMatch(dashboard.render(140)[0] ?? "", /filter:/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard makes blockers and failure retry details prominent", () => {
+  const failed = makeTask({
+    status: "failed",
+    dependsOn: ["T2", "missing"],
+    attempts: [
+      {
+        index: 1,
+        logFile: "missing.jsonl",
+        model: "openai/model-a",
+        provider: "openai",
+        thinking: "medium",
+        startedAt: 0,
+        exitCode: 1,
+        failureReason: {
+          kind: "provider_failure",
+          message: "provider quota exhausted",
+          retryable: true,
+        },
+        usage: { input: 10, output: 2, cost: 0.01, turns: 1 },
+        touchedFiles: [],
+      },
+    ],
+  });
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [failed, makeTask({ id: "T2", status: "running" })],
+  };
+  const changes: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, { setTaskStatus: (id, status) => changes.push(`${id}:${status}`) })
+  );
+  try {
+    dashboard.handleInput("\x1b[B");
+    const output = dashboard.render(140).join("\n");
+    assert.match(output, /Blocked by: T2 \(running\), missing \(missing\)/);
+    assert.match(output, /Failure: provider failure · provider quota exhausted · retryable/);
+    assert.match(output, /r retry/);
+    dashboard.handleInput("r");
+    assert.deepEqual(changes, ["T1:todo"]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard shows retryable review notes and compact attempt history", () => {
+  const task = makeTask({
+    status: "changes_requested",
+    reviewNotes: "Tests fail on Windows.\nPreserve path separators.",
+    attempts: [
+      {
+        index: 1,
+        logFile: "attempt-1.jsonl",
+        model: "anthropic/model-old",
+        provider: "anthropic",
+        thinking: "medium",
+        startedAt: 0,
+        failureReason: { kind: "executor_failure", message: "test failed", retryable: true },
+        usage: { input: 10, output: 2, cost: 0.01, turns: 2 },
+        touchedFiles: ["src/old.ts"],
+      },
+      {
+        index: 2,
+        logFile: "attempt-2.jsonl",
+        model: "openai/model-new",
+        provider: "openai",
+        thinking: "high",
+        startedAt: 1,
+        finalReport: "implemented",
+        reviewReport: "request changes",
+        reviewNotes: "Tests fail on Windows.",
+        reviewModel: "review-model",
+        reviewProvider: "google",
+        reviewUsage: { input: 5, output: 2, cost: 0.02, turns: 1 },
+        usage: { input: 20, output: 4, cost: 0.03, turns: 3 },
+        touchedFiles: ["src/dashboard.ts", "test/dashboard.test.ts"],
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const changes: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, { setTaskStatus: (id, status) => changes.push(`${id}:${status}`) })
+  );
+  try {
+    const output = dashboard.render(160).join("\n");
+    assert.match(output, /Failure: reviewer rejection/);
+    assert.match(output, /Reviewer notes: Tests fail on Windows\. Preserve path separators\./);
+    assert.match(
+      output,
+      /Latest #2: model openai\/model-new · provider openai · 3 turns · \$0\.0300/
+    );
+    assert.match(output, /Reviewer: model review-model · provider google · 1 turns · \$0\.0200/);
+    assert.match(output, /Changed files: src\/dashboard\.ts, test\/dashboard\.test\.ts/);
+    assert.match(output, /History: #1 executor failure · anthropic\/model-old · 2t · \$0\.0100/);
+    assert.match(output, /History: #2 changes requested · openai\/model-new · 3t · \$0\.0300/);
+    assert.match(output, /r retry/);
+
+    dashboard.handleInput("r");
+    assert.deepEqual(changes, ["T1:todo"]);
   } finally {
     dashboard.dispose();
   }

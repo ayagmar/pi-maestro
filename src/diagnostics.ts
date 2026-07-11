@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { type ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { loadBoard } from "./board.js";
 import {
   configFile,
   describeTier,
@@ -7,7 +8,7 @@ import {
   matchingPreset,
   resolveTierModel,
 } from "./config.js";
-import { inspectGit } from "./worktree.js";
+import { inspectGit, inspectManagedWorktrees } from "./worktree.js";
 
 function inspectConfigFile(scope: "user" | "project", file: string): string {
   if (!existsSync(file)) return `${scope}: ${file} (not present)`;
@@ -22,7 +23,8 @@ function inspectConfigFile(scope: "user" | "project", file: string): string {
 export function buildDoctorReport(
   cwd: string,
   modelRegistry: ModelRegistry,
-  preferredModel?: { provider: string; id: string }
+  preferredModel?: { provider: string; id: string },
+  liveTaskIds: ReadonlySet<string> = new Set()
 ): string {
   const userFile = configFile("user", cwd);
   const projectFile = configFile("project", cwd);
@@ -86,6 +88,26 @@ export function buildDoctorReport(
   lines.push("", "Git/worktrees:", `  ${git.ok ? "✓" : "✗"} ${git.summary}`);
   if (!git.ok && (config.useWorktrees || config.autoCommit)) {
     lines.push("  Initialize and commit the repository, or disable worktrees/automatic commits.");
+  }
+
+  if (git.ok) {
+    const worktrees = inspectManagedWorktrees(cwd, loadBoard(cwd), liveTaskIds);
+    if (worktrees.length === 0) {
+      lines.push("  ✓ no managed worktrees need attention");
+    } else {
+      for (const entry of worktrees) {
+        const task = entry.taskId ? ` · ${entry.taskId} attempt ${entry.attemptIndex}` : "";
+        const presence = entry.exists ? "" : " · checkout missing";
+        lines.push(
+          `  ${entry.state}: ${entry.ref.worktreePath}${task}${presence}\n    ${entry.reason}`
+        );
+      }
+      if (worktrees.some((entry) => entry.state === "orphaned" || entry.state === "stale")) {
+        lines.push(
+          `  Cleanup available: /maestro doctor cleanup (removes only rechecked stale/orphaned entries after confirmation).`
+        );
+      }
+    }
   }
   return lines.join("\n");
 }

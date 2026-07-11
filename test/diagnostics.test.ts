@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import test from "node:test";
 import { type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { buildDoctorReport } from "../src/diagnostics.js";
+import { createWorktree } from "../src/worktree.js";
 
 function fakeRegistry(available: { provider: string; id: string }[]): ModelRegistry {
   return {
@@ -49,6 +51,28 @@ test("doctor reports invalid config and unavailable primary and fallback models"
 
     assert.match(report, /maestro\.json \(INVALID JSON/);
     assert.match(report, /normally archives it on load/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("doctor reports orphaned worktrees and confirmed cleanup guidance", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-doctor-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+    writeFileSync(join(cwd, "file.txt"), "base\n");
+    execFileSync("git", ["add", "."], { cwd });
+    execFileSync("git", ["commit", "-qm", "initial"], { cwd });
+    const orphaned = createWorktree(cwd, "orphan", 1);
+
+    const report = buildDoctorReport(cwd, fakeRegistry([]));
+
+    assert.match(report, /orphaned:/);
+    assert.match(report, new RegExp(orphaned.worktreePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(report, /\/maestro doctor cleanup/);
+    assert.match(report, /after confirmation/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

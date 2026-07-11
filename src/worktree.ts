@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { MAX_INJECTED_CONTEXT_LENGTH } from "./prompts.js";
+import { type Board, type Task } from "./types.js";
 
 export interface WorktreeRef {
   worktreePath: string;
@@ -16,6 +17,28 @@ export interface MergeResult {
 export interface GitReadiness {
   ok: boolean;
   summary: string;
+}
+
+export type ManagedWorktreeState =
+  | "active"
+  | "recoverable"
+  | "retained-conflict"
+  | "orphaned"
+  | "stale";
+
+export interface ManagedWorktreeInspection {
+  ref: WorktreeRef;
+  state: ManagedWorktreeState;
+  exists: boolean;
+  taskId?: string;
+  attemptIndex?: number;
+  reason: string;
+}
+
+export interface WorktreeCleanupResult {
+  confirmed: boolean;
+  removed: ManagedWorktreeInspection[];
+  preserved: ManagedWorktreeInspection[];
 }
 
 function git(cwd: string, args: string[]): string {
@@ -133,13 +156,140 @@ export function removeWorktree(mainCwd: string, ref: WorktreeRef): void {
   }
 }
 
+function managedWorktreeRoot(mainCwd: string): string {
+  return resolve(mainCwd, ".pi", "maestro", "worktrees");
+}
+
+function isManagedPath(root: string, worktreePath: string): boolean {
+  return resolve(worktreePath).startsWith(`${root}${sep}`);
+}
+
+function hasMergeConflictNotes(task: Task): boolean {
+  const notes = task.reviewNotes ?? task.attempts.at(-1)?.reviewNotes;
+  return notes !== undefined && /git conflict/i.test(notes);
+}
+
+/** Inspect managed worktrees without changing the filesystem or git state. */
+export function inspectManagedWorktrees(
+  mainCwd: string,
+  board: Board,
+  liveTaskIds: ReadonlySet<string> = new Set()
+): ManagedWorktreeInspection[] {
+  const root = managedWorktreeRoot(mainCwd);
+  const byPath = new Map<string, ManagedWorktreeInspection>();
+
+  for (const task of board.tasks) {
+    const latestAttempt = task.attempts.at(-1);
+    for (const attempt of task.attempts) {
+      if (!attempt.worktreePath || !attempt.branch) continue;
+      const path = resolve(attempt.worktreePath);
+      if (!isManagedPath(root, path) || !existsSync(path)) continue;
+
+      const isLatest = attempt === latestAttempt;
+      let state: ManagedWorktreeState = "stale";
+      let reason = `recorded by settled or superseded attempt ${task.id} #${attempt.index}`;
+      if (isLatest && (liveTaskIds.has(task.id) || task.status === "running")) {
+        state = "active";
+        reason = `${task.id} is running`;
+      } else if (isLatest && task.status === "changes_requested" && hasMergeConflictNotes(task)) {
+        state = "retained-conflict";
+        reason = `${task.id} is retained after a merge conflict`;
+      } else if (
+        isLatest &&
+        (task.status === "ready_for_review" || task.status === "changes_requested")
+      ) {
+        state = "recoverable";
+        reason = `${task.id} can continue from this checkout`;
+      }
+
+      const candidate: ManagedWorktreeInspection = {
+        ref: { worktreePath: path, branch: attempt.branch },
+        state,
+        exists: existsSync(path),
+        taskId: task.id,
+        attemptIndex: attempt.index,
+        reason,
+      };
+      const current = byPath.get(path);
+      const priority: Record<ManagedWorktreeState, number> = {
+        active: 5,
+        "retained-conflict": 4,
+        recoverable: 3,
+        stale: 2,
+        orphaned: 1,
+      };
+      if (!current || priority[candidate.state] > priority[current.state]) {
+        byPath.set(path, candidate);
+      }
+    }
+  }
+
+  if (existsSync(root)) {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const worktreePath = resolve(root, entry.name);
+      if (byPath.has(worktreePath)) continue;
+      byPath.set(worktreePath, {
+        ref: { worktreePath, branch: `maestro/${entry.name}` },
+        state: "orphaned",
+        exists: true,
+        reason: "managed checkout has no board metadata",
+      });
+    }
+  }
+
+  return [...byPath.values()].sort((left, right) =>
+    left.ref.worktreePath.localeCompare(right.ref.worktreePath)
+  );
+}
+
+/**
+ * Remove only confirmed stale/orphaned entries. The board and live-run state are
+ * read again immediately before each removal so a newly active or recoverable
+ * checkout is never removed from a stale diagnostic snapshot.
+ */
+export function cleanupManagedWorktrees(
+  mainCwd: string,
+  confirmed: boolean,
+  loadCurrentBoard: () => Board,
+  isTaskLive: (taskId: string) => boolean
+): WorktreeCleanupResult {
+  const initial = inspectManagedWorktrees(mainCwd, loadCurrentBoard());
+  if (!confirmed) return { confirmed: false, removed: [], preserved: initial };
+
+  const removed: ManagedWorktreeInspection[] = [];
+  const preserved: ManagedWorktreeInspection[] = [];
+  for (const entry of initial) {
+    if (entry.state !== "orphaned" && entry.state !== "stale") {
+      preserved.push(entry);
+      continue;
+    }
+
+    const board = loadCurrentBoard();
+    const liveIds = new Set(
+      board.tasks.filter((task) => isTaskLive(task.id)).map((task) => task.id)
+    );
+    const current = inspectManagedWorktrees(mainCwd, board, liveIds).find(
+      (candidate) => candidate.ref.worktreePath === entry.ref.worktreePath
+    );
+    if (!current || (current.state !== "orphaned" && current.state !== "stale")) {
+      if (current) preserved.push(current);
+      continue;
+    }
+
+    removeWorktree(mainCwd, current.ref);
+    removed.push(current);
+  }
+  return { confirmed: true, removed, preserved };
+}
+
 /** Remove managed directories and known branches not represented by a retained task attempt. */
 export function sweepWorktrees(
   mainCwd: string,
   retained: WorktreeRef[],
   known: WorktreeRef[] = []
 ): void {
-  const root = resolve(mainCwd, ".pi", "maestro", "worktrees");
+  const root = managedWorktreeRoot(mainCwd);
   const retainedPaths = new Set(retained.map((ref) => resolve(ref.worktreePath)));
 
   for (const ref of known) {

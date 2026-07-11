@@ -1,13 +1,25 @@
+import { sep } from "node:path";
 import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
-import { sep } from "node:path";
+import {
+  Container,
+  Editor,
+  type EditorTheme,
+  Input,
+  Key,
+  matchesKey,
+  type SelectItem,
+  SelectList,
+  Text,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+  applyPlanTaskEdits,
+  approvePlan,
   archiveBoard,
   blockedReason,
   createTask,
@@ -17,10 +29,13 @@ import {
   listArchivedBoards,
   loadBoard,
   loadStatusHistory,
+  planValidationMessage,
+  rejectPlan,
   restoreArchivedBoard,
   saveBoard,
   transition,
   updateTask,
+  validatePlan,
 } from "./board.js";
 import {
   describeConfig,
@@ -34,6 +49,7 @@ import { buildDoctorReport } from "./diagnostics.js";
 import {
   boardUsage,
   formatBoardProgress,
+  formatCostSummary,
   formatUsage,
   runBudgetWarning,
   STATUS_GLYPHS,
@@ -49,11 +65,18 @@ import {
   startExecutor,
 } from "./runner.js";
 import { showSettings } from "./settings-ui.js";
-import { type Board, type Task, type TaskStatus, type TierConfig } from "./types.js";
+import {
+  type Board,
+  type PausedDriveState,
+  type Task,
+  type TaskStatus,
+  type TierConfig,
+} from "./types.js";
 import {
   type DriveSummary,
   driveBoard,
   executeTask,
+  formatDriveSummary,
   lastReport,
   preflightTaskTiers,
   reviewTask,
@@ -62,7 +85,9 @@ import {
   type WorkflowRun,
 } from "./workflow.js";
 import {
+  cleanupManagedWorktrees,
   createWorktree,
+  inspectManagedWorktrees,
   removeWorktree,
   sweepWorktrees,
   type WorktreeRef,
@@ -76,10 +101,37 @@ interface MaestroDetails {
   stoppedBecause?: DriveSummary["stoppedBecause"];
 }
 
+interface ActiveDriveControl {
+  cwd: string;
+  ownerSession?: string;
+  taskIds?: string[];
+  pauseRequested: boolean;
+  abortController: AbortController;
+}
+
 export function maestroBoardCwd(cwd: string): string {
   const marker = `${sep}.pi${sep}maestro${sep}worktrees${sep}`;
   const worktreeIndex = cwd.indexOf(marker);
   return worktreeIndex === -1 ? cwd : cwd.slice(0, worktreeIndex);
+}
+
+export function sessionCanControlDrive(
+  ownerSession: string | undefined,
+  currentSession: string | undefined
+): boolean {
+  return (
+    ownerSession === undefined || currentSession === undefined || ownerSession === currentSession
+  );
+}
+
+export function sessionSwitchBlocked(activeDrive: boolean, liveRunCount: number): boolean {
+  return activeDrive || liveRunCount > 0;
+}
+
+export function assertKnownTaskIds(board: Board, taskIds: string[] | undefined): void {
+  if (!taskIds) return;
+  const unknown = taskIds.filter((id) => !findTask(board, id));
+  if (unknown.length > 0) throw new Error(`Unknown task id(s): ${unknown.join(", ")}`);
 }
 
 export function previousBoardSession(
@@ -120,6 +172,7 @@ export default function maestro(pi: ExtensionAPI) {
   if (process.env.PI_MAESTRO_EXECUTOR === "1") return;
 
   const liveRuns = new Map<string, WorkflowRun>();
+  let activeDrive: ActiveDriveControl | undefined;
   let contextNudgeShown = false;
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
@@ -176,11 +229,12 @@ export default function maestro(pi: ExtensionAPI) {
     const running = liveRuns.size;
     const usage = boardUsage(board.tasks);
     const runningPart = running > 0 ? ` · ${running} running` : "";
+    const pausedPart = board.pausedDrive ? " · paused" : "";
     ctx.ui.setStatus(
       COMMAND,
       ctx.ui.theme.fg(
-        running > 0 ? "warning" : "muted",
-        `⚡ maestro ${progress}${runningPart} · $${usage.cost.toFixed(4)}`
+        running > 0 || board.pausedDrive ? "warning" : "muted",
+        `⚡ maestro ${progress}${runningPart}${pausedPart} · $${usage.cost.toFixed(4)}`
       )
     );
 
@@ -239,11 +293,16 @@ export default function maestro(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     taskIds: string[] | undefined,
     signal: AbortSignal | undefined,
-    reportProgress: (message: string) => void
+    reportProgress: (message: string) => void,
+    shouldPause?: () => boolean
   ): Promise<DriveSummary> {
-    adoptBoard(ctx);
     const config = loadConfig(ctx.cwd);
     const board = loadBoard(ctx.cwd);
+    const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
+    if (validationError) throw new Error(validationError);
+    assertKnownTaskIds(board, taskIds);
+    adoptBoard(ctx);
+
     const selected = taskIds
       ? taskIds.map((id) => findTask(board, id)).filter((task): task is Task => task !== undefined)
       : board.tasks;
@@ -281,7 +340,71 @@ export default function maestro(pi: ExtensionAPI) {
     };
     if (taskIds) driveOptions.taskIds = taskIds;
     if (signal) driveOptions.signal = signal;
+    if (shouldPause) driveOptions.shouldPause = shouldPause;
     return driveBoard(driveOptions);
+  }
+
+  function savePausedDrive(cwd: string, pausedDrive: PausedDriveState | undefined): void {
+    const board = loadBoard(cwd);
+    if (pausedDrive) board.pausedDrive = pausedDrive;
+    else delete board.pausedDrive;
+    saveBoard(cwd, board);
+  }
+
+  async function runControlledDrive(
+    ctx: ExtensionContext,
+    taskIds: string[] | undefined,
+    signal: AbortSignal | undefined,
+    reportProgress: (message: string) => void,
+    resuming = false
+  ): Promise<DriveSummary> {
+    if (activeDrive) throw new Error("An autonomous drive is already active.");
+    const board = loadBoard(ctx.cwd);
+    const config = loadConfig(ctx.cwd);
+    const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
+    if (validationError) throw new Error(validationError);
+    assertKnownTaskIds(board, taskIds);
+
+    const ownerSession = ctx.sessionManager.getSessionFile();
+    const control: ActiveDriveControl = {
+      cwd: ctx.cwd,
+      pauseRequested: false,
+      abortController: new AbortController(),
+    };
+    if (ownerSession) control.ownerSession = ownerSession;
+    if (taskIds) control.taskIds = taskIds;
+    activeDrive = control;
+    if (!resuming) savePausedDrive(ctx.cwd, undefined);
+
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, control.abortController.signal])
+      : control.abortController.signal;
+    let summary: DriveSummary;
+    try {
+      summary = await runDriveWorkflow(
+        ctx,
+        taskIds,
+        combinedSignal,
+        reportProgress,
+        () => control.pauseRequested
+      );
+    } finally {
+      if (activeDrive === control) activeDrive = undefined;
+    }
+
+    if (summary.stoppedBecause.code === "paused") {
+      const paused: PausedDriveState = {};
+      if (taskIds) paused.taskIds = taskIds;
+      if (ownerSession) paused.ownerSession = ownerSession;
+      savePausedDrive(ctx.cwd, paused);
+    } else if (
+      !resuming ||
+      summary.stoppedBecause.code === "completed" ||
+      summary.stoppedBecause.code === "aborted"
+    ) {
+      savePausedDrive(ctx.cwd, undefined);
+    }
+    return summary;
   }
 
   // ---------------------------------------------------------------- tools
@@ -389,10 +512,18 @@ export default function maestro(pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      adoptBoard(ctx);
       const config = loadConfig(ctx.cwd);
       const board = loadBoard(ctx.cwd);
       const requestedIds = params.taskIds as string[] | undefined;
+      const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
+      if (validationError) {
+        return {
+          content: [{ type: "text", text: validationError }],
+          details: { action: "run", tasks: [] },
+        };
+      }
+      assertKnownTaskIds(board, requestedIds);
+      adoptBoard(ctx);
 
       if (board.planPending) {
         return {
@@ -554,6 +685,25 @@ export default function maestro(pi: ExtensionAPI) {
       const config = loadConfig(ctx.cwd);
       const board = loadBoard(ctx.cwd);
       const requestedIds = params.taskIds as string[] | undefined;
+      const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
+      if (validationError) {
+        return {
+          content: [{ type: "text", text: validationError }],
+          details: { action: "review", tasks: [] },
+        };
+      }
+      assertKnownTaskIds(board, requestedIds);
+      if (board.planPending) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Plan approval is pending. Review it with /${COMMAND} plan before starting reviewers.`,
+            },
+          ],
+          details: { action: "review", tasks: [] },
+        };
+      }
 
       const candidates = requestedIds
         ? requestedIds.map((id) => findTask(board, id)).filter((t): t is Task => t !== undefined)
@@ -593,6 +743,7 @@ export default function maestro(pi: ExtensionAPI) {
           tier: reviewTier,
           startExecutor,
           autoCommit: config.autoCommit,
+          availableTiers: Object.keys(config.tiers),
           onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
           trackRun: (run) => trackRun(ctx, run),
         };
@@ -643,7 +794,7 @@ export default function maestro(pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const taskIds = params.taskIds as string[] | undefined;
-      const summary = await runDriveWorkflow(ctx, taskIds, signal, (message) => {
+      const summary = await runControlledDrive(ctx, taskIds, signal, (message) => {
         const current = loadBoard(ctx.cwd).tasks.filter(
           (task) => !taskIds || taskIds.includes(task.id)
         );
@@ -654,7 +805,7 @@ export default function maestro(pi: ExtensionAPI) {
       });
       refreshUI(ctx);
       return {
-        content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+        content: [{ type: "text", text: formatDriveSummary(summary) }],
         details: {
           action: "drive",
           rounds: summary.rounds,
@@ -679,43 +830,45 @@ export default function maestro(pi: ExtensionAPI) {
     name: "maestro_update",
     label: "Maestro Update",
     description:
-      "Update a planned task: refine its brief, retitle it, change its tier, or cancel it. Use when a task failed twice with the same root cause or the plan needs adjusting. Running tasks cannot be updated.",
+      "Update a planned task: refine its brief, retitle it, change its tier or dependencies, cancel it, or reactivate it. Use when a task failed twice with the same root cause or the plan needs adjusting. Running tasks cannot be updated.",
     promptSnippet: "Refine a task's brief/tier or cancel it (maestro board)",
     parameters: Type.Object({
       taskId: Type.String({ description: "Task id like T1" }),
       title: Type.Optional(Type.String({ description: "New title" })),
       brief: Type.Optional(Type.String({ description: "New self-contained brief" })),
       tier: Type.Optional(Type.String({ description: "New complexity tier" })),
-      cancel: Type.Optional(Type.Boolean({ description: "Cancel the task" })),
+      dependsOn: Type.Optional(
+        Type.Array(Type.String(), { description: "Replacement dependency task ids" })
+      ),
+      cancel: Type.Optional(
+        Type.Boolean({ description: "Set true to cancel, or false to reactivate a cancelled task" })
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const { taskId, title, brief, tier, cancel } = params as {
+      const { taskId, title, brief, tier, dependsOn, cancel } = params as {
         taskId: string;
         title?: string;
         brief?: string;
         tier?: string;
+        dependsOn?: string[];
         cancel?: boolean;
       };
-      if (tier && !loadConfig(ctx.cwd).tiers[tier]) {
-        throw new Error(
-          `Unknown tier "${tier}". Available tiers: ${Object.keys(loadConfig(ctx.cwd).tiers).join(", ")}`
-        );
-      }
+      const config = loadConfig(ctx.cwd);
       if (liveRuns.has(taskId.trim().toUpperCase())) {
         throw new Error(`${taskId} is running. Abort it first or wait for it to finish.`);
       }
       const updated = updateTask(ctx.cwd, taskId, (fresh) => {
-        if (title) fresh.title = title;
-        if (brief) {
-          fresh.brief = brief;
-          // A rewritten brief supersedes review feedback on the old one.
-          delete fresh.reviewNotes;
-          if (fresh.status === "changes_requested" || fresh.status === "failed") {
-            forceStatus(fresh, "todo");
-          }
-        }
-        if (tier) fresh.tier = tier;
-        if (cancel) forceStatus(fresh, "cancelled");
+        applyPlanTaskEdits(
+          fresh,
+          {
+            ...(title !== undefined ? { title } : {}),
+            ...(brief !== undefined ? { brief } : {}),
+            ...(tier !== undefined ? { tier } : {}),
+            ...(dependsOn !== undefined ? { dependsOn } : {}),
+            ...(cancel !== undefined ? { cancelled: cancel } : {}),
+          },
+          Object.keys(config.tiers)
+        );
       });
       if (!updated) throw new Error(`Unknown task: ${taskId}`);
       refreshUI(ctx);
@@ -729,7 +882,9 @@ export default function maestro(pi: ExtensionAPI) {
         args.title ? "title" : null,
         args.brief ? "brief" : null,
         args.tier ? `tier→${args.tier}` : null,
-        args.cancel ? "cancel" : null,
+        args.dependsOn ? "dependencies" : null,
+        args.cancel === true ? "cancel" : null,
+        args.cancel === false ? "reactivate" : null,
       ]
         .filter((part) => part !== null)
         .join(", ");
@@ -764,7 +919,12 @@ export default function maestro(pi: ExtensionAPI) {
       });
       const usage = boardUsage(board.tasks);
       return {
-        content: [{ type: "text", text: `${lines.join("\n")}\n\nTotal: ${formatUsage(usage)}` }],
+        content: [
+          {
+            type: "text",
+            text: `${lines.join("\n")}\n\nTotal: ${formatUsage(usage)}\nCosts: ${formatCostSummary(board.tasks)}`,
+          },
+        ],
         details: { action: "status", tasks: board.tasks.map((task) => snapshot(task)) },
       };
     },
@@ -824,21 +984,27 @@ export default function maestro(pi: ExtensionAPI) {
 
   pi.registerCommand(COMMAND, {
     description:
-      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | plan | board | open <taskId> | history [n] | replay [file] | config | doctor | reset",
+      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | pause | resume | abort | plan | board | costs | open <taskId> | history [n] | replay [file] | config | doctor [cleanup] | reset",
     getArgumentCompletions: (prefix) => {
       const options = [
         "start",
         "handoff",
         "back",
         "drive",
+        "pause",
+        "resume",
+        "abort",
         "board",
         "plan",
         "list",
+        "costs",
         "open",
         "config",
         "config project",
         "config show",
         "doctor",
+        "doctor cleanup",
+        "doctor cleanup confirm",
         "history",
         "replay",
         "reset",
@@ -901,21 +1067,101 @@ export default function maestro(pi: ExtensionAPI) {
           return;
         }
         case "drive": {
-          if (liveRuns.size > 0) {
-            notify(ctx, "Executors are already running.", "warning");
+          if (activeDrive || liveRuns.size > 0) {
+            notify(ctx, "An autonomous drive or executor batch is already running.", "warning");
             return;
           }
           const taskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
           notify(ctx, `Driving ${taskIds?.join(", ") ?? "the whole board"}…`);
-          const summary = await runDriveWorkflow(ctx, taskIds, undefined, (message) => {
+          const summary = await runControlledDrive(ctx, taskIds, undefined, (message) => {
             notify(ctx, message);
           });
           refreshUI(ctx);
           notify(
             ctx,
-            `Drive stopped after ${summary.rounds} round(s): ${summary.stoppedBecause.message}`,
+            formatDriveSummary(summary),
             summary.stoppedBecause.code === "completed" ? "info" : "warning"
           );
+          return;
+        }
+        case "pause": {
+          const currentSession = ctx.sessionManager.getSessionFile();
+          if (!activeDrive) {
+            const paused = loadBoard(ctx.cwd).pausedDrive;
+            notify(
+              ctx,
+              paused ? "Autonomous drive is already paused." : "No autonomous drive is active.",
+              "warning"
+            );
+            return;
+          }
+          if (
+            activeDrive.cwd !== ctx.cwd ||
+            !sessionCanControlDrive(activeDrive.ownerSession, currentSession)
+          ) {
+            notify(ctx, "Only the session that started this drive may pause it.", "warning");
+            return;
+          }
+          activeDrive.pauseRequested = true;
+          notify(ctx, "Pause requested. Active executors will finish; no new batch will start.");
+          return;
+        }
+        case "resume": {
+          const board = loadBoard(ctx.cwd);
+          const paused = board.pausedDrive;
+          if (!paused) {
+            notify(ctx, "No paused autonomous drive to resume.", "warning");
+            return;
+          }
+          if (activeDrive || liveRuns.size > 0) {
+            notify(ctx, "Executors are already running.", "warning");
+            return;
+          }
+          if (!sessionCanControlDrive(paused.ownerSession, ctx.sessionManager.getSessionFile())) {
+            notify(ctx, "Only the session that paused this drive may resume it.", "warning");
+            return;
+          }
+          notify(ctx, `Resuming ${paused.taskIds?.join(", ") ?? "the whole board"}…`);
+          const summary = await runControlledDrive(
+            ctx,
+            paused.taskIds,
+            undefined,
+            (message) => notify(ctx, message),
+            true
+          );
+          refreshUI(ctx);
+          notify(
+            ctx,
+            formatDriveSummary(summary),
+            summary.stoppedBecause.code === "completed" ? "info" : "warning"
+          );
+          return;
+        }
+        case "abort": {
+          const currentSession = ctx.sessionManager.getSessionFile();
+          if (activeDrive) {
+            if (
+              activeDrive.cwd !== ctx.cwd ||
+              !sessionCanControlDrive(activeDrive.ownerSession, currentSession)
+            ) {
+              notify(ctx, "Only the session that started this drive may abort it.", "warning");
+              return;
+            }
+            activeDrive.abortController.abort();
+            notify(ctx, "Abort requested for the drive and its active executors.", "warning");
+            return;
+          }
+          const paused = loadBoard(ctx.cwd).pausedDrive;
+          if (!paused) {
+            notify(ctx, "No active or paused autonomous drive to abort.", "warning");
+            return;
+          }
+          if (!sessionCanControlDrive(paused.ownerSession, currentSession)) {
+            notify(ctx, "Only the session that paused this drive may abort it.", "warning");
+            return;
+          }
+          savePausedDrive(ctx.cwd, undefined);
+          notify(ctx, "Paused autonomous drive aborted. No executors were running.", "warning");
           return;
         }
         case "plan":
@@ -947,9 +1193,71 @@ export default function maestro(pi: ExtensionAPI) {
           refreshUI(ctx);
           return;
         }
-        case "doctor":
-          notify(ctx, buildDoctorReport(ctx.cwd, ctx.modelRegistry, ctx.model));
+        case "costs": {
+          const board = loadBoard(ctx.cwd);
+          notify(
+            ctx,
+            board.tasks.length === 0
+              ? "No recorded costs; the board is empty."
+              : formatCostSummary(board.tasks)
+          );
           return;
+        }
+        case "doctor": {
+          const liveTaskIds = new Set(liveRuns.keys());
+          if (restParts[0]?.toLowerCase() !== "cleanup") {
+            notify(ctx, buildDoctorReport(ctx.cwd, ctx.modelRegistry, ctx.model, liveTaskIds));
+            return;
+          }
+
+          const candidates = inspectManagedWorktrees(
+            ctx.cwd,
+            loadBoard(ctx.cwd),
+            liveTaskIds
+          ).filter((entry) => entry.state === "orphaned" || entry.state === "stale");
+          if (candidates.length === 0) {
+            notify(ctx, "No stale or orphaned managed worktrees to clean.");
+            return;
+          }
+
+          let confirmed = restParts[1]?.toLowerCase() === "confirm";
+          if (ctx.hasUI && !confirmed) {
+            confirmed = await ctx.ui.confirm(
+              "Clean stale maestro worktrees?",
+              `Remove ${candidates.length} stale/orphaned checkout(s)? Active, recoverable, and retained-conflict worktrees will be rechecked and preserved.`
+            );
+          }
+          if (!ctx.hasUI && !confirmed) {
+            notify(
+              ctx,
+              `Cleanup cancelled. Run /${COMMAND} doctor cleanup confirm to explicitly confirm in non-interactive mode.`,
+              "warning"
+            );
+            return;
+          }
+          if (!confirmed) {
+            notify(ctx, "Worktree cleanup cancelled.");
+            return;
+          }
+
+          const result = cleanupManagedWorktrees(
+            ctx.cwd,
+            true,
+            () => loadBoard(ctx.cwd),
+            (taskId) => liveRuns.has(taskId)
+          );
+          const preserved = result.preserved.filter(
+            (entry) =>
+              entry.state === "active" ||
+              entry.state === "recoverable" ||
+              entry.state === "retained-conflict"
+          ).length;
+          notify(
+            ctx,
+            `Removed ${result.removed.length} stale/orphaned worktree(s). Preserved ${preserved} active or recoverable worktree(s).`
+          );
+          return;
+        }
         case "handoff": {
           const board = loadBoard(ctx.cwd);
           if (board.tasks.length === 0) {
@@ -1095,13 +1403,18 @@ export default function maestro(pi: ExtensionAPI) {
               `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
               `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
               `/${COMMAND} drive [ids]    autonomously run, review, and retry tasks`,
+              `/${COMMAND} pause          stop the drive after active executors finish`,
+              `/${COMMAND} resume         continue a paused drive from fresh board state`,
+              `/${COMMAND} abort          abort a drive and its active executors`,
               `/${COMMAND} plan           review, approve, or reject a gated plan`,
               `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
               `/${COMMAND} list           compact task picker`,
               `/${COMMAND} open <taskId>  switch into an executor session`,
               `/${COMMAND} back           switch back to the previous session`,
               `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
-              `/${COMMAND} doctor         diagnose config, models, authentication, and git readiness`,
+              `/${COMMAND} costs          show attempts, total/average cost, models, and providers`,
+              `/${COMMAND} doctor         diagnose config, models, authentication, git, and managed worktrees`,
+              `/${COMMAND} doctor cleanup remove rechecked stale/orphaned worktrees after confirmation`,
               `/${COMMAND} history [n]    show recent task status changes (default 20)`,
               `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
               `/${COMMAND} reset          archive and clear the board`,
@@ -1207,11 +1520,6 @@ export default function maestro(pi: ExtensionAPI) {
   }
 
   async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
-    const board = loadBoard(ctx.cwd);
-    if (board.tasks.length === 0) {
-      notify(ctx, "Board is empty. Plan tasks with maestro_plan.", "warning");
-      return;
-    }
     if (liveRuns.size > 0) {
       notify(
         ctx,
@@ -1220,65 +1528,251 @@ export default function maestro(pi: ExtensionAPI) {
       );
       return;
     }
-    if (!board.planPending) {
-      notify(ctx, "No plan is awaiting approval.");
-      return;
-    }
 
-    const pending = board.tasks.filter((task) => task.status === "todo");
-    const items: SelectItem[] = pending.map((task) => ({
-      value: `task:${task.id}`,
-      label: `${task.id} ${task.title} [${task.tier}] · dependsOn: ${task.dependsOn.join(", ") || "none"} · commit: ${task.commitMessage ?? `feat: ${task.title}`}`,
-      description: truncateText(task.brief, 2),
-    }));
-    items.push(
-      {
-        value: "approve",
-        label: "Approve plan",
-        description: "Allow maestro_run to start executors",
-      },
-      {
-        value: "reject",
-        label: "Reject plan",
-        description: "Archive and clear this board",
+    while (true) {
+      const board = loadBoard(ctx.cwd);
+      if (board.tasks.length === 0) {
+        notify(ctx, "Board is empty. Plan tasks with maestro_plan.", "warning");
+        return;
       }
-    );
+      if (!board.planPending) {
+        notify(ctx, "No plan is awaiting approval.");
+        return;
+      }
 
-    const choice = await pickFromList(ctx, "Maestro Plan · awaiting approval", items);
-    if (!choice) return;
-    if (choice.startsWith("task:")) {
-      const task = findTask(board, choice.slice("task:".length));
-      if (!task) return;
-      pi.sendMessage({
-        customType: MESSAGE_TYPE,
-        content: `## ${task.id} ${task.title}\n\n${task.brief}`,
-        display: true,
-      });
-      return;
-    }
-    if (choice === "approve") {
-      board.planPending = false;
-      saveBoard(ctx.cwd, board);
-      refreshUI(ctx);
-      notify(ctx, "Plan approved. Executors may now be started with maestro_run.");
-      return;
-    }
-
-    const archivePath = archiveBoard(ctx.cwd);
-    if (!archivePath) {
-      notify(ctx, "Could not archive the board; rejection cancelled.", "error");
-      return;
-    }
-    if (ctx.hasUI) {
-      const ok = await ctx.ui.confirm(
-        "Reject plan?",
-        `Archive and clear all ${board.tasks.length} task(s)? Archived at ${archivePath}`
+      const editable = board.tasks.filter(
+        (task) => task.status === "todo" || task.status === "cancelled"
       );
-      if (!ok) return;
+      const items: SelectItem[] = editable.map((task) => ({
+        value: `task:${task.id}`,
+        label: `${task.id} ${task.title} [${task.tier}]${task.status === "cancelled" ? " · CANCELLED" : ""}`,
+        description: `dependsOn: ${task.dependsOn.join(", ") || "none"} · ${truncateText(task.brief, 1)}`,
+      }));
+      items.push(
+        {
+          value: "approve",
+          label: "Approve plan",
+          description: "Validate the complete plan, then allow execution",
+        },
+        {
+          value: "reject",
+          label: "Reject plan",
+          description: "Archive and clear this board",
+        }
+      );
+
+      const choice = await pickFromList(ctx, "Maestro Plan · awaiting approval", items);
+      if (!choice) return;
+      if (choice.startsWith("task:")) {
+        await editPlanTask(ctx, choice.slice("task:".length));
+        continue;
+      }
+      if (choice === "approve") {
+        const fresh = loadBoard(ctx.cwd);
+        const config = loadConfig(ctx.cwd);
+        const validationError = planValidationMessage(
+          approvePlan(fresh, Object.keys(config.tiers))
+        );
+        if (validationError) {
+          notify(ctx, `${validationError}\nEdit the listed tasks before approving.`, "error");
+          continue;
+        }
+        saveBoard(ctx.cwd, fresh);
+        refreshUI(ctx);
+        notify(ctx, "Plan approved. Executors may now be started with maestro_run.");
+        return;
+      }
+
+      const ok =
+        !ctx.hasUI ||
+        (await ctx.ui.confirm(
+          "Reject plan?",
+          `Archive and clear all ${board.tasks.length} task(s)?`
+        ));
+      if (!ok) continue;
+      const archivePath = rejectPlan(ctx.cwd);
+      if (!archivePath) {
+        notify(ctx, "Could not archive the board; rejection cancelled.", "error");
+        return;
+      }
+      refreshUI(ctx);
+      notify(ctx, `Plan rejected. Board archived at ${archivePath}`);
+      return;
     }
-    saveBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
-    refreshUI(ctx);
-    notify(ctx, `Plan rejected. Board archived at ${archivePath}`);
+  }
+
+  async function editPlanTask(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
+    const task = findTask(loadBoard(ctx.cwd), taskId);
+    if (!task) return;
+    const draft = structuredClone(task);
+    const tiers = Object.keys(loadConfig(ctx.cwd).tiers);
+
+    while (true) {
+      const action = await pickFromList(ctx, `${draft.id} · edit planned task`, [
+        { value: "title", label: `Title · ${draft.title}` },
+        { value: "brief", label: "Brief", description: truncateText(draft.brief, 3) },
+        { value: "tier", label: `Tier · ${draft.tier}` },
+        {
+          value: "dependencies",
+          label: `Dependencies · ${draft.dependsOn.join(", ") || "none"}`,
+          description: "Comma- or space-separated task ids",
+        },
+        {
+          value: "cancellation",
+          label: `Cancellation · ${draft.status === "cancelled" ? "cancelled" : "active"}`,
+        },
+        { value: "save", label: "Save changes", description: "Validate and update the board" },
+        { value: "cancel", label: "Cancel editing", description: "Discard all draft changes" },
+      ]);
+      if (!action || action === "cancel") return;
+
+      if (action === "title") {
+        const value = await editPlanText(ctx, "Task title", draft.title, false);
+        if (value !== null) {
+          try {
+            applyPlanTaskEdits(draft, { title: value }, tiers);
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          }
+        }
+        continue;
+      }
+      if (action === "brief") {
+        const value = await editPlanText(ctx, "Task brief", draft.brief, true);
+        if (value !== null) {
+          try {
+            applyPlanTaskEdits(draft, { brief: value }, tiers);
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          }
+        }
+        continue;
+      }
+      if (action === "tier") {
+        const tier = await pickFromList(
+          ctx,
+          "Task tier",
+          tiers.map((name) => ({ value: name, label: name }))
+        );
+        if (tier) applyPlanTaskEdits(draft, { tier }, tiers);
+        continue;
+      }
+      if (action === "dependencies") {
+        const value = await editPlanText(ctx, "Dependencies", draft.dependsOn.join(", "), false);
+        if (value !== null) {
+          applyPlanTaskEdits(draft, { dependsOn: value.split(/[\s,]+/) }, tiers);
+        }
+        continue;
+      }
+      if (action === "cancellation") {
+        const state = await pickFromList(ctx, "Cancellation state", [
+          { value: "active", label: "Active" },
+          { value: "cancelled", label: "Cancelled" },
+        ]);
+        if (state) applyPlanTaskEdits(draft, { cancelled: state === "cancelled" }, tiers);
+        continue;
+      }
+
+      const candidate = structuredClone(loadBoard(ctx.cwd));
+      const candidateTask = findTask(candidate, draft.id);
+      if (!candidateTask) return;
+      applyPlanTaskEdits(
+        candidateTask,
+        {
+          title: draft.title,
+          brief: draft.brief,
+          tier: draft.tier,
+          dependsOn: draft.dependsOn,
+          cancelled: draft.status === "cancelled",
+        },
+        tiers
+      );
+      const validation = validatePlan(candidate, tiers);
+      const validationError = planValidationMessage({
+        missingDependencies: validation.missingDependencies.filter(
+          (missing) => missing.taskId === draft.id
+        ),
+        dependencyCycles: validation.dependencyCycles.filter((cycle) => cycle.includes(draft.id)),
+        invalidTiers: validation.invalidTiers.filter((invalid) => invalid.taskId === draft.id),
+      });
+      if (validationError) {
+        notify(ctx, `${validationError}\nChanges were not saved.`, "error");
+        continue;
+      }
+      updateTask(ctx.cwd, draft.id, (fresh) => {
+        applyPlanTaskEdits(
+          fresh,
+          {
+            title: draft.title,
+            brief: draft.brief,
+            tier: draft.tier,
+            dependsOn: draft.dependsOn,
+            cancelled: draft.status === "cancelled",
+          },
+          tiers
+        );
+      });
+      refreshUI(ctx);
+      notify(ctx, `${draft.id} plan changes saved.`);
+      return;
+    }
+  }
+
+  async function editPlanText(
+    ctx: ExtensionCommandContext,
+    title: string,
+    value: string,
+    multiline: boolean
+  ): Promise<string | null> {
+    return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+      const hint = new Text(
+        theme.fg(
+          "dim",
+          multiline
+            ? "enter save · esc cancel · use \\ + enter for newline"
+            : "enter save · esc cancel"
+        ),
+        1,
+        0
+      );
+      const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
+      const editorTheme: EditorTheme = {
+        borderColor: (text) => theme.fg("accent", text),
+        selectList: {
+          selectedPrefix: (text) => theme.fg("accent", text),
+          selectedText: (text) => theme.fg("accent", text),
+          description: (text) => theme.fg("muted", text),
+          scrollInfo: (text) => theme.fg("dim", text),
+          noMatch: (text) => theme.fg("warning", text),
+        },
+      };
+      const field = multiline ? new Editor(tui, editorTheme) : new Input();
+      if (field instanceof Editor) field.setText(value);
+      else field.setValue(value);
+      field.onSubmit = (next) => done(next);
+      if (field instanceof Input) field.onEscape = () => done(null);
+
+      return {
+        render: (width: number) => [
+          ...heading.render(width),
+          ...field.render(width),
+          ...hint.render(width),
+        ],
+        invalidate: () => {
+          heading.invalidate();
+          field.invalidate();
+          hint.invalidate();
+        },
+        handleInput: (data: string) => {
+          if (field instanceof Editor && matchesKey(data, Key.escape)) {
+            done(null);
+            return;
+          }
+          field.handleInput(data);
+          tui.requestRender();
+        },
+      };
+    });
   }
 
   async function showBoard(ctx: ExtensionCommandContext): Promise<void> {
@@ -1435,6 +1929,14 @@ export default function maestro(pi: ExtensionAPI) {
     ctx: ExtensionCommandContext,
     sessionFile: string
   ): Promise<void> {
+    if (sessionSwitchBlocked(activeDrive !== undefined, liveRuns.size)) {
+      notify(
+        ctx,
+        `Pause the autonomous drive and wait for active executors before switching sessions. Use /${COMMAND} abort to stop them immediately.`,
+        "warning"
+      );
+      return;
+    }
     const current = ctx.sessionManager.getSessionFile();
     const result = await ctx.switchSession(sessionFile);
     if (!result.cancelled && current) previousSession = current;
@@ -1494,6 +1996,26 @@ export default function maestro(pi: ExtensionAPI) {
     } catch {
       // The turn may belong to a context invalidated by a session switch.
     }
+  });
+
+  pi.on("session_before_switch", (_event, ctx) => {
+    if (!sessionSwitchBlocked(activeDrive !== undefined, liveRuns.size)) return;
+    notify(
+      ctx,
+      `Session switch blocked while maestro work is active. Use /${COMMAND} pause and wait, or /${COMMAND} abort.`,
+      "warning"
+    );
+    return { cancel: true };
+  });
+
+  pi.on("session_before_fork", (_event, ctx) => {
+    if (!sessionSwitchBlocked(activeDrive !== undefined, liveRuns.size)) return;
+    notify(
+      ctx,
+      `Session fork blocked while maestro work is active. Use /${COMMAND} pause and wait, or /${COMMAND} abort.`,
+      "warning"
+    );
+    return { cancel: true };
   });
 
   pi.on("session_start", (event, ctx) => {
@@ -1556,8 +2078,10 @@ export default function maestro(pi: ExtensionAPI) {
     refreshUI(ctx);
   });
 
-  // Kill live executors on pi exit so no orphan processes keep burning tokens.
+  // The before-switch/fork guards normally keep active work in this runtime.
+  // Shutdown still aborts as a final safety net so a forced reload or exit can never orphan it.
   pi.on("session_shutdown", () => {
+    activeDrive?.abortController.abort();
     for (const run of liveRuns.values()) {
       run.handle.abort();
     }

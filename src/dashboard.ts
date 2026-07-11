@@ -1,8 +1,9 @@
 import { type Theme } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { blockedReason, groupTasks, taskGroup } from "./board.js";
 import { boardUsage, STATUS_GLYPHS, STATUS_LABELS, taskUsage } from "./format.js";
 import { TranscriptTail } from "./transcript.js";
-import { type Board, type Task, type TaskStatus } from "./types.js";
+import { type Attempt, type Board, type Task, type TaskGroup, type TaskStatus } from "./types.js";
 
 export type DashboardTaskAction = "view_report" | "view_review" | "open_executor" | "open_reviewer";
 
@@ -26,6 +27,28 @@ export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
 const MIN_DASHBOARD_BODY_HEIGHT = 2;
 
 type Mode = "browse" | "steer_templates" | "steer" | "confirm_abort";
+type DashboardFilter = "all" | TaskGroup;
+
+const GROUPS: readonly TaskGroup[] = [
+  "blocked",
+  "ready",
+  "running",
+  "review-needed",
+  "approved",
+  "failed",
+  "cancelled",
+];
+const FILTERS: readonly DashboardFilter[] = ["all", ...GROUPS];
+
+const GROUP_LABELS: Record<TaskGroup, string> = {
+  blocked: "blocked",
+  ready: "ready",
+  running: "running",
+  "review-needed": "review needed",
+  approved: "approved",
+  failed: "failed",
+  cancelled: "cancelled",
+};
 
 const STEER_OPTIONS = [
   "Stop - wrong approach, report current state",
@@ -57,6 +80,7 @@ export class Dashboard {
   private mode: Mode = "browse";
   private scrollUp = 0;
   private hideDone = false;
+  private filter: DashboardFilter = "all";
   private steerOption = 0;
   private steerInput = new Input();
   private tails = new Map<string, TranscriptTail>();
@@ -85,9 +109,12 @@ export class Dashboard {
 
   invalidate(): void {}
 
-  /** Tasks currently shown: hideDone filters out settled work (approved/cancelled). */
+  /** Tasks currently shown, ordered by their workflow group. */
   private visibleTasks(): Task[] {
-    const tasks = this.actions.getBoard().tasks;
+    const board = this.actions.getBoard();
+    const grouped = groupTasks(board);
+    const tasks =
+      this.filter === "all" ? GROUPS.flatMap((group) => grouped[group]) : grouped[this.filter];
     if (!this.hideDone) return tasks;
     return tasks.filter((task) => task.status !== "approved" && task.status !== "cancelled");
   }
@@ -152,6 +179,11 @@ export class Dashboard {
       this.hideDone = !this.hideDone;
       this.selected = 0;
       this.scrollUp = 0;
+    } else if (data === "g") {
+      const current = FILTERS.indexOf(this.filter);
+      this.filter = FILTERS[(current + 1) % FILTERS.length] ?? "all";
+      this.selected = 0;
+      this.scrollUp = 0;
     } else if (matchesKey(data, "pageUp")) {
       this.scrollUp += 10;
     } else if (matchesKey(data, "pageDown")) {
@@ -170,7 +202,10 @@ export class Dashboard {
     } else if (
       data === "r" &&
       task &&
-      (task.status === "approved" || task.status === "failed" || task.status === "cancelled") &&
+      (task.status === "approved" ||
+        task.status === "changes_requested" ||
+        task.status === "failed" ||
+        task.status === "cancelled") &&
       !this.actions.isLive(task.id)
     ) {
       this.actions.setTaskStatus(task.id, "todo");
@@ -246,13 +281,14 @@ export class Dashboard {
     const usage = boardUsage(board.tasks);
     const running = board.tasks.filter((t) => this.actions.isLive(t.id)).length;
     const hiddenCount = board.tasks.length - visible.length;
-    const filterPart = this.hideDone ? ` · hiding ${hiddenCount} done` : "";
+    const doneFilterPart = this.hideDone ? ` · hiding ${hiddenCount} done` : "";
+    const statusFilterPart = this.filter === "all" ? "" : ` · filter: ${GROUP_LABELS[this.filter]}`;
     const completed =
       board.tasks.length > 0 &&
       board.tasks.every((task) => task.status === "approved" || task.status === "cancelled")
         ? " · board complete"
         : "";
-    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)}${completed}${filterPart} `;
+    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)}${completed}${statusFilterPart}${doneFilterPart} `;
     lines.push(theme.fg("accent", truncateToWidth(title + "─".repeat(width), width)));
 
     for (let i = 0; i < bodyHeight; i++) {
@@ -280,10 +316,11 @@ export class Dashboard {
           theme.fg("dim", "Use /maestro start <goal>"),
         ].slice(0, height);
       }
-      if (this.hideDone) {
+      if (this.hideDone && this.filter === "all") {
         return [theme.fg("muted", "All tasks are done."), theme.fg("dim", "f show them again")];
       }
-      return [];
+      const label = this.filter === "all" ? "current filters" : GROUP_LABELS[this.filter];
+      return [theme.fg("muted", `No tasks in ${label}.`), theme.fg("dim", "g next group · f done")];
     }
 
     const lines: string[] = [];
@@ -303,7 +340,10 @@ export class Dashboard {
 
       const usage = taskUsage(task);
       const activity = live ? ` · ${this.actions.liveActivity(task.id) ?? "…"}` : "";
-      const detail = `${STATUS_LABELS[task.status]} [${task.tier}] · $${usage.cost.toFixed(4)}${activity}`;
+      const group = GROUP_LABELS[taskGroup(this.actions.getBoard(), task)];
+      const status =
+        group === STATUS_LABELS[task.status] ? group : `${group} · ${STATUS_LABELS[task.status]}`;
+      const detail = `${status} [${task.tier}] · $${usage.cost.toFixed(4)}${activity}`;
       const line2 = `     ${theme.fg("dim", truncateToWidth(detail, width - 5))}`;
 
       lines.push(line1);
@@ -318,7 +358,8 @@ export class Dashboard {
     const task = this.selectedTask();
     if (!task) return [];
 
-    const summary = this.renderSelectedTask(task, width).slice(0, Math.max(1, height - 1));
+    const maxSummaryHeight = Math.min(11, Math.max(1, Math.ceil(height / 2)));
+    const summary = this.renderSelectedTask(task, width).slice(0, maxSummaryHeight);
     const transcriptHeight = Math.max(0, height - summary.length);
     const tail = this.tailFor(task);
     tail?.poll();
@@ -360,39 +401,99 @@ export class Dashboard {
   }
 
   private renderSelectedTask(task: Task, width: number): string[] {
+    const board = this.actions.getBoard();
     const usage = taskUsage(task);
     const dependencies = task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none";
     const attempts = `${task.attempts.length} attempt${task.attempts.length === 1 ? "" : "s"}`;
+    const group = GROUP_LABELS[taskGroup(board, task)];
     const heading = `${STATUS_GLYPHS[task.status]} ${task.id} · ${STATUS_LABELS[task.status]} · ${task.tier}`;
-
-    return [
+    const lines = [
       this.theme.bold(truncateToWidth(heading, width)),
       this.theme.fg(
         "dim",
         truncateToWidth(
-          `Dependencies: ${dependencies} · ${attempts} · $${usage.cost.toFixed(4)}`,
+          `Group: ${group} · Dependencies: ${dependencies} · ${attempts} · $${usage.cost.toFixed(4)}`,
           width
         )
       ),
-      truncateToWidth(`Next: ${this.nextAction(task)}`, width),
-      this.theme.fg("dim", "─".repeat(width)),
     ];
+
+    const blockers = task.dependsOn.flatMap((dependencyId) => {
+      const dependency = board.tasks.find((candidate) => candidate.id === dependencyId);
+      if (dependency?.status === "approved") return [];
+      return [`${dependencyId} (${dependency ? STATUS_LABELS[dependency.status] : "missing"})`];
+    });
+    if (blockers.length > 0) {
+      lines.push(
+        this.theme.fg("warning", truncateToWidth(`Blocked by: ${blockers.join(", ")}`, width))
+      );
+    }
+
+    const failure = latestFailure(task);
+    if (failure) {
+      lines.push(this.theme.fg("error", truncateToWidth(`Failure: ${failure}`, width)));
+    }
+
+    const reviewNotes = task.reviewNotes ?? task.attempts.at(-1)?.reviewNotes;
+    if (reviewNotes) {
+      lines.push(
+        this.theme.fg(
+          "warning",
+          truncateToWidth(`Reviewer notes: ${singleLine(reviewNotes)}`, width)
+        )
+      );
+    }
+
+    const latest = task.attempts.at(-1);
+    if (latest) {
+      lines.push(this.theme.fg("dim", truncateToWidth(attemptDetails(latest), width)));
+      if (latest.reviewModel || latest.reviewProvider || latest.reviewUsage) {
+        const reviewUsage = latest.reviewUsage;
+        const reviewCost = reviewUsage
+          ? ` · ${reviewUsage.turns} turns · $${reviewUsage.cost.toFixed(4)}`
+          : "";
+        lines.push(
+          this.theme.fg(
+            "dim",
+            truncateToWidth(
+              `Reviewer: model ${latest.reviewModel ?? "unknown"} · provider ${latest.reviewProvider ?? "unknown"}${reviewCost}`,
+              width
+            )
+          )
+        );
+      }
+      if (latest.touchedFiles.length > 0) {
+        lines.push(
+          this.theme.fg(
+            "dim",
+            truncateToWidth(`Changed files: ${latest.touchedFiles.join(", ")}`, width)
+          )
+        );
+      }
+      lines.push(
+        ...task.attempts
+          .slice(-3)
+          .map((attempt) =>
+            this.theme.fg("dim", truncateToWidth(`History: ${attemptHistory(attempt)}`, width))
+          )
+      );
+    }
+
+    lines.push(truncateToWidth(`Next: ${this.nextAction(task)}`, width));
+    lines.push(this.theme.fg("dim", "─".repeat(width)));
+    return lines;
   }
 
   private nextAction(task: Task): string {
     if (this.actions.isLive(task.id)) return "Monitor output, steer if needed, or abort.";
     if (task.status === "ready_for_review")
       return "Review the result; open its session or approve it.";
-    if (task.status === "changes_requested") return "Waiting for the next revision attempt.";
+    if (task.status === "changes_requested") return "Retry with the reviewer notes (r).";
     if (task.status === "approved") return "Complete — no action needed.";
     if (task.status === "failed") return "Reopen the task to retry it.";
     if (task.status === "cancelled") return "Reopen the task if it should run.";
-    const tasks = this.actions.getBoard().tasks;
-    const blockers = task.dependsOn.filter(
-      (dependencyId) =>
-        tasks.find((candidate) => candidate.id === dependencyId)?.status !== "approved"
-    );
-    if (blockers.length > 0) return `Waiting for ${blockers.join(", ")} to complete.`;
+    const reason = blockedReason(this.actions.getBoard(), task);
+    if (reason) return `Waiting for ${reason.slice("blocked by ".length)} to complete.`;
     return "Ready to run when the orchestrator dispatches it.";
   }
 
@@ -439,17 +540,57 @@ export class Dashboard {
       if (this.actions.hasExecutorSession(task.id)) parts.push("enter executor");
       if (this.actions.hasReviewerSession(task.id)) parts.push("O reviewer");
       if (task.status === "ready_for_review") parts.push("a approve");
-      if (task.status === "approved" || task.status === "failed" || task.status === "cancelled") {
-        parts.push("r reopen");
-      }
+      if (task.status === "failed" || task.status === "changes_requested") parts.push("r retry");
+      else if (task.status === "approved" || task.status === "cancelled") parts.push("r reopen");
     }
-    parts.push(this.hideDone ? "f show done" : "f hide done", "esc close");
+    const groupFilter = this.filter === "all" ? "all" : GROUP_LABELS[this.filter];
+    parts.push(
+      `g group:${groupFilter}`,
+      this.hideDone ? "f show done" : "f hide done",
+      "esc close"
+    );
     return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
   }
 }
 
 function lastAttemptReport(task: Task): string | undefined {
   return task.attempts.at(-1)?.finalReport;
+}
+
+function latestFailure(task: Task): string | undefined {
+  const attempt = task.attempts.at(-1);
+  if (task.status === "changes_requested") return "reviewer rejection";
+  if (task.status !== "failed") return undefined;
+  const reason = attempt?.failureReason;
+  if (reason) {
+    const retry = reason.retryable ? "retryable" : "not retryable";
+    return `${reason.kind.replaceAll("_", " ")} · ${singleLine(reason.message)} · ${retry}`;
+  }
+  if (attempt?.errorMessage) return singleLine(attempt.errorMessage);
+  return "executor failed without a recorded reason";
+}
+
+function attemptDetails(attempt: Attempt): string {
+  const model = attempt.model ?? "unknown model";
+  const provider = attempt.provider ?? "unknown provider";
+  return `Latest #${attempt.index}: model ${model} · provider ${provider} · ${attempt.usage.turns} turns · $${attempt.usage.cost.toFixed(4)}`;
+}
+
+function attemptHistory(attempt: Attempt): string {
+  let outcome = "in progress";
+  if (attempt.failureReason) outcome = attempt.failureReason.kind.replaceAll("_", " ");
+  else if (attempt.reviewNotes) outcome = "changes requested";
+  else if (attempt.reviewReport) outcome = "reviewed";
+  else if (attempt.finalReport) outcome = "completed";
+  else if (attempt.exitCode !== undefined) outcome = attempt.exitCode === 0 ? "finished" : "failed";
+  const provider = attempt.provider ?? "?";
+  const model = attempt.model ?? "?";
+  const identity = model.startsWith(`${provider}/`) ? model : `${provider}/${model}`;
+  return `#${attempt.index} ${outcome} · ${identity} · ${attempt.usage.turns}t · $${attempt.usage.cost.toFixed(4)}`;
+}
+
+function singleLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function padToWidth(line: string, width: number): string {

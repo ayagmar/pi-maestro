@@ -78,9 +78,9 @@ test("every preset defines all four tiers and keeps review read-only", () => {
 });
 
 test("findPreset and matchingPreset round-trip", () => {
-  const balanced = findPreset("balanced");
+  const balanced = findPreset("openai-balanced");
   assert.ok(balanced);
-  assert.equal(matchingPreset(balanced.config), "balanced");
+  assert.equal(matchingPreset(balanced.config), "openai-balanced");
   assert.equal(matchingPreset(DEFAULT_CONFIG), "inherit");
   const custom = mergeConfig(DEFAULT_CONFIG, { maxParallel: 7 });
   assert.equal(matchingPreset(custom), "custom");

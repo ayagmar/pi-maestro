@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   boardUsage,
+  boardUsageSummary,
   formatBoardProgress,
+  formatCostSummary,
   formatTokens,
   formatUsage,
   runBudgetWarning,
@@ -51,6 +53,48 @@ test("taskUsage sums attempts and boardUsage sums tasks", () => {
   assert.equal(taskUsage(task).turns, 5);
   const total = boardUsage([task, makeTask({ attempts: [makeAttempt(0.1, 1)] })]);
   assert.equal(total.cost.toFixed(2), "0.13");
+});
+
+test("boardUsageSummary reports attempts, meaningful average cost, models, and providers", () => {
+  const openAiAttempt = makeAttempt(0.02, 1);
+  openAiAttempt.model = "openai/gpt-5-mini";
+  const emptyProviderFailure = makeAttempt(0, 0);
+  emptyProviderFailure.usage.input = 0;
+  emptyProviderFailure.usage.output = 0;
+  emptyProviderFailure.model = "openai/gpt-5-mini";
+  const anthropicAttempt = makeAttempt(0.04, 2);
+  anthropicAttempt.model = "anthropic/claude-sonnet";
+
+  assert.deepEqual(
+    boardUsageSummary([
+      makeTask({ attempts: [openAiAttempt, emptyProviderFailure] }),
+      makeTask({ attempts: [anthropicAttempt] }),
+    ]),
+    {
+      totalAttempts: 3,
+      totalCost: 0.06,
+      averageMeaningfulCost: 0.03,
+      models: ["openai/gpt-5-mini", "anthropic/claude-sonnet"],
+      providers: ["openai", "anthropic"],
+    }
+  );
+  assert.deepEqual(boardUsageSummary([]), {
+    totalAttempts: 0,
+    totalCost: 0,
+    averageMeaningfulCost: 0,
+    models: [],
+    providers: [],
+  });
+});
+
+test("formatCostSummary stays compact and omits unavailable identities", () => {
+  const attempt = makeAttempt(0.02, 1);
+  attempt.model = "openai/gpt-5-mini";
+  assert.equal(
+    formatCostSummary([makeTask({ attempts: [attempt] })]),
+    "1 attempt · $0.0200 total · $0.0200 avg billed attempt · models: openai/gpt-5-mini · providers: openai"
+  );
+  assert.equal(formatCostSummary([]), "0 attempts · $0.0000 total · $0.0000 avg billed attempt");
 });
 
 test("formatBoardProgress excludes cancelled tasks from active progress", () => {

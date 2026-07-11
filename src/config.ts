@@ -44,8 +44,14 @@ export interface Preset {
  *   gpt-5.6-sol    high $3.47 69% · medium $1.86 61%  · xhigh $4.70 71%
  *   gpt-5.6-terra  high $1.13 54% · xhigh  $2.13 60%
  *   gpt-5.6-luna   high $0.78 44% · xhigh  $1.54 57%
- * Model names are patterns (no provider prefix) so pi resolves whichever
- * provider you have access to (openai-codex, openai, proxies, ...).
+ * All preset models are provider-qualified so executors never silently
+ * resolve to a different provider serving the same model id.
+ *
+ * The anthropic presets follow the capability ladder from Anthropic's
+ * advisor-tool guidance (haiku-4-5 < sonnet-5 < opus-4-8 < fable-5): fast
+ * executors on cheap tiers, stronger models on complex work, and the
+ * strongest affordable model on the read-only review tier where judgment
+ * matters most.
  */
 export const PRESETS: Preset[] = [
   {
@@ -55,8 +61,8 @@ export const PRESETS: Preset[] = [
     config: DEFAULT_CONFIG,
   },
   {
-    name: "balanced",
-    label: "Balanced (recommended)",
+    name: "openai-balanced",
+    label: "OpenAI balanced (recommended)",
     description:
       "Best cost/quality per tier: terra-high trivial ($1.13), sol-medium standard ($1.86), sol-high complex+review ($3.47, 69% pass@1).",
     config: {
@@ -68,16 +74,16 @@ export const PRESETS: Preset[] = [
       maxCostPerTask: 0,
       maxRunCost: 0,
       tiers: {
-        trivial: { model: "gpt-5.6-terra", thinking: "high" },
-        standard: { model: "gpt-5.6-sol", thinking: "medium" },
-        complex: { model: "gpt-5.6-sol", thinking: "high" },
-        review: { model: "gpt-5.6-sol", thinking: "medium", tools: REVIEW_TOOLS },
+        trivial: { model: "openai-codex/gpt-5.6-terra", thinking: "high" },
+        standard: { model: "openai-codex/gpt-5.6-sol", thinking: "medium" },
+        complex: { model: "openai-codex/gpt-5.6-sol", thinking: "high" },
+        review: { model: "openai-codex/gpt-5.6-sol", thinking: "medium", tools: REVIEW_TOOLS },
       },
     },
   },
   {
-    name: "budget",
-    label: "Budget",
+    name: "openai-budget",
+    label: "OpenAI budget",
     description:
       "Cheapest sensible run: luna-high trivial ($0.78), terra-high standard ($1.13), terra-xhigh complex+review ($2.13, 60% pass@1).",
     config: {
@@ -89,16 +95,79 @@ export const PRESETS: Preset[] = [
       maxCostPerTask: 2,
       maxRunCost: 0,
       tiers: {
-        trivial: { model: "gpt-5.6-luna", thinking: "high" },
-        standard: { model: "gpt-5.6-terra", thinking: "high" },
-        complex: { model: "gpt-5.6-terra", thinking: "xhigh" },
-        review: { model: "gpt-5.6-terra", thinking: "xhigh", tools: REVIEW_TOOLS },
+        trivial: { model: "openai-codex/gpt-5.6-luna", thinking: "high" },
+        standard: { model: "openai-codex/gpt-5.6-terra", thinking: "high" },
+        complex: { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
+        review: { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh", tools: REVIEW_TOOLS },
       },
     },
   },
   {
-    name: "quality",
-    label: "Quality-first",
+    name: "anthropic-budget",
+    label: "Anthropic budget",
+    description:
+      "Cheapest Claude run: haiku-4-5 trivial, sonnet-5 for everything else including review.",
+    config: {
+      maxParallel: 4,
+      planGate: false,
+      useWorktrees: false,
+      autoCommit: true,
+      maxAttempts: 3,
+      maxCostPerTask: 2,
+      maxRunCost: 0,
+      tiers: {
+        trivial: { model: "anthropic/claude-haiku-4-5", thinking: "medium" },
+        standard: { model: "anthropic/claude-sonnet-5", thinking: "medium" },
+        complex: { model: "anthropic/claude-sonnet-5", thinking: "high" },
+        review: { model: "anthropic/claude-sonnet-5", thinking: "high", tools: REVIEW_TOOLS },
+      },
+    },
+  },
+  {
+    name: "anthropic-balanced",
+    label: "Anthropic balanced",
+    description:
+      "Claude ladder: sonnet-5 executors for trivial+standard, opus-4-8 complex, fable-5 frontier review (strongest model on read-only judgment, per Anthropic's advisor pattern).",
+    config: {
+      maxParallel: 3,
+      planGate: false,
+      useWorktrees: false,
+      autoCommit: true,
+      maxAttempts: 3,
+      maxCostPerTask: 0,
+      maxRunCost: 0,
+      tiers: {
+        trivial: { model: "anthropic/claude-sonnet-5", thinking: "low" },
+        standard: { model: "anthropic/claude-sonnet-5", thinking: "medium" },
+        complex: { model: "anthropic/claude-opus-4-8", thinking: "high" },
+        review: { model: "anthropic/claude-fable-5", thinking: "high", tools: REVIEW_TOOLS },
+      },
+    },
+  },
+  {
+    name: "anthropic-quality",
+    label: "Anthropic quality-first",
+    description:
+      "Frontier Claude on every tier: opus-4-8 trivial+standard, fable-5 complex and review.",
+    config: {
+      maxParallel: 3,
+      planGate: false,
+      useWorktrees: false,
+      autoCommit: true,
+      maxAttempts: 4,
+      maxCostPerTask: 0,
+      maxRunCost: 0,
+      tiers: {
+        trivial: { model: "anthropic/claude-opus-4-8", thinking: "medium" },
+        standard: { model: "anthropic/claude-opus-4-8", thinking: "high" },
+        complex: { model: "anthropic/claude-fable-5", thinking: "high" },
+        review: { model: "anthropic/claude-fable-5", thinking: "high", tools: REVIEW_TOOLS },
+      },
+    },
+  },
+  {
+    name: "openai-quality",
+    label: "OpenAI quality-first",
     description:
       "Frontier executors on every tier: sol-medium trivial, sol-high standard, sol-xhigh complex ($4.70, 71% pass@1), sol-high review.",
     config: {
@@ -110,10 +179,10 @@ export const PRESETS: Preset[] = [
       maxCostPerTask: 0,
       maxRunCost: 0,
       tiers: {
-        trivial: { model: "gpt-5.6-sol", thinking: "medium" },
-        standard: { model: "gpt-5.6-sol", thinking: "high" },
-        complex: { model: "gpt-5.6-sol", thinking: "xhigh" },
-        review: { model: "gpt-5.6-sol", thinking: "high", tools: REVIEW_TOOLS },
+        trivial: { model: "openai-codex/gpt-5.6-sol", thinking: "medium" },
+        standard: { model: "openai-codex/gpt-5.6-sol", thinking: "high" },
+        complex: { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
+        review: { model: "openai-codex/gpt-5.6-sol", thinking: "high", tools: REVIEW_TOOLS },
       },
     },
   },

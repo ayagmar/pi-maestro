@@ -10,9 +10,11 @@ import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/
 import {
   driveBoard,
   executeTask,
+  formatDriveSummary,
   reviewTask,
-  sessionLabel,
   type StartExecutor,
+  sessionLabel,
+  snapshot,
   taskCommitMessage,
 } from "../src/workflow.js";
 
@@ -97,6 +99,68 @@ test("sessionLabel numbers attempts and reviews while preserving the label forma
   );
 });
 
+test("formatDriveSummary reports outcomes, attempts, meaningful cost, and identities", () => {
+  const summary = formatDriveSummary({
+    rounds: 2,
+    tasks: [
+      {
+        id: "T1",
+        title: "Done",
+        status: "approved",
+        tier: "standard",
+        attempts: 2,
+        cost: 0.06,
+        turns: 3,
+        history: [
+          {
+            attempt: 1,
+            model: "openai/gpt-5",
+            provider: "openai",
+            turns: 0,
+            cost: 0,
+            touchedFiles: [],
+          },
+          {
+            attempt: 2,
+            reviewModel: "anthropic/claude",
+            reviewProvider: "anthropic",
+            turns: 3,
+            cost: 0.06,
+            touchedFiles: [],
+          },
+        ],
+      },
+      {
+        id: "T2",
+        title: "Failed",
+        status: "failed",
+        tier: "standard",
+        attempts: 0,
+        cost: 0,
+        turns: 0,
+        history: [],
+      },
+      {
+        id: "T3",
+        title: "Waiting",
+        status: "todo",
+        tier: "standard",
+        attempts: 0,
+        cost: 0,
+        turns: 0,
+        history: [],
+      },
+    ],
+    stoppedBecause: { code: "blocked", message: "dependency unavailable" },
+  });
+
+  assert.match(summary, /1 approved · 1 failed · 0 cancelled · 1 blocked/);
+  assert.match(summary, /2 attempts · \$0\.0600 total · \$0\.0600 avg billed attempt/);
+  assert.match(summary, /models: openai\/gpt-5, anthropic\/claude/);
+  assert.match(summary, /providers: openai, anthropic/);
+  assert.match(summary, /dependency unavailable$/);
+});
+
 test("driveBoard approves dependent tasks across multiple rounds", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-test-"));
   try {
@@ -141,6 +205,270 @@ test("driveBoard approves dependent tasks across multiple rounds", async () => {
         [second.id, "approved"],
       ]
     );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("driveBoard pauses after active executors finish and resumes from fresh board state", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-pause-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let pauseRequested = false;
+    let activeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      activeStarted = resolve;
+    });
+    let finishActive!: (outcome: RunOutcome) => void;
+    const activeOutcome = new Promise<RunOutcome>((resolve) => {
+      finishActive = resolve;
+    });
+    let abortCalls = 0;
+    const activeExecutor: StartExecutor = () => {
+      activeStarted();
+      return {
+        attempt: attempt(),
+        outcome: activeOutcome,
+        steer: () => {},
+        abort: () => {
+          abortCalls += 1;
+        },
+      };
+    };
+
+    const pausedRun = driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: activeExecutor,
+      shouldPause: () => pauseRequested,
+      onUpdate,
+      trackRun,
+    });
+    await started;
+    pauseRequested = true;
+    finishActive({
+      exitCode: 0,
+      usage: { input: 1, output: 1, cost: 0, turns: 1 },
+      finalReport: "Work completed",
+      touchedFiles: [],
+      aborted: false,
+    });
+
+    const paused = await pausedRun;
+    assert.equal(paused.stoppedBecause.code, "paused");
+    assert.equal(paused.rounds, 1);
+    assert.equal(abortCalls, 0, "pause must not abort an active executor");
+    assert.equal(findTask(loadBoard(cwd), task.id)?.status, "ready_for_review");
+
+    const resumed = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: executor({ finalReport: "Verified.\nVERDICT: APPROVE" }),
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(resumed.stoppedBecause.code, "completed");
+    assert.equal(resumed.rounds, 1);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.status, "approved");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("driveBoard aborts active executors through the existing AbortSignal", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-abort-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const controller = new AbortController();
+    let activeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      activeStarted = resolve;
+    });
+    const abortingExecutor: StartExecutor = (options) => {
+      activeStarted();
+      const outcome = new Promise<RunOutcome>((resolve) => {
+        options.signal?.addEventListener("abort", () => {
+          resolve({
+            exitCode: 1,
+            usage: { input: 0, output: 0, cost: 0, turns: 0 },
+            finalReport: "",
+            touchedFiles: [],
+            aborted: true,
+          });
+        });
+      });
+      return { attempt: attempt(), outcome, steer: () => {}, abort: () => {} };
+    };
+
+    const running = driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: abortingExecutor,
+      signal: controller.signal,
+      onUpdate,
+      trackRun,
+    });
+    await started;
+    controller.abort();
+
+    const result = await running;
+    assert.equal(result.stoppedBecause.code, "aborted");
+    assert.equal(findTask(loadBoard(cwd), task.id)?.status, "cancelled");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("driveBoard gives plan gates precedence and rechecks cost caps after pause", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-gates-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    board.planPending = true;
+    const costly = attempt();
+    costly.usage.cost = 2;
+    task.attempts.push(costly);
+    saveBoard(cwd, board);
+    const options = {
+      cwd,
+      config: { ...config, maxRunCost: 1 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: executor({}),
+      onUpdate,
+      trackRun,
+    };
+
+    const gated = await driveBoard({ ...options, shouldPause: () => true });
+    assert.equal(gated.stoppedBecause.code, "plan_gate");
+    assert.equal(gated.rounds, 0);
+
+    const approvedPlan = loadBoard(cwd);
+    approvedPlan.planPending = false;
+    saveBoard(cwd, approvedPlan);
+    const paused = await driveBoard({ ...options, shouldPause: () => true });
+    assert.equal(paused.stoppedBecause.code, "paused");
+    assert.equal(paused.rounds, 0);
+
+    const budgetBlocked = await driveBoard(options);
+    assert.equal(budgetBlocked.stoppedBecause.code, "budget_blocked");
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.length, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("driveBoard blocks invalid plans before dispatch and leaves the board unchanged", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-invalid-plan-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    task.dependsOn = ["T2"];
+    createTask(board, {
+      title: "Cycle",
+      brief: "work",
+      tier: "unknown",
+      dependsOn: [task.id],
+    });
+    saveBoard(cwd, board);
+    const before = loadBoard(cwd);
+    let dispatches = 0;
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([["standard", tier]]),
+      startExecutor: () => {
+        dispatches += 1;
+        return executor({})({
+          stateDir: cwd,
+          runId: "unused",
+          cwd,
+          prompt: "unused",
+          tier,
+          sessionLabel: "unused",
+          onUpdate: () => {},
+        });
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "error");
+    assert.match(result.stoppedBecause.message, /dependency cycle: T1 → T2 → T1/);
+    assert.match(result.stoppedBecause.message, /T2 uses unknown tier "unknown"/);
+    assert.equal(dispatches, 0);
+    assert.deepEqual(loadBoard(cwd), before);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("rejected executor outcomes persist a redacted failure and return a retryable snapshot", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-cleanup-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let tracked = 0;
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 1 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: () => {
+        const runAttempt = attempt();
+        runAttempt.model = "acme/executor";
+        runAttempt.usage = { input: 8, output: 3, cost: 0.04, turns: 1 };
+        runAttempt.touchedFiles = ["src/rejected.ts"];
+        return {
+          attempt: runAttempt,
+          outcome: Promise.reject(new Error("executor promise failed token=top-secret")),
+          steer: () => {},
+          abort: () => {},
+        };
+      },
+      onUpdate,
+      trackRun: () => {
+        tracked += 1;
+        return () => {
+          tracked -= 1;
+        };
+      },
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    const failed = result.tasks.find((item) => item.id === task.id);
+    assert.equal(result.stoppedBecause.code, "attempt_cap");
+    assert.equal(persisted?.status, "failed");
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "executor_failure");
+    assert.equal(
+      persisted?.attempts[0]?.failureReason?.message,
+      "executor promise failed token=[REDACTED]"
+    );
+    assert.equal(failed?.history[0]?.cost, 0.04);
+    assert.equal(failed?.history[0]?.turns, 1);
+    assert.deepEqual(failed?.history[0]?.touchedFiles, ["src/rejected.ts"]);
+    assert.equal(failed?.history[0]?.model, "acme/executor");
+    assert.equal(failed?.history[0]?.provider, "acme");
+    assert.equal(failed?.retryAction, 'maestro_run ["T1"]');
+    assert.match(failed?.note ?? "", /executor promise failed token=\[REDACTED\]/);
+    assert.equal(tracked, 0);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -284,13 +612,84 @@ test("failed execution persists failed status and returns the error note", async
       task,
       tier,
       config,
-      startExecutor: executor({ exitCode: 1, errorMessage: "stub executor failed" }),
+      startExecutor: executor({
+        exitCode: 1,
+        errorMessage: "stub executor failed",
+        usage: { input: 10, output: 2, cost: 0.02, turns: 1 },
+        touchedFiles: ["src/failure.ts"],
+        model: "acme/test-model",
+      }),
       onUpdate,
       trackRun,
     });
 
-    assert.equal(findTask(loadBoard(cwd), task.id)?.status, "failed");
-    assert.equal(result.note, "stub executor failed");
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "failed");
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "executor_failure");
+    assert.equal(persisted?.attempts[0]?.usage.cost, 0.02);
+    assert.deepEqual(persisted?.attempts[0]?.touchedFiles, ["src/failure.ts"]);
+    assert.equal(persisted?.attempts[0]?.model, "acme/test-model");
+    assert.equal(persisted?.attempts[0]?.provider, "acme");
+    assert.match(result.note ?? "", /stub executor failed/);
+    assert.match(result.note ?? "", /Retry: maestro_run \["T1"\]/);
+    assert.equal(result.retryAction, 'maestro_run ["T1"]');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("user abort persists a retryable structured reason", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    const result = await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      startExecutor: executor({ exitCode: 1, aborted: true }),
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "cancelled");
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "user_abort");
+    assert.equal(result.retryAction, 'maestro_run ["T1"]');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("cost-cap failure is not recorded as a user abort", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      startExecutor: executor({
+        exitCode: 1,
+        aborted: false,
+        errorMessage: "cost cap exceeded: $0.1200 > $0.1 (maxCostPerTask)",
+        usage: { input: 20, output: 5, cost: 0.12, turns: 1 },
+      }),
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "failed");
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "cost_cap");
+    assert.equal(persisted?.attempts[0]?.usage.cost, 0.12);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -389,7 +788,53 @@ test("zero-turn provider failure is persisted and retries on fallback without co
     assert.equal(persisted?.attempts[0]?.exitCode, 1);
     assert.equal(persisted?.attempts[0]?.errorMessage, "primary provider unavailable");
     assert.equal(persisted?.attempts[0]?.providerFailure, true);
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "provider_failure");
+    assert.equal(persisted?.attempts[0]?.provider, "provider");
     assert.equal(persisted?.attempts[1]?.usage.turns, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("zero-turn process failure keeps its cause while using configured fallback accounting", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-process-fallback-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let calls = 0;
+    const processThenSuccess: StartExecutor = (options) => {
+      calls += 1;
+      if (calls === 1) {
+        return executor({
+          exitCode: 1,
+          errorMessage: "spawn pi ENOENT",
+          failureCause: "process",
+        })(options);
+      }
+      return executor({
+        finalReport: "fallback succeeded",
+        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+      })(options);
+    };
+
+    const result = await executeTask({
+      cwd,
+      board,
+      task,
+      tier: { model: "provider/primary", fallbacks: ["provider/fallback"], thinking: "low" },
+      config: { ...config, maxAttempts: 1 },
+      startExecutor: processThenSuccess,
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(calls, 2, "zero-turn failure should retain existing fallback behavior");
+    assert.equal(result.status, "ready_for_review");
+    assert.equal(persisted?.attempts[0]?.providerFailure, true);
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "executor_failure");
+    assert.equal(persisted?.attempts[0]?.failureReason?.message, "spawn pi ENOENT");
+    assert.equal(persisted?.attempts.filter((item) => !item.providerFailure).length, 1);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -450,6 +895,110 @@ test("approved review persists approved status and clears review notes", async (
   }
 });
 
+test("rejected reviewer outcomes persist a redacted failure and return a retryable snapshot", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-review-rejection-test-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    const completed = attempt("Executor completed the task");
+    completed.index = 1;
+    completed.usage = { input: 10, output: 4, cost: 0.03, turns: 2 };
+    completed.touchedFiles = ["src/executor.ts"];
+    task.attempts.push(completed);
+    saveBoard(cwd, board);
+    let tracked = 0;
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: () => {
+        const reviewAttempt = attempt();
+        reviewAttempt.model = "reviewco/model";
+        reviewAttempt.usage = { input: 5, output: 2, cost: 0.02, turns: 1 };
+        return {
+          attempt: reviewAttempt,
+          outcome: Promise.reject(new Error("review promise failed secret=hunter2")),
+          steer: () => {},
+          abort: () => {},
+        };
+      },
+      onUpdate,
+      trackRun: () => {
+        tracked += 1;
+        return () => {
+          tracked -= 1;
+        };
+      },
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "ready_for_review");
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "reviewer_failure");
+    assert.equal(
+      persisted?.attempts[0]?.failureReason?.message,
+      "review promise failed secret=[REDACTED]"
+    );
+    assert.deepEqual(persisted?.attempts[0]?.reviewUsage, {
+      input: 5,
+      output: 2,
+      cost: 0.02,
+      turns: 1,
+    });
+    assert.equal(persisted?.attempts[0]?.usage.cost, 0.05);
+    assert.deepEqual(persisted?.attempts[0]?.touchedFiles, ["src/executor.ts"]);
+    assert.equal(persisted?.attempts[0]?.reviewModel, "reviewco/model");
+    assert.equal(persisted?.attempts[0]?.reviewProvider, "reviewco");
+    assert.equal(result.history[0]?.failureReason?.kind, "reviewer_failure");
+    assert.equal(result.retryAction, 'maestro_review ["T1"]');
+    assert.match(result.note ?? "", /review promise failed secret=\[REDACTED\]/);
+    assert.equal(tracked, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("production-shaped reviewer failure is reclassified and stays reviewable", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    task.attempts.push(attempt("Executor completed the task"));
+    saveBoard(cwd, board);
+    const executorReason = {
+      kind: "executor_failure" as const,
+      message: "review process failed",
+      retryable: true,
+    };
+    const reviewerExecutor: StartExecutor = (options) => {
+      const run = executor({
+        exitCode: 1,
+        errorMessage: "review process failed",
+        failureCause: "process",
+        failureReason: executorReason,
+        usage: { input: 2, output: 1, cost: 0.01, turns: 1 },
+      })(options);
+      run.attempt.failureReason = executorReason;
+      return run;
+    };
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: reviewerExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "ready_for_review");
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "reviewer_failure");
+    assert.equal(result.retryAction, 'maestro_review ["T1"]');
+    assert.match(result.note ?? "", /review process failed/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("requested changes persist changes_requested status and reviewer notes", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   try {
@@ -470,6 +1019,80 @@ test("requested changes persist changes_requested status and reviewer notes", as
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "changes_requested");
     assert.equal(persisted?.reviewNotes, notes);
+    assert.equal(persisted?.attempts[0]?.reviewNotes, notes);
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "reviewer_rejection");
+    const snap = snapshot(persisted as Task);
+    assert.equal(snap.retryAction, 'maestro_run ["T1"]');
+    assert.match(snap.note ?? "", /Fix src\/example\.ts behavior/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("retry receives reviewer notes and preserves prior attempt history", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-retry-test-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    const first = attempt("Initial implementation");
+    first.index = 1;
+    first.model = "provider-a/model-a";
+    first.provider = "provider-a";
+    first.usage = { input: 10, output: 5, cost: 0.04, turns: 2 };
+    first.touchedFiles = ["src/initial.ts"];
+    task.attempts.push(first);
+    saveBoard(cwd, board);
+    const notes = "Add a regression test for the retry path.";
+
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: executor({
+        finalReport: `VERDICT: REQUEST_CHANGES\n${notes}`,
+        usage: { input: 3, output: 2, cost: 0.01, turns: 1 },
+      }),
+      onUpdate,
+      trackRun,
+    });
+
+    const rejected = findTask(loadBoard(cwd), task.id) as Task;
+    let retryPrompt = "";
+    await executeTask({
+      cwd,
+      board: loadBoard(cwd),
+      task: rejected,
+      tier: { thinking: "low", model: "provider-b/model-b" },
+      config,
+      startExecutor: (options) => {
+        retryPrompt = options.prompt;
+        return executor({
+          finalReport: "Retry completed",
+          model: "provider-b/model-b",
+          usage: { input: 8, output: 4, cost: 0.03, turns: 2 },
+          touchedFiles: ["test/retry.test.ts"],
+        })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.match(retryPrompt, /Add a regression test for the retry path/);
+    const persisted = findTask(loadBoard(cwd), task.id) as Task;
+    assert.equal(persisted.attempts.length, 2);
+    assert.equal(persisted.attempts[0]?.reviewNotes, notes);
+    assert.equal(persisted.attempts[0]?.usage.cost, 0.05);
+    assert.deepEqual(persisted.attempts[0]?.touchedFiles, ["src/initial.ts"]);
+    assert.equal(persisted.attempts[1]?.index, 2);
+    assert.equal(persisted.attempts[1]?.provider, "provider-b");
+    assert.equal(persisted.attempts[1]?.usage.cost, 0.03);
+    assert.deepEqual(persisted.attempts[1]?.touchedFiles, ["test/retry.test.ts"]);
+    assert.deepEqual(
+      snapshot(persisted).history.map((item) => [item.attempt, item.cost, item.touchedFiles]),
+      [
+        [1, 0.05, ["src/initial.ts"]],
+        [2, 0.03, ["test/retry.test.ts"]],
+      ]
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

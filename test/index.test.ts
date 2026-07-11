@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { maestroBoardCwd, previousBoardSession } from "../src/index.js";
+import {
+  assertKnownTaskIds,
+  maestroBoardCwd,
+  previousBoardSession,
+  sessionCanControlDrive,
+  sessionSwitchBlocked,
+} from "../src/index.js";
+import { createTask } from "../src/board.js";
+import { type Board } from "../src/types.js";
 
 const owner = "/sessions/orchestrator.jsonl";
 const executor = "/sessions/executor.jsonl";
@@ -24,6 +32,28 @@ test("supports repeated back toggling between a board owner and executor", () =>
     previous = previousBoardSession(current, nextCurrent, [owner], [executor]);
     current = nextCurrent;
   }
+});
+
+test("drive controls stay with their owning session", () => {
+  assert.equal(sessionCanControlDrive(owner, owner), true);
+  assert.equal(sessionCanControlDrive(owner, other), false);
+  assert.equal(sessionCanControlDrive(undefined, other), true);
+  assert.equal(sessionCanControlDrive(owner, undefined), true);
+});
+
+test("session switches are blocked for active drive ownership or live executors", () => {
+  assert.equal(sessionSwitchBlocked(true, 0), true);
+  assert.equal(sessionSwitchBlocked(false, 1), true);
+  assert.equal(sessionSwitchBlocked(true, 2), true);
+  assert.equal(sessionSwitchBlocked(false, 0), false);
+});
+
+test("explicit dispatch rejects unknown task ids", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  createTask(board, { title: "Known", brief: "work", tier: "standard" });
+
+  assert.doesNotThrow(() => assertKnownTaskIds(board, ["t1"]));
+  assert.throws(() => assertKnownTaskIds(board, ["T1", "T99"]), /Unknown task id.*T99/);
 });
 
 test("does not restore unrelated sessions or cross executor boundaries", () => {

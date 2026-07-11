@@ -37,7 +37,9 @@ const MODEL_CHOICES = [
   "gpt-5.6-luna",
   "gpt-5.6-terra",
   "gpt-5.6-sol",
+  "claude-haiku-4-5",
   "claude-sonnet-5",
+  "claude-opus-4-8",
   "claude-fable-5",
 ];
 
