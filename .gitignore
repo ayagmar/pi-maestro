@@ -33,6 +33,5 @@ yarn-error.log*
 coverage/
 .nyc_output/
 
-# Conductor run state (in consumer projects)
-.pi/conductor/
+# Maestro run state (in consumer projects)
 .pi/maestro/

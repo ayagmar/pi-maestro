@@ -63,7 +63,7 @@ export interface TierConfig {
 
 export interface MaestroConfig {
   maxParallel: number;
-  /** Hard attempt cap per task; exceeded tasks need an explicit conductor-run or a brief rewrite. */
+  /** Hard attempt cap per task; exceeded tasks need an explicit maestro-run or a brief rewrite. */
   maxAttempts: number;
   /** Abort an executor once its attempt cost (USD) exceeds this. 0 disables the cap. */
   maxCostPerTask: number;
