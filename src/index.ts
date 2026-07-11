@@ -14,7 +14,6 @@ import {
   isRunnable,
   loadBoard,
   saveBoard,
-  stateDir,
   transition,
   updateTask,
 } from "./board.js";
@@ -31,74 +30,31 @@ import {
   STATUS_GLYPHS,
   STATUS_LABELS,
   taskLine,
-  taskUsage,
   truncateText,
 } from "./format.js";
-import {
-  buildExecutorPrompt,
-  buildOrchestratorBriefing,
-  buildSupervisorBriefing,
-  buildReviewPrompt,
-  parseVerdict,
-} from "./prompts.js";
+import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
 import { Dashboard } from "./dashboard.js";
 import {
-  type ExecutorHandle,
   findSessionFile,
   mapWithConcurrencyLimit,
+  type RunUpdate,
   startExecutor,
 } from "./runner.js";
 import { showSettings } from "./settings-ui.js";
+import { type Board, type Task, type TaskStatus, type TierConfig } from "./types.js";
 import {
-  type Board,
-  type MaestroConfig,
-  type Task,
-  type TaskStatus,
-  type TierConfig,
-} from "./types.js";
-
-interface LiveRun {
-  taskId: string;
-  kind: "execute" | "review";
-  turns: number;
-  cost: number;
-  lastActivity: string;
-  handle: ExecutorHandle;
-}
-
-interface TaskSnapshot {
-  id: string;
-  title: string;
-  status: TaskStatus;
-  tier: string;
-  attempts: number;
-  cost: number;
-  turns: number;
-  note?: string;
-}
+  executeTask,
+  lastReport,
+  preflightTaskTiers,
+  reviewTask,
+  snapshot,
+  type TaskSnapshot,
+  type WorkflowRun,
+} from "./workflow.js";
 
 interface MaestroDetails {
   action: string;
   tasks: TaskSnapshot[];
-}
-
-function snapshot(task: Task, note?: string): TaskSnapshot {
-  const usage = taskUsage(task);
-  const snap: TaskSnapshot = {
-    id: task.id,
-    title: task.title,
-    status: task.status,
-    tier: task.tier,
-    attempts: task.attempts.length,
-    cost: usage.cost,
-    turns: usage.turns,
-  };
-  if (note !== undefined) snap.note = note;
-  return snap;
-}
-
-function lastReport(task: Task): string | undefined {
-  return task.attempts.at(-1)?.finalReport;
 }
 
 function notify(
@@ -116,7 +72,7 @@ export default function maestro(pi: ExtensionAPI) {
   // over the shared board file.
   if (process.env.PI_MAESTRO_EXECUTOR === "1") return;
 
-  const liveRuns = new Map<string, LiveRun>();
+  const liveRuns = new Map<string, WorkflowRun>();
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
 
@@ -168,7 +124,7 @@ export default function maestro(pi: ExtensionAPI) {
   function applyUpdate(
     ctx: ExtensionContext,
     taskId: string,
-    update: { turns: number; cost: number; lastActivity: string },
+    update: RunUpdate,
     onProgress: () => void
   ): void {
     const live = liveRuns.get(taskId);
@@ -181,164 +137,13 @@ export default function maestro(pi: ExtensionAPI) {
     onProgress();
   }
 
-  function trackRun(ctx: ExtensionContext, run: LiveRun): () => void {
+  function trackRun(ctx: ExtensionContext, run: WorkflowRun): () => void {
     liveRuns.set(run.taskId, run);
     refreshUI(ctx);
     return () => {
       liveRuns.delete(run.taskId);
       refreshUI(ctx);
     };
-  }
-
-  async function executeTask(
-    board: Board,
-    task: Task,
-    tier: TierConfig,
-    config: MaestroConfig,
-    ctx: ExtensionContext,
-    signal: AbortSignal | undefined,
-    onProgress: () => void
-  ): Promise<TaskSnapshot> {
-    if (task.attempts.length >= config.maxAttempts) {
-      const updated = updateTask(ctx.cwd, task.id, (fresh) => {
-        forceStatus(fresh, "failed");
-      });
-      return snapshot(
-        updated ?? task,
-        `attempt cap reached (${config.maxAttempts}); rewrite the brief with maestro_update or raise maxAttempts`
-      );
-    }
-    const dependencyReports = task.dependsOn
-      .map((depId) => findTask(board, depId))
-      .filter((dep): dep is Task => dep !== undefined && lastReport(dep) !== undefined)
-      .map((dep) => ({ id: dep.id, title: dep.title, report: lastReport(dep) ?? "" }));
-
-    const attemptIndex = task.attempts.length + 1;
-    const runOptions: Parameters<typeof startExecutor>[0] = {
-      stateDir: stateDir(ctx.cwd),
-      runId: `${task.id}-attempt-${attemptIndex}`,
-      cwd: ctx.cwd,
-      prompt: buildExecutorPrompt(task, dependencyReports),
-      tier,
-      onUpdate: (update) => applyUpdate(ctx, task.id, update, onProgress),
-    };
-    if (signal) runOptions.signal = signal;
-    if (config.maxCostPerTask > 0) runOptions.maxCost = config.maxCostPerTask;
-    const run = startExecutor(runOptions);
-    run.attempt.index = attemptIndex;
-
-    const live: LiveRun = {
-      taskId: task.id,
-      kind: "execute",
-      turns: 0,
-      cost: 0,
-      lastActivity: "starting…",
-      handle: run,
-    };
-    const untrack = trackRun(ctx, live);
-
-    // All board writes go through updateTask (fresh load per write) because
-    // parallel executors finish in arbitrary order.
-    updateTask(ctx.cwd, task.id, (fresh) => {
-      transition(fresh, "running");
-      fresh.attempts.push(run.attempt);
-    });
-
-    const outcome = await run.outcome;
-    untrack();
-
-    if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
-    if (outcome.model !== undefined) run.attempt.model = outcome.model;
-
-    const status: TaskStatus = outcome.aborted
-      ? "cancelled"
-      : outcome.exitCode !== 0 || outcome.errorMessage
-        ? "failed"
-        : "ready_for_review";
-
-    const updated = updateTask(ctx.cwd, task.id, (fresh) => {
-      transition(fresh, status);
-      fresh.attempts[fresh.attempts.length - 1] = run.attempt;
-    });
-
-    const note = outcome.aborted
-      ? "aborted by user"
-      : status === "failed"
-        ? (outcome.errorMessage ?? `exit code ${outcome.exitCode}`)
-        : undefined;
-    return snapshot(updated ?? task, note);
-  }
-
-  async function reviewTask(
-    task: Task,
-    tier: TierConfig,
-    ctx: ExtensionContext,
-    signal: AbortSignal | undefined,
-    onProgress: () => void
-  ): Promise<TaskSnapshot> {
-    const report = lastReport(task);
-    if (!report) {
-      return snapshot(task, "no executor report to review");
-    }
-
-    const runOptions: Parameters<typeof startExecutor>[0] = {
-      stateDir: stateDir(ctx.cwd),
-      runId: `${task.id}-review-${task.attempts.length}`,
-      cwd: ctx.cwd,
-      prompt: buildReviewPrompt(task, report),
-      tier,
-      onUpdate: (update) => applyUpdate(ctx, task.id, update, onProgress),
-    };
-    if (signal) runOptions.signal = signal;
-    const run = startExecutor(runOptions);
-
-    const live: LiveRun = {
-      taskId: task.id,
-      kind: "review",
-      turns: 0,
-      cost: 0,
-      lastActivity: "starting…",
-      handle: run,
-    };
-    const untrack = trackRun(ctx, live);
-
-    const outcome = await run.outcome;
-    untrack();
-
-    const verdict =
-      outcome.aborted || outcome.exitCode !== 0 || outcome.errorMessage
-        ? undefined
-        : parseVerdict(outcome.finalReport);
-
-    const updated = updateTask(ctx.cwd, task.id, (fresh) => {
-      // Reviewer usage is billed against the task for honest per-task cost.
-      const attempt = fresh.attempts.at(-1);
-      if (attempt) {
-        attempt.usage.input += outcome.usage.input;
-        attempt.usage.output += outcome.usage.output;
-        attempt.usage.cost += outcome.usage.cost;
-        attempt.usage.turns += outcome.usage.turns;
-      }
-      if (!verdict) return; // aborted/failed/no verdict: stays ready_for_review
-      if (verdict.approved) {
-        transition(fresh, "approved");
-        delete fresh.reviewNotes;
-      } else {
-        transition(fresh, "changes_requested");
-        fresh.reviewNotes = verdict.notes || outcome.finalReport;
-      }
-    });
-
-    const result = updated ?? task;
-    if (outcome.aborted)
-      return snapshot(result, "review aborted by user; task stays ready for review");
-    if (outcome.exitCode !== 0 || outcome.errorMessage) {
-      return snapshot(result, `review failed: ${outcome.errorMessage ?? outcome.exitCode}`);
-    }
-    if (!verdict) {
-      return snapshot(result, "reviewer gave no VERDICT line; review again or inspect manually");
-    }
-    return snapshot(result, verdict.approved ? "approved" : truncateText(verdict.notes, 10));
   }
 
   // ---------------------------------------------------------------- tools
@@ -462,23 +267,12 @@ export default function maestro(pi: ExtensionAPI) {
 
       // Preflight tier models before spawning anything: a bad pattern or
       // missing API key should fail with an actionable message, not N dead runs.
-      const resolvedTiers = new Map<string, TierConfig>();
-      for (const task of runnable) {
-        if (resolvedTiers.has(task.tier)) continue;
-        const tier = config.tiers[task.tier] ?? config.tiers.standard;
-        if (!tier) throw new Error(`No tier config for "${task.tier}" and no standard fallback`);
-        const resolution = resolveTierModel(
-          task.tier,
-          tier,
-          ctx.modelRegistry,
-          ctx.model?.provider
-        );
-        if (!resolution.ok) throw new Error(resolution.error);
-        const resolved: TierConfig = { ...tier };
-        if (resolution.modelArg === undefined) delete resolved.model;
-        else resolved.model = resolution.modelArg;
-        resolvedTiers.set(task.tier, resolved);
-      }
+      const resolvedTiers = preflightTaskTiers(
+        runnable,
+        config,
+        ctx.modelRegistry,
+        ctx.model?.provider
+      );
 
       const emitProgress = () => {
         onUpdate?.({
@@ -490,7 +284,18 @@ export default function maestro(pi: ExtensionAPI) {
       const results = await mapWithConcurrencyLimit(runnable, config.maxParallel, (task) => {
         const tier = resolvedTiers.get(task.tier);
         if (!tier) throw new Error(`No tier config for "${task.tier}"`);
-        return executeTask(board, task, tier, config, ctx, signal, emitProgress);
+        const workflowOptions: Parameters<typeof executeTask>[0] = {
+          cwd: ctx.cwd,
+          board,
+          task,
+          tier,
+          config,
+          startExecutor,
+          onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
+          trackRun: (run) => trackRun(ctx, run),
+        };
+        if (signal) workflowOptions.signal = signal;
+        return executeTask(workflowOptions);
       });
 
       // Reports were written by executors after our board copy was loaded.
@@ -576,9 +381,18 @@ export default function maestro(pi: ExtensionAPI) {
         });
       };
 
-      const results = await mapWithConcurrencyLimit(reviewable, config.maxParallel, (task) =>
-        reviewTask(task, reviewTier, ctx, signal, emitProgress)
-      );
+      const results = await mapWithConcurrencyLimit(reviewable, config.maxParallel, (task) => {
+        const workflowOptions: Parameters<typeof reviewTask>[0] = {
+          cwd: ctx.cwd,
+          task,
+          tier: reviewTier,
+          startExecutor,
+          onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
+          trackRun: (run) => trackRun(ctx, run),
+        };
+        if (signal) workflowOptions.signal = signal;
+        return reviewTask(workflowOptions);
+      });
 
       const summary = results
         .map(
