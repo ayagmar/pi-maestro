@@ -169,6 +169,21 @@ function hasMergeConflictNotes(task: Task): boolean {
   return notes !== undefined && /git conflict/i.test(notes);
 }
 
+/** An orphaned checkout with uncommitted changes or branch-only commits still holds recoverable work. */
+function orphanHasRecoverableWork(mainCwd: string, worktreePath: string, branch: string): boolean {
+  try {
+    if (git(worktreePath, ["status", "--porcelain"])) return true;
+  } catch {
+    // Not a live worktree checkout; fall back to inspecting the branch.
+  }
+  try {
+    const uniqueCommits = git(mainCwd, ["rev-list", "--count", branch, "--not", "HEAD"]);
+    return uniqueCommits !== "" && uniqueCommits !== "0";
+  } catch {
+    return false;
+  }
+}
+
 /** Inspect managed worktrees without changing the filesystem or git state. */
 export function inspectManagedWorktrees(
   mainCwd: string,
@@ -183,7 +198,8 @@ export function inspectManagedWorktrees(
     for (const attempt of task.attempts) {
       if (!attempt.worktreePath || !attempt.branch) continue;
       const path = resolve(attempt.worktreePath);
-      if (!isManagedPath(root, path) || !existsSync(path)) continue;
+      if (!isManagedPath(root, path)) continue;
+      const exists = existsSync(path);
 
       const isLatest = attempt === latestAttempt;
       let state: ManagedWorktreeState = "stale";
@@ -202,10 +218,19 @@ export function inspectManagedWorktrees(
         reason = `${task.id} can continue from this checkout`;
       }
 
+      if (
+        !exists &&
+        (state === "active" || state === "recoverable" || state === "retained-conflict")
+      ) {
+        reason = `${reason}; checkout is missing and cannot be recovered here`;
+      } else if (!exists) {
+        reason = `${reason}; checkout is missing, only the branch/registration remains`;
+      }
+
       const candidate: ManagedWorktreeInspection = {
         ref: { worktreePath: path, branch: attempt.branch },
         state,
-        exists: existsSync(path),
+        exists,
         taskId: task.id,
         attemptIndex: attempt.index,
         reason,
@@ -229,11 +254,15 @@ export function inspectManagedWorktrees(
       if (!entry.isDirectory()) continue;
       const worktreePath = resolve(root, entry.name);
       if (byPath.has(worktreePath)) continue;
+      const branch = `maestro/${entry.name}`;
+      const recoverable = orphanHasRecoverableWork(mainCwd, worktreePath, branch);
       byPath.set(worktreePath, {
-        ref: { worktreePath, branch: `maestro/${entry.name}` },
-        state: "orphaned",
+        ref: { worktreePath, branch },
+        state: recoverable ? "recoverable" : "orphaned",
         exists: true,
-        reason: "managed checkout has no board metadata",
+        reason: recoverable
+          ? "managed checkout has no board metadata but holds uncommitted or branch-only work"
+          : "managed checkout has no board metadata",
       });
     }
   }
@@ -244,33 +273,28 @@ export function inspectManagedWorktrees(
 }
 
 /**
- * Remove only confirmed stale/orphaned entries. The board and live-run state are
- * read again immediately before each removal so a newly active or recoverable
- * checkout is never removed from a stale diagnostic snapshot.
+ * Remove only the paths the caller explicitly confirmed. The board and live-run
+ * state are read again immediately before each removal so a checkout that became
+ * active or recoverable while the user was confirming is preserved, and a path
+ * that appeared after confirmation is never touched because it was not confirmed.
  */
 export function cleanupManagedWorktrees(
   mainCwd: string,
-  confirmed: boolean,
+  confirmedPaths: ReadonlySet<string>,
   loadCurrentBoard: () => Board,
   isTaskLive: (taskId: string) => boolean
 ): WorktreeCleanupResult {
-  const initial = inspectManagedWorktrees(mainCwd, loadCurrentBoard());
-  if (!confirmed) return { confirmed: false, removed: [], preserved: initial };
+  if (confirmedPaths.size === 0) return { confirmed: false, removed: [], preserved: [] };
 
   const removed: ManagedWorktreeInspection[] = [];
   const preserved: ManagedWorktreeInspection[] = [];
-  for (const entry of initial) {
-    if (entry.state !== "orphaned" && entry.state !== "stale") {
-      preserved.push(entry);
-      continue;
-    }
-
+  for (const worktreePath of confirmedPaths) {
     const board = loadCurrentBoard();
     const liveIds = new Set(
       board.tasks.filter((task) => isTaskLive(task.id)).map((task) => task.id)
     );
     const current = inspectManagedWorktrees(mainCwd, board, liveIds).find(
-      (candidate) => candidate.ref.worktreePath === entry.ref.worktreePath
+      (candidate) => candidate.ref.worktreePath === resolve(worktreePath)
     );
     if (!current || (current.state !== "orphaned" && current.state !== "stale")) {
       if (current) preserved.push(current);
@@ -295,6 +319,7 @@ export function sweepWorktrees(
   for (const ref of known) {
     const path = resolve(ref.worktreePath);
     if (!path.startsWith(`${root}${sep}`) || retainedPaths.has(path)) continue;
+    if (orphanHasRecoverableWork(mainCwd, path, ref.branch)) continue;
     removeWorktree(mainCwd, ref);
   }
 
@@ -303,7 +328,9 @@ export function sweepWorktrees(
     if (!entry.isDirectory()) continue;
     const worktreePath = join(root, entry.name);
     if (retainedPaths.has(resolve(worktreePath))) continue;
-    removeWorktree(mainCwd, { worktreePath, branch: `maestro/${entry.name}` });
+    const ref = { worktreePath, branch: `maestro/${entry.name}` };
+    if (orphanHasRecoverableWork(mainCwd, ref.worktreePath, ref.branch)) continue;
+    removeWorktree(mainCwd, ref);
   }
   git(mainCwd, ["worktree", "prune"]);
 }

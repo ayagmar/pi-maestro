@@ -137,6 +137,36 @@ test("orphan sweep is idempotent and preserves retained recovery worktrees", () 
   }
 });
 
+test("startup sweep preserves dirty and branch-ahead orphan worktrees", () => {
+  const cwd = repository();
+  try {
+    const dirty = createWorktree(cwd, "dirty-orphan", 1);
+    writeFileSync(join(dirty.worktreePath, "shared.txt"), "recoverable uncommitted work\n");
+
+    const ahead = createWorktree(cwd, "ahead-orphan", 1);
+    writeFileSync(join(ahead.worktreePath, "ahead.txt"), "recoverable committed work\n");
+    git(ahead.worktreePath, "add", "ahead.txt");
+    git(ahead.worktreePath, "commit", "-qm", "orphan work");
+
+    const stale = createWorktree(cwd, "stale-orphan", 1);
+
+    sweepWorktrees(cwd, []);
+
+    assert.equal(
+      readFileSync(join(dirty.worktreePath, "shared.txt"), "utf-8"),
+      "recoverable uncommitted work\n"
+    );
+    assert.equal(
+      readFileSync(join(ahead.worktreePath, "ahead.txt"), "utf-8"),
+      "recoverable committed work\n"
+    );
+    assert.equal(existsSync(stale.worktreePath), false);
+    assert.equal(git(cwd, "branch", "--list", stale.branch), "");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("managed worktree inspection distinguishes protected and cleanup states", () => {
   const cwd = repository();
   try {
@@ -175,6 +205,75 @@ test("managed worktree inspection distinguishes protected and cleanup states", (
   }
 });
 
+test("inspection reports missing managed checkouts from stale metadata", () => {
+  const cwd = repository();
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const task = createTask(board, { title: "Task", brief: "Change it", tier: "standard" });
+    forceStatus(task, "approved");
+    const ref = worktreeRef(cwd, task.id, 1);
+    task.attempts.push(attempt(ref.worktreePath, ref.branch));
+
+    const entries = inspectManagedWorktrees(cwd, board);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.state, "stale");
+    assert.equal(entries[0]?.exists, false);
+    assert.match(entries[0]?.reason ?? "", /checkout is missing/i);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("orphan with uncommitted work is classified recoverable and preserved on cleanup", () => {
+  const cwd = repository();
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const orphan = createWorktree(cwd, "orphan-dirty", 1);
+    writeFileSync(join(orphan.worktreePath, "shared.txt"), "uncommitted work\n");
+
+    const entries = inspectManagedWorktrees(cwd, board);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.state, "recoverable");
+
+    const cleaned = cleanupManagedWorktrees(
+      cwd,
+      new Set([orphan.worktreePath]),
+      () => board,
+      () => false
+    );
+    assert.equal(cleaned.removed.length, 0);
+    assert.equal(existsSync(orphan.worktreePath), true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("cleanup ignores paths that appeared after confirmation", () => {
+  const cwd = repository();
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const confirmed = createWorktree(cwd, "confirmed", 1);
+    const appeared = createWorktree(cwd, "appeared", 1);
+
+    const result = cleanupManagedWorktrees(
+      cwd,
+      new Set([confirmed.worktreePath]),
+      () => board,
+      () => false
+    );
+
+    assert.deepEqual(
+      result.removed.map((entry) => entry.ref.worktreePath),
+      [confirmed.worktreePath]
+    );
+    assert.equal(existsSync(confirmed.worktreePath), false);
+    assert.equal(existsSync(appeared.worktreePath), true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("confirmed cleanup removes only stale and orphaned worktrees", () => {
   const cwd = repository();
   try {
@@ -198,9 +297,10 @@ test("confirmed cleanup removes only stale and orphaned worktrees", () => {
     staleTask.attempts.push(attempt(stale.worktreePath, stale.branch));
     const orphaned = createWorktree(cwd, "orphan", 1);
 
+    const confirmedPaths = new Set([stale.worktreePath, orphaned.worktreePath]);
     const cancelled = cleanupManagedWorktrees(
       cwd,
-      false,
+      new Set<string>(),
       () => board,
       () => false
     );
@@ -211,7 +311,7 @@ test("confirmed cleanup removes only stale and orphaned worktrees", () => {
 
     const cleaned = cleanupManagedWorktrees(
       cwd,
-      true,
+      confirmedPaths,
       () => board,
       () => false
     );
@@ -233,9 +333,10 @@ test("cleanup rechecks live and newly recoverable worktrees before removal", () 
     const ref = createWorktree(cwd, task.id, 1);
     task.attempts.push(attempt(ref.worktreePath, ref.branch));
 
+    const confirmedPaths = new Set([ref.worktreePath]);
     const liveResult = cleanupManagedWorktrees(
       cwd,
-      true,
+      confirmedPaths,
       () => board,
       () => true
     );
@@ -243,14 +344,13 @@ test("cleanup rechecks live and newly recoverable worktrees before removal", () 
     assert.equal(liveResult.preserved[0]?.state, "active");
     assert.equal(existsSync(ref.worktreePath), true);
 
-    let reads = 0;
     forceStatus(task, "approved");
     const recoveryResult = cleanupManagedWorktrees(
       cwd,
-      true,
+      confirmedPaths,
       () => {
-        reads += 1;
-        if (reads > 1) forceStatus(task, "ready_for_review");
+        // The task became recoverable between confirmation and the pre-removal recheck.
+        forceStatus(task, "ready_for_review");
         return board;
       },
       () => false
