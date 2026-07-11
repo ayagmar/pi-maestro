@@ -15,10 +15,11 @@ you ──▶ orchestrator (SOTA model, your session)
               │ maestro_plan          ┌────────────────────────────┐
               ▼                         │ .pi/maestro/board.json   │
         task board  ◀──────────────────▶│ logs/  history.jsonl       │
-              │ maestro_run           └────────────────────────────┘
+              │ plan approval (optional) └────────────────────────────┘
+              │ maestro_run or maestro_drive
               ▼
    executors in parallel (cheap models, fresh context each)
-              │ maestro_review
+              │ maestro_review (or drive continues automatically)
               ▼
    adversarial reviewers (default config: read-only tools, fresh context)
               │ approve / request changes
@@ -127,10 +128,11 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   live transcript of the selected task on the right (tailed from the executor's event log,
   auto-refreshing twice a second). From the dashboard you can:
   - `↑↓` switch between executors, `PgUp/PgDn` scroll the transcript
-  - `s` **steer a running executor** — choose **Stop - wrong approach**, **Run the project
-    checks**, **Stay strictly within the task brief scope**, or **Custom message**. The selected
-    message is queued into that executor's next LLM call (executors run in RPC mode, so mid-run
-    steering works like it does in pi itself). The chooser scrolls in short terminals.
+  - `s` **steer a running executor** — choose **Stop - wrong approach, report current state**,
+    **Run the project checks before finishing**, **Stay strictly within the task brief scope**, or
+    **Custom message...** (which opens a text input). The message is queued into that executor's
+    next LLM call (executors run in RPC mode, so mid-run steering works like it does in pi itself).
+    The chooser scrolls to keep the selected template visible in short terminals.
   - `x` abort a running executor (task becomes `cancelled`)
   - `a` approve / `r` reopen a finished task without spawning a reviewer (a manual lifecycle
     override that bypasses adversarial review)
@@ -290,10 +292,10 @@ checks the review tier's primary model. This happens before spawning executors.
   `running` from a crash are marked `failed` with a notice; retry them with
   `maestro_run ["T3"]` — explicitly named failed/cancelled tasks are runnable again.
 - `/maestro replay [file]` refuses while executors are live and rechecks after the archive picker
-  closes. With no file it lists valid archives newest first; an explicit path must resolve inside
-  `.pi/maestro/archive/`. Maestro fully validates the archived board before changing state, archives
-  the current board first, then restores the selected board. Invalid or out-of-directory files leave
-  the current board untouched.
+  closes. With no file it lists valid archives newest first; `file` may be an archive filename or a
+  path, but must resolve inside `.pi/maestro/archive/`. Maestro fully validates the archived board
+  before changing state, archives the current board first, then restores the selected board. Invalid
+  or out-of-directory files leave the current board untouched.
 - `/maestro reset` refuses while executors are live, copies the current board to
   `.pi/maestro/archive/<timestamp>-board.json`, then (after TUI confirmation) clears tasks and the
   goal. Audit history and run logs remain. Maestro creates `.pi/maestro/.gitignore` containing `*`
