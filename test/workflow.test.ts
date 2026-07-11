@@ -79,10 +79,22 @@ test("sessionLabel numbers attempts and reviews while preserving the label forma
     tier: "standard",
   });
 
-  assert.equal(sessionLabel(task, "attempt", 1), "T1 A deliberately long title that exceeds f… · attempt 1");
-  assert.equal(sessionLabel(task, "attempt", 2), "T1 A deliberately long title that exceeds f… · attempt 2");
-  assert.equal(sessionLabel(task, "review", 1), "T1 A deliberately long title that exceeds f… · review 1");
-  assert.equal(sessionLabel(task, "review", 2), "T1 A deliberately long title that exceeds f… · review 2");
+  assert.equal(
+    sessionLabel(task, "attempt", 1),
+    "T1 A deliberately long title that exceeds f… · attempt 1"
+  );
+  assert.equal(
+    sessionLabel(task, "attempt", 2),
+    "T1 A deliberately long title that exceeds f… · attempt 2"
+  );
+  assert.equal(
+    sessionLabel(task, "review", 1),
+    "T1 A deliberately long title that exceeds f… · review 1"
+  );
+  assert.equal(
+    sessionLabel(task, "review", 2),
+    "T1 A deliberately long title that exceeds f… · review 2"
+  );
 });
 
 test("driveBoard approves dependent tasks across multiple rounds", async () => {
