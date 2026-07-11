@@ -11,7 +11,7 @@ import maestro, {
   sessionCanControlDrive,
   sessionSwitchBlocked,
 } from "../src/index.js";
-import { createTask, findTask, loadBoard, saveBoard } from "../src/board.js";
+import { createTask, findTask, listArchivedBoards, loadBoard, saveBoard } from "../src/board.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
 import { type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board } from "../src/types.js";
@@ -101,6 +101,15 @@ const fakeTheme = {
   bold: (text: string) => text,
 } as unknown as Theme;
 
+interface TestTui {
+  requestRender: () => void;
+  terminal: { rows: number };
+}
+
+interface TestComponent {
+  handleInput: (data: string) => void;
+}
+
 interface CommandCtx {
   cwd: string;
   hasUI: boolean;
@@ -115,15 +124,45 @@ interface CommandCtx {
     notify: (message: string, level?: string) => void;
     setStatus: () => void;
     setWidget: () => void;
+    custom?: <T>(
+      factory: (
+        tui: TestTui,
+        theme: Theme,
+        keybindings: object,
+        done: (value: T) => void
+      ) => TestComponent
+    ) => Promise<T>;
+    confirm?: (title: string, message: string) => Promise<boolean>;
   };
 }
 
 type EventHandler = (event: unknown, ctx: CommandCtx) => unknown;
 
+interface TuiStep {
+  keys: string[];
+  before?: () => void;
+}
+
+interface UiScript {
+  steps: TuiStep[];
+  confirmations?: boolean[];
+}
+
+const enter = "\r";
+const escapeKey = "\x1b";
+const down = "\x1b[B";
+const clearLine = "\x15";
+const deleteForward = "\x1b[3~";
+
+function select(index: number): string[] {
+  return [...Array.from({ length: index }, () => down), enter];
+}
+
 function loadMaestro(
   cwd: string,
   startExecutor?: StartExecutor,
-  sessionFile = owner
+  sessionFile = owner,
+  uiScript?: UiScript
 ): {
   ctx: CommandCtx;
   notices: string[];
@@ -132,6 +171,36 @@ function loadMaestro(
   events: Map<string, EventHandler>;
 } {
   const notices: string[] = [];
+  const ui = {
+    theme: fakeTheme,
+    notify: (message: string) => {
+      notices.push(message);
+    },
+    setStatus: () => {},
+    setWidget: () => {},
+    custom: async <T>(
+      factory: (
+        tui: TestTui,
+        theme: Theme,
+        keybindings: object,
+        done: (value: T) => void
+      ) => TestComponent
+    ): Promise<T> => {
+      const step = uiScript?.steps.shift();
+      assert.ok(step, "unexpected TUI modal");
+      return await new Promise<T>((resolve) => {
+        const component = factory(
+          { requestRender: () => {}, terminal: { rows: 40 } },
+          fakeTheme,
+          {},
+          resolve
+        );
+        step.before?.();
+        for (const key of step.keys) component.handleInput(key);
+      });
+    },
+    confirm: async (): Promise<boolean> => uiScript?.confirmations?.shift() ?? false,
+  };
   const ctx: CommandCtx = {
     cwd,
     hasUI: true,
@@ -141,12 +210,7 @@ function loadMaestro(
       getSessionFile: () => sessionFile,
       getSessionName: () => undefined,
     },
-    ui: {
-      theme: fakeTheme,
-      notify: (message) => notices.push(message),
-      setStatus: () => {},
-      setWidget: () => {},
-    },
+    ui,
   };
   let command: RegisteredCommand | undefined;
   const tools = new Map<string, RegisteredTool>();
@@ -198,6 +262,152 @@ async function withBoard(
     rmSync(cwd, { recursive: true, force: true });
   }
 }
+
+test("gated plan editor saves title, brief, tier, dependencies, and cancellation explicitly", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+      createTask(board, { title: "Old title", brief: "Old brief", tier: "standard" });
+      createTask(board, { title: "Dependency", brief: "Prepare work", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = {
+        steps: [
+          { keys: [enter] },
+          { keys: [enter] },
+          {
+            keys: [
+              ...Array.from({ length: "Old title".length }, () => deleteForward),
+              "New title",
+              enter,
+            ],
+          },
+          { keys: select(1) },
+          { keys: [clearLine, "New self-contained brief", enter] },
+          { keys: select(2) },
+          { keys: select(2) },
+          { keys: select(3) },
+          { keys: [clearLine, "t2", enter] },
+          { keys: select(4) },
+          { keys: select(1) },
+          {
+            keys: select(5),
+            before: () => {
+              const unsaved = findTask(loadBoard(cwd), "T1");
+              assert.equal(unsaved?.title, "Old title");
+              assert.equal(unsaved?.brief, "Old brief");
+              assert.equal(unsaved?.tier, "standard");
+              assert.deepEqual(unsaved?.dependsOn, []);
+              assert.equal(unsaved?.status, "todo");
+            },
+          },
+          { keys: [escapeKey] },
+        ],
+      };
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("plan", ctx);
+
+      const saved = findTask(loadBoard(cwd), "T1");
+      assert.equal(saved?.title, "New title");
+      assert.equal(saved?.brief, "New self-contained brief");
+      assert.equal(saved?.tier, "complex");
+      assert.deepEqual(saved?.dependsOn, ["T2"]);
+      assert.equal(saved?.status, "cancelled");
+      assert.ok(notices.includes("T1 plan changes saved."));
+      assert.equal(script.steps.length, 0);
+    }
+  );
+});
+
+test("gated plan editor cancel discards draft changes", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+      createTask(board, { title: "Original", brief: "Keep this", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = {
+        steps: [
+          { keys: [enter] },
+          { keys: [enter] },
+          { keys: [clearLine, "Discarded title", enter] },
+          { keys: select(6) },
+          { keys: [escapeKey] },
+        ],
+      };
+      const before = loadBoard(cwd);
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("plan", ctx);
+
+      assert.deepEqual(loadBoard(cwd), before);
+      assert.equal(
+        notices.some((notice) => notice.includes("changes saved")),
+        false
+      );
+      assert.equal(script.steps.length, 0);
+    }
+  );
+});
+
+test("gated plan approval reports invalid references and cycles without changing the board", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+      createTask(board, {
+        title: "First",
+        brief: "First work",
+        tier: "standard",
+        dependsOn: ["T2", "T99"],
+      });
+      createTask(board, {
+        title: "Second",
+        brief: "Second work",
+        tier: "standard",
+        dependsOn: ["T1"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = { steps: [{ keys: select(2) }, { keys: [escapeKey] }] };
+      const before = loadBoard(cwd);
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("plan", ctx);
+
+      assert.deepEqual(loadBoard(cwd), before);
+      assert.match(notices[0] ?? "", /T1 references unknown dependency "T99"/);
+      assert.match(notices[0] ?? "", /dependency cycle: T1 → T2 → T1/);
+      assert.match(notices[0] ?? "", /Edit the listed tasks before approving/);
+      assert.equal(script.steps.length, 0);
+    }
+  );
+});
+
+test("gated plan rejection confirmation archives and clears the board", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+      createTask(board, { title: "Reject me", brief: "Work", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = { steps: [{ keys: select(2) }], confirmations: [true] };
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("plan", ctx);
+
+      assert.deepEqual(loadBoard(cwd).tasks, []);
+      assert.equal(listArchivedBoards(cwd).length, 1);
+      assert.match(notices[0] ?? "", /Plan rejected\. Board archived at/);
+      assert.equal(script.steps.length, 0);
+      assert.deepEqual(script.confirmations, []);
+    }
+  );
+});
 
 test("/maestro costs reports the empty board plainly", async () => {
   await withBoard(
