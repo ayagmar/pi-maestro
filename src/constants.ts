@@ -5,7 +5,6 @@ export const STATE_ENTRY_TYPE = "maestro:event";
 
 /** All maestro state lives under this directory, relative to the project cwd. */
 export const STATE_DIR = ".pi/maestro";
-export const SESSIONS_DIR = "sessions";
 export const LOGS_DIR = "logs";
 
 export const PROJECT_CONFIG_FILE = ".pi/maestro.json";

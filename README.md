@@ -175,6 +175,7 @@ dead executors.
 /maestro board            full-screen live dashboard (also ctrl+alt+b)
 /maestro list             compact task picker
 /maestro open <taskId>    switch into an executor's session
+/maestro back             switch back to the previous session (after open)
 /maestro config           interactive settings editor (user scope)
 /maestro config project   interactive settings editor (repo scope)
 /maestro config show      print the resolved configuration
@@ -185,8 +186,10 @@ dead executors.
 
 - The board (`.pi/maestro/board.json`) is the single source of truth, written atomically.
   Restarting pi loses nothing; the status bar and board rebuild from disk.
-- Executors are `pi --mode rpc` child processes with persisted sessions under
-  `.pi/maestro/sessions/<task>-attempt-<n>/` and raw event logs under `.pi/maestro/logs/`.
+- Executors are `pi --mode rpc` child processes. Their sessions persist in pi's default
+  session storage (so `/resume` and usage reports include them; each attempt records its
+  session file on the board), with raw event logs under `.pi/maestro/logs/`. The
+  `.pi/maestro/` state dir gitignores itself — runtime state never floods your git status.
   RPC mode is what makes mid-run steering and clean aborts possible. Executor-side extension
   dialogs (e.g. permission gates) are auto-cancelled so headless runs can never hang.
 - Dependencies gate execution: a task only runs when everything it `dependsOn` is `approved`.

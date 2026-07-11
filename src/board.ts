@@ -28,7 +28,12 @@ export function loadBoard(cwd: string): Board {
 }
 
 export function saveBoard(cwd: string, board: Board): void {
-  mkdirSync(stateDir(cwd), { recursive: true });
+  const dir = stateDir(cwd);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+    // Runtime state (board, logs) has no place in version control.
+    writeFileSync(join(dir, ".gitignore"), "*\n", "utf-8");
+  }
   const file = boardFile(cwd);
   const tmp = `${file}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(board, null, 2)}\n`, "utf-8");

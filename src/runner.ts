@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
-import { KILL_GRACE_MS, LOGS_DIR, SESSIONS_DIR } from "./constants.js";
+import { KILL_GRACE_MS, LOGS_DIR } from "./constants.js";
 import { type Attempt, type TierConfig, type Usage } from "./types.js";
 
 export interface RunOutcome {
@@ -43,6 +43,7 @@ export interface JsonEvent {
   command?: string;
   success?: boolean;
   error?: string;
+  data?: { sessionFile?: string };
   toolName?: string;
   args?: Record<string, unknown> | null;
   message?: {
@@ -90,14 +91,11 @@ export function startExecutor(options: {
   signal?: AbortSignal;
   onUpdate?: (update: RunUpdate) => void;
 }): ExecutorHandle {
-  const sessionDir = join(options.stateDir, SESSIONS_DIR, options.runId);
   const logFile = join(options.stateDir, LOGS_DIR, `${options.runId}.jsonl`);
-  mkdirSync(sessionDir, { recursive: true });
   mkdirSync(dirname(logFile), { recursive: true });
 
   const attempt: Attempt = {
     index: 0,
-    sessionDir,
     logFile,
     thinking: options.tier.thinking,
     startedAt: Date.now(),
@@ -106,7 +104,9 @@ export function startExecutor(options: {
   };
   if (options.tier.model !== undefined) attempt.model = options.tier.model;
 
-  const args = ["--mode", "rpc", "--session-dir", sessionDir, "--thinking", options.tier.thinking];
+  // Sessions go to pi's default storage so /resume and usage reports see them;
+  // the file path comes back via get_state and is stored on the attempt.
+  const args = ["--mode", "rpc", "--thinking", options.tier.thinking];
   if (options.tier.model) args.push("--model", options.tier.model);
   if (options.tier.tools) args.push("--tools", options.tier.tools);
 
@@ -166,6 +166,11 @@ export function startExecutor(options: {
       // permission gates fail safe instead of hanging the run.
       if (event.type === "extension_ui_request" && event.id) {
         send({ type: "extension_ui_response", id: event.id, cancelled: true });
+        return;
+      }
+
+      if (event.type === "response" && event.command === "get_state" && event.data?.sessionFile) {
+        attempt.sessionFile = event.data.sessionFile;
         return;
       }
 
@@ -266,6 +271,8 @@ export function startExecutor(options: {
       else options.signal.addEventListener("abort", abort, { once: true });
     }
 
+    send({ type: "set_session_name", name: `maestro ${options.runId}` });
+    send({ type: "get_state" });
     send({ type: "prompt", message: options.prompt });
   });
 
@@ -277,12 +284,16 @@ export function startExecutor(options: {
   };
 }
 
-/** Locate the persisted session file for an attempt, for attaching in the TUI. */
-export function findSessionFile(sessionDir: string): string | undefined {
-  if (!existsSync(sessionDir)) return undefined;
-  const files = readdirSync(sessionDir)
+/** Locate an attempt's session file: direct reference, or legacy per-attempt dir scan. */
+export function findSessionFile(attempt: {
+  sessionFile?: string;
+  sessionDir?: string;
+}): string | undefined {
+  if (attempt.sessionFile && existsSync(attempt.sessionFile)) return attempt.sessionFile;
+  if (!attempt.sessionDir || !existsSync(attempt.sessionDir)) return undefined;
+  const files = readdirSync(attempt.sessionDir)
     .filter((name) => name.endsWith(".jsonl"))
-    .map((name) => join(sessionDir, name))
+    .map((name) => join(attempt.sessionDir ?? "", name))
     .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
   return files[0];
 }

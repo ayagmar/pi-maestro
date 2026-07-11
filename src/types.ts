@@ -16,7 +16,10 @@ export interface Usage {
 
 export interface Attempt {
   index: number;
-  sessionDir: string;
+  /** Session file in pi's default session storage, reported by the executor via get_state. */
+  sessionFile?: string;
+  /** Legacy (pre-0.2): custom per-attempt session dir inside the project. */
+  sessionDir?: string;
   logFile: string;
   model?: string;
   thinking: string;

@@ -117,6 +117,8 @@ export default function maestro(pi: ExtensionAPI) {
   if (process.env.PI_MAESTRO_EXECUTOR === "1") return;
 
   const liveRuns = new Map<string, LiveRun>();
+  /** Session we switched away from when opening an executor session (for /maestro back). */
+  let previousSession: string | undefined;
 
   function refreshUI(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
@@ -758,6 +760,7 @@ export default function maestro(pi: ExtensionAPI) {
       const options = [
         "start",
         "handoff",
+        "back",
         "board",
         "list",
         "open",
@@ -793,6 +796,16 @@ export default function maestro(pi: ExtensionAPI) {
             },
             { triggerTurn: true }
           );
+          return;
+        }
+        case "back": {
+          if (!previousSession) {
+            notify(ctx, "No session to go back to. Use /resume to pick one.", "warning");
+            return;
+          }
+          const target = previousSession;
+          previousSession = ctx.sessionManager.getSessionFile();
+          await ctx.switchSession(target);
           return;
         }
         case "board":
@@ -888,6 +901,7 @@ export default function maestro(pi: ExtensionAPI) {
               `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
               `/${COMMAND} list           compact task picker`,
               `/${COMMAND} open <taskId>  switch into an executor session`,
+              `/${COMMAND} back           switch back to the previous session`,
               `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
               `/${COMMAND} reset          clear the board`,
             ].join("\n")
@@ -1059,17 +1073,19 @@ export default function maestro(pi: ExtensionAPI) {
       return;
     }
     const attempt = task.attempts.at(-1);
-    const sessionFile = attempt ? findSessionFile(attempt.sessionDir) : undefined;
+    const sessionFile = attempt ? findSessionFile(attempt) : undefined;
     if (!sessionFile) {
       notify(ctx, `${task.id} has no executor session yet.`, "warning");
       return;
     }
     const ok = await ctx.ui.confirm(
       `Open executor session for ${task.id}?`,
-      "This switches the current TUI into the executor's session. Use /resume to come back to the orchestrator."
+      `This switches the current TUI into the executor's session. Use /${COMMAND} back to return here.`
     );
     if (!ok) return;
-    await ctx.switchSession(sessionFile);
+    const current = ctx.sessionManager.getSessionFile();
+    const result = await ctx.switchSession(sessionFile);
+    if (!result.cancelled && current) previousSession = current;
   }
 
   async function pickFromList(

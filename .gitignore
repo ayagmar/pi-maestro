@@ -35,3 +35,4 @@ coverage/
 
 # Conductor run state (in consumer projects)
 .pi/conductor/
+.pi/maestro/
