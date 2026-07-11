@@ -295,7 +295,7 @@ export class Dashboard {
       }
     }
 
-    const steerLines = this.renderSteerControls(width);
+    const steerLines = this.renderSteerControls(width, height);
     const visible = Math.max(0, height - steerLines.length);
     const maxScroll = Math.max(0, wrapped.length - visible);
     if (this.scrollUp > maxScroll) this.scrollUp = maxScroll;
@@ -306,22 +306,32 @@ export class Dashboard {
     return body.slice(0, height);
   }
 
-  private renderSteerControls(width: number): string[] {
+  private renderSteerControls(width: number, height: number): string[] {
     if (this.mode === "steer") {
       return [
         this.theme.fg("accent", "steer ▸ ") + (this.steerInput.render(width - 8)[0] ?? ""),
         this.theme.fg("dim", "enter send · esc cancel"),
-      ].slice(0, this.bodyHeight);
+      ].slice(0, height);
     }
     if (this.mode !== "steer_templates") return [];
 
-    const lines = STEER_OPTIONS.map((option, index) => {
-      const marker = index === this.steerOption ? "▶ " : "  ";
-      const text = truncateToWidth(`${marker}${option}`, width);
-      return index === this.steerOption ? this.theme.fg("accent", text) : text;
-    });
-    lines.push(this.theme.fg("dim", "↑↓ select · enter choose · esc cancel"));
-    return lines.slice(0, this.bodyHeight);
+    const optionRows = Math.min(STEER_OPTIONS.length, height);
+    const firstOption = Math.min(
+      Math.max(0, this.steerOption - optionRows + 1),
+      STEER_OPTIONS.length - optionRows
+    );
+    const lines = STEER_OPTIONS.slice(firstOption, firstOption + optionRows).map(
+      (option, offset) => {
+        const index = firstOption + offset;
+        const marker = index === this.steerOption ? "▶ " : "  ";
+        const text = truncateToWidth(`${marker}${option}`, width);
+        return index === this.steerOption ? this.theme.fg("accent", text) : text;
+      }
+    );
+    if (height > STEER_OPTIONS.length) {
+      lines.push(this.theme.fg("dim", "↑↓ select · enter choose · esc cancel"));
+    }
+    return lines;
   }
 
   private renderFooter(width: number): string {

@@ -168,6 +168,29 @@ test("dashboard sends the selected steering template", () => {
   }
 });
 
+test("dashboard keeps every steering template visible at constrained height", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board, { isLive: () => true }), {
+    bodyHeight: 2,
+  });
+  const options = [
+    "Stop - wrong approach, report current state",
+    "Run the project checks before finishing",
+    "Stay strictly within the task brief scope",
+    "Custom message...",
+  ];
+  try {
+    dashboard.handleInput("s");
+    for (const option of options) {
+      const body = dashboard.render(120).slice(1, 3).join("\n");
+      assert.match(body, new RegExp(option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      dashboard.handleInput("\x1b[B");
+    }
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard cancels the steering template chooser with escape", () => {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
   let closed = false;
