@@ -103,6 +103,17 @@ export default function maestro(pi: ExtensionAPI) {
     return board.ownerSessions.includes(current);
   }
 
+  /**
+   * Orchestrator sessions otherwise show up as "(no messages)" in the
+   * session picker: their first entry is a custom briefing, not a user
+   * message pi can derive a title from.
+   */
+  function nameSessionAfterGoal(ctx: ExtensionContext, goal: string, role: string): void {
+    if (ctx.sessionManager.getSessionName()) return; // don't overwrite a user-chosen name
+    const summary = goal.length > 48 ? `${goal.slice(0, 48)}…` : goal;
+    pi.setSessionName(`${role}: ${summary}`);
+  }
+
   /** Record the current session as an owner of the board (idempotent). */
   function adoptBoard(ctx: ExtensionContext): void {
     const current = ctx.sessionManager.getSessionFile();
@@ -829,6 +840,7 @@ export default function maestro(pi: ExtensionAPI) {
           board.goal = rest;
           saveBoard(ctx.cwd, board);
           adoptBoard(ctx);
+          nameSessionAfterGoal(ctx, rest, "maestro");
           pi.sendMessage(
             {
               customType: MESSAGE_TYPE,
@@ -933,6 +945,7 @@ export default function maestro(pi: ExtensionAPI) {
             ...(parentSession ? { parentSession } : {}),
             withSession: async (fresh) => {
               adoptBoard(fresh);
+              nameSessionAfterGoal(fresh, board.goal ?? "maestro run", "supervisor");
               await fresh.sendMessage(
                 { customType: MESSAGE_TYPE, content: briefing, display: true },
                 { triggerTurn: true }

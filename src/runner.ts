@@ -86,6 +86,8 @@ export function startExecutor(options: {
   cwd: string;
   prompt: string;
   tier: TierConfig;
+  /** Human-readable session name shown in pi's session picker (e.g. "T3 · add replay command"). */
+  sessionLabel?: string;
   /** Abort the run when attempt cost exceeds this (USD). 0 disables the cap. */
   maxCost?: number;
   signal?: AbortSignal;
@@ -271,7 +273,7 @@ export function startExecutor(options: {
       else options.signal.addEventListener("abort", abort, { once: true });
     }
 
-    send({ type: "set_session_name", name: `maestro ${options.runId}` });
+    send({ type: "set_session_name", name: options.sessionLabel ?? `maestro ${options.runId}` });
     send({ type: "get_state" });
     send({ type: "prompt", message: options.prompt });
   });

@@ -407,6 +407,7 @@ export async function executeTask(options: {
       cwd: worktree?.worktreePath ?? cwd,
       prompt: buildExecutorPrompt(task, dependencyReports),
       tier: attemptTier,
+      sessionLabel: sessionLabel(task, "attempt", attemptIndex),
       onUpdate: (update) => onUpdate(task.id, update),
     };
     if (signal) runOptions.signal = signal;
@@ -494,6 +495,13 @@ function loadBoardAttemptCount(cwd: string, taskId: string): number | undefined 
   return findTask(loadBoard(cwd), taskId)?.attempts.length;
 }
 
+/** Session picker name: "T3 add replay command · attempt 2" beats "maestro T3-attempt-2". */
+export function sessionLabel(task: Task, kind: "attempt" | "review", index: number): string {
+  const title = task.title.length > 40 ? `${task.title.slice(0, 40)}…` : task.title;
+  const suffix = index > 1 ? ` ${index}` : "";
+  return `${task.id} ${title} · ${kind}${suffix}`;
+}
+
 /** Conventional commit message for a task: orchestrator-provided, or derived from the title. */
 export function taskCommitMessage(task: Task): string {
   if (task.commitMessage) return task.commitMessage;
@@ -526,6 +534,7 @@ export async function reviewTask(options: {
     cwd: worktree?.worktreePath ?? cwd,
     prompt: buildReviewPrompt(task, report),
     tier,
+    sessionLabel: sessionLabel(task, "review", task.attempts.length),
     onUpdate: (update) => onUpdate(task.id, update),
   };
   if (signal) runOptions.signal = signal;
