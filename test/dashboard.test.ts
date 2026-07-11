@@ -134,10 +134,55 @@ test("dashboard steer mode routes submitted text to the live run", () => {
     })
   );
   try {
-    dashboard.handleInput("s"); // enter steer mode
+    dashboard.handleInput("s"); // open steering templates
+    dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r"); // select Custom message...
     for (const ch of "focus on tests") dashboard.handleInput(ch);
     dashboard.handleInput("\r"); // submit
     assert.deepEqual(steered, ["T1:focus on tests"]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard sends the selected steering template", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const steered: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => true,
+      steer: (taskId, message) => steered.push(`${taskId}:${message}`),
+    })
+  );
+  try {
+    dashboard.handleInput("s");
+    dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+
+    assert.deepEqual(steered, ["T1:Run the project checks before finishing"]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard cancels the steering template chooser with escape", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  let closed = false;
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, { isLive: () => true, close: () => (closed = true) })
+  );
+  try {
+    dashboard.handleInput("s");
+    assert.match(dashboard.render(100).join("\n"), /Custom message\.\.\./);
+
+    dashboard.handleInput("\x1b");
+
+    assert.equal(closed, false);
+    assert.doesNotMatch(dashboard.render(100).join("\n"), /Custom message\.\.\./);
   } finally {
     dashboard.dispose();
   }

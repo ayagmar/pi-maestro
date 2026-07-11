@@ -21,7 +21,14 @@ const REFRESH_MS = 500;
 export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
 const MIN_DASHBOARD_BODY_HEIGHT = 2;
 
-type Mode = "browse" | "steer" | "confirm_abort";
+type Mode = "browse" | "steer_templates" | "steer" | "confirm_abort";
+
+const STEER_OPTIONS = [
+  "Stop - wrong approach, report current state",
+  "Run the project checks before finishing",
+  "Stay strictly within the task brief scope",
+  "Custom message...",
+] as const;
 
 export interface DashboardOptions {
   /** Number of rows shared by the task list and transcript panes. */
@@ -46,6 +53,7 @@ export class Dashboard {
   private mode: Mode = "browse";
   private scrollUp = 0;
   private hideDone = false;
+  private steerOption = 0;
   private steerInput = new Input();
   private tails = new Map<string, TranscriptTail>();
   private timer: ReturnType<typeof setInterval>;
@@ -103,6 +111,12 @@ export class Dashboard {
   }
 
   handleInput(data: string): void {
+    if (this.mode === "steer_templates") {
+      this.handleSteerTemplateInput(data);
+      this.actions.requestRender();
+      return;
+    }
+
     if (this.mode === "steer") {
       this.steerInput.handleInput(data);
       this.actions.requestRender();
@@ -139,7 +153,8 @@ export class Dashboard {
     } else if (matchesKey(data, "pageDown")) {
       this.scrollUp = Math.max(0, this.scrollUp - 10);
     } else if (data === "s" && task && this.actions.isLive(task.id)) {
-      this.mode = "steer";
+      this.steerOption = 0;
+      this.mode = "steer_templates";
     } else if (data === "x" && task && this.actions.isLive(task.id)) {
       this.mode = "confirm_abort";
     } else if (data === "a" && task && !this.actions.isLive(task.id)) {
@@ -151,6 +166,30 @@ export class Dashboard {
       return;
     }
     this.actions.requestRender();
+  }
+
+  private handleSteerTemplateInput(data: string): void {
+    if (matchesKey(data, "escape")) {
+      this.mode = "browse";
+      return;
+    }
+    if (matchesKey(data, "up")) {
+      this.steerOption = Math.max(0, this.steerOption - 1);
+      return;
+    }
+    if (matchesKey(data, "down")) {
+      this.steerOption = Math.min(STEER_OPTIONS.length - 1, this.steerOption + 1);
+      return;
+    }
+    if (!matchesKey(data, "return")) return;
+
+    const message = STEER_OPTIONS[this.steerOption];
+    if (!message) return;
+    if (message === "Custom message...") {
+      this.mode = "steer";
+      return;
+    }
+    this.submitSteer(message);
   }
 
   render(width: number): string[] {
@@ -229,15 +268,16 @@ export class Dashboard {
     const task = this.selectedTask();
     if (!task) return [];
     const tail = this.tailFor(task);
-    if (!tail) return [theme.fg("muted", "No attempt yet — task has not run.")];
-    tail.poll();
-
-    if (tail.items.length === 0) {
-      return [theme.fg("muted", "Waiting for executor output…")];
-    }
+    tail?.poll();
 
     const wrapped: string[] = [];
-    for (const item of tail.items) {
+    if (!tail) {
+      wrapped.push(theme.fg("muted", "No attempt yet — task has not run."));
+    } else if (tail.items.length === 0) {
+      wrapped.push(theme.fg("muted", "Waiting for executor output…"));
+    }
+
+    for (const item of tail?.items ?? []) {
       if (item.kind === "tool") {
         wrapped.push(
           theme.fg("muted", "→ ") + theme.fg("toolTitle", truncateToWidth(item.text, width - 2))
@@ -255,18 +295,33 @@ export class Dashboard {
       }
     }
 
-    const reserved = this.mode === "steer" ? 2 : 0;
-    const visible = height - reserved;
+    const steerLines = this.renderSteerControls(width);
+    const visible = Math.max(0, height - steerLines.length);
     const maxScroll = Math.max(0, wrapped.length - visible);
     if (this.scrollUp > maxScroll) this.scrollUp = maxScroll;
     const end = wrapped.length - this.scrollUp;
     const body = wrapped.slice(Math.max(0, end - visible), end);
 
-    if (this.mode === "steer") {
-      body.push(theme.fg("accent", "steer ▸ ") + (this.steerInput.render(width - 8)[0] ?? ""));
-      body.push(theme.fg("dim", "enter send · esc cancel"));
-    }
+    body.push(...steerLines);
     return body.slice(0, height);
+  }
+
+  private renderSteerControls(width: number): string[] {
+    if (this.mode === "steer") {
+      return [
+        this.theme.fg("accent", "steer ▸ ") + (this.steerInput.render(width - 8)[0] ?? ""),
+        this.theme.fg("dim", "enter send · esc cancel"),
+      ].slice(0, this.bodyHeight);
+    }
+    if (this.mode !== "steer_templates") return [];
+
+    const lines = STEER_OPTIONS.map((option, index) => {
+      const marker = index === this.steerOption ? "▶ " : "  ";
+      const text = truncateToWidth(`${marker}${option}`, width);
+      return index === this.steerOption ? this.theme.fg("accent", text) : text;
+    });
+    lines.push(this.theme.fg("dim", "↑↓ select · enter choose · esc cancel"));
+    return lines.slice(0, this.bodyHeight);
   }
 
   private renderFooter(width: number): string {
