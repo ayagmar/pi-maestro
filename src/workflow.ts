@@ -445,9 +445,18 @@ export async function executeTask(options: {
       : outcome.exitCode !== 0 || outcome.errorMessage
         ? "failed"
         : "ready_for_review";
+    // Dead on arrival (zero turns) or the provider died mid-run from an
+    // exhausted quota: neither is the task's fault. Such attempts do not
+    // consume maxAttempts budget and fall back to the next model when one
+    // is configured — retrying the same exhausted provider is pointless.
+    const quotaFailure =
+      outcome.usage.turns > 0 &&
+      /usage limit|rate limit|quota|too many requests|resource.?exhausted/i.test(
+        outcome.errorMessage ?? ""
+      );
     const providerFailure =
       status === "failed" &&
-      outcome.usage.turns === 0 &&
+      (outcome.usage.turns === 0 || quotaFailure) &&
       !outcome.aborted &&
       !outcome.errorMessage?.startsWith("cost cap exceeded:") &&
       models.length > 1;

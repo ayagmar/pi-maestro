@@ -501,3 +501,57 @@ test("approval auto-commits the task's touched files as one conventional commit"
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("mid-run quota exhaustion falls back to the next model without consuming attempts", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-quota-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    let calls = 0;
+    const flaky: StartExecutor = (options) => {
+      calls += 1;
+      const failing = calls === 1;
+      const result: RunOutcome = failing
+        ? {
+            exitCode: 1,
+            usage: { input: 100, output: 50, cost: 0.01, turns: 3 },
+            finalReport: "",
+            touchedFiles: [],
+            aborted: false,
+            errorMessage: "Codex error: The usage limit has been reached",
+          }
+        : {
+            exitCode: 0,
+            usage: { input: 100, output: 50, cost: 0.01, turns: 2 },
+            finalReport: "done",
+            touchedFiles: [],
+            aborted: false,
+          };
+      return {
+        attempt: { ...attempt(), model: options.tier.model ?? "" },
+        outcome: Promise.resolve(result),
+        steer: () => {},
+        abort: () => {},
+      };
+    };
+
+    const snap = await executeTask({
+      cwd,
+      board,
+      task,
+      tier: { thinking: "low", model: "provider-a/model-a", fallbacks: ["provider-b/model-b"] },
+      config,
+      startExecutor: flaky,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(calls, 2, "fallback model should have been tried");
+    assert.equal(snap.status, "ready_for_review");
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.attempts.filter((a) => !a.providerFailure).length, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
