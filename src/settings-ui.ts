@@ -5,13 +5,13 @@ import {
 import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 import {
   type ConfigScope,
-  PRESETS,
-  THINKING_LEVELS,
   configFile,
   findPreset,
   loadConfig,
   matchingPreset,
+  PRESETS,
   saveConfig,
+  THINKING_LEVELS,
 } from "./config.js";
 import { type MaestroConfig } from "./types.js";
 
@@ -67,6 +67,14 @@ export async function showSettings(
           "How many executors run at once. Higher is faster for independent tasks but multiplies burst API usage.",
       },
       {
+        id: "useWorktrees",
+        label: "Parallel git worktrees",
+        currentValue: config.useWorktrees ? "on" : "off",
+        values: ["off", "on"],
+        description:
+          "Isolate each task in a parallel batch in its own git worktree. Approved branches merge into the original tree; conflicts are retained for recovery.",
+      },
+      {
         id: "maxAttempts",
         label: "Max attempts per task",
         currentValue: String(config.maxAttempts),
@@ -90,7 +98,7 @@ export async function showSettings(
         label: `${name} · model`,
         currentValue: tier.model ?? "(pi default)",
         values: MODEL_CHOICES,
-        description: `${tierDescription(name)} "(pi default)" inherits your current pi model — works with any provider.`,
+        description: `${tierDescription(name)} "(pi default)" inherits your current pi model. Ordered fallbacks can be configured in JSON config.`,
       });
       items.push({
         id: `thinking:${name}`,
@@ -112,6 +120,11 @@ export async function showSettings(
     }
     if (id === "maxParallel") {
       config.maxParallel = Number(value);
+      persist();
+      return;
+    }
+    if (id === "useWorktrees") {
+      config.useWorktrees = value === "on";
       persist();
       return;
     }

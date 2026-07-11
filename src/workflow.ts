@@ -1,6 +1,6 @@
 import { type ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { findTask, forceStatus, stateDir, transition, updateTask } from "./board.js";
-import { resolveTierModel } from "./config.js";
+import { findTask, forceStatus, loadBoard, stateDir, transition, updateTask } from "./board.js";
+import { resolveTierModels } from "./config.js";
 import { taskUsage, truncateText } from "./format.js";
 import { buildExecutorPrompt, buildReviewPrompt, parseVerdict } from "./prompts.js";
 import { type ExecutorHandle, type RunUpdate } from "./runner.js";
@@ -11,6 +11,25 @@ import {
   type TaskStatus,
   type TierConfig,
 } from "./types.js";
+import { mergeWorktree, removeWorktree, type WorktreeRef } from "./worktree.js";
+
+const mainTreeOperationTails = new Map<string, Promise<void>>();
+
+async function serializeMainTreeOperation<T>(cwd: string, operation: () => T): Promise<T> {
+  const previous = mainTreeOperationTails.get(cwd) ?? Promise.resolve();
+  const result = previous.then(operation);
+  const tail = result.then(
+    () => {},
+    () => {}
+  );
+  mainTreeOperationTails.set(cwd, tail);
+
+  try {
+    return await result;
+  } finally {
+    if (mainTreeOperationTails.get(cwd) === tail) mainTreeOperationTails.delete(cwd);
+  }
+}
 
 export interface TaskSnapshot {
   id: string;
@@ -69,12 +88,15 @@ export function preflightTaskTiers(
     const tier = config.tiers[task.tier] ?? config.tiers.standard;
     if (!tier) throw new Error(`No tier config for "${task.tier}" and no standard fallback`);
 
-    const resolution = resolveTierModel(task.tier, tier, modelRegistry, preferredProvider);
+    const resolution = resolveTierModels(task.tier, tier, modelRegistry, preferredProvider);
     if (!resolution.ok) throw new Error(resolution.error);
 
     const resolved: TierConfig = { ...tier };
-    if (resolution.modelArg === undefined) delete resolved.model;
-    else resolved.model = resolution.modelArg;
+    const [primary, ...fallbacks] = resolution.modelArgs;
+    if (primary === undefined) delete resolved.model;
+    else resolved.model = primary;
+    if (fallbacks.length === 0) delete resolved.fallbacks;
+    else resolved.fallbacks = fallbacks.filter((model): model is string => model !== undefined);
     resolvedTiers.set(task.tier, resolved);
   }
 
@@ -87,14 +109,17 @@ export async function executeTask(options: {
   task: Task;
   tier: TierConfig;
   config: MaestroConfig;
+  worktree?: WorktreeRef;
   startExecutor: StartExecutor;
   signal?: AbortSignal;
   onUpdate: WorkflowUpdate;
   trackRun: TrackRun;
 }): Promise<TaskSnapshot> {
-  const { cwd, board, task, tier, config, startExecutor, signal, onUpdate, trackRun } = options;
+  const { cwd, board, task, tier, config, worktree, startExecutor, signal, onUpdate, trackRun } =
+    options;
 
-  if (task.attempts.length >= config.maxAttempts) {
+  const consumedAttempts = task.attempts.filter((attempt) => !attempt.providerFailure).length;
+  if (consumedAttempts >= config.maxAttempts) {
     const updated = updateTask(cwd, task.id, (fresh) => {
       forceStatus(fresh, "failed");
     });
@@ -107,61 +132,98 @@ export async function executeTask(options: {
   const dependencyReports = task.dependsOn
     .map((depId) => findTask(board, depId))
     .filter((dep): dep is Task => dep !== undefined && lastReport(dep) !== undefined)
-    .map((dep) => ({ id: dep.id, title: dep.title, report: lastReport(dep) ?? "" }));
+    .map((dep) => {
+      const recordedAttempt = dep.attempts.at(-1);
+      const report = {
+        id: dep.id,
+        title: dep.title,
+        report: recordedAttempt?.finalReport ?? "",
+      };
+      if (!recordedAttempt?.sessionFile) return report;
+      return { ...report, sessionFile: recordedAttempt.sessionFile };
+    });
 
-  const attemptIndex = task.attempts.length + 1;
-  const runOptions: Parameters<StartExecutor>[0] = {
-    stateDir: stateDir(cwd),
-    runId: `${task.id}-attempt-${attemptIndex}`,
-    cwd,
-    prompt: buildExecutorPrompt(task, dependencyReports),
-    tier,
-    onUpdate: (update) => onUpdate(task.id, update),
-  };
-  if (signal) runOptions.signal = signal;
-  if (config.maxCostPerTask > 0) runOptions.maxCost = config.maxCostPerTask;
+  const models = [tier.model, ...(tier.fallbacks ?? [])];
+  let updated: Task | undefined;
 
-  const run = startExecutor(runOptions);
-  run.attempt.index = attemptIndex;
-  const untrack = trackRun({
-    taskId: task.id,
-    kind: "execute",
-    turns: 0,
-    cost: 0,
-    lastActivity: "starting…",
-    handle: run,
-  });
+  for (const [modelIndex, model] of models.entries()) {
+    const attemptIndex = (loadBoardAttemptCount(cwd, task.id) ?? task.attempts.length) + 1;
+    const attemptTier: TierConfig = { ...tier };
+    delete attemptTier.fallbacks;
+    if (model === undefined) delete attemptTier.model;
+    else attemptTier.model = model;
 
-  // All board writes go through updateTask (fresh load per write) because
-  // parallel executors finish in arbitrary order.
-  updateTask(cwd, task.id, (fresh) => {
-    transition(fresh, "running");
-    fresh.attempts.push(run.attempt);
-  });
+    const runOptions: Parameters<StartExecutor>[0] = {
+      stateDir: stateDir(cwd),
+      runId: `${task.id}-attempt-${attemptIndex}`,
+      cwd: worktree?.worktreePath ?? cwd,
+      prompt: buildExecutorPrompt(task, dependencyReports),
+      tier: attemptTier,
+      onUpdate: (update) => onUpdate(task.id, update),
+    };
+    if (signal) runOptions.signal = signal;
+    if (config.maxCostPerTask > 0) runOptions.maxCost = config.maxCostPerTask;
 
-  const outcome = await run.outcome;
-  untrack();
+    const run = startExecutor(runOptions);
+    run.attempt.index = attemptIndex;
+    if (worktree) {
+      run.attempt.worktreePath = worktree.worktreePath;
+      run.attempt.branch = worktree.branch;
+    }
+    const untrack = trackRun({
+      taskId: task.id,
+      kind: "execute",
+      turns: 0,
+      cost: 0,
+      lastActivity: "starting…",
+      handle: run,
+    });
 
-  if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
-  if (outcome.model !== undefined) run.attempt.model = outcome.model;
+    updateTask(cwd, task.id, (fresh) => {
+      transition(fresh, "running");
+      fresh.attempts.push(run.attempt);
+    });
 
-  const status: TaskStatus = outcome.aborted
-    ? "cancelled"
-    : outcome.exitCode !== 0 || outcome.errorMessage
-      ? "failed"
-      : "ready_for_review";
+    const outcome = await run.outcome;
+    untrack();
+    if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
+    if (outcome.model !== undefined) run.attempt.model = outcome.model;
+    if (outcome.errorMessage) run.attempt.errorMessage = outcome.errorMessage;
+    run.attempt.exitCode = outcome.exitCode;
 
-  const updated = updateTask(cwd, task.id, (fresh) => {
-    transition(fresh, status);
-    fresh.attempts[fresh.attempts.length - 1] = run.attempt;
-  });
+    const status: TaskStatus = outcome.aborted
+      ? "cancelled"
+      : outcome.exitCode !== 0 || outcome.errorMessage
+        ? "failed"
+        : "ready_for_review";
+    const providerFailure =
+      status === "failed" &&
+      outcome.usage.turns === 0 &&
+      !outcome.aborted &&
+      !outcome.errorMessage?.startsWith("cost cap exceeded:") &&
+      models.length > 1;
+    const canFallback = providerFailure && modelIndex < models.length - 1;
+    if (providerFailure) run.attempt.providerFailure = true;
 
-  const note = outcome.aborted
-    ? "aborted by user"
-    : status === "failed"
-      ? (outcome.errorMessage ?? `exit code ${outcome.exitCode}`)
-      : undefined;
-  return snapshot(updated ?? task, note);
+    updated = updateTask(cwd, task.id, (fresh) => {
+      transition(fresh, status);
+      fresh.attempts[fresh.attempts.length - 1] = run.attempt;
+    });
+    if (canFallback) continue;
+
+    const note = outcome.aborted
+      ? "aborted by user"
+      : status === "failed"
+        ? (outcome.errorMessage ?? `exit code ${outcome.exitCode}`)
+        : undefined;
+    return snapshot(updated ?? task, note);
+  }
+
+  return snapshot(updated ?? task);
+}
+
+function loadBoardAttemptCount(cwd: string, taskId: string): number | undefined {
+  return findTask(loadBoard(cwd), taskId)?.attempts.length;
 }
 
 export async function reviewTask(options: {
@@ -177,10 +239,15 @@ export async function reviewTask(options: {
   const report = lastReport(task);
   if (!report) return snapshot(task, "no executor report to review");
 
+  const reviewedAttempt = task.attempts.at(-1);
+  const worktree =
+    reviewedAttempt?.worktreePath && reviewedAttempt.branch
+      ? { worktreePath: reviewedAttempt.worktreePath, branch: reviewedAttempt.branch }
+      : undefined;
   const runOptions: Parameters<StartExecutor>[0] = {
     stateDir: stateDir(cwd),
     runId: `${task.id}-review-${task.attempts.length}`,
-    cwd,
+    cwd: worktree?.worktreePath ?? cwd,
     prompt: buildReviewPrompt(task, report),
     tier,
     onUpdate: (update) => onUpdate(task.id, update),
@@ -200,10 +267,22 @@ export async function reviewTask(options: {
   const outcome = await run.outcome;
   untrack();
 
-  const verdict =
+  let verdict =
     outcome.aborted || outcome.exitCode !== 0 || outcome.errorMessage
       ? undefined
       : parseVerdict(outcome.finalReport);
+  let mergeConflict: string | undefined;
+  if (verdict?.approved && worktree) {
+    const merge = await serializeMainTreeOperation(cwd, () => {
+      const result = mergeWorktree(cwd, worktree);
+      if (result.ok) removeWorktree(cwd, worktree);
+      return result;
+    });
+    if (!merge.ok) {
+      mergeConflict = `Approved review could not be merged because of a git conflict. Recovery worktree: ${worktree.worktreePath}\nBranch: ${worktree.branch}\n${merge.error ?? "Merge failed"}`;
+      verdict = { approved: false, notes: mergeConflict };
+    }
+  }
 
   const updated = updateTask(cwd, task.id, (fresh) => {
     // Reviewer usage is billed against the task for honest per-task cost.
@@ -237,6 +316,7 @@ export async function reviewTask(options: {
   if (!verdict) {
     return snapshot(result, "reviewer gave no VERDICT line; review again or inspect manually");
   }
+  if (mergeConflict) return snapshot(result, truncateText(mergeConflict, 10));
   if (verdict.approved) {
     // Show what the reviewer actually verified, not a bare "approved".
     const summary = outcome.finalReport.replace(/VERDICT:\s*APPROVE\s*$/i, "").trim();

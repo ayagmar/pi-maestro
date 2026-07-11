@@ -43,6 +43,36 @@ test("only runner spawns child processes", () => {
   );
 });
 
+test("only worktree executes git commands", () => {
+  const files = sourceFiles();
+  const gitExecution = /\b(?:execFileSync|execFile|spawnSync|spawn)\s*\(\s*["']git["']/;
+
+  assert.match(
+    files.find((file) => file.name === "worktree.ts")?.contents ?? "",
+    gitExecution,
+    "src/worktree.ts must contain the allowed git execution"
+  );
+  const violations = violatingFiles(files, "worktree.ts", gitExecution);
+  assert.deepEqual(
+    violations,
+    [],
+    `Only src/worktree.ts may execute git commands; violations: ${violations.join(", ")}`
+  );
+});
+
+test("only runner and worktree import child process APIs", () => {
+  const childProcessImport = /(?:from|import\s*\()\s*["']node:child_process["']/;
+  const violations = sourceFiles()
+    .filter(
+      (file) =>
+        file.name !== "runner.ts" &&
+        file.name !== "worktree.ts" &&
+        childProcessImport.test(file.contents)
+    )
+    .map((file) => file.name);
+  assert.deepEqual(violations, []);
+});
+
 test("only board owns the board persistence name", () => {
   const files = sourceFiles();
   const boardPersistenceName = /\bBOARD_FILE\b|board\.json/;

@@ -97,12 +97,24 @@ test("executor prompt includes review notes on retry", () => {
   assert.match(prompt, /Missing test for 500 path/);
 });
 
-test("executor prompt includes dependency reports", () => {
+test("executor prompt includes dependency reports and their optional transcript references", () => {
+  const withTranscript = "## Context from completed dependency T0 (Setup)\n";
+  const withoutTranscript = "## Context from completed dependency T2 (Tests)\n";
   const prompt = buildExecutorPrompt(makeTask(), [
-    { id: "T0", title: "Setup", report: "Created src/server.ts" },
+    {
+      id: "T0",
+      title: "Setup",
+      report: "Created src/server.ts",
+      sessionFile: "/sessions/T0-attempt-1.jsonl",
+    },
+    { id: "T2", title: "Tests", report: "Added tests" },
   ]);
-  assert.match(prompt, /dependency T0 \(Setup\)/);
-  assert.match(prompt, /Created src\/server\.ts/);
+
+  assert.equal(
+    injectedSection(prompt, withTranscript),
+    "Created src/server.ts\nFull transcript (read sparingly, only if this report is insufficient): /sessions/T0-attempt-1.jsonl"
+  );
+  assert.equal(injectedSection(prompt, withoutTranscript), "Added tests");
 });
 
 test("review prompt is adversarial, scoped, and demands a verdict", () => {

@@ -4,21 +4,23 @@ Orchestrator/executor workflows for [pi](https://github.com/badlogic/pi-mono).
 
 The model in your interactive session becomes the **orchestrator**: it plans a goal into small
 tasks, delegates each task to a cheap **fresh-context executor** (a separate `pi` process), and an
-**adversarial reviewer** independently verifies each result before it is approved. The orchestrator
-never reads raw executor output — it works off short reports and status pulses, so its context
-stays clean and your expensive model spends tokens on judgment, not typing.
+**adversarial reviewer** independently verifies each result before automated approval. Adversarial
+review and read-only reviewer tools are the defaults; manual status overrides and a custom reviewer
+`tools` allowlist can bypass those guarantees. The orchestrator never reads raw executor output —
+it works off short reports and status pulses, so its context stays clean and your expensive model
+spends tokens on judgment, not typing.
 
 ```
 you ──▶ orchestrator (SOTA model, your session)
               │ maestro_plan          ┌────────────────────────────┐
               ▼                         │ .pi/maestro/board.json   │
-        task board  ◀──────────────────▶│ sessions/  logs/           │
+        task board  ◀──────────────────▶│ logs/  history.jsonl       │
               │ maestro_run           └────────────────────────────┘
               ▼
    executors in parallel (cheap models, fresh context each)
               │ maestro_review
               ▼
-   adversarial reviewers (read-only tools, fresh context)
+   adversarial reviewers (default config: read-only tools, fresh context)
               │ approve / request changes
               ▼
         approved tasks ──▶ orchestrator summarizes for you
@@ -31,11 +33,13 @@ you ──▶ orchestrator (SOTA model, your session)
 - **No context rot.** Every executor and reviewer starts with a fresh context containing only its
   self-contained brief (plus approved dependency reports). The orchestrator pulses
   `maestro_status` instead of ingesting transcripts.
-- **Same quality.** Every task passes an adversarial review with read-only tools before it is
-  approved. Rejected work is retried with the reviewer's notes injected into the next attempt.
-- **Deterministic and observable.** All state lives in `.pi/maestro/board.json`. Every executor
-  session and raw JSON event log is persisted, and you can switch your TUI into any executor
-  session.
+- **Independent review by default.** The automated path sends every task through an adversarial
+  review with read-only tools before approval. Rejected work is retried with the reviewer's notes
+  injected into the next attempt. Manual approval skips that review, and configuring writable
+  reviewer tools removes the read-only guarantee.
+- **Deterministic and observable.** Task state lives in `.pi/maestro/board.json`; audit history
+  and raw event logs live beside it. Executor sessions use pi's normal session storage, and you
+  can switch your TUI into any completed executor session.
 
 ## Install
 
@@ -60,7 +64,7 @@ with four tools:
 |------|--------------|
 | `maestro_plan` | Creates tasks with self-contained briefs, a complexity tier, and optional dependencies |
 | `maestro_run` | Runs all runnable tasks in parallel fresh-context executors (respects `maxParallel` and dependencies) |
-| `maestro_review` | Spawns adversarial fresh-context reviewers (read-only tools) that approve or request changes |
+| `maestro_review` | Spawns adversarial fresh-context reviewers that approve or request changes (reviewer tools are read-only by default) |
 | `maestro_status` | Cheap status pulse: statuses, tiers, attempts, cost per task |
 
 You can also call these tools yourself in plain prompts ("plan these three tasks…"), or manage the
@@ -111,7 +115,8 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   - `s` **steer a running executor** — type a correction and it is queued into that executor's
     next LLM call (executors run in RPC mode, so mid-run steering works like it does in pi itself)
   - `x` abort a running executor (task becomes `cancelled`)
-  - `a` approve / `r` reopen a finished task without spawning a reviewer
+  - `a` approve / `r` reopen a finished task without spawning a reviewer (a manual lifecycle
+    override that bypasses adversarial review)
   - `enter` open the executor's full session in your TUI
 - **`/maestro list`**: compact task picker (report view, status overrides, open session).
 - **`/maestro open T3`**: switches your TUI into that executor's persisted session so you can
@@ -126,30 +131,47 @@ config). Every row has a description; changing any value switches the preset to 
 **Presets** ship with defaults derived from the Artificial Analysis Coding Agent Index v1.1
 and deep SWE leaderboard (pass@1 / avg cost per run):
 
-| Preset | trivial | standard | complex | review | Rationale |
-|--------|---------|----------|---------|--------|-----------|
-| `inherit` (default) | pi default · low | pi default · medium | pi default · high | pi default · high | Works with any provider, zero setup |
-| `balanced` | terra · high | sol · medium | sol · high | sol · medium | Best cost/quality knee per tier (sol-high: 69% @ $3.47) |
-| `budget` | luna · high | terra · high | terra · xhigh | terra · xhigh | Cheapest sensible run (terra-xhigh: 60% @ $2.13) |
-| `quality` | sol · medium | sol · high | sol · xhigh | sol · high | Frontier on every tier (sol-xhigh: 71% @ $4.70) |
+| Preset | trivial | standard | complex | review | Parallel / attempts / cost cap | Rationale |
+|--------|---------|----------|---------|--------|--------------------------------|-----------|
+| `inherit` (default) | pi default · low | pi default · medium | pi default · high | pi default · high | 3 / 3 / off | Works with any provider, zero setup |
+| `balanced` | terra · high | sol · medium | sol · high | sol · medium | 3 / 3 / off | Best cost/quality knee per tier (sol-high: 69% @ $3.47) |
+| `budget` | luna · high | terra · high | terra · xhigh | terra · xhigh | 4 / 3 / $2 | Cheapest sensible run (terra-xhigh: 60% @ $2.13) |
+| `quality` | sol · medium | sol · high | sol · xhigh | sol · high | 3 / 4 / off | Frontier on every tier (sol-xhigh: 71% @ $4.70) |
+
+All presets set `useWorktrees` to `false`. The cost cap shown is per executor attempt.
 
 Config files are plain JSON if you prefer editing by hand — user scope
-`~/.pi/agent/maestro.json`, project scope `.pi/maestro.json` (project wins per key):
+`~/.pi/agent/maestro.json`, project scope `.pi/maestro.json`. Resolution is defaults, then user,
+then project. Top-level fields merge by key; `tiers` merge by tier name, with the later scope's
+whole tier object replacing the earlier object of the same name:
 
 ```json
 {
   "maxParallel": 4,
+  "useWorktrees": false,
   "maxAttempts": 3,
   "maxCostPerTask": 2,
   "tiers": {
     "trivial":  { "model": "gpt-5.6-terra", "thinking": "high" },
-    "standard": { "model": "gpt-5.6-sol", "thinking": "medium" },
+    "standard": {
+      "model": "gpt-5.6-sol",
+      "fallbacks": ["gpt-5.6-terra", "openai/gpt-5-mini"],
+      "thinking": "medium"
+    },
     "complex":  { "model": "gpt-5.6-sol", "thinking": "high" },
     "review":   { "model": "gpt-5.6-sol", "thinking": "medium", "tools": "read,bash,grep,find,ls" }
   }
 }
 ```
 
+- `maxParallel` — maximum executor or reviewer processes run concurrently (default 3).
+  Dependencies can reduce the number that are runnable at once.
+- `useWorktrees` — when enabled, a single `maestro_run` dispatch with more than one runnable task
+  gives every task in that batch an isolated git worktree and branch. A one-task dispatch stays in
+  the current checkout. Reviewers use the executor's worktree. Approval commits its changes,
+  serializes merges into the original tree, then deletes the worktree and branch. A merge conflict
+  is aborted, changes the task to `changes_requested`, and retains the checkout, branch, and
+  recovery notes; the next retry reuses that worktree (default false).
 - `maxAttempts` — hard cap on execute attempts per task (default 3). Stops orchestrator retry
   loops; a capped task fails with a hint to rewrite its brief via `maestro_update`.
 - `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default 0 =
@@ -157,35 +179,47 @@ Config files are plain JSON if you prefer editing by hand — user scope
 - `model` — a pi model pattern. Bare names like `gpt-5.6-terra` are resolved against providers
   you actually have auth for (preferring the orchestrator's provider); `provider/id` pins one
   provider. Omit to inherit pi's default model.
+- `fallbacks` — ordered model patterns for an executor tier. Unavailable patterns are skipped at
+  preflight. At runtime maestro advances only when the current provider/model fails before any
+  model turn; that provider failure is recorded but does not consume `maxAttempts`. Failures after
+  a turn do not fall back. The interactive editor shows the primary model; edit JSON to set this
+  array. Review configuration accepts the same tier shape, but review runs currently use its
+  primary `model` only.
 - `thinking` — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Per GPT-5.6 guidance: start
   medium, test one level lower, raise only when results show a gain.
-- `tools` — comma-separated allowlist passed to the executor. The `review` tier defaults to
-  read-only tools so reviewers cannot modify files.
+- `tools` — comma-separated allowlist passed to the executor. Every preset's `review` tier defaults
+  to `read,bash,grep,find,ls`, so automated reviewers are read-only by default. This field is
+  configurable: adding write-capable tools removes that guarantee. Manual approval from the board
+  or task picker bypasses the reviewer entirely.
 - You can add your own tier names; the orchestrator's planning guidance lists them.
 
-Before any run, maestro preflights every tier's model against your configured providers and
-fails with an actionable message (which tier, which model, how to fix) instead of spawning
-dead executors.
+Before an execution dispatch, maestro resolves the primary and fallbacks for every tier used by
+that batch and fails with an actionable message if none are available. Before review, it similarly
+checks the review tier's primary model. This happens before spawning executors.
 
 ### Commands
 
 ```
 /maestro start <goal>     plan + delegate a goal with the orchestrator
 /maestro handoff          continue run/review in a fresh session (drops planning context)
-/maestro board            full-screen live dashboard (also ctrl+alt+b)
+/maestro board            full-screen live dashboard (aliases: dash, dashboard; also ctrl+alt+b)
 /maestro list             compact task picker
 /maestro open <taskId>    switch into an executor's session
-/maestro back             switch back to the previous session (after open)
+/maestro back             switch back to the previous session (after open/reviewer open)
 /maestro config           interactive settings editor (user scope)
 /maestro config project   interactive settings editor (repo scope)
-/maestro config show      print the resolved configuration
-/maestro reset            clear the board
+/maestro config show      print the resolved defaults + user + project configuration
+/maestro history [n]      show the last n audited status changes (default 20)
+/maestro reset            archive the current board, then clear tasks and goal
 ```
 
 ## How it stays deterministic
 
 - The board (`.pi/maestro/board.json`) is the single source of truth, written atomically.
-  Restarting pi loses nothing; the status bar and board rebuild from disk.
+  Restarting pi loses nothing; the status bar and board rebuild from disk. Invalid board JSON is
+  preserved as `board.json.corrupt-<timestamp>` before maestro recovers with an empty board;
+  invalid user or project config is preserved beside it as `maestro.json.corrupt-<timestamp>` and
+  that scope falls back to lower-precedence configuration.
 - Executors are `pi --mode rpc` child processes. Their sessions persist in pi's default
   session storage (so `/resume` and usage reports include them; each attempt records its
   session file on the board), with raw event logs under `.pi/maestro/logs/`. The
@@ -193,20 +227,27 @@ dead executors.
   RPC mode is what makes mid-run steering and clean aborts possible. Executor-side extension
   dialogs (e.g. permission gates) are auto-cancelled so headless runs can never hang.
 - Dependencies gate execution: a task only runs when everything it `dependsOn` is `approved`.
+  Its fresh prompt includes each approved dependency's report and, when available, a reference to
+  that dependency's persisted pi session transcript. Injected dependency reports and retry review
+  notes are bounded to 10,000 characters each, with explicit truncation markers.
 - Boards are scoped to their owning sessions: the status bar and widget only render in
   sessions that started or drove the run (plan/run/start/handoff), so an unrelated pi chat in
   the same repo stays clean. The board file itself remains shared, hand-editable state.
-- Review verdicts persist per attempt (`reviewReport`, `reviewSessionFile`): from the task
-  picker you can view the full verdict text or switch into the reviewer's session.
+- Review verdicts persist on the reviewed attempt (`reviewReport`, `reviewSessionFile`): from the
+  task picker you can view the full verdict text or switch into the reviewer's session. Reviewer
+  usage is added to that task's totals.
 - Reviewers must end with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`; anything else leaves
   the task in `ready_for_review` for you or the orchestrator to re-review.
-- Board writes are per-task against fresh state, so parallel executors finishing in any order
-  cannot clobber each other's status updates.
+- Every task status change is appended to `.pi/maestro/history.jsonl`; `/maestro history [n]`
+  reads this audit trail. Board writes are per-task against fresh state, so parallel executors
+  finishing in any order cannot clobber each other's status updates.
 - On pi exit, live executors are aborted (no orphan processes). On startup, tasks stuck in
   `running` from a crash are marked `failed` with a notice; retry them with
   `maestro_run ["T3"]` — explicitly named failed/cancelled tasks are runnable again.
-
-Add `.pi/maestro/` to your project's `.gitignore` unless you want to commit run history.
+- `/maestro reset` refuses while executors are live, copies the current board to
+  `.pi/maestro/archive/<timestamp>-board.json`, then (after TUI confirmation) clears tasks and the
+  goal. Audit history and run logs remain. Maestro creates `.pi/maestro/.gitignore` containing `*`
+  when it first saves state, so board, logs, history, archives, and worktrees ignore themselves.
 
 ## Development
 

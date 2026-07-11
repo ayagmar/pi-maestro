@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { type Theme } from "@earendil-works/pi-coding-agent";
-import { Dashboard, type DashboardActions } from "../src/dashboard.js";
+import {
+  Dashboard,
+  type DashboardActions,
+  DEFAULT_DASHBOARD_BODY_HEIGHT,
+} from "../src/dashboard.js";
 import { type Board, type Task } from "../src/types.js";
 
 const fakeTheme = {
@@ -49,12 +56,70 @@ test("dashboard renders header, tasks, and footer within width", () => {
   try {
     const lines = dashboard.render(100);
     const joined = lines.join("\n");
+    assert.equal(lines.length, DEFAULT_DASHBOARD_BODY_HEIGHT + 3);
     assert.match(joined, /maestro dashboard · 2 task\(s\)/);
     assert.match(joined, /T1 Do thing/);
     assert.match(joined, /T2 Do thing/);
     assert.match(joined, /esc close/);
   } finally {
     dashboard.dispose();
+  }
+});
+
+test("dashboard clamps both panes to its configured body height", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-dashboard-"));
+  const logFile = join(directory, "executor.jsonl");
+  writeFileSync(
+    logFile,
+    `${JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "transcript one\ntranscript two\ntranscript three\ntranscript four",
+          },
+        ],
+      },
+    })}\n`
+  );
+
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 4,
+    tasks: [
+      makeTask({
+        attempts: [
+          {
+            index: 1,
+            logFile,
+            thinking: "medium",
+            startedAt: 0,
+            usage: { input: 0, output: 0, cost: 0, turns: 0 },
+            touchedFiles: [],
+          },
+        ],
+      }),
+      makeTask({ id: "T2" }),
+      makeTask({ id: "T3" }),
+    ],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { bodyHeight: 3 });
+  try {
+    const lines = dashboard.render(100);
+    const body = lines.slice(1, 4).join("\n");
+
+    assert.equal(lines.length, 6);
+    assert.match(body, /T2 Do thing/);
+    assert.doesNotMatch(body, /T3 Do thing/);
+    assert.doesNotMatch(body, /transcript one/);
+    assert.match(body, /transcript two/);
+    assert.match(body, /transcript three/);
+    assert.match(body, /transcript four/);
+  } finally {
+    dashboard.dispose();
+    rmSync(directory, { force: true, recursive: true });
   }
 });
 

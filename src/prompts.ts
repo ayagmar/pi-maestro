@@ -21,7 +21,7 @@ function truncateInjectedContext(value: string): string {
 /** Prompt for a fresh-context executor. The task brief must be self-contained. */
 export function buildExecutorPrompt(
   task: Task,
-  dependencyReports: { id: string; title: string; report: string }[]
+  dependencyReports: { id: string; title: string; report: string; sessionFile?: string }[]
 ): string {
   const sections = [
     `Role: executor agent with a fresh context, completing one task end to end.`,
@@ -36,8 +36,11 @@ export function buildExecutorPrompt(
   }
 
   for (const dep of dependencyReports) {
+    const transcriptReference = dep.sessionFile
+      ? `\nFull transcript (read sparingly, only if this report is insufficient): ${dep.sessionFile}`
+      : "";
     sections.push(
-      `## Context from completed dependency ${dep.id} (${dep.title})\n${truncateInjectedContext(dep.report)}`
+      `## Context from completed dependency ${dep.id} (${dep.title})\n${truncateInjectedContext(dep.report)}${transcriptReference}`
     );
   }
 

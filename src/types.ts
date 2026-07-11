@@ -26,8 +26,16 @@ export interface Attempt {
   startedAt: number;
   endedAt?: number;
   exitCode?: number;
+  /** Provider or executor error that ended this attempt. */
+  errorMessage?: string;
+  /** Failed before any model turn and therefore does not consume maxAttempts. */
+  providerFailure?: boolean;
   usage: Usage;
   finalReport?: string;
+  /** Isolated checkout used by this executor and its reviewer. */
+  worktreePath?: string;
+  /** Git branch checked out in worktreePath. */
+  branch?: string;
   /** Full report of the last review run against this attempt. */
   reviewReport?: string;
   /** Session file of the last review run, for post-hoc inspection. */
@@ -62,6 +70,8 @@ export interface Board {
 export interface TierConfig {
   /** Model pattern like "openai/gpt-5-mini". Omit to inherit pi's default model. */
   model?: string;
+  /** Ordered model patterns tried when the primary fails before completing a turn. */
+  fallbacks?: string[];
   /** Thinking level: off, minimal, low, medium, high, xhigh. */
   thinking: string;
   /** Comma-separated tool allowlist passed to the executor. Omit for all tools. */
@@ -70,6 +80,8 @@ export interface TierConfig {
 
 export interface MaestroConfig {
   maxParallel: number;
+  /** Isolate tasks in per-task git worktrees when a batch dispatches in parallel. */
+  useWorktrees: boolean;
   /** Hard attempt cap per task; exceeded tasks need an explicit maestro-run or a brief rewrite. */
   maxAttempts: number;
   /** Abort an executor once its attempt cost (USD) exceeds this. 0 disables the cap. */

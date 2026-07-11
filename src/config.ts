@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { type ModelRegistry, getAgentDir, resolveCliModel } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ModelRegistry, resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
 import { type MaestroConfig, type TierConfig } from "./types.js";
 
@@ -16,6 +16,7 @@ export const REVIEW_TOOLS = "read,bash,grep,find,ls";
  */
 export const DEFAULT_CONFIG: MaestroConfig = {
   maxParallel: 3,
+  useWorktrees: false,
   maxAttempts: 3,
   maxCostPerTask: 0,
   tiers: {
@@ -57,6 +58,7 @@ export const PRESETS: Preset[] = [
       "Best cost/quality per tier: terra-high trivial ($1.13), sol-medium standard ($1.86), sol-high complex+review ($3.47, 69% pass@1).",
     config: {
       maxParallel: 3,
+      useWorktrees: false,
       maxAttempts: 3,
       maxCostPerTask: 0,
       tiers: {
@@ -74,6 +76,7 @@ export const PRESETS: Preset[] = [
       "Cheapest sensible run: luna-high trivial ($0.78), terra-high standard ($1.13), terra-xhigh complex+review ($2.13, 60% pass@1).",
     config: {
       maxParallel: 4,
+      useWorktrees: false,
       maxAttempts: 3,
       maxCostPerTask: 2,
       tiers: {
@@ -91,6 +94,7 @@ export const PRESETS: Preset[] = [
       "Frontier executors on every tier: sol-medium trivial, sol-high standard, sol-xhigh complex ($4.70, 71% pass@1), sol-high review.",
     config: {
       maxParallel: 3,
+      useWorktrees: false,
       maxAttempts: 4,
       maxCostPerTask: 0,
       tiers: {
@@ -122,6 +126,7 @@ export function mergeConfig(
   if (!override) return base;
   return {
     maxParallel: override.maxParallel ?? base.maxParallel,
+    useWorktrees: override.useWorktrees ?? base.useWorktrees,
     maxAttempts: override.maxAttempts ?? base.maxAttempts,
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
     tiers: { ...base.tiers, ...override.tiers },
@@ -168,6 +173,7 @@ export function describeConfig(config: MaestroConfig): string {
   const lines = [
     `preset: ${matchingPreset(config)}`,
     `maxParallel: ${config.maxParallel}`,
+    `useWorktrees: ${config.useWorktrees}`,
     `maxAttempts: ${config.maxAttempts}`,
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
     "tiers:",
@@ -180,6 +186,10 @@ export function describeConfig(config: MaestroConfig): string {
 
 export type TierModelResolution =
   | { ok: true; modelArg: string | undefined }
+  | { ok: false; error: string };
+
+export type TierModelsResolution =
+  | { ok: true; modelArgs: (string | undefined)[] }
   | { ok: false; error: string };
 
 /**
@@ -237,6 +247,40 @@ export function resolveTierModel(
     return { ok: false, error: `Tier "${tierName}": no usable model for "${tier.model}".` };
   }
   return { ok: true, modelArg: `${chosen.provider}/${chosen.id}` };
+}
+
+/** Resolve the primary and ordered fallbacks, skipping patterns unavailable with current auth. */
+export function resolveTierModels(
+  tierName: string,
+  tier: TierConfig,
+  modelRegistry: ModelRegistry,
+  preferredProvider?: string
+): TierModelsResolution {
+  const patterns: (string | undefined)[] = [tier.model, ...(tier.fallbacks ?? [])];
+  const modelArgs: (string | undefined)[] = [];
+
+  for (const [index, pattern] of patterns.entries()) {
+    if (pattern === undefined) {
+      if (index === 0) modelArgs.push(undefined);
+      continue;
+    }
+    if (pattern.length === 0) continue;
+
+    const resolution = resolveTierModel(
+      tierName,
+      { model: pattern, thinking: tier.thinking },
+      modelRegistry,
+      preferredProvider
+    );
+    if (resolution.ok) modelArgs.push(resolution.modelArg);
+  }
+
+  if (modelArgs.length > 0) return { ok: true, modelArgs };
+  const configured = patterns.filter((pattern): pattern is string => pattern !== undefined);
+  return {
+    ok: false,
+    error: `Tier "${tierName}": none of the configured models (${configured.join(", ")}) are available with configured authentication. Fix fallbacks in /maestro config, run /login, or check pi --list-models.`,
+  };
 }
 
 /** Tier decision rules injected into planning guidance. Stated once, as decision rules. */

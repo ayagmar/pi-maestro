@@ -1,6 +1,6 @@
 import { type Theme } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { STATUS_GLYPHS, STATUS_LABELS, boardUsage, taskUsage } from "./format.js";
+import { boardUsage, STATUS_GLYPHS, STATUS_LABELS, taskUsage } from "./format.js";
 import { TranscriptTail } from "./transcript.js";
 import { type Board, type Task, type TaskStatus } from "./types.js";
 
@@ -18,8 +18,15 @@ export interface DashboardActions {
 }
 
 const REFRESH_MS = 500;
+export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
+const MIN_DASHBOARD_BODY_HEIGHT = 2;
 
 type Mode = "browse" | "steer" | "confirm_abort";
+
+export interface DashboardOptions {
+  /** Number of rows shared by the task list and transcript panes. */
+  bodyHeight?: number;
+}
 
 function statusColor(status: TaskStatus): "success" | "error" | "warning" | "accent" | "muted" {
   if (status === "approved") return "success";
@@ -41,11 +48,17 @@ export class Dashboard {
   private steerInput = new Input();
   private tails = new Map<string, TranscriptTail>();
   private timer: ReturnType<typeof setInterval>;
+  private bodyHeight: number;
 
   constructor(
     private theme: Theme,
-    private actions: DashboardActions
+    private actions: DashboardActions,
+    options: DashboardOptions = {}
   ) {
+    this.bodyHeight = Math.max(
+      MIN_DASHBOARD_BODY_HEIGHT,
+      Math.floor(options.bodyHeight ?? DEFAULT_DASHBOARD_BODY_HEIGHT)
+    );
     this.steerInput.onSubmit = (value) => this.submitSteer(value);
     this.steerInput.onEscape = () => {
       this.mode = "browse";
@@ -135,7 +148,7 @@ export class Dashboard {
 
     const listWidth = Math.min(44, Math.max(24, Math.floor(width * 0.35)));
     const transcriptWidth = width - listWidth - 3;
-    const bodyHeight = 22;
+    const bodyHeight = this.bodyHeight;
 
     const left = this.renderTaskList(board, listWidth, bodyHeight);
     const right = this.renderTranscript(transcriptWidth, bodyHeight);
@@ -160,7 +173,10 @@ export class Dashboard {
   private renderTaskList(board: Board, width: number, height: number): string[] {
     const theme = this.theme;
     if (board.tasks.length === 0) {
-      return [theme.fg("muted", "Board is empty."), theme.fg("dim", "Use /maestro start <goal>")];
+      return [
+        theme.fg("muted", "Board is empty."),
+        theme.fg("dim", "Use /maestro start <goal>"),
+      ].slice(0, height);
     }
 
     const lines: string[] = [];
@@ -183,7 +199,9 @@ export class Dashboard {
       const detail = `${STATUS_LABELS[task.status]} [${task.tier}] · $${usage.cost.toFixed(4)}${activity}`;
       const line2 = `     ${theme.fg("dim", truncateToWidth(detail, width - 5))}`;
 
-      lines.push(line1, line2);
+      lines.push(line1);
+      if (lines.length === height) break;
+      lines.push(line2);
     }
     return lines;
   }
@@ -230,7 +248,7 @@ export class Dashboard {
       body.push(theme.fg("accent", "steer ▸ ") + (this.steerInput.render(width - 8)[0] ?? ""));
       body.push(theme.fg("dim", "enter send · esc cancel"));
     }
-    return body;
+    return body.slice(0, height);
   }
 
   private renderFooter(width: number): string {

@@ -53,6 +53,13 @@ import {
   type TaskSnapshot,
   type WorkflowRun,
 } from "./workflow.js";
+import {
+  createWorktree,
+  removeWorktree,
+  sweepWorktrees,
+  type WorktreeRef,
+  worktreeExists,
+} from "./worktree.js";
 
 interface MaestroDetails {
   action: string;
@@ -309,6 +316,32 @@ export default function maestro(pi: ExtensionAPI) {
         ctx.model?.provider
       );
 
+      const taskWorktrees = new Map<string, WorktreeRef>();
+      const isolateBatch = config.useWorktrees && runnable.length > 1;
+      const created: WorktreeRef[] = [];
+      try {
+        for (const task of runnable) {
+          const previous = task.attempts.at(-1);
+          const retained =
+            task.status === "changes_requested" &&
+            previous?.worktreePath &&
+            previous.branch &&
+            worktreeExists({ worktreePath: previous.worktreePath, branch: previous.branch })
+              ? { worktreePath: previous.worktreePath, branch: previous.branch }
+              : undefined;
+          if (retained) {
+            taskWorktrees.set(task.id, retained);
+          } else if (isolateBatch) {
+            const ref = createWorktree(ctx.cwd, task.id, task.attempts.length + 1);
+            created.push(ref);
+            taskWorktrees.set(task.id, ref);
+          }
+        }
+      } catch (error) {
+        for (const ref of created) removeWorktree(ctx.cwd, ref);
+        throw error;
+      }
+
       const emitProgress = () => {
         onUpdate?.({
           content: [{ type: "text", text: `Running ${liveRuns.size} executor(s)…` }],
@@ -329,6 +362,8 @@ export default function maestro(pi: ExtensionAPI) {
           onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
           trackRun: (run) => trackRun(ctx, run),
         };
+        const worktree = taskWorktrees.get(task.id);
+        if (worktree) workflowOptions.worktree = worktree;
         if (signal) workflowOptions.signal = signal;
         return executeTask(workflowOptions);
       });
@@ -1054,6 +1089,27 @@ export default function maestro(pi: ExtensionAPI) {
           "warning"
         );
       }
+    }
+    const recovered = loadBoard(ctx.cwd);
+    const knownWorktrees = recovered.tasks.flatMap((task) =>
+      task.attempts.flatMap((attempt) =>
+        attempt.worktreePath && attempt.branch
+          ? [{ worktreePath: attempt.worktreePath, branch: attempt.branch }]
+          : []
+      )
+    );
+    const retained = recovered.tasks
+      .filter((task) => task.status === "ready_for_review" || task.status === "changes_requested")
+      .flatMap((task) => {
+        const attempt = task.attempts.at(-1);
+        return attempt?.worktreePath && attempt.branch
+          ? [{ worktreePath: attempt.worktreePath, branch: attempt.branch }]
+          : [];
+      });
+    try {
+      sweepWorktrees(ctx.cwd, retained, knownWorktrees);
+    } catch (error) {
+      notify(ctx, `Could not clean stale maestro worktrees: ${String(error)}`, "warning");
     }
     refreshUI(ctx);
   });

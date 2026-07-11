@@ -11,6 +11,7 @@ import { executeTask, reviewTask, type StartExecutor } from "../src/workflow.js"
 const tier = { thinking: "low" };
 const config: MaestroConfig = {
   maxParallel: 1,
+  useWorktrees: false,
   maxAttempts: 3,
   maxCostPerTask: 0,
   tiers: { standard: tier },
@@ -82,6 +83,39 @@ test("successful execution persists ready_for_review", async () => {
   }
 });
 
+test("worktree execution records metadata and starts the executor in that checkout", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const seenCwds: string[] = [];
+    const startExecutor: StartExecutor = (options) => {
+      seenCwds.push(options.cwd);
+      return executor({ finalReport: "Work completed" })(options);
+    };
+    const worktree = { worktreePath: join(cwd, "task-worktree"), branch: "maestro/t1-attempt-1" };
+
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      worktree,
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    const recorded = findTask(loadBoard(cwd), task.id)?.attempts.at(-1);
+    assert.deepEqual(seenCwds, [worktree.worktreePath]);
+    assert.equal(recorded?.worktreePath, worktree.worktreePath);
+    assert.equal(recorded?.branch, worktree.branch);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("failed execution persists failed status and returns the error note", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   try {
@@ -101,6 +135,135 @@ test("failed execution persists failed status and returns the error note", async
 
     assert.equal(findTask(loadBoard(cwd), task.id)?.status, "failed");
     assert.equal(result.note, "stub executor failed");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("execution forwards a dependency executor session, not its review session", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const dependency = createTask(board, {
+      title: "Dependency",
+      brief: "Complete the prerequisite",
+      tier: "standard",
+    });
+    forceStatus(dependency, "approved");
+    const dependencyAttempt = attempt("Dependency completed");
+    dependencyAttempt.sessionFile = "/sessions/dependency-executor.jsonl";
+    dependencyAttempt.reviewSessionFile = "/sessions/dependency-review.jsonl";
+    dependency.attempts.push(dependencyAttempt);
+    const task = createTask(board, {
+      title: "Dependent",
+      brief: "Use the prerequisite",
+      tier: "standard",
+      dependsOn: [dependency.id],
+    });
+    saveBoard(cwd, board);
+    let prompt = "";
+
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      startExecutor: (options) => {
+        prompt = options.prompt;
+        return executor({ finalReport: "Dependent completed" })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.match(
+      prompt,
+      /Full transcript \(read sparingly, only if this report is insufficient\): \/sessions\/dependency-executor\.jsonl/
+    );
+    assert.doesNotMatch(prompt, /dependency-review\.jsonl/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("zero-turn provider failure is persisted and retries on fallback without consuming maxAttempts", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const selectedModels: (string | undefined)[] = [];
+    let call = 0;
+    const fallbackExecutor: StartExecutor = (options) => {
+      selectedModels.push(options.tier.model);
+      const failed = call++ === 0;
+      const usage = { input: 0, output: 0, cost: 0, turns: failed ? 0 : 1 };
+      const runAttempt = attempt();
+      runAttempt.usage = usage;
+      return {
+        attempt: runAttempt,
+        outcome: Promise.resolve({
+          exitCode: failed ? 1 : 0,
+          usage,
+          finalReport: failed ? "" : "fallback succeeded",
+          touchedFiles: [],
+          aborted: false,
+          ...(failed ? { errorMessage: "primary provider unavailable" } : {}),
+        }),
+        steer: () => {},
+        abort: () => {},
+      };
+    };
+
+    const result = await executeTask({
+      cwd,
+      board,
+      task,
+      tier: { model: "provider/primary", fallbacks: ["provider/fallback"], thinking: "low" },
+      config: { ...config, maxAttempts: 1 },
+      startExecutor: fallbackExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(result.status, "ready_for_review");
+    assert.deepEqual(selectedModels, ["provider/primary", "provider/fallback"]);
+    assert.equal(persisted?.attempts.length, 2);
+    assert.equal(persisted?.attempts[0]?.exitCode, 1);
+    assert.equal(persisted?.attempts[0]?.errorMessage, "primary provider unavailable");
+    assert.equal(persisted?.attempts[0]?.providerFailure, true);
+    assert.equal(persisted?.attempts[1]?.usage.turns, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("nonzero-turn failures do not use a configured fallback", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let calls = 0;
+    const used = executor({
+      exitCode: 1,
+      usage: { input: 1, output: 1, cost: 0, turns: 1 },
+      errorMessage: "task failed",
+    });
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier: { model: "primary", fallbacks: ["fallback"], thinking: "low" },
+      config,
+      startExecutor: (options) => {
+        calls += 1;
+        return used(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(calls, 1);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
