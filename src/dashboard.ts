@@ -345,7 +345,8 @@ export class Dashboard {
     if (live) parts.push("s steer", "x abort");
     else if (task) {
       if (task.attempts.length > 0) parts.push("enter open session");
-      parts.push("a approve", "r reopen");
+      if (task.status !== "approved") parts.push("a approve");
+      if (task.status !== "todo") parts.push("r reopen");
     }
     parts.push(this.hideDone ? "f show done" : "f hide done", "esc close");
     return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
