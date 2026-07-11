@@ -10,7 +10,16 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { STATE_DIR } from "./constants.js";
-import { type Board, type Task, type TaskStatus } from "./types.js";
+import {
+  type Attempt,
+  type Board,
+  type FailureKind,
+  type PlanTaskEdits,
+  type PlanValidation,
+  type Task,
+  type TaskGroup,
+  type TaskStatus,
+} from "./types.js";
 
 export const BOARD_FILE = "board.json";
 const HISTORY_FILE = "history.jsonl";
@@ -204,16 +213,49 @@ function isAttempt(value: unknown): boolean {
     (value.sessionFile === undefined || typeof value.sessionFile === "string") &&
     (value.sessionDir === undefined || typeof value.sessionDir === "string") &&
     (value.model === undefined || typeof value.model === "string") &&
+    (value.provider === undefined || typeof value.provider === "string") &&
     (value.endedAt === undefined || isNumber(value.endedAt)) &&
     (value.exitCode === undefined || isNumber(value.exitCode)) &&
     (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
+    (value.failureReason === undefined || isFailureReason(value.failureReason)) &&
     (value.providerFailure === undefined || typeof value.providerFailure === "boolean") &&
     (value.finalReport === undefined || typeof value.finalReport === "string") &&
     (value.diff === undefined || typeof value.diff === "string") &&
     (value.worktreePath === undefined || typeof value.worktreePath === "string") &&
     (value.branch === undefined || typeof value.branch === "string") &&
     (value.reviewReport === undefined || typeof value.reviewReport === "string") &&
+    (value.reviewNotes === undefined || typeof value.reviewNotes === "string") &&
+    (value.reviewModel === undefined || typeof value.reviewModel === "string") &&
+    (value.reviewProvider === undefined || typeof value.reviewProvider === "string") &&
+    (value.reviewUsage === undefined || isUsage(value.reviewUsage)) &&
     (value.reviewSessionFile === undefined || typeof value.reviewSessionFile === "string")
+  );
+}
+
+function isFailureReason(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const kinds = [
+    "provider_failure",
+    "executor_failure",
+    "reviewer_rejection",
+    "reviewer_failure",
+    "user_abort",
+    "cost_cap",
+  ];
+  return (
+    kinds.includes(value.kind as string) &&
+    typeof value.message === "string" &&
+    typeof value.retryable === "boolean"
+  );
+}
+
+function isUsage(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNumber(value.input) &&
+    isNumber(value.output) &&
+    isNumber(value.cost) &&
+    isNumber(value.turns)
   );
 }
 
@@ -335,4 +377,173 @@ export function blockedReason(board: Board, task: Task): string | undefined {
   const blocking = task.dependsOn.filter((depId) => findTask(board, depId)?.status !== "approved");
   if (blocking.length === 0) return undefined;
   return `blocked by ${blocking.join(", ")}`;
+}
+
+export function attemptFailureCause(attempt: Attempt): FailureKind | undefined {
+  if (attempt.failureReason) return attempt.failureReason.kind;
+  if (attempt.errorMessage?.startsWith("cost cap exceeded:")) return "cost_cap";
+  if (attempt.providerFailure) return "provider_failure";
+  if (
+    attempt.errorMessage &&
+    (attempt.usage.turns === 0 ||
+      /usage limit|rate limit|quota|too many requests|resource.?exhausted/i.test(
+        attempt.errorMessage
+      ))
+  ) {
+    return "provider_failure";
+  }
+  if (attempt.exitCode !== undefined && attempt.exitCode !== 0) return "executor_failure";
+  if (attempt.errorMessage) return "executor_failure";
+  return undefined;
+}
+
+export function taskFailureCause(task: Task): FailureKind | undefined {
+  if (task.status === "cancelled") return "user_abort";
+  if (task.status === "changes_requested") return "reviewer_rejection";
+  if (task.status !== "failed") return undefined;
+
+  const latestAttempt = task.attempts.at(-1);
+  return latestAttempt
+    ? (attemptFailureCause(latestAttempt) ?? "executor_failure")
+    : "executor_failure";
+}
+
+export function taskGroup(board: Board, task: Task): TaskGroup {
+  if (task.status === "todo" || task.status === "changes_requested") {
+    return blockedReason(board, task) ? "blocked" : "ready";
+  }
+  if (task.status === "ready_for_review") return "review-needed";
+  return task.status;
+}
+
+export function filterTasksByGroup(board: Board, group: TaskGroup): Task[] {
+  return board.tasks.filter((task) => taskGroup(board, task) === group);
+}
+
+export function groupTasks(board: Board): Record<TaskGroup, Task[]> {
+  const groups: Record<TaskGroup, Task[]> = {
+    blocked: [],
+    ready: [],
+    running: [],
+    "review-needed": [],
+    approved: [],
+    failed: [],
+    cancelled: [],
+  };
+  for (const task of board.tasks) groups[taskGroup(board, task)].push(task);
+  return groups;
+}
+
+export function validatePlan(board: Board, availableTiers?: Iterable<string>): PlanValidation {
+  const tasksById = new Map(board.tasks.map((task) => [task.id.toUpperCase(), task]));
+  const missingDependencies: PlanValidation["missingDependencies"] = [];
+  const validTiers = availableTiers ? new Set(availableTiers) : undefined;
+  const invalidTiers = validTiers
+    ? board.tasks
+        .filter((task) => !validTiers.has(task.tier))
+        .map((task) => ({ taskId: task.id, tier: task.tier }))
+    : [];
+
+  for (const task of board.tasks) {
+    for (const dependencyId of task.dependsOn) {
+      if (!tasksById.has(dependencyId.trim().toUpperCase())) {
+        missingDependencies.push({ taskId: task.id, dependencyId });
+      }
+    }
+  }
+
+  const dependencyCycles: string[][] = [];
+  const visited = new Set<string>();
+  const active = new Map<string, number>();
+  const path: Task[] = [];
+
+  function visit(task: Task): void {
+    const taskKey = task.id.toUpperCase();
+    visited.add(taskKey);
+    active.set(taskKey, path.length);
+    path.push(task);
+
+    for (const dependencyId of task.dependsOn) {
+      const dependency = tasksById.get(dependencyId.trim().toUpperCase());
+      if (!dependency) continue;
+
+      const dependencyKey = dependency.id.toUpperCase();
+      const cycleStart = active.get(dependencyKey);
+      if (cycleStart !== undefined) {
+        dependencyCycles.push([...path.slice(cycleStart).map((item) => item.id), dependency.id]);
+      } else if (!visited.has(dependencyKey)) {
+        visit(dependency);
+      }
+    }
+
+    path.pop();
+    active.delete(taskKey);
+  }
+
+  for (const task of board.tasks) {
+    if (!visited.has(task.id.toUpperCase())) visit(task);
+  }
+
+  return { missingDependencies, dependencyCycles, invalidTiers };
+}
+
+export function rejectPlan(cwd: string): string | undefined {
+  const archivePath = archiveBoard(cwd);
+  if (!archivePath) return undefined;
+  saveBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+  return archivePath;
+}
+
+export function approvePlan(board: Board, availableTiers: Iterable<string>): PlanValidation {
+  const validation = validatePlan(board, availableTiers);
+  if (!planValidationMessage(validation)) board.planPending = false;
+  return validation;
+}
+
+export function planValidationMessage(validation: PlanValidation): string | undefined {
+  const problems: string[] = [];
+  for (const missing of validation.missingDependencies) {
+    problems.push(`${missing.taskId} references unknown dependency "${missing.dependencyId}"`);
+  }
+  for (const cycle of validation.dependencyCycles) {
+    problems.push(`dependency cycle: ${cycle.join(" → ")}`);
+  }
+  for (const invalid of validation.invalidTiers) {
+    problems.push(`${invalid.taskId} uses unknown tier "${invalid.tier}"`);
+  }
+  if (problems.length === 0) return undefined;
+  return `Invalid plan:\n- ${problems.join("\n- ")}`;
+}
+
+export function applyPlanTaskEdits(
+  task: Task,
+  edits: PlanTaskEdits,
+  availableTiers: Iterable<string>
+): void {
+  if (edits.title !== undefined) {
+    const title = edits.title.trim();
+    if (!title) throw new Error(`${task.id} title cannot be empty.`);
+    task.title = title;
+  }
+  if (edits.brief !== undefined) {
+    const brief = edits.brief.trim();
+    if (!brief) throw new Error(`${task.id} brief cannot be empty.`);
+    task.brief = brief;
+    delete task.reviewNotes;
+    if (task.status === "changes_requested" || task.status === "failed") {
+      forceStatus(task, "todo");
+    }
+  }
+  if (edits.tier !== undefined) {
+    if (!new Set(availableTiers).has(edits.tier)) {
+      throw new Error(`${task.id} uses unknown tier "${edits.tier}".`);
+    }
+    task.tier = edits.tier;
+  }
+  if (edits.dependsOn !== undefined) {
+    task.dependsOn = edits.dependsOn.map((id) => id.trim().toUpperCase()).filter(Boolean);
+  }
+  if (edits.cancelled === true) forceStatus(task, "cancelled");
+  if (edits.cancelled === false && task.status === "cancelled") forceStatus(task, "todo");
+  task.updatedAt = Date.now();
 }

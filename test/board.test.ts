@@ -12,21 +12,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  applyPlanTaskEdits,
+  approvePlan,
   archiveBoard,
+  attemptFailureCause,
   blockedReason,
   createTask,
+  filterTasksByGroup,
   findTask,
   forceStatus,
+  groupTasks,
   isRunnable,
   loadBoard,
   loadStatusHistory,
+  rejectPlan,
   restoreArchivedBoard,
   saveBoard,
   setStatus,
+  taskFailureCause,
+  taskGroup,
   transition,
   updateTask,
+  validatePlan,
 } from "../src/board.js";
-import { type Board, type TaskStatus } from "../src/types.js";
+import { type Attempt, type Board, type TaskStatus } from "../src/types.js";
 
 function emptyBoard(): Board {
   return { version: 1, nextTaskNumber: 1, tasks: [] };
@@ -133,6 +142,216 @@ test("failed and cancelled tasks are runnable only when explicitly named", () =>
   assert.equal(isRunnable(board, task, true), true);
   setStatus(task, "approved");
   assert.equal(isRunnable(board, task, true), false);
+});
+
+test("failure causes distinguish provider, executor, cost cap, review rejection, and abort", () => {
+  const attempt = (overrides: Partial<Attempt>): Attempt => ({
+    index: 1,
+    logFile: "executor.log",
+    thinking: "medium",
+    startedAt: 1,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+    ...overrides,
+  });
+
+  assert.equal(attemptFailureCause(attempt({ providerFailure: true })), "provider_failure");
+  assert.equal(
+    attemptFailureCause(attempt({ errorMessage: "primary provider unavailable", exitCode: 1 })),
+    "provider_failure"
+  );
+  assert.equal(attemptFailureCause(attempt({ exitCode: 1 })), "executor_failure");
+  assert.equal(
+    attemptFailureCause(attempt({ errorMessage: "cost cap exceeded: $2 > $1" })),
+    "cost_cap"
+  );
+
+  const board = emptyBoard();
+  const task = createTask(board, { title: "A", brief: "a", tier: "standard" });
+  forceStatus(task, "changes_requested");
+  assert.equal(taskFailureCause(task), "reviewer_rejection");
+  forceStatus(task, "cancelled");
+  assert.equal(taskFailureCause(task), "user_abort");
+  forceStatus(task, "failed");
+  task.attempts.push(
+    attempt({
+      errorMessage: "tests failed",
+      usage: { input: 100, output: 20, cost: 0.01, turns: 1 },
+    })
+  );
+  assert.equal(taskFailureCause(task), "executor_failure");
+});
+
+test("tasks can be classified, filtered, and grouped by board state", () => {
+  const board = emptyBoard();
+  const dependency = createTask(board, { title: "Dependency", brief: "a", tier: "standard" });
+  const blocked = createTask(board, {
+    title: "Blocked",
+    brief: "b",
+    tier: "standard",
+    dependsOn: [dependency.id],
+  });
+  const ready = createTask(board, { title: "Ready", brief: "c", tier: "standard" });
+  const statuses: [TaskStatus, string][] = [
+    ["running", "running"],
+    ["ready_for_review", "review-needed"],
+    ["approved", "approved"],
+    ["failed", "failed"],
+    ["cancelled", "cancelled"],
+  ];
+  for (const [status] of statuses) {
+    const task = createTask(board, { title: status, brief: status, tier: "standard" });
+    forceStatus(task, status);
+  }
+
+  assert.equal(taskGroup(board, blocked), "blocked");
+  assert.equal(taskGroup(board, ready), "ready");
+  assert.deepEqual(
+    filterTasksByGroup(board, "blocked").map((task) => task.id),
+    [blocked.id]
+  );
+
+  const groups = groupTasks(board);
+  assert.deepEqual(
+    groups.ready.map((task) => task.id),
+    [dependency.id, ready.id]
+  );
+  for (const [, group] of statuses) assert.equal(groups[group as keyof typeof groups].length, 1);
+});
+
+test("validatePlan reports missing dependency references and dependency cycles", () => {
+  const board = emptyBoard();
+  const first = createTask(board, {
+    title: "First",
+    brief: "a",
+    tier: "standard",
+    dependsOn: ["T2", "missing"],
+  });
+  createTask(board, {
+    title: "Second",
+    brief: "b",
+    tier: "standard",
+    dependsOn: [first.id.toLowerCase()],
+  });
+  createTask(board, {
+    title: "Self cycle",
+    brief: "c",
+    tier: "standard",
+    dependsOn: ["T3"],
+  });
+
+  assert.deepEqual(validatePlan(board), {
+    missingDependencies: [{ taskId: "T1", dependencyId: "missing" }],
+    dependencyCycles: [
+      ["T1", "T2", "T1"],
+      ["T3", "T3"],
+    ],
+    invalidTiers: [],
+  });
+});
+
+test("validatePlan accepts an acyclic plan", () => {
+  const board = emptyBoard();
+  const first = createTask(board, { title: "First", brief: "a", tier: "standard" });
+  createTask(board, {
+    title: "Second",
+    brief: "b",
+    tier: "standard",
+    dependsOn: [first.id],
+  });
+
+  assert.deepEqual(validatePlan(board), {
+    missingDependencies: [],
+    dependencyCycles: [],
+    invalidTiers: [],
+  });
+});
+
+test("plan edits update every editable field and can cancel or reactivate a task", () => {
+  const task = createTask(emptyBoard(), { title: "Old", brief: "old brief", tier: "standard" });
+
+  applyPlanTaskEdits(
+    task,
+    {
+      title: " New title ",
+      brief: " New brief ",
+      tier: "complex",
+      dependsOn: [" t2 ", "T3"],
+      cancelled: true,
+    },
+    ["trivial", "standard", "complex"]
+  );
+
+  assert.equal(task.title, "New title");
+  assert.equal(task.brief, "New brief");
+  assert.equal(task.tier, "complex");
+  assert.deepEqual(task.dependsOn, ["T2", "T3"]);
+  assert.equal(task.status, "cancelled");
+
+  applyPlanTaskEdits(task, { cancelled: false }, ["trivial", "standard", "complex"]);
+  assert.equal(task.status, "todo");
+});
+
+test("plan edits reject empty fields and unknown tiers without changing them", () => {
+  const task = createTask(emptyBoard(), { title: "Title", brief: "brief", tier: "standard" });
+
+  assert.throws(() => applyPlanTaskEdits(task, { title: " " }, ["standard"]), /title/);
+  assert.throws(() => applyPlanTaskEdits(task, { brief: " " }, ["standard"]), /brief/);
+  assert.throws(() => applyPlanTaskEdits(task, { tier: "huge" }, ["standard"]), /unknown tier/);
+  assert.deepEqual(
+    { title: task.title, brief: task.brief, tier: task.tier },
+    { title: "Title", brief: "brief", tier: "standard" }
+  );
+});
+
+test("approval reports invalid references, cycles, and tiers without changing the board", () => {
+  const board = emptyBoard();
+  board.planPending = true;
+  const first = createTask(board, {
+    title: "First",
+    brief: "a",
+    tier: "unknown",
+    dependsOn: ["T2", "missing"],
+  });
+  createTask(board, { title: "Second", brief: "b", tier: "standard", dependsOn: [first.id] });
+  const before = structuredClone(board);
+
+  const validation = approvePlan(board, ["standard"]);
+
+  assert.deepEqual(board, before);
+  assert.deepEqual(validation.missingDependencies, [{ taskId: "T1", dependencyId: "missing" }]);
+  assert.deepEqual(validation.dependencyCycles, [["T1", "T2", "T1"]]);
+  assert.deepEqual(validation.invalidTiers, [{ taskId: "T1", tier: "unknown" }]);
+});
+
+test("approval clears the gate only for a valid complete plan", () => {
+  const board = emptyBoard();
+  board.planPending = true;
+  createTask(board, { title: "First", brief: "a", tier: "standard" });
+
+  approvePlan(board, ["standard"]);
+
+  assert.equal(board.planPending, false);
+});
+
+test("rejectPlan archives the gated plan before clearing the board", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-reject-plan-test-"));
+  try {
+    const board = emptyBoard();
+    board.planPending = true;
+    createTask(board, { title: "First", brief: "a", tier: "standard" });
+    saveBoard(cwd, board);
+
+    const archivePath = rejectPlan(cwd);
+
+    assert.ok(archivePath);
+    const archived = JSON.parse(readFileSync(archivePath, "utf-8")) as Board;
+    assert.equal(archived.planPending, true);
+    assert.equal(archived.tasks[0]?.title, "First");
+    assert.deepEqual(loadBoard(cwd).tasks, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("updateTask mutates against fresh state so concurrent writers do not clobber", () => {
@@ -331,15 +550,21 @@ test("restoreArchivedBoard rejects invalid optional Attempt fields without repla
       ["sessionFile", 1],
       ["sessionDir", 1],
       ["model", 1],
+      ["provider", 1],
       ["endedAt", "1"],
       ["exitCode", "0"],
       ["errorMessage", 1],
+      ["failureReason", { kind: "unknown", message: "x", retryable: true }],
       ["providerFailure", "false"],
       ["finalReport", 1],
       ["diff", 1],
       ["worktreePath", 1],
       ["branch", 1],
       ["reviewReport", 1],
+      ["reviewNotes", 1],
+      ["reviewModel", 1],
+      ["reviewProvider", 1],
+      ["reviewUsage", { input: 1 }],
       ["reviewSessionFile", 1],
     ];
     const directory = join(cwd, ".pi", "maestro", "archive");
