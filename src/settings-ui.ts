@@ -31,6 +31,15 @@ const MODEL_CHOICES = [
   "claude-fable-5",
 ];
 
+const FALLBACK_CHOICES = [
+  "(none)",
+  "claude-haiku-4-5",
+  "claude-sonnet-4-6",
+  "claude-sonnet-5",
+  "gpt-5.6-terra",
+  "gpt-5.6-sol",
+];
+
 function tierDescription(name: string): string {
   return TIER_DESCRIPTIONS[name] ?? "Custom tier.";
 }
@@ -122,7 +131,14 @@ export async function showSettings(
         label: `${name} · model`,
         currentValue: tier.model ?? "(pi default)",
         values: MODEL_CHOICES,
-        description: `${tierDescription(name)} "(pi default)" inherits your current pi model. Ordered fallbacks can be configured in JSON config.`,
+        description: `${tierDescription(name)} "(pi default)" inherits your current pi model.`,
+      });
+      items.push({
+        id: `fallback:${name}`,
+        label: `${name} · fallback`,
+        currentValue: tier.fallbacks?.[0] ?? "(none)",
+        values: FALLBACK_CHOICES,
+        description: `Model tried when the ${name} model dies (no key, expired auth, quota/rate limit). Pick a different provider so one outage cannot stall the run. Longer chains: edit fallbacks[] in the JSON config.`,
       });
       items.push({
         id: `thinking:${name}`,
@@ -183,6 +199,13 @@ export async function showSettings(
     if (kind === "model") {
       if (value === "(pi default)") delete tier.model;
       else tier.model = value;
+    }
+    if (kind === "fallback") {
+      // The UI edits the first fallback; deeper chain entries stay untouched.
+      const rest = tier.fallbacks?.slice(1) ?? [];
+      const chain = value === "(none)" ? rest : [value, ...rest];
+      if (chain.length === 0) delete tier.fallbacks;
+      else tier.fallbacks = chain;
     }
     if (kind === "thinking") tier.thinking = value;
     persist();
