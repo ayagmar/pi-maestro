@@ -105,14 +105,13 @@ test("dashboard clamps both panes to its configured body height", () => {
       makeTask({ id: "T3" }),
     ],
   };
-  const dashboard = new Dashboard(fakeTheme, makeActions(board), { bodyHeight: 3 });
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { bodyHeight: 7 });
   try {
     const lines = dashboard.render(100);
-    const body = lines.slice(1, 4).join("\n");
+    const body = lines.slice(1, 8).join("\n");
 
-    assert.equal(lines.length, 6);
-    assert.match(body, /T2 Do thing/);
-    assert.doesNotMatch(body, /T3 Do thing/);
+    assert.equal(lines.length, 10);
+    assert.match(body, /T3 Do thing/);
     assert.doesNotMatch(body, /transcript one/);
     assert.match(body, /transcript two/);
     assert.match(body, /transcript three/);
@@ -242,12 +241,45 @@ test("dashboard escape closes in browse mode", () => {
   }
 });
 
-test("dashboard approve/reopen shortcuts only work on finished tasks", () => {
+test("dashboard shows selected task context and state-aware actions", () => {
   const board: Board = {
     version: 1,
-    nextTaskNumber: 2,
-    tasks: [makeTask({ status: "ready_for_review" })],
+    nextTaskNumber: 3,
+    tasks: [
+      makeTask({
+        status: "ready_for_review",
+        tier: "complex",
+        dependsOn: ["T2"],
+        attempts: [
+          {
+            index: 1,
+            logFile: "missing.jsonl",
+            thinking: "high",
+            startedAt: 0,
+            usage: { input: 10, output: 20, cost: 0.125, turns: 2 },
+            touchedFiles: [],
+          },
+        ],
+      }),
+      makeTask({ id: "T2", status: "approved" }),
+    ],
   };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    const output = dashboard.render(120).join("\n");
+    assert.match(output, /T1 · ready for review · complex/);
+    assert.match(output, /Dependencies: T2 · 1 attempt · \$0\.1250/);
+    assert.match(output, /Next: Review the result; open its session or approve it\./);
+    assert.match(output, /enter open session · a approve/);
+    assert.doesNotMatch(output, /r reopen/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard only applies task actions valid for the selected state", () => {
+  const task = makeTask({ status: "ready_for_review" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
   const changes: string[] = [];
   const dashboard = new Dashboard(
     fakeTheme,
@@ -256,7 +288,43 @@ test("dashboard approve/reopen shortcuts only work on finished tasks", () => {
   try {
     dashboard.handleInput("a");
     dashboard.handleInput("r");
+    task.status = "failed";
+    dashboard.handleInput("a");
+    dashboard.handleInput("r");
     assert.deepEqual(changes, ["T1:approved", "T1:todo"]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard makes complete and filtered boards clear while preserving the done filter", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 2,
+    tasks: [makeTask({ status: "approved" })],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    assert.match(dashboard.render(100).join("\n"), /board complete/);
+    dashboard.handleInput("f");
+    const filtered = dashboard.render(100).join("\n");
+    assert.match(filtered, /All tasks are done\./);
+    assert.match(filtered, /f show them again/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard opens the selected task session", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const opened: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, { openSession: (taskId) => opened.push(taskId) })
+  );
+  try {
+    dashboard.handleInput("o");
+    assert.deepEqual(opened, ["T1"]);
   } finally {
     dashboard.dispose();
   }

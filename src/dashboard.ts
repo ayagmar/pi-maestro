@@ -157,9 +157,18 @@ export class Dashboard {
       this.mode = "steer_templates";
     } else if (data === "x" && task && this.actions.isLive(task.id)) {
       this.mode = "confirm_abort";
-    } else if (data === "a" && task && !this.actions.isLive(task.id)) {
+    } else if (
+      data === "a" &&
+      task?.status === "ready_for_review" &&
+      !this.actions.isLive(task.id)
+    ) {
       this.actions.setTaskStatus(task.id, "approved");
-    } else if (data === "r" && task && !this.actions.isLive(task.id)) {
+    } else if (
+      data === "r" &&
+      task &&
+      (task.status === "approved" || task.status === "failed" || task.status === "cancelled") &&
+      !this.actions.isLive(task.id)
+    ) {
       this.actions.setTaskStatus(task.id, "todo");
     } else if ((matchesKey(data, "return") || data === "o") && task) {
       this.actions.openSession(task.id);
@@ -210,7 +219,12 @@ export class Dashboard {
     const running = board.tasks.filter((t) => this.actions.isLive(t.id)).length;
     const hiddenCount = board.tasks.length - visible.length;
     const filterPart = this.hideDone ? ` · hiding ${hiddenCount} done` : "";
-    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)}${filterPart} `;
+    const completed =
+      board.tasks.length > 0 &&
+      board.tasks.every((task) => task.status === "approved" || task.status === "cancelled")
+        ? " · board complete"
+        : "";
+    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)}${completed}${filterPart} `;
     lines.push(theme.fg("accent", truncateToWidth(title + "─".repeat(width), width)));
 
     for (let i = 0; i < bodyHeight; i++) {
@@ -267,6 +281,9 @@ export class Dashboard {
     const theme = this.theme;
     const task = this.selectedTask();
     if (!task) return [];
+
+    const summary = this.renderSelectedTask(task, width).slice(0, Math.max(1, height - 1));
+    const transcriptHeight = Math.max(0, height - summary.length);
     const tail = this.tailFor(task);
     tail?.poll();
 
@@ -295,15 +312,47 @@ export class Dashboard {
       }
     }
 
-    const steerLines = this.renderSteerControls(width, height);
-    const visible = Math.max(0, height - steerLines.length);
+    const steerLines = this.renderSteerControls(width, transcriptHeight);
+    const visible = Math.max(0, transcriptHeight - steerLines.length);
     const maxScroll = Math.max(0, wrapped.length - visible);
     if (this.scrollUp > maxScroll) this.scrollUp = maxScroll;
     const end = wrapped.length - this.scrollUp;
     const body = wrapped.slice(Math.max(0, end - visible), end);
 
     body.push(...steerLines);
-    return body.slice(0, height);
+    return [...summary, ...body].slice(0, height);
+  }
+
+  private renderSelectedTask(task: Task, width: number): string[] {
+    const usage = taskUsage(task);
+    const dependencies = task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none";
+    const attempts = `${task.attempts.length} attempt${task.attempts.length === 1 ? "" : "s"}`;
+    const heading = `${STATUS_GLYPHS[task.status]} ${task.id} · ${STATUS_LABELS[task.status]} · ${task.tier}`;
+
+    return [
+      this.theme.bold(truncateToWidth(heading, width)),
+      this.theme.fg(
+        "dim",
+        truncateToWidth(
+          `Dependencies: ${dependencies} · ${attempts} · $${usage.cost.toFixed(4)}`,
+          width
+        )
+      ),
+      truncateToWidth(`Next: ${this.nextAction(task)}`, width),
+      this.theme.fg("dim", "─".repeat(width)),
+    ];
+  }
+
+  private nextAction(task: Task): string {
+    if (this.actions.isLive(task.id)) return "Monitor output, steer if needed, or abort.";
+    if (task.status === "ready_for_review")
+      return "Review the result; open its session or approve it.";
+    if (task.status === "changes_requested") return "Waiting for the next revision attempt.";
+    if (task.status === "approved") return "Complete — no action needed.";
+    if (task.status === "failed") return "Reopen the task to retry it.";
+    if (task.status === "cancelled") return "Reopen the task if it should run.";
+    if (task.dependsOn.length > 0) return `Waiting for ${task.dependsOn.join(", ")} to complete.`;
+    return "Ready to run when the orchestrator dispatches it.";
   }
 
   private renderSteerControls(width: number, height: number): string[] {
@@ -345,8 +394,10 @@ export class Dashboard {
     if (live) parts.push("s steer", "x abort");
     else if (task) {
       if (task.attempts.length > 0) parts.push("enter open session");
-      if (task.status !== "approved") parts.push("a approve");
-      if (task.status !== "todo") parts.push("r reopen");
+      if (task.status === "ready_for_review") parts.push("a approve");
+      if (task.status === "approved" || task.status === "failed" || task.status === "cancelled") {
+        parts.push("r reopen");
+      }
     }
     parts.push(this.hideDone ? "f show done" : "f hide done", "esc close");
     return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
