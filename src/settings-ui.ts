@@ -80,6 +80,54 @@ export function filterModelChoices(choices: string[], query: string): string[] {
   return choices.filter((choice) => choice.toLowerCase().includes(normalizedQuery));
 }
 
+export interface ModelPickerChoice {
+  value: string;
+  label: string;
+}
+
+/**
+ * Keep a bare model pattern selected while showing the authenticated model it
+ * currently resolves to. The stored value stays bare, preserving provider
+ * preference during execution.
+ */
+export function buildModelPickerChoices(
+  modelRegistry: ExtensionCommandContext["modelRegistry"],
+  choices: string[],
+  currentValue: string,
+  preferredProvider?: string
+): ModelPickerChoice[] {
+  const items = choices.map((choice) => ({ value: choice, label: choice }));
+  if (currentValue.startsWith("(") || currentValue.includes("/")) return items;
+
+  const pattern = currentValue.toLowerCase();
+  const candidates = modelRegistry
+    .getAvailable()
+    .filter((model) => model.id.toLowerCase().includes(pattern));
+  const preferred = preferredProvider
+    ? candidates.find((model) => model.provider === preferredProvider)
+    : undefined;
+  const selected = preferred ?? candidates[0];
+  if (!selected) return items;
+
+  const qualifiedValue = `${selected.provider}/${selected.id}`;
+  const selectedItem = items.find((item) => item.value === qualifiedValue);
+  if (selectedItem) selectedItem.value = currentValue;
+  return items;
+}
+
+function displayModelValue(
+  modelRegistry: ExtensionCommandContext["modelRegistry"],
+  choices: string[],
+  currentValue: string,
+  preferredProvider?: string
+): string {
+  return (
+    buildModelPickerChoices(modelRegistry, choices, currentValue, preferredProvider).find(
+      (choice) => choice.value === currentValue
+    )?.label ?? currentValue
+  );
+}
+
 function tierDescription(name: string): string {
   return TIER_DESCRIPTIONS[name] ?? "Custom tier.";
 }
@@ -138,6 +186,7 @@ export async function showSettings(
 ): Promise<void> {
   let config: MaestroConfig = structuredClone(loadConfig(ctx.cwd));
   const modelChoices = buildModelChoices(ctx.modelRegistry);
+  const preferredProvider = ctx.model?.provider;
   const persist = () => saveConfig(scope, ctx.cwd, config);
 
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
@@ -155,6 +204,12 @@ export async function showSettings(
       currentValue: string,
       close: (selectedValue?: string) => void
     ) => {
+      const pickerChoices = buildModelPickerChoices(
+        ctx.modelRegistry,
+        choices,
+        currentValue,
+        preferredProvider
+      );
       const input = new Input();
       const titleText = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
       const searchLabel = new Text(theme.fg("muted", " Search by provider or model id:"), 0, 0);
@@ -166,12 +221,22 @@ export async function showSettings(
       let list: SelectList;
 
       const rebuildList = () => {
-        const items: SelectItem[] = filterModelChoices(choices, input.getValue()).map((choice) => {
-          const item: SelectItem = { value: choice, label: choice };
-          if (choice === "(pi default)") item.description = "Inherit the model selected in pi";
-          if (choice === "(none)") item.description = "Do not configure a fallback";
-          return item;
-        });
+        const matchingLabels = new Set(
+          filterModelChoices(
+            pickerChoices.map((choice) => choice.label),
+            input.getValue()
+          )
+        );
+        const items: SelectItem[] = pickerChoices
+          .filter((choice) => matchingLabels.has(choice.label))
+          .map((choice) => {
+            const item: SelectItem = { ...choice };
+            if (choice.value === "(pi default)") {
+              item.description = "Inherit the model selected in pi";
+            }
+            if (choice.value === "(none)") item.description = "Do not configure a fallback";
+            return item;
+          });
         list = new SelectList(items, Math.min(Math.max(items.length, 1), 10), pickerTheme);
         const currentIndex = items.findIndex((item) => item.value === currentValue);
         if (!input.getValue() && currentIndex >= 0) list.setSelectedIndex(currentIndex);
@@ -218,21 +283,33 @@ export async function showSettings(
       for (const name of tierNames) {
         const tier = config.tiers[name];
         if (!tier) continue;
+        const primary = tier.model ?? "(pi default)";
+        const fallback = tier.fallbacks?.[0] ?? "(none)";
         items.push({
           id: `model:${name}`,
           label: `${name} · model`,
-          currentValue: tier.model ?? "(pi default)",
+          currentValue: displayModelValue(
+            ctx.modelRegistry,
+            modelChoices.model,
+            primary,
+            preferredProvider
+          ),
           description: `${tierDescription(name)} Choose an authenticated provider/model, or inherit pi's model.`,
-          submenu: (current, close) =>
-            createModelPicker(`${name} primary model`, modelChoices.model, current, close),
+          submenu: (_current, close) =>
+            createModelPicker(`${name} primary model`, modelChoices.model, primary, close),
         });
         items.push({
           id: `fallback:${name}`,
           label: `${name} · fallback`,
-          currentValue: tier.fallbacks?.[0] ?? "(none)",
+          currentValue: displayModelValue(
+            ctx.modelRegistry,
+            modelChoices.fallback,
+            fallback,
+            preferredProvider
+          ),
           description: `First model tried after the ${name} primary fails. Deeper fallbacks remain unchanged.`,
-          submenu: (current, close) =>
-            createModelPicker(`${name} fallback model`, modelChoices.fallback, current, close),
+          submenu: (_current, close) =>
+            createModelPicker(`${name} fallback model`, modelChoices.fallback, fallback, close),
         });
         items.push({
           id: `thinking:${name}`,
@@ -327,7 +404,11 @@ export async function showSettings(
         "tiers",
         `${Object.keys(config.tiers).filter((name) => name !== "review").length} tiers`
       );
-      navigation.updateValue("review", config.tiers.review?.model ?? "(pi default)");
+      const reviewModel = config.tiers.review?.model ?? "(pi default)";
+      navigation.updateValue(
+        "review",
+        displayModelValue(ctx.modelRegistry, modelChoices.model, reviewModel, preferredProvider)
+      );
     };
 
     const createSection = (section: string, close: (selectedValue?: string) => void) => {
@@ -375,7 +456,12 @@ export async function showSettings(
       {
         id: "review",
         label: "Review settings",
-        currentValue: config.tiers.review?.model ?? "(pi default)",
+        currentValue: displayModelValue(
+          ctx.modelRegistry,
+          modelChoices.model,
+          config.tiers.review?.model ?? "(pi default)",
+          preferredProvider
+        ),
         description: "Primary model, fallback, and thinking level for adversarial review.",
         submenu: (_current, close) => createSection("review", close),
       },

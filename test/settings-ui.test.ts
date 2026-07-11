@@ -4,8 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
-import { applySettingsChange, buildModelChoices, filterModelChoices } from "../src/settings-ui.js";
+import { DEFAULT_CONFIG, findPreset, saveConfig } from "../src/config.js";
+import {
+  applySettingsChange,
+  buildModelChoices,
+  buildModelPickerChoices,
+  filterModelChoices,
+} from "../src/settings-ui.js";
 
 function registryWithModels(
   models: Array<{ provider: string; id: string }>
@@ -46,6 +51,52 @@ test("settings model filtering matches provider, model id, and sentinels", () =>
   assert.deepEqual(filterModelChoices(choices, "OPENAI"), ["openai/gpt-5.6-sol"]);
   assert.deepEqual(filterModelChoices(choices, "default"), ["(pi default)"]);
   assert.deepEqual(filterModelChoices(choices, ""), choices);
+});
+
+test("picker selects preset bare primary and fallback values without qualifying them", () => {
+  const registry = registryWithModels([
+    { provider: "openai", id: "gpt-5.6-sol" },
+    { provider: "proxy", id: "gpt-5.6-sol" },
+    { provider: "anthropic", id: "claude-sonnet-5" },
+  ]);
+  const choices = buildModelChoices(registry);
+  const preset = findPreset("balanced");
+  assert.ok(preset);
+
+  const config = structuredClone(preset.config);
+  const standard = config.tiers.standard;
+  assert.ok(standard?.model);
+  standard.fallbacks = ["claude-sonnet-5"];
+
+  const primaryItems = buildModelPickerChoices(registry, choices.model, standard.model, "openai");
+  const fallbackItems = buildModelPickerChoices(
+    registry,
+    choices.fallback,
+    standard.fallbacks[0] as string,
+    "openai"
+  );
+
+  assert.deepEqual(
+    primaryItems.find((item) => item.value === standard.model),
+    {
+      value: "gpt-5.6-sol",
+      label: "openai/gpt-5.6-sol",
+    }
+  );
+  assert.deepEqual(
+    fallbackItems.find((item) => item.value === standard.fallbacks?.[0]),
+    {
+      value: "claude-sonnet-5",
+      label: "anthropic/claude-sonnet-5",
+    }
+  );
+  assert.equal(primaryItems.filter((item) => item.label === "openai/gpt-5.6-sol").length, 1);
+  assert.ok(primaryItems.some((item) => item.value === "proxy/gpt-5.6-sol"));
+
+  applySettingsChange(config, "model:standard", standard.model);
+  applySettingsChange(config, "fallback:standard", standard.fallbacks[0] as string);
+  assert.equal(config.tiers.standard?.model, "gpt-5.6-sol");
+  assert.equal(config.tiers.standard?.fallbacks?.[0], "claude-sonnet-5");
 });
 
 test("settings model choices retain static menus when no authenticated models are available", () => {
