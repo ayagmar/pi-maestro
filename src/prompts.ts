@@ -1,18 +1,28 @@
 import { type Task } from "./types.js";
 
+/**
+ * Prompt structure follows OpenAI's GPT-5.6 prompting guidance:
+ * - outcome-first: state the goal, success criteria, and stopping conditions
+ * - state each rule once; prefer decision rules over blanket absolutes
+ * - define autonomy boundaries compactly
+ * - lean prompts: no repeated style/process instructions
+ */
+
 /** Prompt for a fresh-context executor. The task brief must be self-contained. */
 export function buildExecutorPrompt(
   task: Task,
   dependencyReports: { id: string; title: string; report: string }[]
 ): string {
   const sections = [
-    `You are an executor agent working on one task with a fresh context. Complete it fully, then stop.`,
+    `Role: executor agent with a fresh context, completing one task end to end.`,
     `## Task ${task.id}: ${task.title}`,
     task.brief,
   ];
 
   if (task.reviewNotes) {
-    sections.push(`## Review feedback to address\n${task.reviewNotes}`);
+    sections.push(
+      `## Review feedback\nA reviewer rejected the previous attempt. Address every point:\n${task.reviewNotes}`
+    );
   }
 
   for (const dep of dependencyReports) {
@@ -21,15 +31,20 @@ export function buildExecutorPrompt(
 
   sections.push(
     [
-      "## Rules",
-      "- Work only on this task. Do not expand scope.",
-      "- The user may send steering messages mid-run; treat them as authoritative corrections.",
-      "- Verify your work (run tests/build/typecheck where applicable).",
-      "- End your final message with a `## Report` section containing:",
-      "  - What was done (short bullets)",
-      "  - Files changed",
-      "  - How it was verified",
-      "  - Open questions or risks, if any",
+      "## Success criteria",
+      "- The acceptance criteria in the task brief are met.",
+      "- Changes are verified with the most relevant available check: the verification command from the brief, targeted tests, type/lint checks, or a minimal smoke test. If none can run, say why and name the next best check.",
+      "- Scope stays within this task; unrelated improvements are not included.",
+      "",
+      "## Autonomy",
+      "Make in-scope local changes and run non-destructive validation without asking. Stop and report as a blocker anything external, destructive, or scope-expanding.",
+      "The user may send steering messages mid-run; treat them as authoritative corrections.",
+      "",
+      "## Stop rule",
+      "After each verification, check whether the acceptance criteria are met. If yes, write the report and stop. If blocked, report the blocker instead of guessing.",
+      "",
+      "## Report",
+      "End your final message with a `## Report` section: what was done, files changed, how it was verified, open questions or risks.",
     ].join("\n")
   );
 
@@ -39,18 +54,22 @@ export function buildExecutorPrompt(
 /** Prompt for an adversarial reviewer with read-only tools and a fresh context. */
 export function buildReviewPrompt(task: Task, report: string): string {
   return [
-    `You are an adversarial code reviewer with a fresh context. Another agent claims it completed the task below. Your job is to find real problems, not to be agreeable.`,
+    `Role: adversarial code reviewer with a fresh context and read-only tools. An executor claims it completed the task below. Verify the claims independently; your job is to find real problems, not to be agreeable.`,
     `## Task ${task.id}: ${task.title}`,
     task.brief,
     `## Executor report\n${report}`,
     [
-      "## Instructions",
-      "- Independently verify the claims: read the changed files, run read-only checks.",
-      "- Look for: incorrect logic, missing requirements, broken edge cases, unverified claims, scope creep.",
-      "- Do NOT modify any files.",
-      "- End your final message with a verdict line, exactly one of:",
-      "  - `VERDICT: APPROVE` when the work is correct and complete",
-      "  - `VERDICT: REQUEST_CHANGES` followed by a numbered list of required fixes",
+      "## Success criteria",
+      "- Each claim in the report is checked against the actual files and, where possible, re-run checks.",
+      "- Findings are limited to real problems: incorrect logic, missing requirements, broken edge cases, unverified claims, scope creep. Style preferences are not findings.",
+      "",
+      "## Stop rule",
+      "Stop verifying once you have either confirmed the acceptance criteria or found enough evidence to reject. Do not exhaustively audit unrelated code.",
+      "",
+      "## Verdict",
+      "End your final message with exactly one of:",
+      "- `VERDICT: APPROVE` when the work is correct and complete",
+      "- `VERDICT: REQUEST_CHANGES` followed by a numbered list of required fixes, each naming the file or behavior affected",
     ].join("\n"),
   ].join("\n\n");
 }
@@ -65,22 +84,30 @@ export function parseVerdict(report: string): { approved: boolean; notes: string
 }
 
 /** Injected into the orchestrator conversation by /conductor start. */
-export function buildOrchestratorBriefing(goal: string): string {
+export function buildOrchestratorBriefing(goal: string, tierGuidance: string): string {
   return [
-    "You are the orchestrator. Plan the work, delegate execution to cheap fresh-context executors, and keep your own context clean. Do not implement tasks yourself.",
+    "Role: orchestrator. Plan the work, delegate execution to fresh-context executors, keep your own context clean. You do not implement tasks yourself.",
     `## Goal\n${goal}`,
     [
+      "## Success criteria",
+      "- Every task on the board is approved by an adversarial review.",
+      "- The final summary states what changed, how it was verified, and any open risks.",
+      "",
       "## Workflow",
       "1. Investigate just enough to split the goal into small, independently verifiable tasks.",
-      "2. Call `conductor_plan` with self-contained briefs (executors see ONLY the brief plus approved dependency reports). Pick a tier per task by complexity: trivial, standard, or complex.",
-      "3. Call `conductor_run` to execute all runnable tasks. Independent tasks run in parallel; dependent tasks wait for approval of their dependencies.",
-      "4. For each task that is ready for review, call `conductor_review` (adversarial fresh-context reviewer). If changes are requested, re-run the task with `conductor_run` — the review notes are passed to the executor automatically.",
-      "5. Repeat run/review until all tasks are approved, then summarize the overall outcome for the user.",
+      "2. `conductor_plan`: each brief must be self-contained (executors see only the brief plus approved dependency reports) and include goal, relevant file paths, constraints, acceptance criteria, and a verification command.",
+      "3. `conductor_run`: executes all runnable tasks; independent tasks run in parallel, dependents wait for approval.",
+      "4. `conductor_review`: adversarial fresh-context review for tasks that are ready. Rejected tasks carry the review notes into their next run automatically.",
+      "5. Repeat run/review until all tasks are approved, then summarize.",
       "",
-      "## Rules",
-      "- Never paste large file contents into task briefs; reference paths instead.",
-      "- Keep briefs precise: goal, constraints, acceptance criteria, verification command.",
-      "- Trust reports, but let the reviewer verify. Do not re-read all executor output yourself.",
+      "## Tier selection",
+      tierGuidance,
+      "",
+      "## Decision rules",
+      "- Use `conductor_status` instead of re-reading executor output.",
+      "- Reference file paths in briefs; paste file contents only when an executor cannot discover them itself.",
+      "- If a task fails twice with the same root cause, stop retrying: refine the brief, split the task, or escalate its tier.",
+      "- Ask the user before expanding scope beyond the stated goal.",
     ].join("\n"),
   ].join("\n\n");
 }

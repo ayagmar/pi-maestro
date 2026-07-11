@@ -23,17 +23,20 @@ function makeTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
-test("executor prompt contains task, rules, and report contract", () => {
+test("executor prompt contains task, success criteria, stop rule, and report contract", () => {
   const prompt = buildExecutorPrompt(makeTask(), []);
   assert.match(prompt, /## Task T1: Add health endpoint/);
   assert.match(prompt, /GET \/health/);
+  assert.match(prompt, /## Success criteria/);
+  assert.match(prompt, /## Stop rule/);
   assert.match(prompt, /## Report/);
   assert.match(prompt, /fresh context/);
+  assert.match(prompt, /steering messages mid-run/);
 });
 
 test("executor prompt includes review notes on retry", () => {
   const prompt = buildExecutorPrompt(makeTask({ reviewNotes: "1. Missing test for 500 path" }), []);
-  assert.match(prompt, /## Review feedback to address/);
+  assert.match(prompt, /## Review feedback/);
   assert.match(prompt, /Missing test for 500 path/);
 });
 
@@ -45,10 +48,11 @@ test("executor prompt includes dependency reports", () => {
   assert.match(prompt, /Created src\/server\.ts/);
 });
 
-test("review prompt is adversarial, read-only, and demands a verdict", () => {
+test("review prompt is adversarial, scoped, and demands a verdict", () => {
   const prompt = buildReviewPrompt(makeTask(), "Did the thing.");
   assert.match(prompt, /adversarial/);
-  assert.match(prompt, /Do NOT modify any files/);
+  assert.match(prompt, /read-only tools/);
+  assert.match(prompt, /Style preferences are not findings/);
   assert.match(prompt, /VERDICT: APPROVE/);
   assert.match(prompt, /VERDICT: REQUEST_CHANGES/);
 });
@@ -62,11 +66,14 @@ test("parseVerdict handles approve, request changes, and missing verdicts", () =
   assert.equal(parseVerdict("I think it looks fine"), undefined);
 });
 
-test("orchestrator briefing embeds the goal and workflow tools", () => {
-  const briefing = buildOrchestratorBriefing("Migrate to Spring Boot 4");
+test("orchestrator briefing embeds the goal, tier guidance, and workflow tools", () => {
+  const tierGuidance = "Pick the cheapest tier that can meet the acceptance criteria";
+  const briefing = buildOrchestratorBriefing("Migrate to Spring Boot 4", tierGuidance);
+  assert.match(briefing, /cheapest tier/);
   assert.match(briefing, /Migrate to Spring Boot 4/);
   assert.match(briefing, /conductor_plan/);
   assert.match(briefing, /conductor_run/);
   assert.match(briefing, /conductor_review/);
-  assert.match(briefing, /Do not implement tasks yourself/);
+  assert.match(briefing, /You do not implement tasks yourself/);
+  assert.match(briefing, /fails twice with the same root cause/);
 });

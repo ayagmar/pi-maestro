@@ -94,38 +94,59 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
 
 ### Configuration
 
-Defaults work out of the box (executors inherit your default pi model). Override per user in
-`~/.pi/agent/conductor.json` or per project in `.pi/conductor.json` (project wins per key):
+`/conductor config` opens an interactive settings editor (user scope by default,
+`/conductor config project` for repo scope, `/conductor config show` to print the resolved
+config). Every row has a description; changing any value switches the preset to `custom`.
+
+**Presets** ship with defaults derived from the Artificial Analysis Coding Agent Index v1.1
+and deep SWE leaderboard (pass@1 / avg cost per run):
+
+| Preset | trivial | standard | complex | review | Rationale |
+|--------|---------|----------|---------|--------|-----------|
+| `inherit` (default) | pi default · low | pi default · medium | pi default · high | pi default · high | Works with any provider, zero setup |
+| `balanced` | terra · high | sol · medium | sol · high | sol · medium | Best cost/quality knee per tier (sol-high: 69% @ $3.47) |
+| `budget` | luna · high | terra · high | terra · xhigh | terra · xhigh | Cheapest sensible run (terra-xhigh: 60% @ $2.13) |
+| `quality` | sol · medium | sol · high | sol · xhigh | sol · high | Frontier on every tier (sol-xhigh: 71% @ $4.70) |
+
+Config files are plain JSON if you prefer editing by hand — user scope
+`~/.pi/agent/conductor.json`, project scope `.pi/conductor.json` (project wins per key):
 
 ```json
 {
   "maxParallel": 4,
   "tiers": {
-    "trivial":  { "model": "openai/gpt-5-mini", "thinking": "low" },
-    "standard": { "model": "anthropic/claude-sonnet-4-5", "thinking": "medium" },
-    "complex":  { "model": "anthropic/claude-opus-4-5", "thinking": "high" },
-    "review":   { "model": "anthropic/claude-sonnet-4-5", "thinking": "high", "tools": "read,bash,grep,find,ls" }
+    "trivial":  { "model": "gpt-5.6-terra", "thinking": "high" },
+    "standard": { "model": "gpt-5.6-sol", "thinking": "medium" },
+    "complex":  { "model": "gpt-5.6-sol", "thinking": "high" },
+    "review":   { "model": "gpt-5.6-sol", "thinking": "medium", "tools": "read,bash,grep,find,ls" }
   }
 }
 ```
 
-- `model` — any pi model pattern (`provider/id`). Omit to inherit pi's default model.
-- `thinking` — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
+- `model` — a pi model pattern. Bare names like `gpt-5.6-terra` are resolved against providers
+  you actually have auth for (preferring the orchestrator's provider); `provider/id` pins one
+  provider. Omit to inherit pi's default model.
+- `thinking` — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Per GPT-5.6 guidance: start
+  medium, test one level lower, raise only when results show a gain.
 - `tools` — comma-separated allowlist passed to the executor. The `review` tier defaults to
   read-only tools so reviewers cannot modify files.
-- You can add your own tier names; the orchestrator is told which tiers exist when it plans.
+- You can add your own tier names; the orchestrator's planning guidance lists them.
 
-Check the resolved config with `/conductor config`.
+Before any run, conductor preflights every tier's model against your configured providers and
+fails with an actionable message (which tier, which model, how to fix) instead of spawning
+dead executors.
 
 ### Commands
 
 ```
-/conductor start <goal>   plan + delegate a goal with the orchestrator
-/conductor board          full-screen live dashboard (also ctrl+alt+b)
-/conductor list           compact task picker
-/conductor open <taskId>  switch into an executor's session
-/conductor config         show resolved tier configuration
-/conductor reset          clear the board
+/conductor start <goal>     plan + delegate a goal with the orchestrator
+/conductor board            full-screen live dashboard (also ctrl+alt+b)
+/conductor list             compact task picker
+/conductor open <taskId>    switch into an executor's session
+/conductor config           interactive settings editor (user scope)
+/conductor config project   interactive settings editor (repo scope)
+/conductor config show      print the resolved configuration
+/conductor reset            clear the board
 ```
 
 ## How it stays deterministic

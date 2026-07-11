@@ -40,6 +40,9 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
 export interface JsonEvent {
   type: string;
   id?: string;
+  command?: string;
+  success?: boolean;
+  error?: string;
   toolName?: string;
   args?: Record<string, unknown> | null;
   message?: {
@@ -160,6 +163,17 @@ export function startExecutor(options: {
         return;
       }
 
+      // A rejected prompt (bad model, missing API key, ...) would otherwise
+      // leave the process idle forever. Fail fast with the provider error.
+      if (event.type === "response" && event.command === "prompt" && event.success === false) {
+        result.errorMessage = event.error ?? "executor rejected the prompt";
+        proc.stdin.end();
+        setTimeout(() => {
+          if (proc.exitCode === null) proc.kill("SIGTERM");
+        }, KILL_GRACE_MS);
+        return;
+      }
+
       if (event.type === "tool_execution_start" && event.toolName) {
         lastActivity = event.toolName;
       }
@@ -207,6 +221,7 @@ export function startExecutor(options: {
       if (buffer.trim()) processLine(buffer);
       log.end();
       result.exitCode = code ?? 0;
+      if (result.errorMessage && result.exitCode === 0) result.exitCode = 1;
       result.aborted = wasAborted;
       if (result.exitCode !== 0 && !result.errorMessage && !wasAborted) {
         result.errorMessage = stderr.trim() || `executor exited with code ${result.exitCode}`;

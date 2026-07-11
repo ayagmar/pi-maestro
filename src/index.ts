@@ -16,7 +16,12 @@ import {
   setStatus,
   stateDir,
 } from "./board.js";
-import { describeConfig, loadConfig } from "./config.js";
+import {
+  describeConfig,
+  describeTiersForPlanning,
+  loadConfig,
+  resolveTierModel,
+} from "./config.js";
 import { COMMAND, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
 import {
   boardUsage,
@@ -40,6 +45,7 @@ import {
   mapWithConcurrencyLimit,
   startExecutor,
 } from "./runner.js";
+import { showSettings } from "./settings-ui.js";
 import { type Board, type Task, type TaskStatus, type TierConfig } from "./types.js";
 
 interface LiveRun {
@@ -420,6 +426,26 @@ export default function conductor(pi: ExtensionAPI) {
         };
       }
 
+      // Preflight tier models before spawning anything: a bad pattern or
+      // missing API key should fail with an actionable message, not N dead runs.
+      const resolvedTiers = new Map<string, TierConfig>();
+      for (const task of runnable) {
+        if (resolvedTiers.has(task.tier)) continue;
+        const tier = config.tiers[task.tier] ?? config.tiers.standard;
+        if (!tier) throw new Error(`No tier config for "${task.tier}" and no standard fallback`);
+        const resolution = resolveTierModel(
+          task.tier,
+          tier,
+          ctx.modelRegistry,
+          ctx.model?.provider
+        );
+        if (!resolution.ok) throw new Error(resolution.error);
+        const resolved: TierConfig = { ...tier };
+        if (resolution.modelArg === undefined) delete resolved.model;
+        else resolved.model = resolution.modelArg;
+        resolvedTiers.set(task.tier, resolved);
+      }
+
       const emitProgress = () => {
         onUpdate?.({
           content: [{ type: "text", text: `Running ${liveRuns.size} executor(s)…` }],
@@ -428,8 +454,8 @@ export default function conductor(pi: ExtensionAPI) {
       };
 
       const results = await mapWithConcurrencyLimit(runnable, config.maxParallel, (task) => {
-        const tier = config.tiers[task.tier] ?? config.tiers.standard;
-        if (!tier) throw new Error(`No tier config for "${task.tier}" and no standard fallback`);
+        const tier = resolvedTiers.get(task.tier);
+        if (!tier) throw new Error(`No tier config for "${task.tier}"`);
         return executeTask(board, task, tier, ctx, signal, emitProgress);
       });
 
@@ -494,10 +520,18 @@ export default function conductor(pi: ExtensionAPI) {
         };
       }
 
-      const reviewTier = config.tiers.review ?? {
-        thinking: "high",
-        tools: "read,bash,grep,find,ls",
+      const reviewTier: TierConfig = {
+        ...(config.tiers.review ?? { thinking: "high", tools: "read,bash,grep,find,ls" }),
       };
+      const resolution = resolveTierModel(
+        "review",
+        reviewTier,
+        ctx.modelRegistry,
+        ctx.model?.provider
+      );
+      if (!resolution.ok) throw new Error(resolution.error);
+      if (resolution.modelArg === undefined) delete reviewTier.model;
+      else reviewTier.model = resolution.modelArg;
       const emitProgress = () => {
         onUpdate?.({
           content: [{ type: "text", text: `Reviewing ${liveRuns.size} task(s)…` }],
@@ -619,7 +653,16 @@ export default function conductor(pi: ExtensionAPI) {
     description:
       "Orchestrator/executor workflows: start <goal> | board | open <taskId> | config | reset",
     getArgumentCompletions: (prefix) => {
-      const options = ["start", "board", "list", "open", "config", "reset"];
+      const options = [
+        "start",
+        "board",
+        "list",
+        "open",
+        "config",
+        "config project",
+        "config show",
+        "reset",
+      ];
       const matches = options.filter((option) => option.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
     },
@@ -634,7 +677,14 @@ export default function conductor(pi: ExtensionAPI) {
             return;
           }
           pi.sendMessage(
-            { customType: MESSAGE_TYPE, content: buildOrchestratorBriefing(rest), display: true },
+            {
+              customType: MESSAGE_TYPE,
+              content: buildOrchestratorBriefing(
+                rest,
+                describeTiersForPlanning(loadConfig(ctx.cwd))
+              ),
+              display: true,
+            },
             { triggerTurn: true }
           );
           return;
@@ -655,9 +705,16 @@ export default function conductor(pi: ExtensionAPI) {
           await openTaskSession(ctx, rest);
           return;
         }
-        case "config":
-          notify(ctx, describeConfig(loadConfig(ctx.cwd)));
+        case "config": {
+          if (ctx.mode !== "tui" || rest === "show") {
+            notify(ctx, describeConfig(loadConfig(ctx.cwd)));
+            return;
+          }
+          const scope = rest === "project" ? "project" : "user";
+          await showSettings(ctx, scope);
+          refreshUI(ctx);
           return;
+        }
         case "reset": {
           const board = loadBoard(ctx.cwd);
           if (board.tasks.length === 0) {
@@ -682,7 +739,7 @@ export default function conductor(pi: ExtensionAPI) {
               `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
               `/${COMMAND} list           compact task picker`,
               `/${COMMAND} open <taskId>  switch into an executor session`,
-              `/${COMMAND} config         show resolved tier configuration`,
+              `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
               `/${COMMAND} reset          clear the board`,
             ].join("\n")
           );
