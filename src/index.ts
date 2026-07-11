@@ -30,6 +30,7 @@ import {
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
 import {
   boardUsage,
+  formatBoardProgress,
   formatUsage,
   STATUS_GLYPHS,
   STATUS_LABELS,
@@ -145,7 +146,7 @@ export default function maestro(pi: ExtensionAPI) {
       return;
     }
 
-    const approved = board.tasks.filter((t) => t.status === "approved").length;
+    const progress = formatBoardProgress(board.tasks);
     const running = liveRuns.size;
     const usage = boardUsage(board.tasks);
     const runningPart = running > 0 ? ` · ${running} running` : "";
@@ -153,7 +154,7 @@ export default function maestro(pi: ExtensionAPI) {
       COMMAND,
       ctx.ui.theme.fg(
         running > 0 ? "warning" : "muted",
-        `⚡ maestro ${approved}/${board.tasks.length}${runningPart} · $${usage.cost.toFixed(4)}`
+        `⚡ maestro ${progress}${runningPart} · $${usage.cost.toFixed(4)}`
       )
     );
 
@@ -199,6 +200,9 @@ export default function maestro(pi: ExtensionAPI) {
   function trackRun(ctx: ExtensionContext, run: WorkflowRun): () => void {
     liveRuns.set(run.taskId, run);
     refreshUI(ctx);
+    // The workflow persists the running state immediately after registration.
+    // Refresh again once that synchronous mutation has completed.
+    queueMicrotask(() => refreshUI(ctx));
     return () => {
       liveRuns.delete(run.taskId);
       refreshUI(ctx);
@@ -474,6 +478,7 @@ export default function maestro(pi: ExtensionAPI) {
 
       // Reports were written by executors after our board copy was loaded.
       const freshBoard = loadBoard(ctx.cwd);
+      refreshUI(ctx);
       const all = [...results, ...blocked];
       const summary = all
         .map((snap) => {
@@ -569,6 +574,7 @@ export default function maestro(pi: ExtensionAPI) {
         return reviewTask(workflowOptions);
       });
 
+      refreshUI(ctx);
       const summary = results
         .map(
           (snap) =>
@@ -620,6 +626,7 @@ export default function maestro(pi: ExtensionAPI) {
           details: { action: "drive", tasks: current.map((task) => snapshot(task)) },
         });
       });
+      refreshUI(ctx);
       return {
         content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
         details: {
@@ -841,6 +848,7 @@ export default function maestro(pi: ExtensionAPI) {
           board.goal = rest;
           saveBoard(ctx.cwd, board);
           adoptBoard(ctx);
+          refreshUI(ctx);
           nameSessionAfterGoal(ctx, rest, "maestro");
           pi.sendMessage(
             {

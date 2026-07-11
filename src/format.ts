@@ -58,6 +58,14 @@ export function boardUsage(tasks: Task[]): Usage {
   return total;
 }
 
+export function formatBoardProgress(tasks: Task[]): string {
+  const approved = tasks.filter((task) => task.status === "approved").length;
+  const cancelled = tasks.filter((task) => task.status === "cancelled").length;
+  const active = tasks.length - cancelled;
+  const cancelledPart = cancelled > 0 ? ` · ${cancelled} cancelled` : "";
+  return `${approved}/${active}${cancelledPart}`;
+}
+
 export function runBudgetWarning(tasks: Task[], maxRunCost: number): string | undefined {
   const totalCost = boardUsage(tasks).cost;
   if (maxRunCost <= 0 || totalCost <= maxRunCost) return undefined;

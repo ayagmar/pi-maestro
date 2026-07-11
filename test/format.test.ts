@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   boardUsage,
+  formatBoardProgress,
   formatTokens,
   formatUsage,
   runBudgetWarning,
@@ -50,6 +51,17 @@ test("taskUsage sums attempts and boardUsage sums tasks", () => {
   assert.equal(taskUsage(task).turns, 5);
   const total = boardUsage([task, makeTask({ attempts: [makeAttempt(0.1, 1)] })]);
   assert.equal(total.cost.toFixed(2), "0.13");
+});
+
+test("formatBoardProgress excludes cancelled tasks from active progress", () => {
+  const tasks = [
+    makeTask({ id: "T1", status: "approved" }),
+    makeTask({ id: "T2", status: "approved" }),
+    makeTask({ id: "T3", status: "cancelled" }),
+  ];
+
+  assert.equal(formatBoardProgress(tasks), "2/2 · 1 cancelled");
+  assert.equal(formatBoardProgress(tasks.slice(0, 2)), "2/2");
 });
 
 test("run budget gates only when total board cost exceeds a positive cap", () => {
