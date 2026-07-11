@@ -13,7 +13,7 @@ import {
   matchingPreset,
   saveConfig,
 } from "./config.js";
-import { type ConductorConfig } from "./types.js";
+import { type MaestroConfig } from "./types.js";
 
 const TIER_DESCRIPTIONS: Record<string, string> = {
   trivial: "Mechanical, well-specified changes: renames, configs, small files, docs.",
@@ -36,7 +36,7 @@ function tierDescription(name: string): string {
 }
 
 /**
- * Interactive settings editor for conductor. Edits are applied to a full
+ * Interactive settings editor for maestro. Edits are applied to a full
  * resolved config and written to one scope file, so what you see is exactly
  * what future runs use.
  */
@@ -45,7 +45,7 @@ export async function showSettings(
   scope: ConfigScope
 ): Promise<void> {
   // Work on the resolved config so the UI always shows effective values.
-  let config: ConductorConfig = structuredClone(loadConfig(ctx.cwd));
+  let config: MaestroConfig = structuredClone(loadConfig(ctx.cwd));
 
   const persist = () => saveConfig(scope, ctx.cwd, config);
 
@@ -112,7 +112,7 @@ export async function showSettings(
 
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
     const container = new Container();
-    const title = ` conductor settings · ${scope} scope → ${configFile(scope, ctx.cwd)}`;
+    const title = ` maestro settings · ${scope} scope → ${configFile(scope, ctx.cwd)}`;
     container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
     container.addChild(
       new Text(

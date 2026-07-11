@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type ModelRegistry, getAgentDir, resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
-import { type ConductorConfig, type TierConfig } from "./types.js";
+import { type MaestroConfig, type TierConfig } from "./types.js";
 
 export type ConfigScope = "user" | "project";
 
@@ -14,7 +14,7 @@ export const REVIEW_TOOLS = "read,bash,grep,find,ls";
  * thinking level differentiates tiers. Apply a preset (or edit config) to
  * get real cheap-executor economics.
  */
-export const DEFAULT_CONFIG: ConductorConfig = {
+export const DEFAULT_CONFIG: MaestroConfig = {
   maxParallel: 3,
   tiers: {
     trivial: { thinking: "low" },
@@ -29,7 +29,7 @@ export interface Preset {
   label: string;
   /** One-line rationale shown in the settings UI. */
   description: string;
-  config: ConductorConfig;
+  config: MaestroConfig;
 }
 
 /**
@@ -100,7 +100,7 @@ export function findPreset(name: string): Preset | undefined {
 }
 
 /** Name of the preset the config matches, or "custom". */
-export function matchingPreset(config: ConductorConfig): string {
+export function matchingPreset(config: MaestroConfig): string {
   for (const preset of PRESETS) {
     if (JSON.stringify(preset.config) === JSON.stringify(config)) return preset.name;
   }
@@ -108,9 +108,9 @@ export function matchingPreset(config: ConductorConfig): string {
 }
 
 export function mergeConfig(
-  base: ConductorConfig,
-  override: Partial<ConductorConfig> | undefined
-): ConductorConfig {
+  base: MaestroConfig,
+  override: Partial<MaestroConfig> | undefined
+): MaestroConfig {
   if (!override) return base;
   return {
     maxParallel: override.maxParallel ?? base.maxParallel,
@@ -123,24 +123,24 @@ export function configFile(scope: ConfigScope, cwd: string): string {
   return join(cwd, PROJECT_CONFIG_FILE);
 }
 
-function readConfigFile(file: string): Partial<ConductorConfig> | undefined {
+function readConfigFile(file: string): Partial<MaestroConfig> | undefined {
   if (!existsSync(file)) return undefined;
   try {
-    return JSON.parse(readFileSync(file, "utf-8")) as Partial<ConductorConfig>;
+    return JSON.parse(readFileSync(file, "utf-8")) as Partial<MaestroConfig>;
   } catch {
     return undefined;
   }
 }
 
-/** Resolve config: defaults ← ~/.pi/agent/conductor.json ← <cwd>/.pi/conductor.json */
-export function loadConfig(cwd: string): ConductorConfig {
+/** Resolve config: defaults ← ~/.pi/agent/maestro.json ← <cwd>/.pi/maestro.json */
+export function loadConfig(cwd: string): MaestroConfig {
   const user = readConfigFile(configFile("user", cwd));
   const project = readConfigFile(configFile("project", cwd));
   return mergeConfig(mergeConfig(DEFAULT_CONFIG, user), project);
 }
 
 /** Persist a full config to the given scope file (settings UI writes here). */
-export function saveConfig(scope: ConfigScope, cwd: string, config: ConductorConfig): void {
+export function saveConfig(scope: ConfigScope, cwd: string, config: MaestroConfig): void {
   const file = configFile(scope, cwd);
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
@@ -152,7 +152,7 @@ export function describeTier(tier: TierConfig): string {
   return `${model} thinking=${tier.thinking}${tools}`;
 }
 
-export function describeConfig(config: ConductorConfig): string {
+export function describeConfig(config: MaestroConfig): string {
   const lines = [
     `preset: ${matchingPreset(config)}`,
     `maxParallel: ${config.maxParallel}`,
@@ -192,13 +192,13 @@ export function resolveTierModel(
     if (!result.model) {
       return {
         ok: false,
-        error: `Tier "${tierName}": "${tier.model}" does not match any model. Fix it in /conductor config or check pi --list-models.`,
+        error: `Tier "${tierName}": "${tier.model}" does not match any model. Fix it in /maestro config or check pi --list-models.`,
       };
     }
     if (!modelRegistry.hasConfiguredAuth(result.model)) {
       return {
         ok: false,
-        error: `Tier "${tierName}": no API key for ${result.model.provider}/${result.model.id}. Run /login for that provider or pick another model in /conductor config.`,
+        error: `Tier "${tierName}": no API key for ${result.model.provider}/${result.model.id}. Run /login for that provider or pick another model in /maestro config.`,
       };
     }
     return { ok: true, modelArg: `${result.model.provider}/${result.model.id}` };
@@ -211,7 +211,7 @@ export function resolveTierModel(
   if (candidates.length === 0) {
     return {
       ok: false,
-      error: `Tier "${tierName}": no authed provider serves "${tier.model}". Run /login or pick another model in /conductor config (see pi --list-models ${tier.model}).`,
+      error: `Tier "${tierName}": no authed provider serves "${tier.model}". Run /login or pick another model in /maestro config (see pi --list-models ${tier.model}).`,
     };
   }
 
@@ -226,7 +226,7 @@ export function resolveTierModel(
 }
 
 /** Tier decision rules injected into planning guidance. Stated once, as decision rules. */
-export function describeTiersForPlanning(config: ConductorConfig): string {
+export function describeTiersForPlanning(config: MaestroConfig): string {
   const names = Object.keys(config.tiers).filter((name) => name !== "review");
   const known = new Set(["trivial", "standard", "complex"]);
   const lines = [

@@ -138,15 +138,15 @@ test("resolveTierModel fails with an actionable error when nothing is authed", (
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.match(result.error, /no authed provider serves "gpt-5.6-terra"/);
-    assert.match(result.error, /\/conductor config/);
+    assert.match(result.error, /\/maestro config/);
   }
 });
 
 test("saveConfig writes the scope file", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "conductor-config-"));
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-"));
   try {
     saveConfig("project", cwd, DEFAULT_CONFIG);
-    const written = JSON.parse(readFileSync(join(cwd, ".pi", "conductor.json"), "utf-8"));
+    const written = JSON.parse(readFileSync(join(cwd, ".pi", "maestro.json"), "utf-8"));
     assert.deepEqual(written, DEFAULT_CONFIG);
   } finally {
     rmSync(cwd, { recursive: true, force: true });

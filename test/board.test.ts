@@ -79,7 +79,7 @@ test("failed and cancelled tasks are runnable only when explicitly named", () =>
 });
 
 test("updateTask mutates against fresh state so concurrent writers do not clobber", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "conductor-test-"));
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
     const board = emptyBoard();
     createTask(board, { title: "A", brief: "a", tier: "standard" });
@@ -107,7 +107,7 @@ test("updateTask mutates against fresh state so concurrent writers do not clobbe
 });
 
 test("saveBoard/loadBoard round-trips", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "conductor-test-"));
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
     const board = emptyBoard();
     createTask(board, { title: "A", brief: "do a", tier: "complex" });
@@ -122,11 +122,11 @@ test("saveBoard/loadBoard round-trips", () => {
 });
 
 test("loadBoard returns empty board when missing or corrupt", () => {
-  const cwd = mkdtempSync(join(tmpdir(), "conductor-test-"));
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
     assert.deepEqual(loadBoard(cwd).tasks, []);
-    mkdirSync(join(cwd, ".pi", "conductor"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "conductor", "board.json"), "not json");
+    mkdirSync(join(cwd, ".pi", "maestro"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "maestro", "board.json"), "not json");
     assert.deepEqual(loadBoard(cwd).tasks, []);
   } finally {
     rmSync(cwd, { recursive: true, force: true });

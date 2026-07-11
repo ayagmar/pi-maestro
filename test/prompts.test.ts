@@ -107,9 +107,9 @@ test("orchestrator briefing embeds the goal, tier guidance, and workflow tools",
   const briefing = buildOrchestratorBriefing("Migrate to Spring Boot 4", tierGuidance);
   assert.match(briefing, /cheapest tier/);
   assert.match(briefing, /Migrate to Spring Boot 4/);
-  assert.match(briefing, /conductor_plan/);
-  assert.match(briefing, /conductor_run/);
-  assert.match(briefing, /conductor_review/);
+  assert.match(briefing, /maestro_plan/);
+  assert.match(briefing, /maestro_run/);
+  assert.match(briefing, /maestro_review/);
   assert.match(briefing, /You do not implement tasks yourself/);
   assert.match(briefing, /fails twice with the same root cause/);
 });

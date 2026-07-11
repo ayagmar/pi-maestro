@@ -83,7 +83,7 @@ export function setStatus(task: Task, status: TaskStatus): void {
 
 /**
  * A task is runnable when it is pending work and all dependencies are approved.
- * With explicit=true (task named directly in conductor_run), failed and
+ * With explicit=true (task named directly in maestro_run), failed and
  * cancelled tasks are also runnable so dead ends can be retried on purpose.
  */
 export function isRunnable(board: Board, task: Task, explicit = false): boolean {

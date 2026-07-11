@@ -1,5 +1,5 @@
 {
-  "name": "pi-conductor",
+  "name": "pi-maestro",
   "version": "0.1.0",
   "description": "Orchestrator/executor workflows for pi: plan tasks, run cheap fresh-context executors in parallel, adversarially review, and track everything on a live board",
   "keywords": [
@@ -29,7 +29,7 @@
     "extensions": [
       "./src/index.ts"
     ],
-    "image": "https://placehold.co/1200x630/png?text=pi-conductor"
+    "image": "https://placehold.co/1200x630/png?text=pi-maestro"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

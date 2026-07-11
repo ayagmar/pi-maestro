@@ -143,7 +143,7 @@ export class Dashboard {
     const lines: string[] = [];
     const usage = boardUsage(board.tasks);
     const running = board.tasks.filter((t) => this.actions.isLive(t.id)).length;
-    const title = ` ⚡ conductor dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)} `;
+    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)} `;
     lines.push(theme.fg("accent", truncateToWidth(title + "─".repeat(width), width)));
 
     for (let i = 0; i < bodyHeight; i++) {
@@ -160,7 +160,7 @@ export class Dashboard {
   private renderTaskList(board: Board, width: number, height: number): string[] {
     const theme = this.theme;
     if (board.tasks.length === 0) {
-      return [theme.fg("muted", "Board is empty."), theme.fg("dim", "Use /conductor start <goal>")];
+      return [theme.fg("muted", "Board is empty."), theme.fg("dim", "Use /maestro start <goal>")];
     }
 
     const lines: string[] = [];

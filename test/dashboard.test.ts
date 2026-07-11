@@ -49,7 +49,7 @@ test("dashboard renders header, tasks, and footer within width", () => {
   try {
     const lines = dashboard.render(100);
     const joined = lines.join("\n");
-    assert.match(joined, /conductor dashboard · 2 task\(s\)/);
+    assert.match(joined, /maestro dashboard · 2 task\(s\)/);
     assert.match(joined, /T1 Do thing/);
     assert.match(joined, /T2 Do thing/);
     assert.match(joined, /esc close/);

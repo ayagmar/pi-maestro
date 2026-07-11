@@ -44,7 +44,7 @@ test("parseLogLine maps events to transcript items", () => {
 });
 
 test("TranscriptTail reads incrementally across polls", () => {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-tail-"));
+  const dir = mkdtempSync(join(tmpdir(), "maestro-tail-"));
   const file = join(dir, "log.jsonl");
   try {
     const event1 = JSON.stringify({

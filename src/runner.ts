@@ -113,10 +113,10 @@ export function startExecutor(options: {
     cwd: options.cwd,
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
-    // The flag makes an installed pi-conductor extension no-op inside the
+    // The flag makes an installed pi-maestro extension no-op inside the
     // executor: no recursive orchestration, no crash-recovery fighting the
     // parent over the shared board file.
-    env: { ...process.env, PI_CONDUCTOR_EXECUTOR: "1" },
+    env: { ...process.env, PI_MAESTRO_EXECUTOR: "1" },
   });
 
   const send = (command: Record<string, unknown>) => {
@@ -233,7 +233,7 @@ export function startExecutor(options: {
       // the provider error alone doesn't tell the user how to recover.
       if (result.errorMessage?.includes("No API key for provider")) {
         result.errorMessage +=
-          " — the provider's OAuth token is likely expired or out of quota. Re-run `pi /login` for it, or pick another model in /conductor config.";
+          " — the provider's OAuth token is likely expired or out of quota. Re-run `pi /login` for it, or pick another model in /maestro config.";
       }
       result.aborted = wasAborted;
       if (result.exitCode !== 0 && !result.errorMessage && !wasAborted) {

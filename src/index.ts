@@ -69,7 +69,7 @@ interface TaskSnapshot {
   note?: string;
 }
 
-interface ConductorDetails {
+interface MaestroDetails {
   action: string;
   tasks: TaskSnapshot[];
 }
@@ -102,11 +102,11 @@ function notify(
   else console.log(message);
 }
 
-export default function conductor(pi: ExtensionAPI) {
+export default function maestro(pi: ExtensionAPI) {
   // Inside a spawned executor the extension must be inert: no recursive
   // orchestration, and no session_start crash-recovery fighting the parent
   // over the shared board file.
-  if (process.env.PI_CONDUCTOR_EXECUTOR === "1") return;
+  if (process.env.PI_MAESTRO_EXECUTOR === "1") return;
 
   const liveRuns = new Map<string, LiveRun>();
 
@@ -128,7 +128,7 @@ export default function conductor(pi: ExtensionAPI) {
       COMMAND,
       ctx.ui.theme.fg(
         running > 0 ? "warning" : "muted",
-        `⚡ conductor ${approved}/${board.tasks.length}${runningPart} · $${usage.cost.toFixed(4)}`
+        `⚡ maestro ${approved}/${board.tasks.length}${runningPart} · $${usage.cost.toFixed(4)}`
       )
     );
 
@@ -322,12 +322,12 @@ export default function conductor(pi: ExtensionAPI) {
 
   // ---------------------------------------------------------------- tools
 
-  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
-    name: "conductor_plan",
-    label: "Conductor Plan",
+  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
+    name: "maestro_plan",
+    label: "Maestro Plan",
     description:
-      "Create tasks on the conductor board. Each brief must be fully self-contained: executors run with a fresh context and see only the brief plus approved dependency reports. Tiers control executor model and thinking level (trivial, standard, complex).",
-    promptSnippet: "Plan tasks for fresh-context executor agents (conductor board)",
+      "Create tasks on the maestro board. Each brief must be fully self-contained: executors run with a fresh context and see only the brief plus approved dependency reports. Tiers control executor model and thinking level (trivial, standard, complex).",
+    promptSnippet: "Plan tasks for fresh-context executor agents (maestro board)",
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({
@@ -383,7 +383,7 @@ export default function conductor(pi: ExtensionAPI) {
     renderCall(args, theme) {
       const tasks = (args.tasks ?? []) as { title?: string; tier?: string }[];
       let text =
-        theme.fg("toolTitle", theme.bold("conductor plan ")) +
+        theme.fg("toolTitle", theme.bold("maestro plan ")) +
         theme.fg("accent", `${tasks.length} task(s)`);
       for (const task of tasks.slice(0, 6)) {
         text += `\n  ${theme.fg("muted", "•")} ${task.title ?? "…"}${theme.fg("dim", ` [${task.tier ?? "?"}]`)}`;
@@ -394,12 +394,12 @@ export default function conductor(pi: ExtensionAPI) {
     renderResult: renderTaskListResult,
   });
 
-  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
-    name: "conductor_run",
-    label: "Conductor Run",
+  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
+    name: "maestro_run",
+    label: "Maestro Run",
     description:
-      "Execute runnable tasks from the conductor board in fresh-context executor agents. Independent tasks run in parallel. Tasks with changes_requested are retried with the review notes. Pass taskIds to run a subset; explicitly named failed or cancelled tasks are retried too.",
-    promptSnippet: "Run planned tasks in parallel fresh-context executors (conductor board)",
+      "Execute runnable tasks from the maestro board in fresh-context executor agents. Independent tasks run in parallel. Tasks with changes_requested are retried with the review notes. Pass taskIds to run a subset; explicitly named failed or cancelled tasks are retried too.",
+    promptSnippet: "Run planned tasks in parallel fresh-context executors (maestro board)",
     parameters: Type.Object({
       taskIds: Type.Optional(
         Type.Array(Type.String(), {
@@ -431,7 +431,7 @@ export default function conductor(pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: "No runnable tasks. Check dependencies and statuses with conductor_status.",
+              text: "No runnable tasks. Check dependencies and statuses with maestro_status.",
             },
           ],
           details: { action: "run", tasks: blocked },
@@ -486,7 +486,7 @@ export default function conductor(pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `${results.length} executor(s) finished.\n\n${summary}\n\nNext: call conductor_review for tasks that are ready for review.`,
+            text: `${results.length} executor(s) finished.\n\n${summary}\n\nNext: call maestro_review for tasks that are ready for review.`,
           },
         ],
         details: { action: "run", tasks: all },
@@ -496,7 +496,7 @@ export default function conductor(pi: ExtensionAPI) {
       const ids = args.taskIds as string[] | undefined;
       const scope = ids && ids.length > 0 ? ids.join(", ") : "all runnable tasks";
       return new Text(
-        theme.fg("toolTitle", theme.bold("conductor run ")) + theme.fg("accent", scope),
+        theme.fg("toolTitle", theme.bold("maestro run ")) + theme.fg("accent", scope),
         0,
         0
       );
@@ -504,13 +504,13 @@ export default function conductor(pi: ExtensionAPI) {
     renderResult: renderTaskListResult,
   });
 
-  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
-    name: "conductor_review",
-    label: "Conductor Review",
+  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
+    name: "maestro_review",
+    label: "Maestro Review",
     description:
       "Run adversarial fresh-context reviewers over tasks that are ready for review. Reviewers have read-only tools, independently verify the executor's claims, and either approve the task or request changes (stored as review notes for the next run).",
     promptSnippet:
-      "Adversarially review executor work and approve or request changes (conductor board)",
+      "Adversarially review executor work and approve or request changes (maestro board)",
     parameters: Type.Object({
       taskIds: Type.Optional(
         Type.Array(Type.String(), {
@@ -566,7 +566,7 @@ export default function conductor(pi: ExtensionAPI) {
         .join("\n\n");
       const needsRerun = results.some((snap) => snap.status === "changes_requested");
       const next = needsRerun
-        ? "\n\nNext: call conductor_run to retry tasks with requested changes."
+        ? "\n\nNext: call maestro_run to retry tasks with requested changes."
         : "";
       return {
         content: [{ type: "text", text: `${summary}${next}` }],
@@ -577,7 +577,7 @@ export default function conductor(pi: ExtensionAPI) {
       const ids = args.taskIds as string[] | undefined;
       const scope = ids && ids.length > 0 ? ids.join(", ") : "all ready tasks";
       return new Text(
-        theme.fg("toolTitle", theme.bold("conductor review ")) + theme.fg("accent", scope),
+        theme.fg("toolTitle", theme.bold("maestro review ")) + theme.fg("accent", scope),
         0,
         0
       );
@@ -585,12 +585,12 @@ export default function conductor(pi: ExtensionAPI) {
     renderResult: renderTaskListResult,
   });
 
-  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
-    name: "conductor_update",
-    label: "Conductor Update",
+  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
+    name: "maestro_update",
+    label: "Maestro Update",
     description:
       "Update a planned task: refine its brief, retitle it, change its tier, or cancel it. Use when a task failed twice with the same root cause or the plan needs adjusting. Running tasks cannot be updated.",
-    promptSnippet: "Refine a task's brief/tier or cancel it (conductor board)",
+    promptSnippet: "Refine a task's brief/tier or cancel it (maestro board)",
     parameters: Type.Object({
       taskId: Type.String({ description: "Task id like T1" }),
       title: Type.Optional(Type.String({ description: "New title" })),
@@ -644,7 +644,7 @@ export default function conductor(pi: ExtensionAPI) {
         .filter((part) => part !== null)
         .join(", ");
       return new Text(
-        theme.fg("toolTitle", theme.bold("conductor update ")) +
+        theme.fg("toolTitle", theme.bold("maestro update ")) +
           theme.fg("accent", `${args.taskId} (${changes || "no changes"})`),
         0,
         0
@@ -653,18 +653,18 @@ export default function conductor(pi: ExtensionAPI) {
     renderResult: renderTaskListResult,
   });
 
-  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
-    name: "conductor_status",
-    label: "Conductor Status",
+  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
+    name: "maestro_status",
+    label: "Maestro Status",
     description:
-      "Cheap status pulse of the conductor board: every task with its status, tier, attempts, and cost. Use this instead of re-reading executor output.",
-    promptSnippet: "Check status of conductor board tasks",
+      "Cheap status pulse of the maestro board: every task with its status, tier, attempts, and cost. Use this instead of re-reading executor output.",
+    promptSnippet: "Check status of maestro board tasks",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const board = loadBoard(ctx.cwd);
       if (board.tasks.length === 0) {
         return {
-          content: [{ type: "text", text: "Board is empty. Plan tasks with conductor_plan." }],
+          content: [{ type: "text", text: "Board is empty. Plan tasks with maestro_plan." }],
           details: { action: "status", tasks: [] },
         };
       }
@@ -679,7 +679,7 @@ export default function conductor(pi: ExtensionAPI) {
       };
     },
     renderCall(_args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("conductor status")), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("maestro status")), 0, 0);
     },
     renderResult: renderTaskListResult,
   });
@@ -692,7 +692,7 @@ export default function conductor(pi: ExtensionAPI) {
   }
 
   function renderTaskListResult(
-    result: { content: { type: string; text?: string }[]; details?: ConductorDetails },
+    result: { content: { type: string; text?: string }[]; details?: MaestroDetails },
     { expanded }: { expanded: boolean },
     theme: Theme
   ) {
@@ -757,7 +757,7 @@ export default function conductor(pi: ExtensionAPI) {
       switch ((sub ?? "").toLowerCase()) {
         case "start": {
           if (!rest) {
-            notify(ctx, "Usage: /conductor start <goal>", "warning");
+            notify(ctx, "Usage: /maestro start <goal>", "warning");
             return;
           }
           const board = loadBoard(ctx.cwd);
@@ -786,7 +786,7 @@ export default function conductor(pi: ExtensionAPI) {
           return;
         case "open": {
           if (!rest) {
-            notify(ctx, "Usage: /conductor open <taskId>", "warning");
+            notify(ctx, "Usage: /maestro open <taskId>", "warning");
             return;
           }
           await openTaskSession(ctx, rest);
@@ -878,7 +878,7 @@ export default function conductor(pi: ExtensionAPI) {
   });
 
   pi.registerShortcut("ctrl+alt+b", {
-    description: "Open the conductor dashboard",
+    description: "Open the maestro dashboard",
     handler: (ctx) => {
       if (!ctx.hasUI) return;
       // Route through the command so the handler gets ExtensionCommandContext
@@ -894,7 +894,7 @@ export default function conductor(pi: ExtensionAPI) {
     }
     const board = loadBoard(ctx.cwd);
     if (board.tasks.length === 0) {
-      notify(ctx, "Board is empty. Use /conductor start <goal> or ask the model to plan tasks.");
+      notify(ctx, "Board is empty. Use /maestro start <goal> or ask the model to plan tasks.");
       return;
     }
 
@@ -938,7 +938,7 @@ export default function conductor(pi: ExtensionAPI) {
   async function showBoard(ctx: ExtensionCommandContext): Promise<void> {
     const board = loadBoard(ctx.cwd);
     if (board.tasks.length === 0) {
-      notify(ctx, "Board is empty. Use /conductor start <goal> or ask the model to plan tasks.");
+      notify(ctx, "Board is empty. Use /maestro start <goal> or ask the model to plan tasks.");
       return;
     }
 
@@ -950,7 +950,7 @@ export default function conductor(pi: ExtensionAPI) {
 
     const taskId = await pickFromList(
       ctx,
-      `Conductor Board · ${formatUsage(boardUsage(board.tasks))}`,
+      `Maestro Board · ${formatUsage(boardUsage(board.tasks))}`,
       items
     );
     if (!taskId) return;
@@ -1075,7 +1075,7 @@ export default function conductor(pi: ExtensionAPI) {
 
   pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, theme) => {
     const content = typeof message.content === "string" ? message.content : "";
-    return new Text(theme.fg("accent", "⚡ conductor\n") + content, 0, 0);
+    return new Text(theme.fg("accent", "⚡ maestro\n") + content, 0, 0);
   });
 
   pi.on("session_start", (_event, ctx) => {
@@ -1090,7 +1090,7 @@ export default function conductor(pi: ExtensionAPI) {
       });
       if (ctx.hasUI) {
         ctx.ui.notify(
-          `${task.id} was running when pi exited; marked failed. Retry with conductor_run ["${task.id}"].`,
+          `${task.id} was running when pi exited; marked failed. Retry with maestro_run ["${task.id}"].`,
           "warning"
         );
       }

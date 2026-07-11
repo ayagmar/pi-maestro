@@ -97,7 +97,7 @@ export function parseVerdict(report: string): { approved: boolean; notes: string
 }
 
 /**
- * Injected into a fresh session by /conductor handoff. Planning already
+ * Injected into a fresh session by /maestro handoff. Planning already
  * happened in the previous session; only goal + board state carry over, so
  * the supervisor starts without the planner's investigation context.
  */
@@ -107,7 +107,7 @@ export function buildSupervisorBriefing(
   tierGuidance: string
 ): string {
   return [
-    "Role: supervising orchestrator taking over an existing conductor board with a fresh context. Planning is done. You drive execution and review; you do not implement tasks yourself.",
+    "Role: supervising orchestrator taking over an existing maestro board with a fresh context. Planning is done. You drive execution and review; you do not implement tasks yourself.",
     `## Goal\n${goal ?? "(not recorded — infer from the board)"}`,
     `## Board\n${boardSummary}`,
     [
@@ -116,20 +116,20 @@ export function buildSupervisorBriefing(
       "- The final summary states what changed, how it was verified, and any open risks.",
       "",
       "## Workflow",
-      "1. `conductor_run`: executes all runnable tasks; independent tasks run in parallel, dependents wait for approval.",
-      "2. `conductor_review`: adversarial fresh-context review for tasks that are ready. Rejected tasks carry the review notes into their next run automatically.",
+      "1. `maestro_run`: executes all runnable tasks; independent tasks run in parallel, dependents wait for approval.",
+      "2. `maestro_review`: adversarial fresh-context review for tasks that are ready. Rejected tasks carry the review notes into their next run automatically.",
       "3. Repeat run/review until all tasks are approved, then summarize.",
       "",
       "## Decision rules",
-      "- Use `conductor_status` instead of re-reading executor output.",
-      "- Do not re-plan. Only adjust tasks (`conductor_update` to refine a brief or escalate a tier, `conductor_plan` to split) when a task fails twice with the same root cause.",
+      "- Use `maestro_status` instead of re-reading executor output.",
+      "- Do not re-plan. Only adjust tasks (`maestro_update` to refine a brief or escalate a tier, `maestro_plan` to split) when a task fails twice with the same root cause.",
       tierGuidance,
       "- Ask the user before expanding scope beyond the stated goal.",
     ].join("\n"),
   ].join("\n\n");
 }
 
-/** Injected into the orchestrator conversation by /conductor start. */
+/** Injected into the orchestrator conversation by /maestro start. */
 export function buildOrchestratorBriefing(goal: string, tierGuidance: string): string {
   return [
     "Role: orchestrator. Plan the work, delegate execution to fresh-context executors, keep your own context clean. You do not implement tasks yourself.",
@@ -141,20 +141,20 @@ export function buildOrchestratorBriefing(goal: string, tierGuidance: string): s
       "",
       "## Workflow",
       "1. Investigate just enough to split the goal into small, independently verifiable tasks.",
-      "2. `conductor_plan`: each brief must be self-contained (executors see only the brief plus approved dependency reports) and include goal, relevant file paths, constraints, acceptance criteria, and a verification command.",
-      "3. `conductor_run`: executes all runnable tasks; independent tasks run in parallel, dependents wait for approval.",
-      "4. `conductor_review`: adversarial fresh-context review for tasks that are ready. Rejected tasks carry the review notes into their next run automatically.",
+      "2. `maestro_plan`: each brief must be self-contained (executors see only the brief plus approved dependency reports) and include goal, relevant file paths, constraints, acceptance criteria, and a verification command.",
+      "3. `maestro_run`: executes all runnable tasks; independent tasks run in parallel, dependents wait for approval.",
+      "4. `maestro_review`: adversarial fresh-context review for tasks that are ready. Rejected tasks carry the review notes into their next run automatically.",
       "5. Repeat run/review until all tasks are approved, then summarize.",
       "",
       "## Tier selection",
       tierGuidance,
       "",
       "## Decision rules",
-      "- Use `conductor_status` instead of re-reading executor output.",
+      "- Use `maestro_status` instead of re-reading executor output.",
       "- Reference file paths in briefs; paste file contents only when an executor cannot discover them itself.",
-      "- If a task fails twice with the same root cause, stop retrying: `conductor_update` its brief or tier, split it with `conductor_plan`, or cancel it.",
+      "- If a task fails twice with the same root cause, stop retrying: `maestro_update` its brief or tier, split it with `maestro_plan`, or cancel it.",
       "- Ask the user before expanding scope beyond the stated goal.",
-      "- If planning required heavy investigation, suggest `/conductor handoff` after the plan is on the board: it continues run/review in a fresh session without this session's planning context.",
+      "- If planning required heavy investigation, suggest `/maestro handoff` after the plan is on the board: it continues run/review in a fresh session without this session's planning context.",
     ].join("\n"),
   ].join("\n\n");
 }

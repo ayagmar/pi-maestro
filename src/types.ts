@@ -44,7 +44,7 @@ export interface Task {
 export interface Board {
   version: 1;
   nextTaskNumber: number;
-  /** Goal from /conductor start; lets a fresh orchestrator take over via /conductor handoff. */
+  /** Goal from /maestro start; lets a fresh orchestrator take over via /maestro handoff. */
   goal?: string;
   tasks: Task[];
 }
@@ -58,7 +58,7 @@ export interface TierConfig {
   tools?: string;
 }
 
-export interface ConductorConfig {
+export interface MaestroConfig {
   maxParallel: number;
   /** Named tiers. "review" is used for adversarial review runs. */
   tiers: Record<string, TierConfig>;
