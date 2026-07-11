@@ -13,8 +13,10 @@ import {
   findTask,
   forceStatus,
   isRunnable,
+  listArchivedBoards,
   loadBoard,
   loadStatusHistory,
+  restoreArchivedBoard,
   saveBoard,
   transition,
   updateTask,
@@ -777,7 +779,7 @@ export default function maestro(pi: ExtensionAPI) {
 
   pi.registerCommand(COMMAND, {
     description:
-      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | plan | board | open <taskId> | history [n] | config | reset",
+      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | plan | board | open <taskId> | history [n] | replay [file] | config | reset",
     getArgumentCompletions: (prefix) => {
       const options = [
         "start",
@@ -792,6 +794,7 @@ export default function maestro(pi: ExtensionAPI) {
         "config project",
         "config show",
         "history",
+        "replay",
         "reset",
       ];
       const matches = options.filter((option) => option.startsWith(prefix.toLowerCase()));
@@ -953,6 +956,59 @@ export default function maestro(pi: ExtensionAPI) {
           notify(ctx, lines.join("\n"));
           return;
         }
+        case "replay": {
+          if (liveRuns.size > 0) {
+            notify(
+              ctx,
+              "Executors are still running. Abort them before replaying a board.",
+              "warning"
+            );
+            return;
+          }
+
+          let selectedFile = rest;
+          if (!selectedFile) {
+            const archives = listArchivedBoards(ctx.cwd);
+            if (archives.length === 0) {
+              notify(ctx, "No archived boards found.");
+              return;
+            }
+            const choice = await pickFromList(
+              ctx,
+              "Maestro Archives · newest first",
+              archives.map((archive) => ({
+                value: archive.file,
+                label: `${archive.timestamp} · ${archive.taskCount} task(s)`,
+                description: archive.file,
+              }))
+            );
+            if (!choice) return;
+            selectedFile = choice;
+          }
+
+          // Selection is asynchronous, so an executor may have started while
+          // the archive picker was open. Check again immediately before restore.
+          if (liveRuns.size > 0) {
+            notify(
+              ctx,
+              "Executors are still running. Abort them before replaying a board.",
+              "warning"
+            );
+            return;
+          }
+
+          try {
+            const restored = restoreArchivedBoard(ctx.cwd, selectedFile);
+            refreshUI(ctx);
+            const previous = restored.archivedCurrent
+              ? ` Current board archived at ${restored.archivedCurrent}.`
+              : "";
+            notify(ctx, `Board restored from ${restored.selectedFile}.${previous}`);
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          }
+          return;
+        }
         case "reset": {
           const board = loadBoard(ctx.cwd);
           if (board.tasks.length === 0) {
@@ -994,6 +1050,7 @@ export default function maestro(pi: ExtensionAPI) {
               `/${COMMAND} back           switch back to the previous session`,
               `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
               `/${COMMAND} history [n]    show recent task status changes (default 20)`,
+              `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
               `/${COMMAND} reset          archive and clear the board`,
             ].join("\n")
           );

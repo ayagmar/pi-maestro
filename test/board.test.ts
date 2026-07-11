@@ -20,6 +20,7 @@ import {
   isRunnable,
   loadBoard,
   loadStatusHistory,
+  restoreArchivedBoard,
   saveBoard,
   setStatus,
   transition,
@@ -250,6 +251,109 @@ test("archiveBoard copies the current board and returns its path", () => {
     assert.ok(archive);
     assert.match(archive, /archive[/\\].+-board\.json$/);
     assert.equal(readFileSync(archive, "utf-8"), boardContents);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("restoreArchivedBoard makes the selected board live and archives the current board", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const selected = emptyBoard();
+    createTask(selected, { title: "Archived", brief: "old work", tier: "standard" });
+    saveBoard(cwd, selected);
+    const selectedFile = archiveBoard(cwd);
+    assert.ok(selectedFile);
+
+    const current = emptyBoard();
+    createTask(current, { title: "Current", brief: "new work", tier: "complex" });
+    saveBoard(cwd, current);
+
+    const restored = restoreArchivedBoard(cwd, selectedFile);
+
+    assert.equal(loadBoard(cwd).tasks[0]?.title, "Archived");
+    assert.ok(restored.archivedCurrent);
+    const preRestore = JSON.parse(readFileSync(restored.archivedCurrent, "utf-8")) as Board;
+    assert.equal(preRestore.tasks[0]?.title, "Current");
+    assert.equal(restored.selectedFile, selectedFile);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("restoreArchivedBoard rejects malformed and non-Board files without replacing live board", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const current = emptyBoard();
+    createTask(current, { title: "Current", brief: "work", tier: "standard" });
+    saveBoard(cwd, current);
+    const directory = join(cwd, ".pi", "maestro", "archive");
+    mkdirSync(directory, { recursive: true });
+
+    const invalidArchives: [string, string][] = [
+      ["malformed-board.json", "not json"],
+      ["object-board.json", JSON.stringify({ tasks: [] })],
+    ];
+    for (const [name, contents] of invalidArchives) {
+      const file = join(directory, name);
+      writeFileSync(file, contents);
+      assert.throws(() => restoreArchivedBoard(cwd, file), /not a valid maestro board/);
+      assert.equal(loadBoard(cwd).tasks[0]?.title, "Current");
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("restoreArchivedBoard rejects invalid optional Attempt fields without replacing live board", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const current = emptyBoard();
+    createTask(current, { title: "Current", brief: "work", tier: "standard" });
+    saveBoard(cwd, current);
+
+    const archived = emptyBoard();
+    const archivedTask = createTask(archived, {
+      title: "Archived",
+      brief: "old work",
+      tier: "standard",
+    });
+    archivedTask.attempts.push({
+      index: 1,
+      logFile: "executor.log",
+      thinking: "high",
+      startedAt: 1,
+      usage: { input: 1, output: 2, cost: 0.01, turns: 3 },
+      touchedFiles: [],
+    });
+
+    const invalidOptionalFields: [string, unknown][] = [
+      ["sessionFile", 1],
+      ["sessionDir", 1],
+      ["model", 1],
+      ["endedAt", "1"],
+      ["exitCode", "0"],
+      ["errorMessage", 1],
+      ["providerFailure", "false"],
+      ["finalReport", 1],
+      ["diff", 1],
+      ["worktreePath", 1],
+      ["branch", 1],
+      ["reviewReport", 1],
+      ["reviewSessionFile", 1],
+    ];
+    const directory = join(cwd, ".pi", "maestro", "archive");
+    mkdirSync(directory, { recursive: true });
+
+    for (const [field, invalidValue] of invalidOptionalFields) {
+      const invalidBoard = structuredClone(archived);
+      Object.assign(invalidBoard.tasks[0]?.attempts[0] as object, { [field]: invalidValue });
+      const file = join(directory, `${field}-board.json`);
+      writeFileSync(file, JSON.stringify(invalidBoard));
+
+      assert.throws(() => restoreArchivedBoard(cwd, file), /not a valid maestro board/, field);
+      assert.equal(loadBoard(cwd).tasks[0]?.title, "Current", field);
+    }
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
