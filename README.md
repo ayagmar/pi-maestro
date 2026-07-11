@@ -240,6 +240,11 @@ Before an execution dispatch, maestro resolves the primary and fallbacks for eve
 that batch and fails with an actionable message if none are available. Before review, it similarly
 checks the review tier's primary model. This happens before spawning executors.
 
+`/maestro doctor` prints a non-secret readiness report: user/project config files and precedence,
+effective limits and tier settings, authenticated model and fallback resolution, and git/worktree
+readiness. It never prints API keys. Missing authentication, unavailable models, invalid JSON, and
+a repository without an initial commit include next-step guidance.
+
 ### Commands
 
 ```
@@ -254,6 +259,7 @@ checks the review tier's primary model. This happens before spawning executors.
 /maestro config           interactive settings editor (user scope)
 /maestro config project   interactive settings editor (repo scope)
 /maestro config show      print the resolved defaults + user + project configuration
+/maestro doctor           diagnose config, models, authentication, and git readiness
 /maestro history [n]      show the last n audited status changes (default 20)
 /maestro replay [file]    restore an archived board (newest-first picker when omitted)
 /maestro reset            archive the current board, then clear tasks and goal

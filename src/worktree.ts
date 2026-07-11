@@ -13,12 +13,36 @@ export interface MergeResult {
   error?: string;
 }
 
+export interface GitReadiness {
+  ok: boolean;
+  summary: string;
+}
+
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+export function inspectGit(cwd: string): GitReadiness {
+  try {
+    const root = git(cwd, ["rev-parse", "--show-toplevel"]);
+    git(cwd, ["rev-parse", "--verify", "HEAD"]);
+    const branch = git(cwd, ["branch", "--show-current"]);
+    const status = git(cwd, ["status", "--porcelain"]);
+    return {
+      ok: true,
+      summary: `${root} · ${branch || "detached HEAD"} · ${status ? "working tree has changes" : "clean"}`,
+    };
+  } catch {
+    return {
+      ok: false,
+      summary:
+        "not a git repository with an initial commit; worktrees and automatic commits are unavailable",
+    };
+  }
 }
 
 function safeTaskId(taskId: string): string {

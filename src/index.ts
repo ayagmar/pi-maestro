@@ -28,18 +28,19 @@ import {
   resolveTierModel,
 } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
+import { Dashboard } from "./dashboard.js";
+import { buildDoctorReport } from "./diagnostics.js";
 import {
   boardUsage,
   formatBoardProgress,
   formatUsage,
+  runBudgetWarning,
   STATUS_GLYPHS,
   STATUS_LABELS,
-  runBudgetWarning,
   taskLine,
   truncateText,
 } from "./format.js";
 import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
-import { Dashboard } from "./dashboard.js";
 import {
   findSessionFile,
   mapWithConcurrencyLimit,
@@ -49,13 +50,13 @@ import {
 import { showSettings } from "./settings-ui.js";
 import { type Board, type Task, type TaskStatus, type TierConfig } from "./types.js";
 import {
+  type DriveSummary,
   driveBoard,
   executeTask,
   lastReport,
   preflightTaskTiers,
   reviewTask,
   snapshot,
-  type DriveSummary,
   type TaskSnapshot,
   type WorkflowRun,
 } from "./workflow.js";
@@ -798,7 +799,7 @@ export default function maestro(pi: ExtensionAPI) {
 
   pi.registerCommand(COMMAND, {
     description:
-      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | plan | board | open <taskId> | history [n] | replay [file] | config | reset",
+      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | plan | board | open <taskId> | history [n] | replay [file] | config | doctor | reset",
     getArgumentCompletions: (prefix) => {
       const options = [
         "start",
@@ -812,6 +813,7 @@ export default function maestro(pi: ExtensionAPI) {
         "config",
         "config project",
         "config show",
+        "doctor",
         "history",
         "replay",
         "reset",
@@ -920,6 +922,9 @@ export default function maestro(pi: ExtensionAPI) {
           refreshUI(ctx);
           return;
         }
+        case "doctor":
+          notify(ctx, buildDoctorReport(ctx.cwd, ctx.modelRegistry, ctx.model));
+          return;
         case "handoff": {
           const board = loadBoard(ctx.cwd);
           if (board.tasks.length === 0) {
@@ -1071,6 +1076,7 @@ export default function maestro(pi: ExtensionAPI) {
               `/${COMMAND} open <taskId>  switch into an executor session`,
               `/${COMMAND} back           switch back to the previous session`,
               `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
+              `/${COMMAND} doctor         diagnose config, models, authentication, and git readiness`,
               `/${COMMAND} history [n]    show recent task status changes (default 20)`,
               `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
               `/${COMMAND} reset          archive and clear the board`,
