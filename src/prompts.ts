@@ -1,5 +1,15 @@
 import { type Task } from "./types.js";
 
+export const MAX_INJECTED_CONTEXT_LENGTH = 10_000;
+
+const TRUNCATION_MARKER = "\n\n[... injected context truncated ...]";
+
+function truncateInjectedContext(value: string): string {
+  if (value.length <= MAX_INJECTED_CONTEXT_LENGTH) return value;
+
+  return value.slice(0, MAX_INJECTED_CONTEXT_LENGTH - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+}
+
 /**
  * Prompt structure follows OpenAI's GPT-5.6 prompting guidance:
  * - outcome-first: state the goal, success criteria, and stopping conditions
@@ -21,12 +31,14 @@ export function buildExecutorPrompt(
 
   if (task.reviewNotes) {
     sections.push(
-      `## Review feedback\nA reviewer rejected the previous attempt. Address every point:\n${task.reviewNotes}`
+      `## Review feedback\nA reviewer rejected the previous attempt. Address every point:\n${truncateInjectedContext(task.reviewNotes)}`
     );
   }
 
   for (const dep of dependencyReports) {
-    sections.push(`## Context from completed dependency ${dep.id} (${dep.title})\n${dep.report}`);
+    sections.push(
+      `## Context from completed dependency ${dep.id} (${dep.title})\n${truncateInjectedContext(dep.report)}`
+    );
   }
 
   sections.push(
@@ -60,7 +72,7 @@ export function buildReviewPrompt(task: Task, report: string): string {
   ];
   if (task.reviewNotes) {
     sections.push(
-      `## Previous review findings\nAn earlier attempt was rejected for these reasons. Verify each one was addressed:\n${task.reviewNotes}`
+      `## Previous review findings\nAn earlier attempt was rejected for these reasons. Verify each one was addressed:\n${truncateInjectedContext(task.reviewNotes)}`
     );
   }
   sections.push(

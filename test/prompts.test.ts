@@ -5,6 +5,7 @@ import {
   buildOrchestratorBriefing,
   buildReviewPrompt,
   buildSupervisorBriefing,
+  MAX_INJECTED_CONTEXT_LENGTH,
   parseVerdict,
 } from "../src/prompts.js";
 import { type Task } from "../src/types.js";
@@ -23,6 +24,61 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     ...overrides,
   };
 }
+
+function injectedSection(prompt: string, sectionPrefix: string): string {
+  const start = prompt.indexOf(sectionPrefix);
+  assert.notEqual(start, -1);
+  const valueStart = start + sectionPrefix.length;
+  const end = prompt.indexOf("\n\n## ", valueStart);
+  assert.notEqual(end, -1);
+  return prompt.slice(valueStart, end);
+}
+
+test("maximum injected context length is 10000 characters", () => {
+  assert.equal(MAX_INJECTED_CONTEXT_LENGTH, 10_000);
+});
+
+test("dependency reports preserve boundary values and truncate oversized values", () => {
+  const prefix = "## Context from completed dependency T0 (Setup)\n";
+  for (const length of [MAX_INJECTED_CONTEXT_LENGTH - 1, MAX_INJECTED_CONTEXT_LENGTH]) {
+    const report = "d".repeat(length);
+    const prompt = buildExecutorPrompt(makeTask(), [{ id: "T0", title: "Setup", report }]);
+    assert.equal(injectedSection(prompt, prefix), report);
+  }
+
+  const report = "d".repeat(MAX_INJECTED_CONTEXT_LENGTH + 1);
+  const prompt = buildExecutorPrompt(makeTask(), [{ id: "T0", title: "Setup", report }]);
+  const injected = injectedSection(prompt, prefix);
+  assert.equal(injected.length, MAX_INJECTED_CONTEXT_LENGTH);
+  assert.match(injected, /\[\.\.\. injected context truncated \.\.\.\]$/);
+});
+
+test("review notes are bounded in executor retry and review prompts", () => {
+  const promptBuilders = [
+    {
+      build: (reviewNotes: string) => buildExecutorPrompt(makeTask({ reviewNotes }), []),
+      prefix:
+        "## Review feedback\nA reviewer rejected the previous attempt. Address every point:\n",
+    },
+    {
+      build: (reviewNotes: string) => buildReviewPrompt(makeTask({ reviewNotes }), "done"),
+      prefix:
+        "## Previous review findings\nAn earlier attempt was rejected for these reasons. Verify each one was addressed:\n",
+    },
+  ];
+
+  for (const { build, prefix } of promptBuilders) {
+    for (const length of [MAX_INJECTED_CONTEXT_LENGTH - 1, MAX_INJECTED_CONTEXT_LENGTH]) {
+      const reviewNotes = "r".repeat(length);
+      assert.equal(injectedSection(build(reviewNotes), prefix), reviewNotes);
+    }
+
+    const prompt = build("r".repeat(MAX_INJECTED_CONTEXT_LENGTH + 1));
+    const injected = injectedSection(prompt, prefix);
+    assert.equal(injected.length, MAX_INJECTED_CONTEXT_LENGTH);
+    assert.match(injected, /\[\.\.\. injected context truncated \.\.\.\]$/);
+  }
+});
 
 test("executor prompt contains task, success criteria, stop rule, and report contract", () => {
   const prompt = buildExecutorPrompt(makeTask(), []);

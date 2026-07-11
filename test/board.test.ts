@@ -7,13 +7,15 @@ import {
   blockedReason,
   createTask,
   findTask,
+  forceStatus,
   isRunnable,
   loadBoard,
   saveBoard,
   setStatus,
+  transition,
   updateTask,
 } from "../src/board.js";
-import { type Board } from "../src/types.js";
+import { type Board, type TaskStatus } from "../src/types.js";
 
 function emptyBoard(): Board {
   return { version: 1, nextTaskNumber: 1, tasks: [] };
@@ -27,6 +29,41 @@ test("createTask assigns sequential ids", () => {
   assert.equal(second.id, "T2");
   assert.equal(board.nextTaskNumber, 3);
   assert.equal(first.status, "todo");
+});
+
+test("transition accepts every legal lifecycle move", () => {
+  const legalMoves: [TaskStatus, TaskStatus][] = [
+    ["todo", "running"],
+    ["running", "ready_for_review"],
+    ["running", "failed"],
+    ["running", "cancelled"],
+    ["ready_for_review", "approved"],
+    ["ready_for_review", "changes_requested"],
+    ["changes_requested", "running"],
+    ["failed", "running"],
+    ["cancelled", "running"],
+  ];
+
+  for (const [current, next] of legalMoves) {
+    const task = createTask(emptyBoard(), { title: "A", brief: "do a", tier: "standard" });
+    forceStatus(task, current);
+    transition(task, next);
+    assert.equal(task.status, next, `${current} → ${next}`);
+  }
+});
+
+test("transition rejects illegal lifecycle moves with a useful error", () => {
+  const task = createTask(emptyBoard(), { title: "A", brief: "do a", tier: "standard" });
+  assert.throws(() => transition(task, "approved"), /Illegal.*todo.*approved/);
+  forceStatus(task, "approved");
+  assert.throws(() => transition(task, "running"), /Illegal.*approved.*running/);
+});
+
+test("forceStatus permits a manual lifecycle override", () => {
+  const task = createTask(emptyBoard(), { title: "A", brief: "do a", tier: "standard" });
+  forceStatus(task, "approved");
+  assert.equal(task.status, "approved");
+  assert.ok(task.updatedAt > 0);
 });
 
 test("findTask is case-insensitive", () => {

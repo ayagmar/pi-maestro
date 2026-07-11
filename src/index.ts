@@ -10,10 +10,12 @@ import {
   blockedReason,
   createTask,
   findTask,
+  forceStatus,
   isRunnable,
   loadBoard,
   saveBoard,
   stateDir,
+  transition,
   updateTask,
 } from "./board.js";
 import {
@@ -197,7 +199,7 @@ export default function maestro(pi: ExtensionAPI) {
   ): Promise<TaskSnapshot> {
     if (task.attempts.length >= config.maxAttempts) {
       const updated = updateTask(ctx.cwd, task.id, (fresh) => {
-        fresh.status = "failed";
+        forceStatus(fresh, "failed");
       });
       return snapshot(
         updated ?? task,
@@ -236,7 +238,7 @@ export default function maestro(pi: ExtensionAPI) {
     // All board writes go through updateTask (fresh load per write) because
     // parallel executors finish in arbitrary order.
     updateTask(ctx.cwd, task.id, (fresh) => {
-      fresh.status = "running";
+      transition(fresh, "running");
       fresh.attempts.push(run.attempt);
     });
 
@@ -253,7 +255,7 @@ export default function maestro(pi: ExtensionAPI) {
         : "ready_for_review";
 
     const updated = updateTask(ctx.cwd, task.id, (fresh) => {
-      fresh.status = status;
+      transition(fresh, status);
       fresh.attempts[fresh.attempts.length - 1] = run.attempt;
     });
 
@@ -317,10 +319,10 @@ export default function maestro(pi: ExtensionAPI) {
       }
       if (!verdict) return; // aborted/failed/no verdict: stays ready_for_review
       if (verdict.approved) {
-        fresh.status = "approved";
+        transition(fresh, "approved");
         delete fresh.reviewNotes;
       } else {
-        fresh.status = "changes_requested";
+        transition(fresh, "changes_requested");
         fresh.reviewNotes = verdict.notes || outcome.finalReport;
       }
     });
@@ -638,11 +640,11 @@ export default function maestro(pi: ExtensionAPI) {
           // A rewritten brief supersedes review feedback on the old one.
           delete fresh.reviewNotes;
           if (fresh.status === "changes_requested" || fresh.status === "failed") {
-            fresh.status = "todo";
+            forceStatus(fresh, "todo");
           }
         }
         if (tier) fresh.tier = tier;
-        if (cancel) fresh.status = "cancelled";
+        if (cancel) forceStatus(fresh, "cancelled");
       });
       if (!updated) throw new Error(`Unknown task: ${taskId}`);
       refreshUI(ctx);
@@ -896,17 +898,20 @@ export default function maestro(pi: ExtensionAPI) {
 
   pi.registerShortcut("ctrl+alt+b", {
     description: "Open the maestro dashboard",
-    handler: (ctx) => {
+    handler: async (ctx) => {
       if (!ctx.hasUI) return;
-      // Route through the command so the handler gets ExtensionCommandContext
-      // (needed for switchSession when opening an executor session).
-      pi.sendUserMessage(`/${COMMAND} board`);
+      await showDashboard(ctx);
     },
   });
 
-  async function showDashboard(ctx: ExtensionCommandContext): Promise<void> {
+  /**
+   * Works from both the command handler and the shortcut. Shortcut handlers
+   * only get ExtensionContext (no switchSession), so opening an executor
+   * session from there falls back to a hint instead of switching.
+   */
+  async function showDashboard(ctx: ExtensionContext): Promise<void> {
     if (ctx.mode !== "tui") {
-      await showBoard(ctx);
+      if (isCommandContext(ctx)) await showBoard(ctx);
       return;
     }
     const board = loadBoard(ctx.cwd);
@@ -933,7 +938,7 @@ export default function maestro(pi: ExtensionAPI) {
         },
         setTaskStatus: (taskId, status) => {
           updateTask(ctx.cwd, taskId, (fresh) => {
-            fresh.status = status;
+            forceStatus(fresh, status);
           });
           refreshUI(ctx);
         },
@@ -949,7 +954,16 @@ export default function maestro(pi: ExtensionAPI) {
       };
     });
 
-    if (openTaskId) await openTaskSession(ctx, openTaskId);
+    if (!openTaskId) return;
+    if (isCommandContext(ctx)) {
+      await openTaskSession(ctx, openTaskId);
+      return;
+    }
+    notify(ctx, `Run /${COMMAND} open ${openTaskId} to switch into the executor session.`);
+  }
+
+  function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
+    return "switchSession" in ctx;
   }
 
   async function showBoard(ctx: ExtensionCommandContext): Promise<void> {
@@ -1022,7 +1036,7 @@ export default function maestro(pi: ExtensionAPI) {
     if (action.startsWith("status:")) {
       const status = action.slice("status:".length) as TaskStatus;
       updateTask(ctx.cwd, task.id, (fresh) => {
-        fresh.status = status;
+        forceStatus(fresh, status);
       });
       refreshUI(ctx);
       notify(ctx, `${task.id} → ${STATUS_LABELS[status]}`);
@@ -1103,7 +1117,7 @@ export default function maestro(pi: ExtensionAPI) {
     for (const task of board.tasks) {
       if (task.status !== "running") continue;
       updateTask(ctx.cwd, task.id, (fresh) => {
-        fresh.status = "failed";
+        transition(fresh, "failed");
       });
       if (ctx.hasUI) {
         ctx.ui.notify(

@@ -76,9 +76,31 @@ export function findTask(board: Board, id: string): Task | undefined {
   return board.tasks.find((task) => task.id.toUpperCase() === wanted);
 }
 
-export function setStatus(task: Task, status: TaskStatus): void {
+const LEGAL_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
+  todo: ["running"],
+  running: ["ready_for_review", "failed", "cancelled"],
+  ready_for_review: ["approved", "changes_requested"],
+  approved: [],
+  changes_requested: ["running"],
+  failed: ["running"],
+  cancelled: ["running"],
+};
+
+export function transition(task: Task, next: TaskStatus): void {
+  if (!LEGAL_TRANSITIONS[task.status].includes(next)) {
+    throw new Error(`Illegal task status transition: ${task.status} → ${next}`);
+  }
+  forceStatus(task, next);
+}
+
+export function forceStatus(task: Task, status: TaskStatus): void {
   task.status = status;
   task.updatedAt = Date.now();
+}
+
+/** @deprecated Prefer transition, or forceStatus for an explicit manual override. */
+export function setStatus(task: Task, status: TaskStatus): void {
+  forceStatus(task, status);
 }
 
 /**
