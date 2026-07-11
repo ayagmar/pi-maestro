@@ -51,6 +51,26 @@ export function createTask(
   return task;
 }
 
+/**
+ * Load-modify-save a single task against fresh board state. Use this for
+ * every mutation that can race with other writers (parallel executors
+ * finishing, dashboard status overrides), so last-write-wins clobbering
+ * cannot revert another task's update.
+ */
+export function updateTask(
+  cwd: string,
+  taskId: string,
+  mutate: (task: Task, board: Board) => void
+): Task | undefined {
+  const board = loadBoard(cwd);
+  const task = findTask(board, taskId);
+  if (!task) return undefined;
+  mutate(task, board);
+  task.updatedAt = Date.now();
+  saveBoard(cwd, board);
+  return task;
+}
+
 export function findTask(board: Board, id: string): Task | undefined {
   const wanted = id.trim().toUpperCase();
   return board.tasks.find((task) => task.id.toUpperCase() === wanted);
@@ -61,9 +81,15 @@ export function setStatus(task: Task, status: TaskStatus): void {
   task.updatedAt = Date.now();
 }
 
-/** A task is runnable when it is pending work and all dependencies are approved. */
-export function isRunnable(board: Board, task: Task): boolean {
-  if (task.status !== "todo" && task.status !== "changes_requested") return false;
+/**
+ * A task is runnable when it is pending work and all dependencies are approved.
+ * With explicit=true (task named directly in conductor_run), failed and
+ * cancelled tasks are also runnable so dead ends can be retried on purpose.
+ */
+export function isRunnable(board: Board, task: Task, explicit = false): boolean {
+  const pending = task.status === "todo" || task.status === "changes_requested";
+  const retryable = explicit && (task.status === "failed" || task.status === "cancelled");
+  if (!pending && !retryable) return false;
   return task.dependsOn.every((depId) => findTask(board, depId)?.status === "approved");
 }
 

@@ -11,6 +11,7 @@ import {
   loadBoard,
   saveBoard,
   setStatus,
+  updateTask,
 } from "../src/board.js";
 import { type Board } from "../src/types.js";
 
@@ -62,6 +63,47 @@ test("changes_requested tasks are runnable again", () => {
   assert.equal(isRunnable(board, task), true);
   setStatus(task, "ready_for_review");
   assert.equal(isRunnable(board, task), false);
+});
+
+test("failed and cancelled tasks are runnable only when explicitly named", () => {
+  const board = emptyBoard();
+  const task = createTask(board, { title: "A", brief: "do a", tier: "standard" });
+  setStatus(task, "failed");
+  assert.equal(isRunnable(board, task), false);
+  assert.equal(isRunnable(board, task, true), true);
+  setStatus(task, "cancelled");
+  assert.equal(isRunnable(board, task), false);
+  assert.equal(isRunnable(board, task, true), true);
+  setStatus(task, "approved");
+  assert.equal(isRunnable(board, task, true), false);
+});
+
+test("updateTask mutates against fresh state so concurrent writers do not clobber", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "conductor-test-"));
+  try {
+    const board = emptyBoard();
+    createTask(board, { title: "A", brief: "a", tier: "standard" });
+    createTask(board, { title: "B", brief: "b", tier: "standard" });
+    saveBoard(cwd, board);
+
+    // Two "workers" holding stale copies update different tasks.
+    updateTask(cwd, "T1", (task) => {
+      task.status = "ready_for_review";
+    });
+    updateTask(cwd, "T2", (task) => {
+      task.status = "failed";
+    });
+
+    const fresh = loadBoard(cwd);
+    assert.equal(findTask(fresh, "T1")?.status, "ready_for_review");
+    assert.equal(findTask(fresh, "T2")?.status, "failed");
+    assert.equal(
+      updateTask(cwd, "T9", () => {}),
+      undefined
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("saveBoard/loadBoard round-trips", () => {

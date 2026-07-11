@@ -160,6 +160,11 @@ dead executors.
 - Dependencies gate execution: a task only runs when everything it `dependsOn` is `approved`.
 - Reviewers must end with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`; anything else leaves
   the task in `ready_for_review` for you or the orchestrator to re-review.
+- Board writes are per-task against fresh state, so parallel executors finishing in any order
+  cannot clobber each other's status updates.
+- On pi exit, live executors are aborted (no orphan processes). On startup, tasks stuck in
+  `running` from a crash are marked `failed` with a notice; retry them with
+  `conductor_run ["T3"]` — explicitly named failed/cancelled tasks are runnable again.
 
 Add `.pi/conductor/` to your project's `.gitignore` unless you want to commit run history.
 

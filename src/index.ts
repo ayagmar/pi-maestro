@@ -13,8 +13,8 @@ import {
   isRunnable,
   loadBoard,
   saveBoard,
-  setStatus,
   stateDir,
+  updateTask,
 } from "./board.js";
 import {
   describeConfig,
@@ -210,9 +210,12 @@ export default function conductor(pi: ExtensionAPI) {
     };
     const untrack = trackRun(ctx, live);
 
-    setStatus(task, "running");
-    task.attempts.push(run.attempt);
-    saveBoard(ctx.cwd, board);
+    // All board writes go through updateTask (fresh load per write) because
+    // parallel executors finish in arbitrary order.
+    updateTask(ctx.cwd, task.id, (fresh) => {
+      fresh.status = "running";
+      fresh.attempts.push(run.attempt);
+    });
 
     const outcome = await run.outcome;
     untrack();
@@ -220,25 +223,26 @@ export default function conductor(pi: ExtensionAPI) {
     if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
     if (outcome.model !== undefined) run.attempt.model = outcome.model;
 
-    if (outcome.aborted) {
-      setStatus(task, "cancelled");
-      saveBoard(ctx.cwd, board);
-      return snapshot(task, "aborted by user");
-    }
+    const status: TaskStatus = outcome.aborted
+      ? "cancelled"
+      : outcome.exitCode !== 0 || outcome.errorMessage
+        ? "failed"
+        : "ready_for_review";
 
-    if (outcome.exitCode !== 0 || outcome.errorMessage) {
-      setStatus(task, "failed");
-      saveBoard(ctx.cwd, board);
-      return snapshot(task, outcome.errorMessage ?? `exit code ${outcome.exitCode}`);
-    }
+    const updated = updateTask(ctx.cwd, task.id, (fresh) => {
+      fresh.status = status;
+      fresh.attempts[fresh.attempts.length - 1] = run.attempt;
+    });
 
-    setStatus(task, "ready_for_review");
-    saveBoard(ctx.cwd, board);
-    return snapshot(task);
+    const note = outcome.aborted
+      ? "aborted by user"
+      : status === "failed"
+        ? (outcome.errorMessage ?? `exit code ${outcome.exitCode}`)
+        : undefined;
+    return snapshot(updated ?? task, note);
   }
 
   async function reviewTask(
-    board: Board,
     task: Task,
     tier: TierConfig,
     ctx: ExtensionContext,
@@ -274,40 +278,40 @@ export default function conductor(pi: ExtensionAPI) {
     const outcome = await run.outcome;
     untrack();
 
-    // Reviewer usage is billed against the task for honest per-task cost.
-    const attempt = task.attempts.at(-1);
-    if (attempt) {
-      attempt.usage.input += outcome.usage.input;
-      attempt.usage.output += outcome.usage.output;
-      attempt.usage.cost += outcome.usage.cost;
-      attempt.usage.turns += outcome.usage.turns;
-    }
+    const verdict =
+      outcome.aborted || outcome.exitCode !== 0 || outcome.errorMessage
+        ? undefined
+        : parseVerdict(outcome.finalReport);
 
-    if (outcome.aborted) {
-      saveBoard(ctx.cwd, board);
-      return snapshot(task, "review aborted by user; task stays ready for review");
-    }
+    const updated = updateTask(ctx.cwd, task.id, (fresh) => {
+      // Reviewer usage is billed against the task for honest per-task cost.
+      const attempt = fresh.attempts.at(-1);
+      if (attempt) {
+        attempt.usage.input += outcome.usage.input;
+        attempt.usage.output += outcome.usage.output;
+        attempt.usage.cost += outcome.usage.cost;
+        attempt.usage.turns += outcome.usage.turns;
+      }
+      if (!verdict) return; // aborted/failed/no verdict: stays ready_for_review
+      if (verdict.approved) {
+        fresh.status = "approved";
+        delete fresh.reviewNotes;
+      } else {
+        fresh.status = "changes_requested";
+        fresh.reviewNotes = verdict.notes || outcome.finalReport;
+      }
+    });
 
+    const result = updated ?? task;
+    if (outcome.aborted)
+      return snapshot(result, "review aborted by user; task stays ready for review");
     if (outcome.exitCode !== 0 || outcome.errorMessage) {
-      saveBoard(ctx.cwd, board);
-      return snapshot(task, `review failed: ${outcome.errorMessage ?? outcome.exitCode}`);
+      return snapshot(result, `review failed: ${outcome.errorMessage ?? outcome.exitCode}`);
     }
-
-    const verdict = parseVerdict(outcome.finalReport);
     if (!verdict) {
-      saveBoard(ctx.cwd, board);
-      return snapshot(task, "reviewer gave no VERDICT line; review again or inspect manually");
+      return snapshot(result, "reviewer gave no VERDICT line; review again or inspect manually");
     }
-
-    if (verdict.approved) {
-      setStatus(task, "approved");
-      delete task.reviewNotes;
-    } else {
-      setStatus(task, "changes_requested");
-      task.reviewNotes = verdict.notes || outcome.finalReport;
-    }
-    saveBoard(ctx.cwd, board);
-    return snapshot(task, verdict.approved ? "approved" : truncateText(verdict.notes, 10));
+    return snapshot(result, verdict.approved ? "approved" : truncateText(verdict.notes, 10));
   }
 
   // ---------------------------------------------------------------- tools
@@ -388,7 +392,7 @@ export default function conductor(pi: ExtensionAPI) {
     name: "conductor_run",
     label: "Conductor Run",
     description:
-      "Execute runnable tasks from the conductor board in fresh-context executor agents. Independent tasks run in parallel. Tasks with changes_requested are retried with the review notes. Pass taskIds to run a subset, otherwise all runnable tasks run.",
+      "Execute runnable tasks from the conductor board in fresh-context executor agents. Independent tasks run in parallel. Tasks with changes_requested are retried with the review notes. Pass taskIds to run a subset; explicitly named failed or cancelled tasks are retried too.",
     promptSnippet: "Run planned tasks in parallel fresh-context executors (conductor board)",
     parameters: Type.Object({
       taskIds: Type.Optional(
@@ -402,14 +406,16 @@ export default function conductor(pi: ExtensionAPI) {
       const board = loadBoard(ctx.cwd);
       const requestedIds = params.taskIds as string[] | undefined;
 
-      const candidates = requestedIds
+      // Explicitly named tasks may also retry failed/cancelled ones.
+      const explicit = requestedIds !== undefined;
+      const candidates = explicit
         ? requestedIds.map((id) => findTask(board, id)).filter((t): t is Task => t !== undefined)
         : board.tasks;
-      const runnable = candidates.filter((task) => isRunnable(board, task));
+      const runnable = candidates.filter((task) => isRunnable(board, task, explicit));
       const blocked = candidates
         .filter(
           (task) =>
-            !isRunnable(board, task) &&
+            !isRunnable(board, task, explicit) &&
             (task.status === "todo" || task.status === "changes_requested")
         )
         .map((task) => snapshot(task, blockedReason(board, task)));
@@ -459,11 +465,14 @@ export default function conductor(pi: ExtensionAPI) {
         return executeTask(board, task, tier, ctx, signal, emitProgress);
       });
 
+      // Reports were written by executors after our board copy was loaded.
+      const freshBoard = loadBoard(ctx.cwd);
       const all = [...results, ...blocked];
       const summary = all
         .map((snap) => {
           const detail = snap.note ? ` — ${snap.note}` : "";
-          const report = snap.status === "ready_for_review" ? getReportPreview(board, snap.id) : "";
+          const report =
+            snap.status === "ready_for_review" ? getReportPreview(freshBoard, snap.id) : "";
           return `${snap.id} (${snap.title}): ${STATUS_LABELS[snap.status]}${detail}${report}`;
         })
         .join("\n\n");
@@ -540,7 +549,7 @@ export default function conductor(pi: ExtensionAPI) {
       };
 
       const results = await mapWithConcurrencyLimit(reviewable, config.maxParallel, (task) =>
-        reviewTask(board, task, reviewTier, ctx, signal, emitProgress)
+        reviewTask(task, reviewTier, ctx, signal, emitProgress)
       );
 
       const summary = results
@@ -785,11 +794,9 @@ export default function conductor(pi: ExtensionAPI) {
           liveRuns.get(taskId)?.handle.abort();
         },
         setTaskStatus: (taskId, status) => {
-          const current = loadBoard(ctx.cwd);
-          const task = findTask(current, taskId);
-          if (!task) return;
-          setStatus(task, status);
-          saveBoard(ctx.cwd, current);
+          updateTask(ctx.cwd, taskId, (fresh) => {
+            fresh.status = status;
+          });
           refreshUI(ctx);
         },
         openSession: (taskId) => done(taskId),
@@ -875,10 +882,12 @@ export default function conductor(pi: ExtensionAPI) {
       return;
     }
     if (action.startsWith("status:")) {
-      setStatus(task, action.slice("status:".length) as TaskStatus);
-      saveBoard(ctx.cwd, board);
+      const status = action.slice("status:".length) as TaskStatus;
+      updateTask(ctx.cwd, task.id, (fresh) => {
+        fresh.status = status;
+      });
       refreshUI(ctx);
-      notify(ctx, `${task.id} → ${STATUS_LABELS[task.status]}`);
+      notify(ctx, `${task.id} → ${STATUS_LABELS[status]}`);
     }
   }
 
@@ -950,6 +959,29 @@ export default function conductor(pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     liveRuns.clear();
+    // Executors die with the pi process; a task still marked running on
+    // startup is a stale leftover from a crash or hard exit.
+    const board = loadBoard(ctx.cwd);
+    for (const task of board.tasks) {
+      if (task.status !== "running") continue;
+      updateTask(ctx.cwd, task.id, (fresh) => {
+        fresh.status = "failed";
+      });
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `${task.id} was running when pi exited; marked failed. Retry with conductor_run ["${task.id}"].`,
+          "warning"
+        );
+      }
+    }
     refreshUI(ctx);
+  });
+
+  // Kill live executors on pi exit so no orphan processes keep burning tokens.
+  pi.on("session_shutdown", () => {
+    for (const run of liveRuns.values()) {
+      run.handle.abort();
+    }
+    liveRuns.clear();
   });
 }
