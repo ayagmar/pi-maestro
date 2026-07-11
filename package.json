@@ -1,7 +1,7 @@
 {
   "name": "pi-maestro",
   "version": "0.1.0",
-  "description": "Orchestrator/executor workflows for pi: plan tasks, run cheap fresh-context executors in parallel, adversarially review, and track everything on a live board",
+  "description": "Orchestrator and fresh-context executor workflows for pi with review, git isolation, and a live task board",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -11,9 +11,14 @@
   ],
   "type": "module",
   "main": "./src/index.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ayagmar/pi-maestro.git"
+  },
   "files": [
     "src/",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "lint": "biome lint . --error-on-warnings",
@@ -28,8 +33,7 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ],
-    "image": "https://placehold.co/1200x630/png?text=pi-maestro"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

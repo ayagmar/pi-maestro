@@ -45,7 +45,7 @@ you ──▶ orchestrator (SOTA model, your session)
 ## Install
 
 ```bash
-pi install git:github.com/<you>/pi-maestro
+pi install git:github.com/ayagmar/pi-maestro
 # or from a local checkout
 pi install /path/to/pi-maestro
 ```
@@ -86,7 +86,8 @@ board, so the planning context is disposable once the plan exists.
 the board alone: goal + task list + tier guidance, none of the planning tokens. It drives
 run/review/retry and is instructed not to re-plan unless a task keeps failing. The planning
 session stays on disk (`/resume` to revisit). The orchestrator briefing suggests the handoff
-itself when planning required heavy investigation.
+itself when planning required heavy investigation. Once per orchestrator session, maestro also
+shows a handoff nudge when context usage reaches 65%; executor sessions do not receive it.
 
 Recommended flow for large goals:
 
@@ -140,7 +141,9 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   - `enter` open the executor's full session in your TUI
 - **`/maestro list`**: compact task picker (report view, status overrides, open session).
 - **`/maestro open T3`**: switches your TUI into that executor's persisted session so you can
-  inspect exactly what it did — or continue working in it by hand. `/maestro back` returns.
+  inspect exactly what it did — or continue working in it by hand. `/maestro back` returns to the
+  previous session. Persisted session names identify the task and always number the run, for
+  example `T3 Add replay support · attempt 1` and `T3 Add replay support · review 1`.
 - **`/maestro start`** on a non-empty board archives the previous run first — each goal gets a
   fresh board, and old runs stay recoverable under `.pi/maestro/archive/`.
 
@@ -219,11 +222,12 @@ whole tier object replacing the earlier object of the same name:
   you actually have auth for (preferring the orchestrator's provider); `provider/id` pins one
   provider. Omit to inherit pi's default model.
 - `fallbacks` — ordered model patterns for an executor tier. Unavailable patterns are skipped at
-  preflight. At runtime maestro advances only when the current provider/model fails before any
-  model turn; that provider failure is recorded but does not consume `maxAttempts`. Failures after
-  a turn do not fall back. The interactive editor shows the primary model; edit JSON to set this
-  array. Review configuration accepts the same tier shape, but review runs currently use its
-  primary `model` only.
+  preflight. At runtime maestro advances when the current provider/model fails before any model
+  turn or reports quota/rate-limit exhaustion mid-run; that provider failure is recorded but does
+  not consume `maxAttempts`. Other failures after a turn do not fall back. The settings UI has a
+  searchable fallback row for every tier and edits the first fallback; edit `fallbacks` in JSON for
+  longer chains. Review configuration accepts the same tier shape, but review runs currently use
+  its primary `model` only.
 - `thinking` — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Per GPT-5.6 guidance: start
   medium, test one level lower, raise only when results show a gain.
 - `tools` — comma-separated allowlist passed to the executor. Every preset's `review` tier defaults
@@ -264,7 +268,8 @@ checks the review tier's primary model. This happens before spawning executors.
   that scope falls back to lower-precedence configuration.
 - Executors are `pi --mode rpc` child processes. Their sessions persist in pi's default
   session storage (so `/resume` and usage reports include them; each attempt records its
-  session file on the board), with raw event logs under `.pi/maestro/logs/`. The
+  session file on the board) under descriptive, numbered attempt/review names, with raw event logs
+  under `.pi/maestro/logs/`. The
   `.pi/maestro/` state dir gitignores itself — runtime state never floods your git status.
   RPC mode is what makes mid-run steering and clean aborts possible. Executor-side extension
   dialogs (e.g. permission gates) are auto-cancelled so headless runs can never hang.
