@@ -75,6 +75,14 @@ interface MaestroDetails {
   stoppedBecause?: DriveSummary["stoppedBecause"];
 }
 
+export function previousOwnedSession(
+  previousSessionFile: string | undefined,
+  ownerSessions: string[] | undefined
+): string | undefined {
+  if (!previousSessionFile || !ownerSessions?.includes(previousSessionFile)) return undefined;
+  return previousSessionFile;
+}
+
 function notify(
   ctx: ExtensionContext,
   message: string,
@@ -1429,12 +1437,17 @@ export default function maestro(pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     liveRuns.clear();
     contextNudgeShown = false;
+    // Session switches reload extensions, so switchWithReturn's in-memory
+    // reference does not survive. Restore it only when the prior session owns
+    // this board, keeping unrelated and executor sessions isolated.
+    const board = loadBoard(ctx.cwd);
+    previousSession = previousOwnedSession(event.previousSessionFile, board.ownerSessions);
+
     // Executors die with the pi process; a task still marked running on
     // startup is a stale leftover from a crash or hard exit.
-    const board = loadBoard(ctx.cwd);
     for (const task of board.tasks) {
       if (task.status !== "running") continue;
       updateTask(ctx.cwd, task.id, (fresh) => {
