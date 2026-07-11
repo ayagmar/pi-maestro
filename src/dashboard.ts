@@ -4,6 +4,8 @@ import { boardUsage, STATUS_GLYPHS, STATUS_LABELS, taskUsage } from "./format.js
 import { TranscriptTail } from "./transcript.js";
 import { type Board, type Task, type TaskStatus } from "./types.js";
 
+export type DashboardTaskAction = "view_report" | "view_review" | "open_executor" | "open_reviewer";
+
 export interface DashboardActions {
   getBoard(): Board;
   isLive(taskId: string): boolean;
@@ -11,8 +13,10 @@ export interface DashboardActions {
   steer(taskId: string, message: string): void;
   abort(taskId: string): void;
   setTaskStatus(taskId: string, status: TaskStatus): void;
-  /** Close the dashboard and switch the TUI into the task's session. */
-  openSession(taskId: string): void;
+  hasExecutorSession(taskId: string): boolean;
+  hasReviewerSession(taskId: string): boolean;
+  /** Close the dashboard and route an inspection action through the command helpers. */
+  selectTaskAction(taskId: string, action: DashboardTaskAction): void;
   close(): void;
   requestRender(): void;
 }
@@ -170,8 +174,32 @@ export class Dashboard {
       !this.actions.isLive(task.id)
     ) {
       this.actions.setTaskStatus(task.id, "todo");
-    } else if ((matchesKey(data, "return") || data === "o") && task) {
-      this.actions.openSession(task.id);
+    } else if (data === "p" && task && !this.actions.isLive(task.id) && lastAttemptReport(task)) {
+      this.actions.selectTaskAction(task.id, "view_report");
+      return;
+    } else if (
+      data === "v" &&
+      task &&
+      !this.actions.isLive(task.id) &&
+      task.attempts.at(-1)?.reviewReport
+    ) {
+      this.actions.selectTaskAction(task.id, "view_review");
+      return;
+    } else if (
+      (matchesKey(data, "return") || data === "o") &&
+      task &&
+      !this.actions.isLive(task.id) &&
+      this.actions.hasExecutorSession(task.id)
+    ) {
+      this.actions.selectTaskAction(task.id, "open_executor");
+      return;
+    } else if (
+      data === "O" &&
+      task &&
+      !this.actions.isLive(task.id) &&
+      this.actions.hasReviewerSession(task.id)
+    ) {
+      this.actions.selectTaskAction(task.id, "open_reviewer");
       return;
     }
     this.actions.requestRender();
@@ -406,7 +434,10 @@ export class Dashboard {
     const parts = ["↑↓ tasks", "PgUp/PgDn scroll"];
     if (live) parts.push("s steer", "x abort");
     else if (task) {
-      if (task.attempts.length > 0) parts.push("enter open session");
+      if (lastAttemptReport(task)) parts.push("p report");
+      if (task.attempts.at(-1)?.reviewReport) parts.push("v verdict");
+      if (this.actions.hasExecutorSession(task.id)) parts.push("enter executor");
+      if (this.actions.hasReviewerSession(task.id)) parts.push("O reviewer");
       if (task.status === "ready_for_review") parts.push("a approve");
       if (task.status === "approved" || task.status === "failed" || task.status === "cancelled") {
         parts.push("r reopen");
@@ -415,6 +446,10 @@ export class Dashboard {
     parts.push(this.hideDone ? "f show done" : "f hide done", "esc close");
     return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
   }
+}
+
+function lastAttemptReport(task: Task): string | undefined {
+  return task.attempts.at(-1)?.finalReport;
 }
 
 function padToWidth(line: string, width: number): string {

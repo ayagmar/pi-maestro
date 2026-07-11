@@ -39,7 +39,9 @@ function makeActions(board: Board, overrides: Partial<DashboardActions> = {}): D
     steer: () => {},
     abort: () => {},
     setTaskStatus: () => {},
-    openSession: () => {},
+    hasExecutorSession: () => false,
+    hasReviewerSession: () => false,
+    selectTaskAction: () => {},
     close: () => {},
     requestRender: () => {},
     ...overrides,
@@ -270,7 +272,7 @@ test("dashboard shows selected task context and state-aware actions", () => {
     assert.match(output, /T1 · ready for review · complex/);
     assert.match(output, /Dependencies: T2 · 1 attempt · \$0\.1250/);
     assert.match(output, /Next: Review the result; open its session or approve it\./);
-    assert.match(output, /enter open session · a approve/);
+    assert.match(output, /a approve/);
     assert.doesNotMatch(output, /r reopen/);
   } finally {
     dashboard.dispose();
@@ -366,16 +368,133 @@ test("dashboard keeps an empty board distinct when the done filter is toggled", 
   }
 });
 
-test("dashboard opens the selected task session", () => {
-  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
-  const opened: string[] = [];
+test("dashboard exposes available report and session actions and routes their keys", () => {
+  const task = makeTask({
+    status: "approved",
+    attempts: [
+      {
+        index: 1,
+        sessionFile: "executor.jsonl",
+        logFile: "missing.jsonl",
+        thinking: "medium",
+        startedAt: 0,
+        usage: { input: 0, output: 0, cost: 0, turns: 0 },
+        finalReport: "executor report",
+        reviewReport: "approved verdict",
+        reviewSessionFile: "reviewer.jsonl",
+        touchedFiles: [],
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const selected: string[] = [];
   const dashboard = new Dashboard(
     fakeTheme,
-    makeActions(board, { openSession: (taskId) => opened.push(taskId) })
+    makeActions(board, {
+      hasExecutorSession: () => true,
+      hasReviewerSession: () => true,
+      selectTaskAction: (taskId, action) => selected.push(`${taskId}:${action}`),
+    })
   );
   try {
+    const footer = dashboard.render(140).at(-1) ?? "";
+    assert.match(footer, /p report/);
+    assert.match(footer, /v verdict/);
+    assert.match(footer, /enter executor/);
+    assert.match(footer, /O reviewer/);
+
+    dashboard.handleInput("p");
+    dashboard.handleInput("v");
     dashboard.handleInput("o");
-    assert.deepEqual(opened, ["T1"]);
+    dashboard.handleInput("O");
+    assert.deepEqual(selected, [
+      "T1:view_report",
+      "T1:view_review",
+      "T1:open_executor",
+      "T1:open_reviewer",
+    ]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard hides reviewer routing when the host cannot switch sessions", () => {
+  const task = makeTask({
+    attempts: [
+      {
+        index: 1,
+        sessionFile: "executor.jsonl",
+        logFile: "missing.jsonl",
+        thinking: "medium",
+        startedAt: 0,
+        usage: { input: 0, output: 0, cost: 0, turns: 0 },
+        reviewSessionFile: "reviewer.jsonl",
+        touchedFiles: [],
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const selected: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      hasExecutorSession: () => true,
+      hasReviewerSession: () => false,
+      selectTaskAction: (_taskId, action) => selected.push(action),
+    })
+  );
+  try {
+    const footer = dashboard.render(120).at(-1) ?? "";
+    assert.match(footer, /enter executor/);
+    assert.doesNotMatch(footer, /reviewer/);
+
+    dashboard.handleInput("O");
+    assert.deepEqual(selected, []);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard hides unavailable actions and ignores their keys while live", () => {
+  const liveTask = makeTask({
+    attempts: [
+      {
+        index: 1,
+        sessionFile: "executor.jsonl",
+        logFile: "missing.jsonl",
+        thinking: "medium",
+        startedAt: 0,
+        usage: { input: 0, output: 0, cost: 0, turns: 0 },
+        finalReport: "persisted executor report",
+        reviewReport: "persisted verdict",
+        reviewSessionFile: "reviewer.jsonl",
+        touchedFiles: [],
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [liveTask] };
+  const selected: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => true,
+      hasExecutorSession: () => true,
+      hasReviewerSession: () => true,
+      selectTaskAction: (_taskId, action) => selected.push(action),
+    })
+  );
+  try {
+    const footer = dashboard.render(120).at(-1) ?? "";
+    assert.match(footer, /s steer · x abort/);
+    assert.doesNotMatch(footer, /report|verdict|executor|reviewer|approve|reopen/);
+
+    dashboard.handleInput("p");
+    dashboard.handleInput("v");
+    dashboard.handleInput("o");
+    dashboard.handleInput("O");
+    dashboard.handleInput("a");
+    dashboard.handleInput("r");
+    assert.deepEqual(selected, []);
   } finally {
     dashboard.dispose();
   }

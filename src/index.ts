@@ -29,7 +29,7 @@ import {
   resolveTierModel,
 } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
-import { Dashboard } from "./dashboard.js";
+import { Dashboard, type DashboardTaskAction } from "./dashboard.js";
 import { buildDoctorReport } from "./diagnostics.js";
 import {
   boardUsage,
@@ -1121,8 +1121,8 @@ export default function maestro(pi: ExtensionAPI) {
 
   /**
    * Works from both the command handler and the shortcut. Shortcut handlers
-   * only get ExtensionContext (no switchSession), so opening an executor
-   * session from there falls back to a hint instead of switching.
+   * only get ExtensionContext, so session actions are hidden when the host
+   * cannot switch sessions.
    */
   async function showDashboard(ctx: ExtensionContext): Promise<void> {
     if (ctx.mode !== "tui") {
@@ -1135,46 +1135,71 @@ export default function maestro(pi: ExtensionAPI) {
       return;
     }
 
-    const openTaskId = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
-      const dashboard = new Dashboard(theme, {
-        getBoard: () => loadBoard(ctx.cwd),
-        isLive: (taskId) => liveRuns.has(taskId),
-        liveActivity: (taskId) => {
-          const live = liveRuns.get(taskId);
-          if (!live) return undefined;
-          const label = live.kind === "review" ? "reviewing" : "running";
-          return `${label} · ${live.turns} turns · ${live.lastActivity}`;
-        },
-        steer: (taskId, message) => {
-          liveRuns.get(taskId)?.handle.steer(message);
-        },
-        abort: (taskId) => {
-          liveRuns.get(taskId)?.handle.abort();
-        },
-        setTaskStatus: (taskId, status) => {
-          updateTask(ctx.cwd, taskId, (fresh) => {
-            forceStatus(fresh, status);
-          });
-          refreshUI(ctx);
-        },
-        openSession: (taskId) => done(taskId),
-        close: () => done(null),
-        requestRender: () => tui.requestRender(),
-      });
-      return {
-        render: (width: number) => dashboard.render(width),
-        invalidate: () => dashboard.invalidate(),
-        handleInput: (data: string) => dashboard.handleInput(data),
-        dispose: () => dashboard.dispose(),
-      };
-    });
+    const selection = await ctx.ui.custom<{ taskId: string; action: DashboardTaskAction } | null>(
+      (tui, theme, _keybindings, done) => {
+        const dashboard = new Dashboard(theme, {
+          getBoard: () => loadBoard(ctx.cwd),
+          isLive: (taskId) => liveRuns.has(taskId),
+          liveActivity: (taskId) => {
+            const live = liveRuns.get(taskId);
+            if (!live) return undefined;
+            const label = live.kind === "review" ? "reviewing" : "running";
+            return `${label} · ${live.turns} turns · ${live.lastActivity}`;
+          },
+          steer: (taskId, message) => {
+            liveRuns.get(taskId)?.handle.steer(message);
+          },
+          abort: (taskId) => {
+            liveRuns.get(taskId)?.handle.abort();
+          },
+          setTaskStatus: (taskId, status) => {
+            updateTask(ctx.cwd, taskId, (fresh) => {
+              forceStatus(fresh, status);
+            });
+            refreshUI(ctx);
+          },
+          hasExecutorSession: (taskId) => {
+            const task = findTask(loadBoard(ctx.cwd), taskId);
+            const attempt = task?.attempts.at(-1);
+            return isCommandContext(ctx) && attempt
+              ? findSessionFile(attempt) !== undefined
+              : false;
+          },
+          hasReviewerSession: (taskId) => {
+            const task = findTask(loadBoard(ctx.cwd), taskId);
+            return isCommandContext(ctx) && task?.attempts.at(-1)?.reviewSessionFile !== undefined;
+          },
+          selectTaskAction: (taskId, action) => done({ taskId, action }),
+          close: () => done(null),
+          requestRender: () => tui.requestRender(),
+        });
+        return {
+          render: (width: number) => dashboard.render(width),
+          invalidate: () => dashboard.invalidate(),
+          handleInput: (data: string) => dashboard.handleInput(data),
+          dispose: () => dashboard.dispose(),
+        };
+      }
+    );
 
-    if (!openTaskId) return;
-    if (isCommandContext(ctx)) {
-      await openTaskSession(ctx, openTaskId);
+    if (!selection) return;
+    if (selection.action === "view_report") {
+      showTaskReport(ctx.cwd, selection.taskId);
       return;
     }
-    notify(ctx, `Run /${COMMAND} open ${openTaskId} to switch into the executor session.`);
+    if (selection.action === "view_review") {
+      showTaskReview(ctx.cwd, selection.taskId);
+      return;
+    }
+    if (!isCommandContext(ctx)) {
+      notify(ctx, `Run /${COMMAND} open ${selection.taskId} to switch sessions.`);
+      return;
+    }
+    if (selection.action === "open_executor") {
+      await openTaskSession(ctx, selection.taskId);
+      return;
+    }
+    await openReviewerSession(ctx, selection.taskId);
   }
 
   function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
@@ -1321,21 +1346,11 @@ export default function maestro(pi: ExtensionAPI) {
     if (!action) return;
 
     if (action === "report") {
-      const report = lastReport(task) ?? "(no report yet)";
-      pi.sendMessage({
-        customType: MESSAGE_TYPE,
-        content: `## ${task.id} ${task.title} — last report\n\n${report}`,
-        display: true,
-      });
+      showTaskReport(ctx.cwd, task.id);
       return;
     }
     if (action === "review") {
-      const review = task.attempts.at(-1)?.reviewReport ?? "(no review yet)";
-      pi.sendMessage({
-        customType: MESSAGE_TYPE,
-        content: `## ${task.id} ${task.title} — review verdict\n\n${review}`,
-        display: true,
-      });
+      showTaskReview(ctx.cwd, task.id);
       return;
     }
     if (action === "open") {
@@ -1343,8 +1358,7 @@ export default function maestro(pi: ExtensionAPI) {
       return;
     }
     if (action === "open-review") {
-      const reviewSession = task.attempts.at(-1)?.reviewSessionFile;
-      if (reviewSession) await switchWithReturn(ctx, reviewSession);
+      await openReviewerSession(ctx, task.id);
       return;
     }
     if (action.startsWith("status:")) {
@@ -1355,6 +1369,34 @@ export default function maestro(pi: ExtensionAPI) {
       refreshUI(ctx);
       notify(ctx, `${task.id} → ${STATUS_LABELS[status]}`);
     }
+  }
+
+  function showTaskReport(cwd: string, taskId: string): void {
+    const task = findTask(loadBoard(cwd), taskId);
+    if (!task) return;
+    const report = lastReport(task) ?? "(no report yet)";
+    pi.sendMessage({
+      customType: MESSAGE_TYPE,
+      content: `## ${task.id} ${task.title} — last report\n\n${report}`,
+      display: true,
+    });
+  }
+
+  function showTaskReview(cwd: string, taskId: string): void {
+    const task = findTask(loadBoard(cwd), taskId);
+    if (!task) return;
+    const review = task.attempts.at(-1)?.reviewReport ?? "(no review yet)";
+    pi.sendMessage({
+      customType: MESSAGE_TYPE,
+      content: `## ${task.id} ${task.title} — review verdict\n\n${review}`,
+      display: true,
+    });
+  }
+
+  async function openReviewerSession(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
+    const task = findTask(loadBoard(ctx.cwd), taskId);
+    const reviewSession = task?.attempts.at(-1)?.reviewSessionFile;
+    if (reviewSession) await switchWithReturn(ctx, reviewSession);
   }
 
   async function openTaskSession(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
