@@ -211,7 +211,7 @@ export class Dashboard {
     const transcriptWidth = width - listWidth - 3;
     const bodyHeight = this.bodyHeight;
 
-    const left = this.renderTaskList(visible, listWidth, bodyHeight);
+    const left = this.renderTaskList(visible, board.tasks.length, listWidth, bodyHeight);
     const right = this.renderTranscript(transcriptWidth, bodyHeight);
 
     const lines: string[] = [];
@@ -238,16 +238,24 @@ export class Dashboard {
     return lines.map((line) => truncateToWidth(line, width));
   }
 
-  private renderTaskList(tasks: Task[], width: number, height: number): string[] {
+  private renderTaskList(
+    tasks: Task[],
+    boardTaskCount: number,
+    width: number,
+    height: number
+  ): string[] {
     const theme = this.theme;
     if (tasks.length === 0) {
+      if (boardTaskCount === 0) {
+        return [
+          theme.fg("muted", "Board is empty."),
+          theme.fg("dim", "Use /maestro start <goal>"),
+        ].slice(0, height);
+      }
       if (this.hideDone) {
         return [theme.fg("muted", "All tasks are done."), theme.fg("dim", "f show them again")];
       }
-      return [
-        theme.fg("muted", "Board is empty."),
-        theme.fg("dim", "Use /maestro start <goal>"),
-      ].slice(0, height);
+      return [];
     }
 
     const lines: string[] = [];
@@ -351,7 +359,12 @@ export class Dashboard {
     if (task.status === "approved") return "Complete — no action needed.";
     if (task.status === "failed") return "Reopen the task to retry it.";
     if (task.status === "cancelled") return "Reopen the task if it should run.";
-    if (task.dependsOn.length > 0) return `Waiting for ${task.dependsOn.join(", ")} to complete.`;
+    const tasks = this.actions.getBoard().tasks;
+    const blockers = task.dependsOn.filter(
+      (dependencyId) =>
+        tasks.find((candidate) => candidate.id === dependencyId)?.status !== "approved"
+    );
+    if (blockers.length > 0) return `Waiting for ${blockers.join(", ")} to complete.`;
     return "Ready to run when the orchestrator dispatches it.";
   }
 

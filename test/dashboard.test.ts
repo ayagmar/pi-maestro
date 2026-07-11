@@ -277,6 +277,43 @@ test("dashboard shows selected task context and state-aware actions", () => {
   }
 });
 
+test("dashboard shows a todo task as ready when all dependencies are approved", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [
+      makeTask({ status: "todo", dependsOn: ["T2"] }),
+      makeTask({ id: "T2", status: "approved" }),
+    ],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    const output = dashboard.render(120).join("\n");
+    assert.match(output, /Next: Ready to run when the orchestrator dispatches it\./);
+    assert.doesNotMatch(output, /Waiting for T2 to complete\./);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard only lists dependencies that still block a task", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 4,
+    tasks: [
+      makeTask({ status: "todo", dependsOn: ["T2", "T3"] }),
+      makeTask({ id: "T2", status: "approved" }),
+      makeTask({ id: "T3", status: "running" }),
+    ],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    assert.match(dashboard.render(120).join("\n"), /Next: Waiting for T3 to complete\./);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard only applies task actions valid for the selected state", () => {
   const task = makeTask({ status: "ready_for_review" });
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
@@ -310,6 +347,20 @@ test("dashboard makes complete and filtered boards clear while preserving the do
     const filtered = dashboard.render(100).join("\n");
     assert.match(filtered, /All tasks are done\./);
     assert.match(filtered, /f show them again/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard keeps an empty board distinct when the done filter is toggled", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    assert.match(dashboard.render(100).join("\n"), /Board is empty\./);
+    dashboard.handleInput("f");
+    const filtered = dashboard.render(100).join("\n");
+    assert.match(filtered, /Board is empty\./);
+    assert.doesNotMatch(filtered, /All tasks are done\./);
   } finally {
     dashboard.dispose();
   }
