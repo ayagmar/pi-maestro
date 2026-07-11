@@ -27,7 +27,7 @@ import {
   loadConfig,
   resolveTierModel,
 } from "./config.js";
-import { COMMAND, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
+import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
 import {
   boardUsage,
   formatUsage,
@@ -93,6 +93,7 @@ export default function maestro(pi: ExtensionAPI) {
   if (process.env.PI_MAESTRO_EXECUTOR === "1") return;
 
   const liveRuns = new Map<string, WorkflowRun>();
+  let contextNudgeShown = false;
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
 
@@ -1395,8 +1396,28 @@ export default function maestro(pi: ExtensionAPI) {
     return new Text(theme.fg("accent", "⚡ maestro\n") + content, 0, 0);
   });
 
+  pi.on("turn_end", (_event, ctx) => {
+    if (contextNudgeShown) return;
+
+    try {
+      const usage = ctx.getContextUsage();
+      if (!usage || usage.percent === null || usage.percent < CONTEXT_NUDGE_PERCENT) return;
+
+      const board = loadBoard(ctx.cwd);
+      if (board.tasks.length === 0 || !sessionOwnsBoard(ctx, board) || !ctx.hasUI) return;
+
+      ctx.ui.notify(
+        `Orchestrator context at ${Math.round(usage.percent)}% - consider /maestro handoff to continue with a clean supervisor.`
+      );
+      contextNudgeShown = true;
+    } catch {
+      // The turn may belong to a context invalidated by a session switch.
+    }
+  });
+
   pi.on("session_start", (_event, ctx) => {
     liveRuns.clear();
+    contextNudgeShown = false;
     // Executors die with the pi process; a task still marked running on
     // startup is a stale leftover from a crash or hard exit.
     const board = loadBoard(ctx.cwd);

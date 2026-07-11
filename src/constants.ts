@@ -12,3 +12,4 @@ export const USER_CONFIG_FILE = "maestro.json";
 
 export const KILL_GRACE_MS = 5000;
 export const REPORT_PREVIEW_LINES = 40;
+export const CONTEXT_NUDGE_PERCENT = 65;
