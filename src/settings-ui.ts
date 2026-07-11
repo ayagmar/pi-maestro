@@ -40,6 +40,21 @@ const FALLBACK_CHOICES = [
   "gpt-5.6-sol",
 ];
 
+export function buildModelChoices(modelRegistry: ExtensionCommandContext["modelRegistry"]): {
+  model: string[];
+  fallback: string[];
+} {
+  const modelIds = [...new Set(modelRegistry.getAvailable().map((model) => model.id))].sort();
+  if (modelIds.length === 0) {
+    return { model: MODEL_CHOICES, fallback: FALLBACK_CHOICES };
+  }
+
+  return {
+    model: ["(pi default)", ...modelIds],
+    fallback: ["(none)", ...modelIds],
+  };
+}
+
 function tierDescription(name: string): string {
   return TIER_DESCRIPTIONS[name] ?? "Custom tier.";
 }
@@ -55,6 +70,7 @@ export async function showSettings(
 ): Promise<void> {
   // Work on the resolved config so the UI always shows effective values.
   let config: MaestroConfig = structuredClone(loadConfig(ctx.cwd));
+  const modelChoices = buildModelChoices(ctx.modelRegistry);
 
   const persist = () => saveConfig(scope, ctx.cwd, config);
 
@@ -130,15 +146,15 @@ export async function showSettings(
         id: `model:${name}`,
         label: `${name} · model`,
         currentValue: tier.model ?? "(pi default)",
-        values: MODEL_CHOICES,
-        description: `${tierDescription(name)} "(pi default)" inherits your current pi model.`,
+        values: modelChoices.model,
+        description: `${tierDescription(name)} "(pi default)" inherits your current pi model; type to filter available models.`,
       });
       items.push({
         id: `fallback:${name}`,
         label: `${name} · fallback`,
         currentValue: tier.fallbacks?.[0] ?? "(none)",
-        values: FALLBACK_CHOICES,
-        description: `Model tried when the ${name} model dies (no key, expired auth, quota/rate limit). Pick a different provider so one outage cannot stall the run. Longer chains: edit fallbacks[] in the JSON config.`,
+        values: modelChoices.fallback,
+        description: `Model tried when the ${name} model dies (no key, expired auth, quota/rate limit); type to filter available models. Pick a different provider so one outage cannot stall the run. Longer chains: edit fallbacks[] in the JSON config.`,
       });
       items.push({
         id: `thinking:${name}`,
