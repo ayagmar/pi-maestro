@@ -193,6 +193,11 @@ dead executors.
   RPC mode is what makes mid-run steering and clean aborts possible. Executor-side extension
   dialogs (e.g. permission gates) are auto-cancelled so headless runs can never hang.
 - Dependencies gate execution: a task only runs when everything it `dependsOn` is `approved`.
+- Boards are scoped to their owning sessions: the status bar and widget only render in
+  sessions that started or drove the run (plan/run/start/handoff), so an unrelated pi chat in
+  the same repo stays clean. The board file itself remains shared, hand-editable state.
+- Review verdicts persist per attempt (`reviewReport`, `reviewSessionFile`): from the task
+  picker you can view the full verdict text or switch into the reviewer's session.
 - Reviewers must end with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`; anything else leaves
   the task in `ready_for_review` for you or the orchestrator to re-review.
 - Board writes are per-task against fresh state, so parallel executors finishing in any order

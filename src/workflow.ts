@@ -213,6 +213,9 @@ export async function reviewTask(options: {
       attempt.usage.output += outcome.usage.output;
       attempt.usage.cost += outcome.usage.cost;
       attempt.usage.turns += outcome.usage.turns;
+      // Keep the full review report and session for post-hoc inspection.
+      if (outcome.finalReport) attempt.reviewReport = outcome.finalReport;
+      if (run.attempt.sessionFile) attempt.reviewSessionFile = run.attempt.sessionFile;
     }
     if (!verdict) return; // aborted/failed/no verdict: stays ready_for_review
     if (verdict.approved) {
@@ -234,5 +237,10 @@ export async function reviewTask(options: {
   if (!verdict) {
     return snapshot(result, "reviewer gave no VERDICT line; review again or inspect manually");
   }
-  return snapshot(result, verdict.approved ? "approved" : truncateText(verdict.notes, 10));
+  if (verdict.approved) {
+    // Show what the reviewer actually verified, not a bare "approved".
+    const summary = outcome.finalReport.replace(/VERDICT:\s*APPROVE\s*$/i, "").trim();
+    return snapshot(result, truncateText(summary, 10) || "approved");
+  }
+  return snapshot(result, truncateText(verdict.notes, 10));
 }

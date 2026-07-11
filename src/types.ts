@@ -28,6 +28,10 @@ export interface Attempt {
   exitCode?: number;
   usage: Usage;
   finalReport?: string;
+  /** Full report of the last review run against this attempt. */
+  reviewReport?: string;
+  /** Session file of the last review run, for post-hoc inspection. */
+  reviewSessionFile?: string;
   touchedFiles: string[];
 }
 
@@ -49,6 +53,8 @@ export interface Board {
   nextTaskNumber: number;
   /** Goal from /maestro start; lets a fresh orchestrator take over via /maestro handoff. */
   goal?: string;
+  /** Sessions that own this board (started/adopted the run). Other sessions in the same repo don't render its status. */
+  ownerSessions?: string[];
   tasks: Task[];
 }
 

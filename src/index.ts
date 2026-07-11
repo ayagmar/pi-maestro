@@ -62,8 +62,12 @@ function notify(
   message: string,
   level: "info" | "warning" | "error" = "info"
 ): void {
-  if (ctx.hasUI) ctx.ui.notify(message, level);
-  else console.log(message);
+  try {
+    if (ctx.hasUI) ctx.ui.notify(message, level);
+    else console.log(message);
+  } catch {
+    console.log(message); // stale ctx after session switch
+  }
 }
 
 export default function maestro(pi: ExtensionAPI) {
@@ -76,11 +80,38 @@ export default function maestro(pi: ExtensionAPI) {
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
 
+  function sessionOwnsBoard(ctx: ExtensionContext, board: Board): boolean {
+    if (!board.ownerSessions || board.ownerSessions.length === 0) return true; // legacy board
+    const current = ctx.sessionManager.getSessionFile();
+    if (!current) return true; // print/RPC mode: no session identity to scope by
+    return board.ownerSessions.includes(current);
+  }
+
+  /** Record the current session as an owner of the board (idempotent). */
+  function adoptBoard(ctx: ExtensionContext): void {
+    const current = ctx.sessionManager.getSessionFile();
+    if (!current) return;
+    const board = loadBoard(ctx.cwd);
+    if (board.ownerSessions?.includes(current)) return;
+    board.ownerSessions = [...(board.ownerSessions ?? []), current];
+    saveBoard(ctx.cwd, board);
+  }
+
   function refreshUI(ctx: ExtensionContext): void {
-    if (!ctx.hasUI) return;
+    // Executor stdout events outlive session switches; any access on a stale
+    // ctx throws. Skip — the next session's events arrive with a live ctx.
+    try {
+      if (!ctx.hasUI) return;
+    } catch {
+      return;
+    }
     const board = loadBoard(ctx.cwd);
 
-    if (board.tasks.length === 0) {
+    // Sessions that never touched this board (fresh /maestro-less chats in
+    // the same repo) don't get its status bar. Live runs always show:
+    // this process owns them regardless of which session spawned them.
+    const showBoard = sessionOwnsBoard(ctx, board) || liveRuns.size > 0;
+    if (board.tasks.length === 0 || !showBoard) {
       ctx.ui.setStatus(COMMAND, undefined);
       ctx.ui.setWidget(COMMAND, undefined);
       return;
@@ -174,6 +205,7 @@ export default function maestro(pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      adoptBoard(ctx);
       const config = loadConfig(ctx.cwd);
       const board = loadBoard(ctx.cwd);
       const created: Task[] = [];
@@ -235,6 +267,7 @@ export default function maestro(pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      adoptBoard(ctx);
       const config = loadConfig(ctx.cwd);
       const board = loadBoard(ctx.cwd);
       const requestedIds = params.taskIds as string[] | undefined;
@@ -600,6 +633,7 @@ export default function maestro(pi: ExtensionAPI) {
           const board = loadBoard(ctx.cwd);
           board.goal = rest;
           saveBoard(ctx.cwd, board);
+          adoptBoard(ctx);
           pi.sendMessage(
             {
               customType: MESSAGE_TYPE,
@@ -677,12 +711,18 @@ export default function maestro(pi: ExtensionAPI) {
             describeTiersForPlanning(loadConfig(ctx.cwd))
           );
           const parentSession = ctx.sessionManager.getSessionFile();
-          const result = await ctx.newSession(parentSession ? { parentSession } : {});
-          if (result.cancelled) return;
-          pi.sendMessage(
-            { customType: MESSAGE_TYPE, content: briefing, display: true },
-            { triggerTurn: true }
-          );
+          // Post-switch work must use the fresh ctx from withSession; the
+          // captured ctx is stale after session replacement.
+          await ctx.newSession({
+            ...(parentSession ? { parentSession } : {}),
+            withSession: async (fresh) => {
+              adoptBoard(fresh);
+              await fresh.sendMessage(
+                { customType: MESSAGE_TYPE, content: briefing, display: true },
+                { triggerTurn: true }
+              );
+            },
+          });
           return;
         }
         case "reset": {
@@ -823,11 +863,21 @@ export default function maestro(pi: ExtensionAPI) {
     if (!task) return;
 
     const actions: SelectItem[] = [{ value: "report", label: "View last report" }];
+    if (task.attempts.at(-1)?.reviewReport) {
+      actions.push({ value: "review", label: "View review verdict" });
+    }
     if (task.attempts.length > 0) {
       actions.push({
         value: "open",
         label: "Open executor session",
         description: "Switch this TUI into the executor's session",
+      });
+    }
+    if (task.attempts.at(-1)?.reviewSessionFile) {
+      actions.push({
+        value: "open-review",
+        label: "Open reviewer session",
+        description: "Switch this TUI into the reviewer's session",
       });
     }
     for (const status of [
@@ -858,8 +908,22 @@ export default function maestro(pi: ExtensionAPI) {
       });
       return;
     }
+    if (action === "review") {
+      const review = task.attempts.at(-1)?.reviewReport ?? "(no review yet)";
+      pi.sendMessage({
+        customType: MESSAGE_TYPE,
+        content: `## ${task.id} ${task.title} — review verdict\n\n${review}`,
+        display: true,
+      });
+      return;
+    }
     if (action === "open") {
       await openTaskSession(ctx, task.id);
+      return;
+    }
+    if (action === "open-review") {
+      const reviewSession = task.attempts.at(-1)?.reviewSessionFile;
+      if (reviewSession) await switchWithReturn(ctx, reviewSession);
       return;
     }
     if (action.startsWith("status:")) {
@@ -880,9 +944,11 @@ export default function maestro(pi: ExtensionAPI) {
       return;
     }
     if (liveRuns.has(task.id)) {
+      // The executor process owns that session file while running; attaching
+      // the TUI to it would fork history. The dashboard tails it live instead.
       notify(
         ctx,
-        `${task.id} is still running. Wait for it to finish, or watch its log: ${task.attempts.at(-1)?.logFile}`,
+        `${task.id} is still running — watch it live in /${COMMAND} board (s to steer, x to abort). The session opens here once it finishes.`,
         "warning"
       );
       return;
@@ -898,6 +964,14 @@ export default function maestro(pi: ExtensionAPI) {
       `This switches the current TUI into the executor's session. Use /${COMMAND} back to return here.`
     );
     if (!ok) return;
+    await switchWithReturn(ctx, sessionFile);
+  }
+
+  /** Switch sessions, remembering where we came from for /maestro back. */
+  async function switchWithReturn(
+    ctx: ExtensionCommandContext,
+    sessionFile: string
+  ): Promise<void> {
     const current = ctx.sessionManager.getSessionFile();
     const result = await ctx.switchSession(sessionFile);
     if (!result.cancelled && current) previousSession = current;
