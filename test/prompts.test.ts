@@ -82,6 +82,26 @@ test("supervisor briefing carries goal and board, and forbids re-planning", () =
   assert.match(buildSupervisorBriefing(undefined, "board", "tiers"), /infer from the board/);
 });
 
+test("parseVerdict uses the last verdict when the reviewer quotes the instruction", () => {
+  const report =
+    "The task says end with VERDICT: APPROVE or VERDICT: REQUEST_CHANGES.\nI checked the files.\nVERDICT: REQUEST_CHANGES\n1. x.ts is missing the null check";
+  const verdict = parseVerdict(report);
+  assert.equal(verdict?.approved, false);
+  assert.match(verdict?.notes ?? "", /null check/);
+});
+
+test("review prompt carries previous review findings on re-review", () => {
+  const task = makeTask({
+    reviewNotes: "1. missing null check in x.ts",
+  });
+  const prompt = buildReviewPrompt(task, "## Report\nfixed it");
+  assert.match(prompt, /Previous review findings/);
+  assert.match(prompt, /missing null check/);
+  // First review has no such section
+  const first = buildReviewPrompt(makeTask({}), "## Report\ndone");
+  assert.doesNotMatch(first, /Previous review findings/);
+});
+
 test("orchestrator briefing embeds the goal, tier guidance, and workflow tools", () => {
   const tierGuidance = "Pick the cheapest tier that can meet the acceptance criteria";
   const briefing = buildOrchestratorBriefing("Migrate to Spring Boot 4", tierGuidance);

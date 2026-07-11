@@ -113,6 +113,10 @@ export function startExecutor(options: {
     cwd: options.cwd,
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
+    // The flag makes an installed pi-conductor extension no-op inside the
+    // executor: no recursive orchestration, no crash-recovery fighting the
+    // parent over the shared board file.
+    env: { ...process.env, PI_CONDUCTOR_EXECUTOR: "1" },
   });
 
   const send = (command: Record<string, unknown>) => {
@@ -127,10 +131,10 @@ export function startExecutor(options: {
     proc.stdin.end();
     setTimeout(() => {
       if (proc.exitCode === null) proc.kill("SIGTERM");
-    }, KILL_GRACE_MS);
+    }, KILL_GRACE_MS).unref();
     setTimeout(() => {
       if (proc.exitCode === null) proc.kill("SIGKILL");
-    }, KILL_GRACE_MS * 2);
+    }, KILL_GRACE_MS * 2).unref();
   };
 
   const outcome = new Promise<RunOutcome>((resolve) => {
@@ -170,7 +174,7 @@ export function startExecutor(options: {
         proc.stdin.end();
         setTimeout(() => {
           if (proc.exitCode === null) proc.kill("SIGTERM");
-        }, KILL_GRACE_MS);
+        }, KILL_GRACE_MS).unref();
         return;
       }
 
@@ -185,7 +189,10 @@ export function startExecutor(options: {
         attempt.usage.output += usage?.output ?? 0;
         attempt.usage.cost += usage?.cost?.total ?? 0;
         if (!result.model && event.message.model) result.model = event.message.model;
+        // The latest assistant message decides: a transient provider error
+        // followed by a successful turn must not fail the whole run.
         if (event.message.errorMessage) result.errorMessage = event.message.errorMessage;
+        else delete result.errorMessage;
         const text = extractText(event.message);
         if (text) result.finalReport = text;
       }
@@ -200,7 +207,7 @@ export function startExecutor(options: {
         proc.stdin.end();
         setTimeout(() => {
           if (proc.exitCode === null) proc.kill("SIGTERM");
-        }, KILL_GRACE_MS);
+        }, KILL_GRACE_MS).unref();
       }
 
       options.onUpdate?.({ turns: attempt.usage.turns, cost: attempt.usage.cost, lastActivity });
@@ -222,6 +229,12 @@ export function startExecutor(options: {
       log.end();
       result.exitCode = code ?? 0;
       if (result.errorMessage && result.exitCode === 0) result.exitCode = 1;
+      // Auth exists at preflight but tokens can be expired or out of quota;
+      // the provider error alone doesn't tell the user how to recover.
+      if (result.errorMessage?.includes("No API key for provider")) {
+        result.errorMessage +=
+          " — the provider's OAuth token is likely expired or out of quota. Re-run `pi /login` for it, or pick another model in /conductor config.";
+      }
       result.aborted = wasAborted;
       if (result.exitCode !== 0 && !result.errorMessage && !wasAborted) {
         result.errorMessage = stderr.trim() || `executor exited with code ${result.exitCode}`;

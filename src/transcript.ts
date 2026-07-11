@@ -81,6 +81,12 @@ export class TranscriptTail {
   poll(): void {
     if (!existsSync(this.file)) return;
     const size = statSync(this.file).size;
+    if (size < this.offset) {
+      // File was truncated (rerun reusing the log path): start over.
+      this.offset = 0;
+      this.buffer = "";
+      this.items.length = 0;
+    }
     if (size <= this.offset) return;
 
     const fd = openSync(this.file, "r");

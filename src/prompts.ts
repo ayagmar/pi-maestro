@@ -53,10 +53,17 @@ export function buildExecutorPrompt(
 
 /** Prompt for an adversarial reviewer with read-only tools and a fresh context. */
 export function buildReviewPrompt(task: Task, report: string): string {
-  return [
+  const sections = [
     `Role: adversarial code reviewer with a fresh context and read-only tools. An executor claims it completed the task below. Verify the claims independently; your job is to find real problems, not to be agreeable.`,
     `## Task ${task.id}: ${task.title}`,
     task.brief,
+  ];
+  if (task.reviewNotes) {
+    sections.push(
+      `## Previous review findings\nAn earlier attempt was rejected for these reasons. Verify each one was addressed:\n${task.reviewNotes}`
+    );
+  }
+  sections.push(
     `## Executor report\n${report}`,
     [
       "## Success criteria",
@@ -70,16 +77,22 @@ export function buildReviewPrompt(task: Task, report: string): string {
       "End your final message with exactly one of:",
       "- `VERDICT: APPROVE` when the work is correct and complete",
       "- `VERDICT: REQUEST_CHANGES` followed by a numbered list of required fixes, each naming the file or behavior affected",
-    ].join("\n"),
-  ].join("\n\n");
+    ].join("\n")
+  );
+  return sections.join("\n\n");
 }
 
-/** Parse the reviewer's verdict line demanded by buildReviewPrompt. */
+/**
+ * Parse the reviewer's verdict line demanded by buildReviewPrompt. The last
+ * occurrence wins: reviewers sometimes quote the instruction ("end with
+ * VERDICT: ...") before stating their actual verdict.
+ */
 export function parseVerdict(report: string): { approved: boolean; notes: string } | undefined {
-  const match = report.match(/VERDICT:\s*(APPROVE|REQUEST_CHANGES)/i);
+  const matches = [...report.matchAll(/VERDICT:\s*(APPROVE|REQUEST_CHANGES)/gi)];
+  const match = matches.at(-1);
   if (!match) return undefined;
   const approved = (match[1] ?? "").toUpperCase() === "APPROVE";
-  const notes = report.slice((match.index ?? 0) + (match[0]?.length ?? 0)).trim();
+  const notes = report.slice((match.index ?? 0) + match[0].length).trim();
   return { approved, notes };
 }
 
@@ -109,7 +122,7 @@ export function buildSupervisorBriefing(
       "",
       "## Decision rules",
       "- Use `conductor_status` instead of re-reading executor output.",
-      "- Do not re-plan. Only touch the plan (`conductor_plan` to split, or adjust briefs) when a task fails twice with the same root cause.",
+      "- Do not re-plan. Only adjust tasks (`conductor_update` to refine a brief or escalate a tier, `conductor_plan` to split) when a task fails twice with the same root cause.",
       tierGuidance,
       "- Ask the user before expanding scope beyond the stated goal.",
     ].join("\n"),
@@ -139,7 +152,7 @@ export function buildOrchestratorBriefing(goal: string, tierGuidance: string): s
       "## Decision rules",
       "- Use `conductor_status` instead of re-reading executor output.",
       "- Reference file paths in briefs; paste file contents only when an executor cannot discover them itself.",
-      "- If a task fails twice with the same root cause, stop retrying: refine the brief, split the task, or escalate its tier.",
+      "- If a task fails twice with the same root cause, stop retrying: `conductor_update` its brief or tier, split it with `conductor_plan`, or cancel it.",
       "- Ask the user before expanding scope beyond the stated goal.",
       "- If planning required heavy investigation, suggest `/conductor handoff` after the plan is on the board: it continues run/review in a fresh session without this session's planning context.",
     ].join("\n"),

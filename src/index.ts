@@ -103,6 +103,11 @@ function notify(
 }
 
 export default function conductor(pi: ExtensionAPI) {
+  // Inside a spawned executor the extension must be inert: no recursive
+  // orchestration, and no session_start crash-recovery fighting the parent
+  // over the shared board file.
+  if (process.env.PI_CONDUCTOR_EXECUTOR === "1") return;
+
   const liveRuns = new Map<string, LiveRun>();
 
   function refreshUI(ctx: ExtensionContext): void {
@@ -581,6 +586,74 @@ export default function conductor(pi: ExtensionAPI) {
   });
 
   pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
+    name: "conductor_update",
+    label: "Conductor Update",
+    description:
+      "Update a planned task: refine its brief, retitle it, change its tier, or cancel it. Use when a task failed twice with the same root cause or the plan needs adjusting. Running tasks cannot be updated.",
+    promptSnippet: "Refine a task's brief/tier or cancel it (conductor board)",
+    parameters: Type.Object({
+      taskId: Type.String({ description: "Task id like T1" }),
+      title: Type.Optional(Type.String({ description: "New title" })),
+      brief: Type.Optional(Type.String({ description: "New self-contained brief" })),
+      tier: Type.Optional(Type.String({ description: "New complexity tier" })),
+      cancel: Type.Optional(Type.Boolean({ description: "Cancel the task" })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const { taskId, title, brief, tier, cancel } = params as {
+        taskId: string;
+        title?: string;
+        brief?: string;
+        tier?: string;
+        cancel?: boolean;
+      };
+      if (tier && !loadConfig(ctx.cwd).tiers[tier]) {
+        throw new Error(
+          `Unknown tier "${tier}". Available tiers: ${Object.keys(loadConfig(ctx.cwd).tiers).join(", ")}`
+        );
+      }
+      if (liveRuns.has(taskId.trim().toUpperCase())) {
+        throw new Error(`${taskId} is running. Abort it first or wait for it to finish.`);
+      }
+      const updated = updateTask(ctx.cwd, taskId, (fresh) => {
+        if (title) fresh.title = title;
+        if (brief) {
+          fresh.brief = brief;
+          // A rewritten brief supersedes review feedback on the old one.
+          delete fresh.reviewNotes;
+          if (fresh.status === "changes_requested" || fresh.status === "failed") {
+            fresh.status = "todo";
+          }
+        }
+        if (tier) fresh.tier = tier;
+        if (cancel) fresh.status = "cancelled";
+      });
+      if (!updated) throw new Error(`Unknown task: ${taskId}`);
+      refreshUI(ctx);
+      return {
+        content: [{ type: "text", text: `Updated: ${taskLine(updated)}` }],
+        details: { action: "update", tasks: [snapshot(updated)] },
+      };
+    },
+    renderCall(args, theme) {
+      const changes = [
+        args.title ? "title" : null,
+        args.brief ? "brief" : null,
+        args.tier ? `tier→${args.tier}` : null,
+        args.cancel ? "cancel" : null,
+      ]
+        .filter((part) => part !== null)
+        .join(", ");
+      return new Text(
+        theme.fg("toolTitle", theme.bold("conductor update ")) +
+          theme.fg("accent", `${args.taskId} (${changes || "no changes"})`),
+        0,
+        0
+      );
+    },
+    renderResult: renderTaskListResult,
+  });
+
+  pi.registerTool<ReturnType<typeof Type.Object>, ConductorDetails>({
     name: "conductor_status",
     label: "Conductor Status",
     description:
@@ -735,6 +808,14 @@ export default function conductor(pi: ExtensionAPI) {
             notify(ctx, "Nothing to hand off — the board is empty.", "warning");
             return;
           }
+          if (liveRuns.size > 0) {
+            notify(
+              ctx,
+              `${liveRuns.size} executor(s) still running — switching sessions would abort them. Wait or abort them first.`,
+              "warning"
+            );
+            return;
+          }
           if (ctx.hasUI) {
             const ok = await ctx.ui.confirm(
               "Hand off to a fresh orchestrator?",
@@ -763,11 +844,17 @@ export default function conductor(pi: ExtensionAPI) {
             notify(ctx, "Board is already empty.");
             return;
           }
-          const ok = await ctx.ui.confirm(
-            "Reset board?",
-            `Delete all ${board.tasks.length} task(s) from the board?`
-          );
-          if (!ok) return;
+          if (liveRuns.size > 0) {
+            notify(ctx, "Executors are still running. Abort them before resetting.", "warning");
+            return;
+          }
+          if (ctx.hasUI) {
+            const ok = await ctx.ui.confirm(
+              "Reset board?",
+              `Delete all ${board.tasks.length} task(s) from the board?`
+            );
+            if (!ok) return;
+          }
           saveBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] }); // also drops goal
           refreshUI(ctx);
           notify(ctx, "Board reset.");
