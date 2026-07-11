@@ -272,16 +272,18 @@ export async function driveBoard(options: {
     onRoundUpdate,
     trackRun,
   } = options;
-  const selectedIds = taskIds ? new Set(taskIds) : undefined;
+  // Task ids are matched case-insensitively (see findTask), so normalize both
+  // the requested ids and each task id before comparing. Comparing raw ids here
+  // would silently drop lowercase/whitespace variants and dispatch nothing.
+  const selectedIds = taskIds ? new Set(taskIds.map((id) => id.trim().toUpperCase())) : undefined;
+  const isSelected = (task: Task): boolean =>
+    selectedIds === undefined || selectedIds.has(task.id.trim().toUpperCase());
   let rounds = 0;
 
-  const selectedTasks = (): Task[] => {
-    const board = loadBoard(cwd);
-    return selectedIds ? board.tasks.filter((task) => selectedIds.has(task.id)) : board.tasks;
-  };
+  const selectedTasks = (): Task[] => loadBoard(cwd).tasks.filter(isSelected);
   const finish = (stoppedBecause: DriveStopReason): DriveSummary => ({
     rounds,
-    tasks: loadBoard(cwd).tasks.map((task) => snapshot(task)),
+    tasks: selectedTasks().map((task) => snapshot(task)),
     stoppedBecause,
   });
 
@@ -295,9 +297,7 @@ export async function driveBoard(options: {
       const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
       if (validationError) return finish({ code: "error", message: validationError });
 
-      const tasks = selectedIds
-        ? board.tasks.filter((task) => selectedIds.has(task.id))
-        : board.tasks;
+      const tasks = board.tasks.filter(isSelected);
       if (tasks.every((task) => task.status === "approved")) {
         return finish({ code: "completed", message: "all selected tasks are approved" });
       }
@@ -396,7 +396,7 @@ export async function driveBoard(options: {
 
       const afterRuns = loadBoard(cwd);
       const reviewable = afterRuns.tasks.filter(
-        (task) => task.status === "ready_for_review" && (!selectedIds || selectedIds.has(task.id))
+        (task) => task.status === "ready_for_review" && isSelected(task)
       );
       if (reviewable.length > 0) {
         onRoundUpdate?.(

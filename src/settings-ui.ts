@@ -155,6 +155,8 @@ export function applySettingsChange(
     config.maxCostPerTask = value === "off" ? 0 : Number(value.slice(1));
   } else if (id === "maxRunCost") {
     config.maxRunCost = value === "off" ? 0 : Number(value.slice(1));
+  } else if (id === "statusWaitSeconds") {
+    config.statusWaitSeconds = Number(value);
   } else {
     const [kind, tierName] = id.split(":");
     const tier = tierName ? config.tiers[tierName] : undefined;
@@ -386,6 +388,13 @@ export async function showSettings(
             currentValue: config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`,
             values: ["off", "$5", "$10", "$25", "$50"],
             description: "Stop starting new executors after the board exceeds this cost.",
+          },
+          {
+            id: "statusWaitSeconds",
+            label: "Progress pulse interval",
+            currentValue: `${config.statusWaitSeconds}`,
+            values: ["15", "30", "60", "90", "120", "180"],
+            description: "Seconds maestro_status waits before returning live executor progress.",
           },
         ];
       }

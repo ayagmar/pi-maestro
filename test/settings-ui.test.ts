@@ -145,6 +145,7 @@ test("settings changes preserve existing values and persist provider-qualified s
     config = applySettingsChange(config, "planGate", "on");
     config = applySettingsChange(config, "maxParallel", "6");
     config = applySettingsChange(config, "maxCostPerTask", "$5");
+    config = applySettingsChange(config, "statusWaitSeconds", "30");
     config = applySettingsChange(config, "model:complex", "anthropic/claude-sonnet-5");
     saveConfig("project", cwd, config);
 
@@ -152,6 +153,7 @@ test("settings changes preserve existing values and persist provider-qualified s
     assert.equal(persisted.planGate, true);
     assert.equal(persisted.maxParallel, 6);
     assert.equal(persisted.maxCostPerTask, 5);
+    assert.equal(persisted.statusWaitSeconds, 30);
     assert.equal(persisted.autoCommit, DEFAULT_CONFIG.autoCommit);
     assert.equal(persisted.tiers.complex.model, "anthropic/claude-sonnet-5");
     assert.equal(persisted.tiers.review.tools, DEFAULT_CONFIG.tiers.review?.tools);

@@ -22,6 +22,7 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   maxAttempts: 3,
   maxCostPerTask: 0,
   maxRunCost: 0,
+  statusWaitSeconds: 60,
   tiers: {
     trivial: { thinking: "low" },
     standard: { thinking: "medium" },
@@ -73,6 +74,7 @@ export const PRESETS: Preset[] = [
       maxAttempts: 3,
       maxCostPerTask: 0,
       maxRunCost: 0,
+      statusWaitSeconds: 60,
       tiers: {
         trivial: { model: "openai-codex/gpt-5.6-terra", thinking: "high" },
         standard: { model: "openai-codex/gpt-5.6-sol", thinking: "medium" },
@@ -94,6 +96,7 @@ export const PRESETS: Preset[] = [
       maxAttempts: 3,
       maxCostPerTask: 2,
       maxRunCost: 0,
+      statusWaitSeconds: 60,
       tiers: {
         trivial: { model: "openai-codex/gpt-5.6-luna", thinking: "high" },
         standard: { model: "openai-codex/gpt-5.6-terra", thinking: "high" },
@@ -115,6 +118,7 @@ export const PRESETS: Preset[] = [
       maxAttempts: 3,
       maxCostPerTask: 2,
       maxRunCost: 0,
+      statusWaitSeconds: 60,
       tiers: {
         trivial: { model: "anthropic/claude-haiku-4-5", thinking: "medium" },
         standard: { model: "anthropic/claude-sonnet-5", thinking: "medium" },
@@ -136,6 +140,7 @@ export const PRESETS: Preset[] = [
       maxAttempts: 3,
       maxCostPerTask: 0,
       maxRunCost: 0,
+      statusWaitSeconds: 60,
       tiers: {
         trivial: { model: "anthropic/claude-sonnet-5", thinking: "low" },
         standard: { model: "anthropic/claude-sonnet-5", thinking: "medium" },
@@ -157,6 +162,7 @@ export const PRESETS: Preset[] = [
       maxAttempts: 4,
       maxCostPerTask: 0,
       maxRunCost: 0,
+      statusWaitSeconds: 60,
       tiers: {
         trivial: { model: "anthropic/claude-opus-4-8", thinking: "medium" },
         standard: { model: "anthropic/claude-opus-4-8", thinking: "high" },
@@ -178,6 +184,7 @@ export const PRESETS: Preset[] = [
       maxAttempts: 4,
       maxCostPerTask: 0,
       maxRunCost: 0,
+      statusWaitSeconds: 60,
       tiers: {
         trivial: { model: "openai-codex/gpt-5.6-sol", thinking: "medium" },
         standard: { model: "openai-codex/gpt-5.6-sol", thinking: "high" },
@@ -213,6 +220,7 @@ export function mergeConfig(
     maxAttempts: override.maxAttempts ?? base.maxAttempts,
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
     maxRunCost: override.maxRunCost ?? base.maxRunCost,
+    statusWaitSeconds: override.statusWaitSeconds ?? base.statusWaitSeconds,
     tiers: { ...base.tiers, ...override.tiers },
   };
 }
@@ -262,6 +270,7 @@ export function describeConfig(config: MaestroConfig): string {
     `maxAttempts: ${config.maxAttempts}`,
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
     `maxRunCost: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,
+    `statusWaitSeconds: ${config.statusWaitSeconds}`,
     "tiers:",
   ];
   for (const [name, tier] of Object.entries(config.tiers)) {

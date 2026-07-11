@@ -27,6 +27,7 @@ const config: MaestroConfig = {
   maxAttempts: 3,
   maxCostPerTask: 0,
   maxRunCost: 0,
+  statusWaitSeconds: 60,
   tiers: { standard: tier },
 };
 
@@ -204,6 +205,93 @@ test("driveBoard approves dependent tasks across multiple rounds", async () => {
         [first.id, "approved"],
         [second.id, "approved"],
       ]
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("driveBoard summary reports only the selected task scope", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-scope-test-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const target = createTask(board, {
+      title: "Driven task",
+      brief: "Do the driven work",
+      tier: "standard",
+    });
+    const bystander = createTask(board, {
+      title: "Untouched task",
+      brief: "Should not appear in the summary",
+      tier: "standard",
+    });
+    forceStatus(bystander, "failed");
+    saveBoard(cwd, board);
+
+    const summary = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      taskIds: [target.id],
+      startExecutor: executor({ finalReport: "Verified.\nVERDICT: APPROVE" }),
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(summary.stoppedBecause.code, "completed");
+    assert.deepEqual(
+      summary.tasks.map((task) => task.id),
+      [target.id]
+    );
+    assert.match(formatDriveSummary(summary), /1 approved · 0 failed · 0 cancelled · 0 blocked/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("driveBoard normalizes scoped task ids and still dispatches them", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-normalize-test-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const task = createTask(board, {
+      title: "Scoped task",
+      brief: "Run me by lowercase id",
+      tier: "standard",
+    });
+    saveBoard(cwd, board);
+
+    let dispatches = 0;
+    const startExecutor: StartExecutor = (options) => {
+      dispatches += 1;
+      return executor({
+        usage: { input: 0, output: 0, cost: 0, turns: 1 },
+        finalReport: options.prompt.includes("adversarial code reviewer")
+          ? "Verified.\nVERDICT: APPROVE"
+          : "Work completed",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      taskIds: [` ${task.id.toLowerCase()} `],
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.ok(dispatches > 0, "expected the scoped task to be dispatched");
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.deepEqual(
+      result.tasks.map((entry) => [entry.id, entry.status]),
+      [[task.id, "approved"]]
     );
   } finally {
     rmSync(cwd, { recursive: true, force: true });

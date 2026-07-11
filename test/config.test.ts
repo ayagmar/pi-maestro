@@ -57,6 +57,7 @@ test("default config has the documented tiers and no model overrides", () => {
   assert.equal(DEFAULT_CONFIG.planGate, false);
   assert.equal(DEFAULT_CONFIG.useWorktrees, false);
   assert.equal(DEFAULT_CONFIG.maxRunCost, 0);
+  assert.equal(DEFAULT_CONFIG.statusWaitSeconds, 60);
   for (const tier of Object.values(DEFAULT_CONFIG.tiers)) {
     assert.equal(tier.model, undefined);
   }
@@ -72,6 +73,7 @@ test("every preset defines all four tiers and keeps review read-only", () => {
     assert.equal(preset.config.planGate, false, `preset ${preset.name}`);
     assert.equal(preset.config.useWorktrees, false, `preset ${preset.name}`);
     assert.equal(preset.config.maxRunCost, 0, `preset ${preset.name}`);
+    assert.equal(preset.config.statusWaitSeconds, 60, `preset ${preset.name}`);
     assert.equal(preset.config.tiers.review?.tools, REVIEW_TOOLS, `preset ${preset.name}`);
     assert.ok(preset.description.length > 0, `preset ${preset.name} needs a description`);
   }
@@ -93,6 +95,7 @@ test("describeConfig lists preset name and every tier", () => {
   assert.match(text, /planGate: false/);
   assert.match(text, /useWorktrees: false/);
   assert.match(text, /maxRunCost: off/);
+  assert.match(text, /statusWaitSeconds: 60/);
   assert.match(text, /trivial: \(pi default model\) thinking=low/);
   assert.match(text, new RegExp(`review: .* tools=${REVIEW_TOOLS}`));
 });
@@ -223,19 +226,22 @@ test("resolveTierModel fails with an actionable error when nothing is authed", (
   }
 });
 
-test("mergeConfig carries attempt and cost caps", () => {
+test("mergeConfig carries attempt, cost, and pulse settings", () => {
   const merged = mergeConfig(DEFAULT_CONFIG, {
     maxAttempts: 5,
     maxCostPerTask: 2,
     maxRunCost: 25,
+    statusWaitSeconds: 30,
   });
   assert.equal(merged.maxAttempts, 5);
   assert.equal(merged.maxCostPerTask, 2);
   assert.equal(merged.maxRunCost, 25);
+  assert.equal(merged.statusWaitSeconds, 30);
   const untouched = mergeConfig(DEFAULT_CONFIG, {});
   assert.equal(untouched.maxAttempts, DEFAULT_CONFIG.maxAttempts);
   assert.equal(untouched.maxCostPerTask, 0);
   assert.equal(untouched.maxRunCost, 0);
+  assert.equal(untouched.statusWaitSeconds, 60);
 });
 
 test("loadConfig archives corrupt project config and falls back", () => {

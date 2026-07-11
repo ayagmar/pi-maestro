@@ -168,6 +168,8 @@ export interface MaestroConfig {
   maxCostPerTask: number;
   /** Stop starting executor batches once total board cost (USD) exceeds this. 0 disables the cap. */
   maxRunCost: number;
+  /** How long batch tools and maestro_status wait (seconds) for running executors before returning progress. 0 disables waiting. */
+  statusWaitSeconds: number;
   /** Commit each task's work on approval (one conventional commit per task). */
   autoCommit: boolean;
   /** Named tiers. "review" is used for adversarial review runs. */

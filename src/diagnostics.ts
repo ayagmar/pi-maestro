@@ -41,6 +41,7 @@ export function buildDoctorReport(
     ...configFiles.map((file) => `  ${file}`),
     `  effective preset: ${matchingPreset(config)}`,
     `  plan gate: ${config.planGate ? "on" : "off"} · attempts: ${config.maxAttempts} · parallelism: ${config.maxParallel}`,
+    `  progress pulse: ${config.statusWaitSeconds}s`,
     `  task cost cap: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`} · run cost cap: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,
     `  worktrees: ${config.useWorktrees ? "on" : "off"} · automatic commits: ${config.autoCommit ? "on" : "off"}`,
     "",

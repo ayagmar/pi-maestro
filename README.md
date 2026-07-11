@@ -66,9 +66,9 @@ with these tools:
 | `maestro_plan` | Creates tasks with self-contained briefs, a complexity tier, and optional dependencies |
 | `maestro_run` | Runs one batch of runnable tasks in parallel fresh-context executors (respects dependencies, `maxParallel`, plan approval, and run budget) |
 | `maestro_review` | Spawns adversarial fresh-context reviewers that approve or request changes (reviewer tools are read-only by default) |
-| `maestro_drive` | Repeats run/review/retry rounds until the selected tasks finish or need intervention |
+| `maestro_drive` | Starts a background run/review/retry loop and returns immediately |
 | `maestro_update` | Refines a task's title, brief, or tier, or cancels it |
-| `maestro_status` | Cheap status pulse: statuses, tiers, attempts, cost per task |
+| `maestro_status` | Waits for the next progress pulse, then reports statuses and live executor activity |
 
 You can also call these tools yourself in plain prompts ("plan these three tasks…"), or manage the
 board manually — the workflow is just tools plus a JSON file. If you already have a plan (design
@@ -100,7 +100,10 @@ Recommended flow for large goals:
 For small goals, skip the handoff — one session is fine. You can also start the autonomous loop
 from the current session with `/maestro drive` (or let the model call `maestro_drive`). It runs
 independent work in parallel, reviews completed attempts, carries review feedback into retries,
-and waits for approved dependencies before advancing them. `/maestro pause` requests a safe stop:
+and waits for approved dependencies before advancing them. Tool-driven orchestrators call
+`maestro_status` about once a minute while it runs, report live turns/cost/current activity to you,
+and then wait for the next pulse. This keeps the interactive session observable and avoids long
+provider-cache-idle gaps. `/maestro pause` requests a safe stop:
 active executors finish, but no new executor batch starts. `/maestro resume` later continues the same
 task scope from the board's fresh persisted state; `/maestro abort` instead aborts active executors.
 The loop stops when work is complete or when a pause, plan gate, run budget, attempt cap, abort,
@@ -201,6 +204,7 @@ whole tier object replacing the earlier object of the same name:
   "maxAttempts": 3,
   "maxCostPerTask": 2,
   "maxRunCost": 25,
+  "statusWaitSeconds": 60,
   "tiers": {
     "trivial":  { "model": "gpt-5.6-terra", "thinking": "high" },
     "standard": {
@@ -235,6 +239,10 @@ whole tier object replacing the earlier object of the same name:
   loops; a capped task fails with a hint to rewrite its brief via `maestro_update`.
 - `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default 0 =
   off). Safety net against a stuck executor burning tokens unattended.
+- `statusWaitSeconds` — how long `maestro_status` waits before returning a live progress pulse
+  while a background drive is active (default 60, maximum 240). Pass `waitSeconds: 0` for an
+  immediate snapshot. Short pulses let the orchestrator narrate progress and keep its provider
+  prompt cache warm without enabling long cache retention.
 - `maxRunCost` — gate new executor batches once total cost recorded across the board exceeds this
   USD amount (default 0 = off). The settings editor offers off, $5, $10, $25, and $50. A blocked
   `maestro_run` returns the budget warning on each otherwise-runnable task; `maestro_drive` stops
