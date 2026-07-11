@@ -35,6 +35,7 @@ import {
 import {
   buildExecutorPrompt,
   buildOrchestratorBriefing,
+  buildSupervisorBriefing,
   buildReviewPrompt,
   parseVerdict,
 } from "./prompts.js";
@@ -664,6 +665,7 @@ export default function conductor(pi: ExtensionAPI) {
     getArgumentCompletions: (prefix) => {
       const options = [
         "start",
+        "handoff",
         "board",
         "list",
         "open",
@@ -685,6 +687,9 @@ export default function conductor(pi: ExtensionAPI) {
             notify(ctx, "Usage: /conductor start <goal>", "warning");
             return;
           }
+          const board = loadBoard(ctx.cwd);
+          board.goal = rest;
+          saveBoard(ctx.cwd, board);
           pi.sendMessage(
             {
               customType: MESSAGE_TYPE,
@@ -724,6 +729,34 @@ export default function conductor(pi: ExtensionAPI) {
           refreshUI(ctx);
           return;
         }
+        case "handoff": {
+          const board = loadBoard(ctx.cwd);
+          if (board.tasks.length === 0) {
+            notify(ctx, "Nothing to hand off — the board is empty.", "warning");
+            return;
+          }
+          if (ctx.hasUI) {
+            const ok = await ctx.ui.confirm(
+              "Hand off to a fresh orchestrator?",
+              "Starts a new session where a supervisor drives run/review from the board alone, without this session's planning context. The current session stays on disk (/resume to revisit)."
+            );
+            if (!ok) return;
+          }
+          await ctx.waitForIdle();
+          const briefing = buildSupervisorBriefing(
+            board.goal,
+            board.tasks.map((task) => taskLine(task)).join("\n"),
+            describeTiersForPlanning(loadConfig(ctx.cwd))
+          );
+          const parentSession = ctx.sessionManager.getSessionFile();
+          const result = await ctx.newSession(parentSession ? { parentSession } : {});
+          if (result.cancelled) return;
+          pi.sendMessage(
+            { customType: MESSAGE_TYPE, content: briefing, display: true },
+            { triggerTurn: true }
+          );
+          return;
+        }
         case "reset": {
           const board = loadBoard(ctx.cwd);
           if (board.tasks.length === 0) {
@@ -735,7 +768,7 @@ export default function conductor(pi: ExtensionAPI) {
             `Delete all ${board.tasks.length} task(s) from the board?`
           );
           if (!ok) return;
-          saveBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+          saveBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] }); // also drops goal
           refreshUI(ctx);
           notify(ctx, "Board reset.");
           return;
@@ -745,6 +778,7 @@ export default function conductor(pi: ExtensionAPI) {
             ctx,
             [
               `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
+              `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
               `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
               `/${COMMAND} list           compact task picker`,
               `/${COMMAND} open <taskId>  switch into an executor session`,

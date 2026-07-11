@@ -64,7 +64,32 @@ with four tools:
 | `conductor_status` | Cheap status pulse: statuses, tiers, attempts, cost per task |
 
 You can also call these tools yourself in plain prompts ("plan these three tasks…"), or manage the
-board manually — the workflow is just tools plus a JSON file.
+board manually — the workflow is just tools plus a JSON file. If you already have a plan (design
+doc, issue list), paste it and ask the model to turn it into `conductor_plan` tasks; `start` is
+for when the decomposition itself needs the expensive model's judgment.
+
+### Two-phase orchestration: plan, then hand off
+
+Planning fills the orchestrator's context with investigation noise (file reads, greps, dead
+ends) that is useless during execution — and stale reasoning can anchor the model to outdated
+approaches. Because task briefs are self-contained by design, all durable state lives on the
+board, so the planning context is disposable once the plan exists.
+
+`/conductor handoff` starts a fresh session where a supervising orchestrator takes over from
+the board alone: goal + task list + tier guidance, none of the planning tokens. It drives
+run/review/retry and is instructed not to re-plan unless a task keeps failing. The planning
+session stays on disk (`/resume` to revisit). The orchestrator briefing suggests the handoff
+itself when planning required heavy investigation.
+
+Recommended flow for large goals:
+
+```
+/conductor start <goal>          # expensive model investigates + plans
+  …review the board, adjust…     # /conductor board, tweak briefs/statuses
+/conductor handoff               # fresh supervisor executes with a clean context
+```
+
+For small goals, skip the handoff — one session is fine.
 
 ### Task lifecycle
 
@@ -140,6 +165,7 @@ dead executors.
 
 ```
 /conductor start <goal>     plan + delegate a goal with the orchestrator
+/conductor handoff          continue run/review in a fresh session (drops planning context)
 /conductor board            full-screen live dashboard (also ctrl+alt+b)
 /conductor list             compact task picker
 /conductor open <taskId>    switch into an executor's session

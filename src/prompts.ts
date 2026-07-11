@@ -83,6 +83,39 @@ export function parseVerdict(report: string): { approved: boolean; notes: string
   return { approved, notes };
 }
 
+/**
+ * Injected into a fresh session by /conductor handoff. Planning already
+ * happened in the previous session; only goal + board state carry over, so
+ * the supervisor starts without the planner's investigation context.
+ */
+export function buildSupervisorBriefing(
+  goal: string | undefined,
+  boardSummary: string,
+  tierGuidance: string
+): string {
+  return [
+    "Role: supervising orchestrator taking over an existing conductor board with a fresh context. Planning is done. You drive execution and review; you do not implement tasks yourself.",
+    `## Goal\n${goal ?? "(not recorded — infer from the board)"}`,
+    `## Board\n${boardSummary}`,
+    [
+      "## Success criteria",
+      "- Every task on the board is approved by an adversarial review.",
+      "- The final summary states what changed, how it was verified, and any open risks.",
+      "",
+      "## Workflow",
+      "1. `conductor_run`: executes all runnable tasks; independent tasks run in parallel, dependents wait for approval.",
+      "2. `conductor_review`: adversarial fresh-context review for tasks that are ready. Rejected tasks carry the review notes into their next run automatically.",
+      "3. Repeat run/review until all tasks are approved, then summarize.",
+      "",
+      "## Decision rules",
+      "- Use `conductor_status` instead of re-reading executor output.",
+      "- Do not re-plan. Only touch the plan (`conductor_plan` to split, or adjust briefs) when a task fails twice with the same root cause.",
+      tierGuidance,
+      "- Ask the user before expanding scope beyond the stated goal.",
+    ].join("\n"),
+  ].join("\n\n");
+}
+
 /** Injected into the orchestrator conversation by /conductor start. */
 export function buildOrchestratorBriefing(goal: string, tierGuidance: string): string {
   return [
@@ -108,6 +141,7 @@ export function buildOrchestratorBriefing(goal: string, tierGuidance: string): s
       "- Reference file paths in briefs; paste file contents only when an executor cannot discover them itself.",
       "- If a task fails twice with the same root cause, stop retrying: refine the brief, split the task, or escalate its tier.",
       "- Ask the user before expanding scope beyond the stated goal.",
+      "- If planning required heavy investigation, suggest `/conductor handoff` after the plan is on the board: it continues run/review in a fresh session without this session's planning context.",
     ].join("\n"),
   ].join("\n\n");
 }

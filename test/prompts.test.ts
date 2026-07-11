@@ -4,6 +4,7 @@ import {
   buildExecutorPrompt,
   buildOrchestratorBriefing,
   buildReviewPrompt,
+  buildSupervisorBriefing,
   parseVerdict,
 } from "../src/prompts.js";
 import { type Task } from "../src/types.js";
@@ -64,6 +65,21 @@ test("parseVerdict handles approve, request changes, and missing verdicts", () =
   assert.equal(rejected?.approved, false);
   assert.match(rejected?.notes ?? "", /1\. fix null check/);
   assert.equal(parseVerdict("I think it looks fine"), undefined);
+});
+
+test("supervisor briefing carries goal and board, and forbids re-planning", () => {
+  const briefing = buildSupervisorBriefing(
+    "Migrate auth",
+    "○ T1 add middleware · todo\n● T2 write tests · ready for review",
+    "tier guidance here"
+  );
+  assert.match(briefing, /fresh context/);
+  assert.match(briefing, /Migrate auth/);
+  assert.match(briefing, /T2 write tests/);
+  assert.match(briefing, /Do not re-plan/);
+  assert.match(briefing, /you do not implement tasks yourself/);
+  // Missing goal degrades gracefully
+  assert.match(buildSupervisorBriefing(undefined, "board", "tiers"), /infer from the board/);
 });
 
 test("orchestrator briefing embeds the goal, tier guidance, and workflow tools", () => {

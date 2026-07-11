@@ -44,6 +44,8 @@ export interface Task {
 export interface Board {
   version: 1;
   nextTaskNumber: number;
+  /** Goal from /conductor start; lets a fresh orchestrator take over via /conductor handoff. */
+  goal?: string;
   tasks: Task[];
 }
 
