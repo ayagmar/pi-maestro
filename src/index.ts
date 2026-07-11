@@ -5,6 +5,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+import { sep } from "node:path";
 import { Type } from "typebox";
 import {
   archiveBoard,
@@ -75,12 +76,28 @@ interface MaestroDetails {
   stoppedBecause?: DriveSummary["stoppedBecause"];
 }
 
-export function previousOwnedSession(
+export function maestroBoardCwd(cwd: string): string {
+  const marker = `${sep}.pi${sep}maestro${sep}worktrees${sep}`;
+  const worktreeIndex = cwd.indexOf(marker);
+  return worktreeIndex === -1 ? cwd : cwd.slice(0, worktreeIndex);
+}
+
+export function previousBoardSession(
   previousSessionFile: string | undefined,
-  ownerSessions: string[] | undefined
+  currentSessionFile: string | undefined,
+  ownerSessions: string[] | undefined,
+  executorSessions: string[]
 ): string | undefined {
-  if (!previousSessionFile || !ownerSessions?.includes(previousSessionFile)) return undefined;
-  return previousSessionFile;
+  if (!previousSessionFile || !currentSessionFile || !ownerSessions) return undefined;
+
+  const previousIsOwner = ownerSessions.includes(previousSessionFile);
+  const currentIsOwner = ownerSessions.includes(currentSessionFile);
+  const previousIsExecutor = executorSessions.includes(previousSessionFile);
+  const currentIsExecutor = executorSessions.includes(currentSessionFile);
+
+  if (previousIsOwner && currentIsExecutor) return previousSessionFile;
+  if (previousIsExecutor && currentIsOwner) return previousSessionFile;
+  return undefined;
 }
 
 function notify(
@@ -1441,11 +1458,24 @@ export default function maestro(pi: ExtensionAPI) {
     liveRuns.clear();
     contextNudgeShown = false;
     // Session switches reload extensions, so switchWithReturn's in-memory
-    // reference does not survive. Restore it only when the prior session owns
-    // this board, keeping unrelated and executor sessions isolated.
-    const board = loadBoard(ctx.cwd);
-    previousSession = previousOwnedSession(event.previousSessionFile, board.ownerSessions);
+    // reference does not survive. Executor sessions may have a worktree cwd,
+    // while their board and owner session remain linked from the main checkout.
+    const navigationBoard = loadBoard(maestroBoardCwd(ctx.cwd));
+    const executorSessions = navigationBoard.tasks.flatMap((task) =>
+      task.attempts.flatMap((attempt) =>
+        [attempt.sessionFile, attempt.reviewSessionFile].filter(
+          (sessionFile): sessionFile is string => sessionFile !== undefined
+        )
+      )
+    );
+    previousSession = previousBoardSession(
+      event.previousSessionFile,
+      ctx.sessionManager.getSessionFile(),
+      navigationBoard.ownerSessions,
+      executorSessions
+    );
 
+    const board = loadBoard(ctx.cwd);
     // Executors die with the pi process; a task still marked running on
     // startup is a stale leftover from a crash or hard exit.
     for (const task of board.tasks) {
