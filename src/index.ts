@@ -360,7 +360,8 @@ export default function maestro(pi: ExtensionAPI) {
           tier: Type.String({ description: "Complexity tier: trivial, standard, or complex" }),
           dependsOn: Type.Optional(
             Type.Array(Type.String({ description: "Task id like T1" }), {
-              description: "Tasks that must be approved before this one runs",
+              description:
+                "Tasks that must be approved before this one runs. Also chain tasks that would edit the same files: parallel executors on one working tree conflict.",
             })
           ),
         }),
