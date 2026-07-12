@@ -53,6 +53,10 @@ test("classifyFailure distinguishes provider, executor, user abort, and cost-cap
     "provider_failure"
   );
   assert.equal(
+    classifyFailure({ aborted: false, exitCode: 1, errorMessage: "HTTP 429", usage })?.kind,
+    "provider_failure"
+  );
+  assert.equal(
     classifyFailure({ aborted: false, exitCode: 1, errorMessage: "tests failed", usage })?.kind,
     "executor_failure"
   );

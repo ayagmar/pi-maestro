@@ -48,7 +48,7 @@ export function classifyFailure(
   const providerFailure =
     outcome.failureCause === "provider" ||
     (outcome.failureCause === undefined &&
-      /usage limit|rate limit|quota|too many requests|resource.?exhausted/i.test(message));
+      /\b429\b|usage limit|rate limit|quota|too many requests|resource.?exhausted/i.test(message));
   if (providerFailure) return { kind: "provider_failure", message, retryable: true };
   return {
     kind: phase === "review" ? "reviewer_failure" : "executor_failure",
