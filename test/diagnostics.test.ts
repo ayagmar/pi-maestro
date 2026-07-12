@@ -41,6 +41,26 @@ test("doctor reports config, effective settings, inherited models, and git guida
   }
 });
 
+test("doctor reports the user config's attempt cap when no project file overrides it", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-doctor-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-doctor-agent-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFileSync(join(agentDir, "maestro.json"), JSON.stringify({ maxAttempts: 6 }));
+
+    const report = buildDoctorReport(cwd, fakeRegistry([]));
+
+    assert.match(report, /project: .*\(not present\)/);
+    assert.match(report, /attempts: 6/);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("doctor reports invalid config and unavailable primary and fallback models", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-doctor-"));
   try {

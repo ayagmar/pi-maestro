@@ -278,3 +278,32 @@ test("saveConfig writes the scope file", () => {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("loadConfig resolves defaults, then user, then project, in that precedence order", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-cwd-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-config-agent-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    // No user or project file: defaults apply.
+    assert.equal(loadConfig(cwd).maxAttempts, DEFAULT_CONFIG.maxAttempts);
+
+    // User config overrides a default.
+    writeFileSync(join(agentDir, "maestro.json"), JSON.stringify({ maxAttempts: 6 }));
+    assert.equal(loadConfig(cwd).maxAttempts, 6);
+
+    // Project config overrides the user config for the same field.
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "maestro.json"), JSON.stringify({ maxAttempts: 9 }));
+    assert.equal(loadConfig(cwd).maxAttempts, 9);
+
+    // Removing the project override falls back to the user config again.
+    rmSync(join(cwd, ".pi", "maestro.json"));
+    assert.equal(loadConfig(cwd).maxAttempts, 6);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});

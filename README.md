@@ -170,7 +170,11 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
 - **Failure and retry actions**: failed and cancelled tasks can be retried by explicitly naming
   them in `maestro_run`; changes-requested tasks carry reviewer notes into the next attempt.
   Rewrite a repeatedly failing brief with `maestro_update`, or use the dashboard's reopen action.
-  Provider failures before useful work do not consume the task attempt cap.
+  Maestro tracks two different counts per task: **launches** (every raw executor process start,
+  including provider failures and model fallbacks) and **attempts** (launches that consumed the
+  `maxAttempts` cap). A provider failure before useful work — an auth/rate-limit/quota error
+  before any model turn — is a launch but not an attempt, so it never counts against
+  `maxAttempts`; only launches that produced real work count.
 - **`/maestro list`**: compact task picker (report view, status overrides, open session).
 - **`/maestro open T3`**: switches your TUI into that executor's persisted session so you can
   inspect exactly what it did — or continue working in it by hand. `/maestro back` returns to the
@@ -247,8 +251,10 @@ whole tier object replacing the earlier object of the same name:
   task, e.g. `fix: handle empty board`) or falls back to `feat: <title>`. Main-tree runs
   commit only the files the executor touched; worktree runs use the message for the merge
   commit. A failed commit (no repo, hooks) never blocks the approval.
-- `maxAttempts` — hard cap on execute attempts per task (default 3). Stops orchestrator retry
-  loops; a capped task fails with a hint to rewrite its brief via `maestro_update`.
+- `maxAttempts` — hard cap on execute attempts per task (default 3), counting only launches that
+  produced real work (see raw launches vs. attempts above). Stops orchestrator retry loops; a
+  capped task fails with a hint to rewrite its brief via `maestro_update`. Never raised
+  automatically as a recovery action — only an explicit edit in `/maestro config` changes it.
 - `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default 0 =
   off). Safety net against a stuck executor burning tokens unattended.
 - `statusWaitSeconds` — how long `maestro_status` waits before returning a live progress pulse
