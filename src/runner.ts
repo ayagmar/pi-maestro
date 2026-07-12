@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
+import { type Writable } from "node:stream";
 import { KILL_GRACE_MS, LOGS_DIR } from "./constants.js";
 import { type Attempt, type FailureReason, type TierConfig, type Usage } from "./types.js";
 
@@ -61,6 +62,24 @@ export interface RunUpdate {
   turns: number;
   cost: number;
   lastActivity: string;
+}
+
+export function cappedLogWriter(
+  output: Pick<Writable, "write">,
+  maxBytes?: number
+): (line: string) => void {
+  let writtenBytes = 0;
+
+  return (line: string) => {
+    const entry = Buffer.from(`${line}\n`);
+    const unlimited = maxBytes === undefined || maxBytes === 0;
+    const remainingBytes = unlimited ? entry.length : maxBytes - writtenBytes;
+    if (remainingBytes <= 0) return;
+
+    const bytes = entry.subarray(0, remainingBytes);
+    output.write(bytes);
+    writtenBytes += bytes.length;
+  };
 }
 
 export interface ExecutorHandle {
@@ -165,6 +184,8 @@ export function startExecutor(options: {
   sessionLabel?: string;
   /** Abort the run when attempt cost exceeds this (USD). 0 disables the cap. */
   maxCost?: number;
+  /** Stop appending to this run's event log after this many bytes. */
+  maxLogBytes?: number;
   signal?: AbortSignal;
   onUpdate?: (update: RunUpdate) => void;
 }): ExecutorHandle {
@@ -223,6 +244,7 @@ export function startExecutor(options: {
 
   const outcome = new Promise<RunOutcome>((resolve) => {
     const log = createWriteStream(logFile);
+    const writeLogLine = cappedLogWriter(log, options.maxLogBytes);
     const result: RunOutcome = {
       exitCode: 0,
       usage: attempt.usage,
@@ -236,7 +258,7 @@ export function startExecutor(options: {
 
     const processLine = (line: string) => {
       if (!line.trim()) return;
-      log.write(`${line}\n`);
+      writeLogLine(line);
       let event: JsonEvent;
       try {
         event = JSON.parse(line) as JsonEvent;

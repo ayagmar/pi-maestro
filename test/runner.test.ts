@@ -1,14 +1,118 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import {
   applyAssistantMessage,
+  cappedLogWriter,
   classifyFailure,
   mapWithConcurrencyLimit,
   redactFailureMessage,
   type RunOutcome,
+  startExecutor,
   touchedFile,
 } from "../src/runner.js";
 import { type Attempt } from "../src/types.js";
+
+test("capped run logs stop at the byte limit without stopping outcome tracking", () => {
+  const output = new PassThrough();
+  const chunks: Buffer[] = [];
+  output.on("data", (chunk: Buffer) => chunks.push(chunk));
+  const writeLogLine = cappedLogWriter(output, 12);
+
+  writeLogLine("1234567");
+  writeLogLine("abcdefgh");
+  writeLogLine("ignored");
+
+  const usage = { input: 0, output: 0, cost: 0, turns: 0 };
+  const attempt: Attempt = {
+    index: 1,
+    logFile: "attempt.jsonl",
+    thinking: "low",
+    startedAt: 1,
+    usage,
+    touchedFiles: [],
+  };
+  const outcome: RunOutcome = {
+    exitCode: 0,
+    usage,
+    finalReport: "",
+    touchedFiles: [],
+    aborted: false,
+  };
+  applyAssistantMessage(outcome, attempt, {
+    role: "assistant",
+    usage: { input: 3, output: 2, cost: { total: 0.01 } },
+    content: [{ type: "text", text: "completed after log cap" }],
+  });
+
+  assert.equal(Buffer.concat(chunks).length, 12);
+  assert.equal(Buffer.concat(chunks).toString(), "1234567\nabcd");
+  assert.equal(outcome.finalReport, "completed after log cap");
+  assert.equal(outcome.usage.turns, 1);
+});
+
+test("a zero log cap leaves logging unlimited", () => {
+  const output = new PassThrough();
+  const chunks: Buffer[] = [];
+  output.on("data", (chunk: Buffer) => chunks.push(chunk));
+  const writeLogLine = cappedLogWriter(output, 0);
+
+  writeLogLine("first");
+  writeLogLine("second");
+
+  assert.equal(Buffer.concat(chunks).toString(), "first\nsecond\n");
+});
+
+test("startExecutor caps its actual log while continuing to track later events", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type !== "prompt") continue;
+    console.log(JSON.stringify({ type: "noise", data: "x".repeat(200) }));
+    console.log(JSON.stringify({ type: "tool_execution_start", toolName: "write", args: { path: "after-cap.ts" } }));
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", model: "test/model", usage: { input: 7, output: 3, cost: { total: 0.25 } }, content: [{ type: "text", text: "finished after cap" }] } }));
+    console.log(JSON.stringify({ type: "agent_end" }));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "capped",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+      maxLogBytes: 64,
+    });
+    const outcome = await run.outcome;
+
+    assert.equal(readFileSync(run.attempt.logFile).byteLength, 64);
+    assert.equal(outcome.finalReport, "finished after cap");
+    assert.deepEqual(outcome.touchedFiles, ["after-cap.ts"]);
+    assert.deepEqual(outcome.usage, { input: 7, output: 3, cost: 0.25, turns: 1 });
+    assert.equal(outcome.model, "test/model");
+    assert.equal(outcome.exitCode, 0);
+  } finally {
+    process.argv[1] = originalScript;
+  }
+});
 
 test("touchedFile picks up write/edit paths from tool_execution_start", () => {
   // pi's JSON stream carries args on tool_execution_start; tool_execution_end has args: null
