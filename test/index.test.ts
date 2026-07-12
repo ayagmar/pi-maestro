@@ -110,6 +110,16 @@ interface TestComponent {
   handleInput: (data: string) => void;
 }
 
+interface NewSessionOptions {
+  parentSession?: string;
+  setup?: (sessionManager: { appendSessionInfo: (name: string) => string }) => Promise<void>;
+  withSession?: (ctx: FreshCtx) => Promise<void>;
+}
+
+interface FreshCtx extends CommandCtx {
+  sendMessage: (message: unknown, options?: { triggerTurn?: boolean }) => Promise<void>;
+}
+
 interface CommandCtx {
   cwd: string;
   hasUI: boolean;
@@ -119,6 +129,8 @@ interface CommandCtx {
     getSessionFile: () => string;
     getSessionName: () => string | undefined;
   };
+  waitForIdle?: () => Promise<void>;
+  newSession?: (options: NewSessionOptions) => Promise<{ cancelled: boolean }>;
   ui: {
     theme: typeof fakeTheme;
     notify: (message: string, level?: string) => void;
@@ -740,6 +752,224 @@ test("slash abort cancels an active drive and its executor", async () => {
         "abort did not cancel the active executor"
       );
       assert.equal(loadBoard(cwd).pausedDrive, undefined);
+    }
+  );
+});
+
+test("handoff replaces the session once and briefs the fresh supervisor context", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, goal: "Ship reliably", tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, command } = loadMaestro(cwd, undefined, owner, {
+        steps: [],
+        confirmations: [true],
+      });
+      const sent: Array<{ message: unknown; options?: { triggerTurn?: boolean } }> = [];
+      let calls = 0;
+      let receivedOptions: NewSessionOptions | undefined;
+      const sessionNames: string[] = [];
+      ctx.waitForIdle = async () => {};
+      ctx.newSession = async (options) => {
+        calls++;
+        receivedOptions = options;
+        await options.setup?.({
+          appendSessionInfo: (name) => {
+            sessionNames.push(name);
+            return "session-info-id";
+          },
+        });
+        const fresh: FreshCtx = {
+          ...ctx,
+          sessionManager: {
+            getSessionFile: () => "/sessions/fresh.jsonl",
+            getSessionName: () => undefined,
+          },
+          sendMessage: async (message, sendOptions) => {
+            sent.push({ message, ...(sendOptions ? { options: sendOptions } : {}) });
+          },
+        };
+        await options.withSession?.(fresh);
+        return { cancelled: false };
+      };
+
+      await command.handler("handoff", ctx);
+
+      assert.equal(calls, 1);
+      assert.equal(receivedOptions?.parentSession, owner);
+      assert.equal(sent.length, 1);
+      assert.deepEqual(sent[0]?.options, { triggerTurn: true });
+      assert.match(JSON.stringify(sent[0]?.message), /Ship reliably/);
+      assert.deepEqual(sessionNames, ["supervisor: Ship reliably"]);
+      assert.ok(loadBoard(cwd).ownerSessions?.includes("/sessions/fresh.jsonl"));
+    }
+  );
+});
+
+test("handoff does not access an invalidated command context during replacement failure", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, command, notices } = loadMaestro(cwd, undefined, owner, {
+        steps: [],
+        confirmations: [true],
+      });
+      ctx.waitForIdle = async () => {};
+      ctx.newSession = async () => {
+        Object.defineProperties(ctx, {
+          hasUI: {
+            get: () => {
+              throw new Error("stale command context");
+            },
+          },
+          ui: {
+            get: () => {
+              throw new Error("stale command context");
+            },
+          },
+          sessionManager: {
+            get: () => {
+              throw new Error("stale command context");
+            },
+          },
+        });
+        throw new Error("replacement failed before callback");
+      };
+
+      await assert.doesNotReject(command.handler("handoff", ctx));
+      assert.ok(notices.some((notice) => notice.includes("Could not start maestro handoff")));
+      assert.ok(notices.some((notice) => notice.includes("replacement failed before callback")));
+    }
+  );
+});
+
+test("handoff guards a captured notification that becomes stale during replacement", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, command } = loadMaestro(cwd, undefined, owner, {
+        steps: [],
+        confirmations: [true],
+      });
+      ctx.waitForIdle = async () => {};
+      let notificationIsStale = false;
+      const notify = ctx.ui.notify;
+      ctx.ui.notify = (message, level) => {
+        if (notificationIsStale) {
+          throw new Error("stale notification");
+        }
+        notify(message, level);
+      };
+      ctx.newSession = async () => {
+        notificationIsStale = true;
+        throw new Error("replacement failed");
+      };
+
+      await assert.doesNotReject(command.handler("handoff", ctx));
+    }
+  );
+});
+
+test("handoff reports fresh-session callback failures without rejecting", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, command, notices } = loadMaestro(cwd, undefined, owner, {
+        steps: [],
+        confirmations: [true],
+      });
+      ctx.waitForIdle = async () => {};
+      ctx.newSession = async (options) => {
+        const fresh: FreshCtx = {
+          ...ctx,
+          sendMessage: async () => {
+            throw new Error("send failed");
+          },
+        };
+        await options.withSession?.(fresh);
+        return { cancelled: false };
+      };
+
+      await assert.doesNotReject(command.handler("handoff", ctx));
+      assert.ok(notices.some((notice) => notice.includes("Could not complete maestro handoff")));
+      assert.ok(notices.some((notice) => notice.includes("send failed")));
+    }
+  );
+});
+
+test("idle session switches are allowed by the maestro guard", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-idle-switch-test-"));
+  try {
+    const { ctx, events } = loadMaestro(cwd);
+    const beforeSwitch = events.get("session_before_switch");
+    assert.ok(beforeSwitch);
+    assert.equal(beforeSwitch({ reason: "new" }, ctx), undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("handoff refuses an empty board or live executors", async () => {
+  await withBoard(
+    (cwd) => saveBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] }),
+    async (cwd) => {
+      const { ctx, command, notices } = loadMaestro(cwd);
+      await command.handler("handoff", ctx);
+      assert.ok(notices.some((notice) => notice.includes("board is empty")));
+    }
+  );
+
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let started!: () => void;
+      const executorStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const startExecutor: StartExecutor = (options) => {
+        started();
+        return {
+          attempt: executorAttempt(),
+          outcome: new Promise<RunOutcome>((resolve) => {
+            options.signal?.addEventListener("abort", () =>
+              resolve({
+                exitCode: 1,
+                usage: { input: 0, output: 0, cost: 0, turns: 0 },
+                finalReport: "",
+                touchedFiles: [],
+                aborted: true,
+              })
+            );
+          }),
+          steer: () => {},
+          abort: () => {},
+        };
+      };
+      const { ctx, command, notices } = loadMaestro(cwd, startExecutor);
+      await command.handler("drive", ctx);
+      await executorStarted;
+      await command.handler("handoff", ctx);
+      assert.ok(notices.some((notice) => notice.includes("executor(s) still running")));
+      await command.handler("abort", ctx);
     }
   );
 });
