@@ -12,7 +12,7 @@ import maestro, {
   sessionSwitchBlocked,
 } from "../src/index.js";
 import { createTask, findTask, listArchivedBoards, loadBoard, saveBoard } from "../src/board.js";
-import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
+import { DEFAULT_CONFIG, REVIEW_TOOLS, saveConfig } from "../src/config.js";
 import { type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board } from "../src/types.js";
 import { type StartExecutor } from "../src/workflow.js";
@@ -580,6 +580,76 @@ test("slash drive can pause live work without aborting it, persist ownership, an
   );
 });
 
+test("provider-blocked slash drive persists resumable state without hot-looping", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let blocked = true;
+      let starts = 0;
+      const startExecutor: StartExecutor = (options) => {
+        starts += 1;
+        if (options.prompt.includes("adversarial code reviewer")) {
+          return {
+            attempt: executorAttempt(),
+            outcome: Promise.resolve({
+              exitCode: 0,
+              usage: { input: 1, output: 1, cost: 0, turns: 1 },
+              finalReport: "Verified.\nVERDICT: APPROVE",
+              touchedFiles: [],
+              aborted: false,
+            }),
+            steer: () => {},
+            abort: () => {},
+          };
+        }
+        return {
+          attempt: executorAttempt(),
+          outcome: Promise.resolve(
+            blocked
+              ? {
+                  exitCode: 1,
+                  usage: { input: 1, output: 0, cost: 0, turns: 1 },
+                  finalReport: "",
+                  touchedFiles: [],
+                  aborted: false,
+                  errorMessage: "HTTP 429 too many requests",
+                  failureCause: "provider" as const,
+                }
+              : {
+                  exitCode: 0,
+                  usage: { input: 1, output: 1, cost: 0, turns: 1 },
+                  finalReport: "Work completed",
+                  touchedFiles: [],
+                  aborted: false,
+                }
+          ),
+          steer: () => {},
+          abort: () => {},
+        };
+      };
+      const { ctx, command } = loadMaestro(cwd, startExecutor);
+
+      await command.handler("drive T1", ctx);
+      await waitFor(() => loadBoard(cwd).pausedDrive !== undefined, "provider block was not saved");
+      assert.equal(starts, 1, "blocked provider must not be retried in the background");
+      assert.equal(findTask(loadBoard(cwd), "T1")?.status, "failed");
+
+      blocked = false;
+      await command.handler("resume", ctx);
+      await waitFor(
+        () => findTask(loadBoard(cwd), "T1")?.status === "approved",
+        "provider-blocked drive did not resume"
+      );
+      assert.equal(loadBoard(cwd).pausedDrive, undefined);
+      assert.equal(starts, 3);
+    }
+  );
+});
+
 test("paused drive ownership blocks resume and abort from another session", async () => {
   await withBoard(
     (cwd) => {
@@ -943,6 +1013,328 @@ test("drive results render the completed summary even with task details present"
       const text = rendered.render(200).join("\n");
       assert.match(text, /T1 Work approved/);
       assert.match(text, /Drive completed after 2 round\(s\): 1 approved/);
+    }
+  );
+});
+
+function approvingReviewer(): RunOutcome {
+  return {
+    exitCode: 0,
+    usage: { input: 1, output: 1, cost: 0, turns: 1 },
+    finalReport: "Verified.\nVERDICT: APPROVE",
+    touchedFiles: [],
+    aborted: false,
+  };
+}
+
+function altSession(ctx: CommandCtx, sessionFile: string): CommandCtx {
+  return {
+    ...ctx,
+    sessionManager: {
+      getSessionFile: () => sessionFile,
+      getSessionName: () => undefined,
+    },
+  };
+}
+
+test("maestro_status honors the configured pulse wait for an active drive", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        statusWaitSeconds: 0.05,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const startExecutor: StartExecutor = (options) => {
+        const outcome = new Promise<RunOutcome>((resolve) => {
+          options.signal?.addEventListener(
+            "abort",
+            () =>
+              resolve({
+                exitCode: 1,
+                usage: { input: 0, output: 0, cost: 0, turns: 0 },
+                finalReport: "",
+                touchedFiles: [],
+                aborted: true,
+              }),
+            { once: true }
+          );
+        });
+        return { attempt: executorAttempt(), outcome, steer: () => {}, abort: () => {} };
+      };
+      const { ctx, command, tools } = loadMaestro(cwd, startExecutor);
+      const status = tools.get("maestro_status");
+      assert.ok(status);
+
+      await command.handler("drive T1", ctx);
+      await waitFor(
+        () => findTask(loadBoard(cwd), "T1")?.status === "running",
+        "drive did not start"
+      );
+
+      // No waitSeconds override: the pulse must fall back to the configured wait.
+      const started = Date.now();
+      const pulse = await status.execute("status", {}, undefined, undefined, ctx);
+      const elapsed = Date.now() - started;
+      assert.ok(
+        elapsed >= 40,
+        `pulse returned too fast (${elapsed}ms) for a 0.05s configured wait`
+      );
+      assert.match(pulse.content[0]?.text ?? "", /Drive still active/);
+
+      await command.handler("abort", ctx);
+      await waitFor(
+        () => findTask(loadBoard(cwd), "T1")?.status === "cancelled",
+        "abort cleanup did not finish"
+      );
+    }
+  );
+});
+
+test("maestro_status reports progress deltas and the settled completed summary", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let finishExecutor!: (outcome: RunOutcome) => void;
+      const executorOutcome = new Promise<RunOutcome>((resolve) => {
+        finishExecutor = resolve;
+      });
+      const startExecutor: StartExecutor = (options) => {
+        if (options.prompt.includes("adversarial code reviewer")) {
+          return {
+            attempt: executorAttempt(),
+            outcome: Promise.resolve(approvingReviewer()),
+            steer: () => {},
+            abort: () => {},
+          };
+        }
+        return {
+          attempt: executorAttempt(),
+          outcome: executorOutcome,
+          steer: () => {},
+          abort: () => {},
+        };
+      };
+      const { ctx, tools } = loadMaestro(cwd, startExecutor);
+      const drive = tools.get("maestro_drive");
+      const status = tools.get("maestro_status");
+      assert.ok(drive && status);
+
+      await drive.execute("drive", {}, undefined, undefined, ctx);
+      await waitFor(
+        () => findTask(loadBoard(cwd), "T1")?.status === "running",
+        "drive did not start"
+      );
+
+      // First pulse: no baseline yet, so no delta line.
+      const first = await status.execute("status", { waitSeconds: 0 }, undefined, undefined, ctx);
+      assert.doesNotMatch(first.content[0]?.text ?? "", /Advanced since last pulse/);
+
+      finishExecutor({
+        exitCode: 0,
+        usage: { input: 1, output: 1, cost: 0.02, turns: 2 },
+        finalReport: "Work completed",
+        touchedFiles: [],
+        aborted: false,
+      });
+      await waitFor(
+        () => findTask(loadBoard(cwd), "T1")?.status === "approved",
+        "drive did not finish"
+      );
+
+      const second = await status.execute("status", { waitSeconds: 0 }, undefined, undefined, ctx);
+      const text = second.content[0]?.text ?? "";
+      assert.match(text, /Advanced since last pulse: T1 running \u2192 approved/);
+      assert.match(text, /Drive completed after 1 round/);
+    }
+  );
+});
+
+test("maestro_status surfaces a provider block with a recovery decision", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const startExecutor: StartExecutor = () => ({
+        attempt: executorAttempt(),
+        outcome: Promise.resolve({
+          exitCode: 1,
+          usage: { input: 1, output: 0, cost: 0, turns: 1 },
+          finalReport: "",
+          touchedFiles: [],
+          aborted: false,
+          errorMessage: "HTTP 429 too many requests",
+          failureCause: "provider" as const,
+        }),
+        steer: () => {},
+        abort: () => {},
+      });
+      const { ctx, tools } = loadMaestro(cwd, startExecutor);
+      const drive = tools.get("maestro_drive");
+      const status = tools.get("maestro_status");
+      assert.ok(drive && status);
+
+      await drive.execute("drive", {}, undefined, undefined, ctx);
+      await waitFor(() => loadBoard(cwd).pausedDrive !== undefined, "provider block was not saved");
+
+      const pulse = await status.execute("status", { waitSeconds: 0 }, undefined, undefined, ctx);
+      const text = pulse.content[0]?.text ?? "";
+      assert.match(text, /Provider access blocked/);
+      assert.match(text, /Failures: T1 \u2014/);
+      assert.match(text, /configure another fallback/);
+      assert.match(text, /Do not blindly retry/);
+    }
+  );
+});
+
+test("maestro_status surfaces a review escalation with an intervention decision", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        maxAttempts: 5,
+        tiers: {
+          standard: { thinking: "medium" },
+          complex: { thinking: "high" },
+          review: { thinking: "high", tools: REVIEW_TOOLS },
+        },
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const startExecutor: StartExecutor = (options) => {
+        if (options.prompt.includes("adversarial code reviewer")) {
+          return {
+            attempt: executorAttempt(),
+            outcome: Promise.resolve({
+              exitCode: 0,
+              usage: { input: 1, output: 1, cost: 0, turns: 1 },
+              finalReport: "VERDICT: REQUEST_CHANGES\n1. Still wrong in src/thing.ts.",
+              touchedFiles: [],
+              aborted: false,
+            }),
+            steer: () => {},
+            abort: () => {},
+          };
+        }
+        return {
+          attempt: executorAttempt(),
+          outcome: Promise.resolve({
+            exitCode: 0,
+            usage: { input: 1, output: 1, cost: 0, turns: 1 },
+            finalReport: "done",
+            touchedFiles: [],
+            aborted: false,
+          }),
+          steer: () => {},
+          abort: () => {},
+        };
+      };
+      const { ctx, tools } = loadMaestro(cwd, startExecutor);
+      const drive = tools.get("maestro_drive");
+      const status = tools.get("maestro_status");
+      assert.ok(drive && status);
+
+      await drive.execute("drive", {}, undefined, undefined, ctx);
+      await waitFor(
+        () => (findTask(loadBoard(cwd), "T1")?.reviewRejections ?? 0) >= 2,
+        "task was not rejected twice"
+      );
+
+      const pulse = await status.execute("status", { waitSeconds: 1 }, undefined, undefined, ctx);
+      const text = pulse.content[0]?.text ?? "";
+      assert.match(text, /Reviewer rejected the same work 2 times/);
+      assert.match(text, /maestro_update to raise the tier or rewrite the brief/);
+      assert.match(text, /Do not blindly retry or raise maxAttempts/);
+    }
+  );
+});
+
+test("a settled drive summary is owned by its session and cleared only after that session observes it", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const startExecutor: StartExecutor = (options) => {
+        if (options.prompt.includes("adversarial code reviewer")) {
+          return {
+            attempt: executorAttempt(),
+            outcome: Promise.resolve(approvingReviewer()),
+            steer: () => {},
+            abort: () => {},
+          };
+        }
+        return {
+          attempt: executorAttempt(),
+          outcome: Promise.resolve({
+            exitCode: 0,
+            usage: { input: 1, output: 1, cost: 0.02, turns: 1 },
+            finalReport: "Work completed",
+            touchedFiles: [],
+            aborted: false,
+          }),
+          steer: () => {},
+          abort: () => {},
+        };
+      };
+      const { ctx, tools } = loadMaestro(cwd, startExecutor);
+      const drive = tools.get("maestro_drive");
+      const status = tools.get("maestro_status");
+      assert.ok(drive && status);
+
+      await drive.execute("drive", {}, undefined, undefined, ctx);
+      await waitFor(
+        () => findTask(loadBoard(cwd), "T1")?.status === "approved",
+        "drive did not finish"
+      );
+
+      // Another session must not observe or clear the owner's settled summary.
+      const stranger = altSession(ctx, other);
+      const strangerPulse = await status.execute(
+        "status",
+        { waitSeconds: 0 },
+        undefined,
+        undefined,
+        stranger
+      );
+      assert.match(strangerPulse.content[0]?.text ?? "", /owned by another session/);
+      assert.doesNotMatch(strangerPulse.content[0]?.text ?? "", /Drive completed/);
+
+      // The owner still sees the completed summary; a second owner pulse is clean.
+      const ownerPulse = await status.execute(
+        "status",
+        { waitSeconds: 0 },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(ownerPulse.content[0]?.text ?? "", /Drive completed after 1 round/);
+      const afterObserved = await status.execute(
+        "status",
+        { waitSeconds: 0 },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(afterObserved.content[0]?.text ?? "", /No background drive is active/);
     }
   );
 });

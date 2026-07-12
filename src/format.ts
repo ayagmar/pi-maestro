@@ -108,6 +108,27 @@ export function formatCostSummary(tasks: Task[]): string {
   return parts.join(" · ");
 }
 
+/**
+ * Net status changes since the previous status pulse, so each pulse can report
+ * what advanced without the orchestrator re-reading executor transcripts.
+ * Returns undefined for the first pulse (no baseline to compare against yet).
+ */
+export function describeProgressDelta(
+  previous: Map<string, TaskStatus> | undefined,
+  tasks: Task[]
+): string | undefined {
+  if (!previous) return undefined;
+  const changes = tasks
+    .filter((task) => previous.get(task.id) !== task.status)
+    .map(
+      (task) =>
+        `${task.id} ${previous.get(task.id) ? STATUS_LABELS[previous.get(task.id) as TaskStatus] : "new"} → ${STATUS_LABELS[task.status]}`
+    );
+  return changes.length > 0
+    ? `Advanced since last pulse: ${changes.join(", ")}`
+    : "No status change since last pulse.";
+}
+
 export function formatBoardProgress(tasks: Task[]): string {
   const approved = tasks.filter((task) => task.status === "approved").length;
   const cancelled = tasks.filter((task) => task.status === "cancelled").length;

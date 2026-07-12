@@ -49,6 +49,7 @@ import { Dashboard, type DashboardTaskAction } from "./dashboard.js";
 import { buildDoctorReport } from "./diagnostics.js";
 import {
   boardUsage,
+  describeProgressDelta,
   formatBoardProgress,
   formatCostSummary,
   formatUsage,
@@ -114,6 +115,10 @@ interface BackgroundDrive {
   promise: Promise<void>;
   summary?: DriveSummary;
   error?: string;
+  /** Owning session, so only it observes and clears settled pulses. */
+  ownerSession?: string;
+  /** Task statuses at the previous pulse, for reporting what advanced. */
+  lastPulseStatuses?: Map<string, TaskStatus>;
 }
 
 export function maestroBoardCwd(cwd: string): string {
@@ -371,6 +376,8 @@ export default function maestro(
     if (activeDrive) throw new Error("An autonomous drive is already active.");
 
     const operation: BackgroundDrive = { promise: Promise.resolve() };
+    const ownerSession = ctx.sessionManager.getSessionFile();
+    if (ownerSession) operation.ownerSession = ownerSession;
     backgroundDrive = operation;
     operation.promise = runControlledDrive(ctx, taskIds, signal, reportProgress)
       .then((summary) => {
@@ -954,7 +961,7 @@ export default function maestro(
     name: "maestro_status",
     label: "Maestro Status",
     description:
-      "Wait for the active background drive to finish or reach the next progress pulse, then return task status plus live executor turns, cost, and activity. Default wait is configurable (60s). While a drive is active, briefly update the user after every pulse and call maestro_status again until completion.",
+      "Wait for the active background drive to finish or reach the next progress pulse, then report what advanced since the last pulse, live executor activity, failures, and any settled decision (provider block, review escalation, attempt cap, blocked, error) with the recommended tool actions. Default wait is configurable (60s). While a drive is active, narrate progress to the user after every pulse and call maestro_status again until it settles.",
     promptSnippet: "Wait for and report live maestro executor progress",
     parameters: Type.Object({
       waitSeconds: Type.Optional(
@@ -1005,25 +1012,63 @@ export default function maestro(
         return taskLine(task) + activity + (blocked ? ` (${blocked})` : "");
       });
       const usage = boardUsage(board.tasks);
-      const settled = backgroundDrive;
-      let driveState = "No background drive is active.";
-      if (settled?.summary) {
-        driveState = formatDriveSummary(settled.summary);
-        backgroundDrive = undefined;
-      } else if (settled?.error) {
-        driveState = `Drive failed: ${settled.error}`;
-        backgroundDrive = undefined;
-      } else if (activeDrive || liveRuns.size > 0) {
-        driveState = `Drive still active with ${liveRuns.size} live executor(s). Briefly report this progress to the user, then call maestro_status again.`;
+
+      // A pulse reports what advanced since the previous one. The baseline is
+      // per background operation and only the owning session may read or move
+      // it, so a stranger's status call never leaks in or resets the delta.
+      const pulse = backgroundDrive;
+      const currentSession = ctx.sessionManager.getSessionFile();
+      const ownsPulse =
+        pulse !== undefined && sessionCanControlDrive(pulse.ownerSession, currentSession);
+      const progress = ownsPulse
+        ? describeProgressDelta(pulse.lastPulseStatuses, board.tasks)
+        : undefined;
+      if (ownsPulse) {
+        pulse.lastPulseStatuses = new Map(board.tasks.map((task) => [task.id, task.status]));
       }
 
+      const failed = board.tasks.filter((task) => task.status === "failed");
+      const failureLine =
+        failed.length > 0
+          ? `Failures: ${failed
+              .map(
+                (task) =>
+                  `${task.id} — ${truncateText(task.attempts.at(-1)?.failureReason?.message ?? "failed", 1)}`
+              )
+              .join("; ")}`
+          : undefined;
+
+      // Settled summaries are session-owned: only the session that started the
+      // drive clears them, so a stray status call from another session can't
+      // discard the completion/intervention report before the owner sees it.
+      const settled = backgroundDrive;
+      const ownsSettled = ownsPulse;
+      let driveState = "No background drive is active.";
+      if (settled?.summary && ownsSettled) {
+        driveState = formatDrivePulse(settled.summary);
+        backgroundDrive = undefined;
+      } else if (settled?.error && ownsSettled) {
+        driveState = `Drive failed: ${settled.error}\nDecide the recovery: fix the root cause, then /maestro resume, or use maestro_run/maestro_review for targeted recovery. Do not blindly retry.`;
+        backgroundDrive = undefined;
+      } else if (settled && !ownsSettled) {
+        driveState =
+          "A background drive owned by another session is active; only its owner observes and clears its pulses.";
+      } else if (activeDrive || liveRuns.size > 0) {
+        driveState = `Drive still active with ${liveRuns.size} live executor(s). Briefly report this progress to the user, then call maestro_status again after the next pulse.`;
+      }
+
+      const report = [
+        lines.join("\n"),
+        progress,
+        failureLine,
+        driveState,
+        `Total: ${formatUsage(usage)}\nCosts: ${formatCostSummary(board.tasks)}`,
+      ]
+        .filter((part): part is string => part !== undefined && part.length > 0)
+        .join("\n\n");
+
       return {
-        content: [
-          {
-            type: "text",
-            text: `${lines.join("\n")}\n\n${driveState}\n\nTotal: ${formatUsage(usage)}\nCosts: ${formatCostSummary(board.tasks)}`,
-          },
-        ],
+        content: [{ type: "text", text: report }],
         details: { action: "status", tasks: board.tasks.map((task) => snapshot(task)) },
       };
     },
@@ -1032,6 +1077,26 @@ export default function maestro(
     },
     renderResult: renderTaskListResult,
   });
+
+  /**
+   * A settled drive pulse: the summary plus, for decision-point stops, the
+   * explicit tool actions the orchestrator should choose among. Completed and
+   * ordinary stops just show the summary.
+   */
+  function formatDrivePulse(summary: DriveSummary): string {
+    const base = formatDriveSummary(summary);
+    const code = summary.stoppedBecause.code;
+    if (code === "provider_blocked") {
+      return `${base}\n\nChoose a recovery: configure another fallback in /maestro config then /maestro resume, or maestro_update the task, or ask the user if the block is a cost/quota decision. Do not blindly retry the same provider.`;
+    }
+    if (code === "escalation_required") {
+      return `${base}\n\nChoose one: maestro_update to raise the tier or rewrite the brief, maestro_plan to split the task, cancel it, or ask the user when scope/cost judgment is required, then /maestro resume. Do not blindly retry or raise maxAttempts.`;
+    }
+    if (code === "attempt_cap" || code === "blocked") {
+      return `${base}\n\nChoose one: maestro_update the brief/tier, maestro_plan to split, cancel the task, or ask the user. Do not raise the project maxAttempts to force another retry.`;
+    }
+    return base;
+  }
 
   function getReportPreview(board: Board, taskId: string): string {
     const task = findTask(board, taskId);

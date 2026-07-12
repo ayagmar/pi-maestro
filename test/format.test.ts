@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   boardUsage,
   boardUsageSummary,
+  describeProgressDelta,
   formatBoardProgress,
   formatCostSummary,
   formatTokens,
@@ -12,7 +13,7 @@ import {
   taskUsage,
   truncateText,
 } from "../src/format.js";
-import { type Attempt, type Task } from "../src/types.js";
+import { type Attempt, type Task, type TaskStatus } from "../src/types.js";
 
 function makeAttempt(cost: number, turns: number): Attempt {
   return {
@@ -40,6 +41,28 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     ...overrides,
   };
 }
+
+test("describeProgressDelta reports net status changes between pulses", () => {
+  const first = [makeTask({ id: "T1", status: "todo" }), makeTask({ id: "T2", status: "running" })];
+
+  // No baseline on the first pulse: nothing to compare against yet.
+  assert.equal(describeProgressDelta(undefined, first), undefined);
+
+  const baseline = new Map<string, TaskStatus>([
+    ["T1", "todo"],
+    ["T2", "running"],
+  ]);
+  const advanced = [
+    makeTask({ id: "T1", status: "running" }),
+    makeTask({ id: "T2", status: "ready_for_review" }),
+  ];
+  assert.equal(
+    describeProgressDelta(baseline, advanced),
+    "Advanced since last pulse: T1 todo → running, T2 running → ready for review"
+  );
+
+  assert.equal(describeProgressDelta(baseline, first), "No status change since last pulse.");
+});
 
 test("formatTokens scales units", () => {
   assert.equal(formatTokens(999), "999");

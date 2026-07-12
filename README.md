@@ -100,10 +100,12 @@ Recommended flow for large goals:
 For small goals, skip the handoff — one session is fine. You can also start the autonomous loop
 from the current session with `/maestro drive` (or let the model call `maestro_drive`). It runs
 independent work in parallel, reviews completed attempts, carries review feedback into retries,
-and waits for approved dependencies before advancing them. Tool-driven orchestrators call
-`maestro_status` about once a minute while it runs, report live turns/cost/current activity to you,
-and then wait for the next pulse. This keeps the interactive session observable and avoids long
-provider-cache-idle gaps. `/maestro pause` requests a safe stop:
+and waits for approved dependencies before advancing them. Tool-driven orchestrators poll
+`maestro_status` at the configured cadence while it runs. Each pulse reports what advanced since the
+last pulse, live executor turns/cost/activity, any failures, and — once the drive settles at a
+decision point — the recommended tool actions to choose among. The orchestrator narrates that
+progress to you and then waits for the next pulse. This keeps the interactive session observable and
+avoids long provider-cache-idle gaps. `/maestro pause` requests a safe stop:
 active executors finish, but no new executor batch starts. `/maestro resume` later continues the same
 task scope from the board's fresh persisted state; `/maestro abort` instead aborts active executors.
 The loop stops when work is complete or when a pause, plan gate, run budget, attempt cap, provider
@@ -111,7 +113,13 @@ block, repeated-rejection escalation, abort, blocked state, error, or its 20-rou
 requires intervention. When the reviewer rejects the same task twice in a row, the drive stops with
 an escalation notice (evidence, current tier, and a recommended next tier or rewrite/split/cancel)
 instead of blindly retrying; changing the brief or tier — or an explicit `maestro_run` — resets the
-counter so a chosen intervention can continue via `/maestro resume`. An optional task-id list
+counter so a chosen intervention can continue via `/maestro resume`. At each decision point the
+orchestrator chooses autonomously among the configured fallback/resume, `maestro_update`
+(brief/tier/dependencies), a `maestro_plan` split, cancellation, or asking you when scope or cost
+judgment is required; it never blindly retries a blocked provider or raises the project
+`maxAttempts` to force another attempt. Settled completion and intervention summaries stay on the
+next pulse until the owning session observes them once, so a stray status call from another session
+cannot discard them. An optional task-id list
 limits the drive to those tasks. Session switches are blocked while a drive or executor is active;
 pause and wait (or abort) before switching.
 
