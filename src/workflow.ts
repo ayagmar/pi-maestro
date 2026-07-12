@@ -26,6 +26,7 @@ import {
   type Attempt,
   type Board,
   type MaestroConfig,
+  type ReviewLaunch,
   type Task,
   type TaskStatus,
   type TierConfig,
@@ -68,6 +69,8 @@ export interface AttemptSnapshot {
   cost: number;
   touchedFiles: string[];
   failureReason?: Attempt["failureReason"];
+  consumesAttempt?: boolean;
+  reviewLaunches?: ReviewLaunch[];
   reviewNotes?: string;
 }
 
@@ -76,7 +79,10 @@ export interface TaskSnapshot {
   title: string;
   status: TaskStatus;
   tier: string;
+  /** Attempts that consume maxAttempts. */
   attempts: number;
+  /** Raw executor launches, including provider failures and fallbacks. */
+  launches?: number;
   cost: number;
   turns: number;
   history: AttemptSnapshot[];
@@ -103,6 +109,7 @@ export type DriveStopCode =
   | "paused"
   | "plan_gate"
   | "budget_blocked"
+  | "provider_blocked"
   | "attempt_cap"
   | "blocked"
   | "round_limit"
@@ -126,6 +133,10 @@ export function formatDriveSummary(summary: DriveSummary): string {
   const cancelled = summary.tasks.filter((task) => task.status === "cancelled").length;
   const blocked = summary.tasks.length - approved - failed - cancelled;
   const attempts = summary.tasks.reduce((total, task) => total + task.attempts, 0);
+  const launches = summary.tasks.reduce(
+    (total, task) => total + (task.launches ?? task.history.length),
+    0
+  );
   const totalCost = summary.tasks.reduce((total, task) => total + task.cost, 0);
   const billedAttempts = summary.tasks
     .flatMap((task) => task.history)
@@ -155,7 +166,7 @@ export function formatDriveSummary(summary: DriveSummary): string {
 
   return [
     `Drive ${summary.stoppedBecause.code} after ${summary.rounds} round(s): ${approved} approved · ${failed} failed · ${cancelled} cancelled · ${blocked} blocked`,
-    `${attempts} attempt${attempts === 1 ? "" : "s"} · $${totalCost.toFixed(4)} total · $${averageCost.toFixed(4)} avg billed attempt`,
+    `${attempts} consuming attempt${attempts === 1 ? "" : "s"} · ${launches} launch${launches === 1 ? "" : "es"} · $${totalCost.toFixed(4)} total · $${averageCost.toFixed(4)} avg billed launch`,
     ...identity,
     summary.stoppedBecause.message,
   ].join("\n");
@@ -165,6 +176,10 @@ export type DriveRoundPhase = "run" | "review";
 export type DriveRoundUpdate = (round: number, phase: DriveRoundPhase, taskIds: string[]) => void;
 
 const DRIVE_ROUND_LIMIT = 20;
+
+function consumesMaxAttempt(attempt: Attempt): boolean {
+  return attempt.consumesAttempt ?? !attempt.providerFailure;
+}
 
 export function snapshot(task: Task, note?: string): TaskSnapshot {
   const usage = taskUsage(task);
@@ -180,6 +195,10 @@ export function snapshot(task: Task, note?: string): TaskSnapshot {
     if (attempt.reviewModel !== undefined) item.reviewModel = attempt.reviewModel;
     if (attempt.reviewProvider !== undefined) item.reviewProvider = attempt.reviewProvider;
     if (attempt.failureReason !== undefined) item.failureReason = attempt.failureReason;
+    item.consumesAttempt = consumesMaxAttempt(attempt);
+    if (attempt.reviewLaunches !== undefined) {
+      item.reviewLaunches = structuredClone(attempt.reviewLaunches);
+    }
     if (attempt.reviewNotes !== undefined) item.reviewNotes = attempt.reviewNotes;
     return item;
   });
@@ -188,7 +207,8 @@ export function snapshot(task: Task, note?: string): TaskSnapshot {
     title: task.title,
     status: task.status,
     tier: task.tier,
-    attempts: task.attempts.length,
+    attempts: task.attempts.filter(consumesMaxAttempt).length,
+    launches: task.attempts.length,
     cost: usage.cost,
     turns: usage.turns,
     history,
@@ -317,8 +337,8 @@ export async function driveBoard(options: {
       rounds += 1;
       const capped = tasks.filter(
         (task) =>
-          task.attempts.filter((attempt) => !attempt.providerFailure).length >=
-            config.maxAttempts && task.status !== "approved"
+          task.attempts.filter(consumesMaxAttempt).length >= config.maxAttempts &&
+          task.status !== "approved"
       );
       const runnable = tasks.filter(
         (task) =>
@@ -395,6 +415,14 @@ export async function driveBoard(options: {
       }
 
       const afterRuns = loadBoard(cwd);
+      // Only execute-side provider blocks stop the drive here; a stale review
+      // provider failure must fall through so the review phase can re-run it.
+      const blockedAfterRuns = afterRuns.tasks.filter(
+        (task) => isSelected(task) && task.status === "failed" && providerBlockedTask(task)
+      );
+      if (blockedAfterRuns.length > 0) {
+        return finish(providerBlockedReason(blockedAfterRuns));
+      }
       const reviewable = afterRuns.tasks.filter(
         (task) => task.status === "ready_for_review" && isSelected(task)
       );
@@ -439,10 +467,15 @@ export async function driveBoard(options: {
       if (budgetWarning) {
         return finish({ code: "budget_blocked", message: budgetWarning });
       }
+      const providerBlocked = freshTasks.filter(providerBlockedTask);
+      if (providerBlocked.length > 0) {
+        return finish(providerBlockedReason(providerBlocked));
+      }
+
       const attemptCapped = freshTasks.filter(
         (task) =>
           task.status !== "approved" &&
-          task.attempts.filter((attempt) => !attempt.providerFailure).length >= config.maxAttempts
+          task.attempts.filter(consumesMaxAttempt).length >= config.maxAttempts
       );
       if (attemptCapped.length > 0) {
         return finish({
@@ -480,6 +513,31 @@ export async function driveBoard(options: {
   });
 }
 
+function providerBlockedTask(task: Task): boolean {
+  const latest = task.attempts.at(-1);
+  if (!latest) return false;
+  if (task.status === "failed") return !consumesMaxAttempt(latest);
+  if (task.status !== "ready_for_review") return false;
+  return latest.reviewLaunches?.at(-1)?.failureReason?.kind === "provider_failure";
+}
+
+function providerBlockedReason(tasks: Task[]): DriveStopReason {
+  const details = tasks.map((task) => {
+    const attempt = task.attempts.at(-1);
+    const reviewFailure = attempt?.reviewLaunches?.at(-1);
+    const model = reviewFailure?.model ?? attempt?.model ?? "configured model";
+    const provider = reviewFailure?.provider ?? attempt?.provider;
+    const identity = provider ? `${model} (${provider})` : model;
+    const message = reviewFailure?.failureReason?.message ?? attempt?.failureReason?.message;
+    return `${task.id}: ${identity}${message ? ` — ${redactFailureMessage(message)}` : ""}`;
+  });
+  return {
+    code: "provider_blocked",
+    message: `Provider access blocked; autonomous retries stopped. ${details.join("; ")}\nCheck provider quota/authentication, configure another fallback in /maestro config, then use /maestro resume (or explicitly retry the task).`,
+    taskIds: tasks.map((task) => task.id),
+  };
+}
+
 export async function executeTask(options: {
   cwd: string;
   board: Board;
@@ -499,7 +557,7 @@ export async function executeTask(options: {
   if (validationError) throw new Error(validationError);
   if (board.planPending) throw new Error("Plan approval is pending.");
 
-  const consumedAttempts = task.attempts.filter((attempt) => !attempt.providerFailure).length;
+  const consumedAttempts = task.attempts.filter(consumesMaxAttempt).length;
   if (consumedAttempts >= config.maxAttempts) {
     const updated = updateTask(cwd, task.id, (fresh) => {
       forceStatus(fresh, "failed");
@@ -595,30 +653,24 @@ export async function executeTask(options: {
       : outcome.exitCode !== 0 || outcome.errorMessage
         ? "failed"
         : "ready_for_review";
-    // Dead on arrival (zero turns) or the provider died mid-run from an
-    // exhausted quota: neither is the task's fault. Such attempts do not
-    // consume maxAttempts budget and fall back to the next model when one
-    // is configured — retrying the same exhausted provider is pointless.
-    const quotaFailure =
-      outcome.usage.turns > 0 &&
-      /usage limit|rate limit|quota|too many requests|resource.?exhausted/i.test(
-        outcome.errorMessage ?? ""
-      );
+    const classifiedFailure = classifyFailure(outcome);
+    // Legacy/test executors may omit failureCause. A zero-turn launch is still
+    // treated as provider setup failure unless it carries an explicit process cause.
+    const inferredProviderFailure =
+      status === "failed" &&
+      outcome.usage.turns === 0 &&
+      outcome.failureCause === undefined &&
+      classifiedFailure?.kind === "executor_failure";
     const providerFailure =
       status === "failed" &&
-      (outcome.usage.turns === 0 || quotaFailure) &&
       !outcome.aborted &&
-      !outcome.errorMessage?.startsWith("cost cap exceeded:") &&
-      models.length > 1;
+      (classifiedFailure?.kind === "provider_failure" || inferredProviderFailure);
     const canFallback = providerFailure && modelIndex < models.length - 1;
+    run.attempt.consumesAttempt = !providerFailure;
     if (providerFailure) run.attempt.providerFailure = true;
-    // Zero-turn failures keep the historical fallback/max-attempt accounting,
-    // but an explicit process cause must remain an executor failure in history.
-    const outcomeForClassification =
-      providerFailure && outcome.failureCause === undefined
-        ? { ...outcome, failureCause: "provider" as const }
-        : outcome;
-    const failureReason = classifyFailure(outcomeForClassification);
+    const failureReason = inferredProviderFailure
+      ? classifyFailure({ ...outcome, failureCause: "provider" })
+      : classifiedFailure;
     if (failureReason) run.attempt.failureReason = failureReason;
 
     if (status === "ready_for_review") {
@@ -705,36 +757,69 @@ export async function reviewTask(options: {
     reviewedAttempt?.worktreePath && reviewedAttempt.branch
       ? { worktreePath: reviewedAttempt.worktreePath, branch: reviewedAttempt.branch }
       : undefined;
-  const runOptions: Parameters<StartExecutor>[0] = {
-    stateDir: stateDir(cwd),
-    runId: `${task.id}-review-${task.attempts.length}`,
-    cwd: worktree?.worktreePath ?? cwd,
-    prompt: buildReviewPrompt(task, report),
-    tier,
-    sessionLabel: sessionLabel(task, "review", task.attempts.length),
-    onUpdate: (update) => onUpdate(task.id, update),
-  };
-  if (signal) runOptions.signal = signal;
+  const models = [tier.model, ...(tier.fallbacks ?? [])];
+  const reviewLaunches: ReviewLaunch[] = [];
+  let run!: ExecutorHandle;
+  let outcome!: RunOutcome;
 
-  const run = startExecutor(runOptions);
-  if (run.attempt.model === undefined && tier.model !== undefined) run.attempt.model = tier.model;
-  const untrack = trackRun({
-    taskId: task.id,
-    kind: "review",
-    turns: 0,
-    cost: 0,
-    lastActivity: "starting…",
-    handle: run,
-  });
+  for (const [modelIndex, model] of models.entries()) {
+    const launchTier: TierConfig = { ...tier };
+    delete launchTier.fallbacks;
+    if (model === undefined) delete launchTier.model;
+    else launchTier.model = model;
+    const runOptions: Parameters<StartExecutor>[0] = {
+      stateDir: stateDir(cwd),
+      runId: `${task.id}-review-${task.attempts.length}-launch-${modelIndex + 1}`,
+      cwd: worktree?.worktreePath ?? cwd,
+      prompt: buildReviewPrompt(task, report),
+      tier: launchTier,
+      sessionLabel: sessionLabel(task, "review", task.attempts.length),
+      onUpdate: (update) => onUpdate(task.id, update),
+    };
+    if (signal) runOptions.signal = signal;
 
-  let outcome: RunOutcome;
-  try {
-    outcome = await run.outcome;
-  } catch (error) {
-    outcome = rejectedRunOutcome(run, error);
-    run.attempt.endedAt = Date.now();
-  } finally {
-    untrack();
+    run = startExecutor(runOptions);
+    if (run.attempt.model === undefined && model !== undefined) run.attempt.model = model;
+    const untrack = trackRun({
+      taskId: task.id,
+      kind: "review",
+      turns: 0,
+      cost: 0,
+      lastActivity: "starting…",
+      handle: run,
+    });
+
+    try {
+      outcome = await run.outcome;
+    } catch (error) {
+      outcome = rejectedRunOutcome(run, error);
+      run.attempt.endedAt = Date.now();
+    } finally {
+      untrack();
+    }
+
+    const failureReason = classifyFailure(outcome, "review") ?? outcome.failureReason;
+    const launch: ReviewLaunch = {
+      startedAt: run.attempt.startedAt,
+      usage: { ...outcome.usage },
+      exitCode: outcome.exitCode,
+    };
+    const reviewModel = outcome.model ?? run.attempt.model;
+    if (reviewModel !== undefined) {
+      launch.model = reviewModel;
+      const provider = providerFromModel(reviewModel);
+      if (provider !== undefined) launch.provider = provider;
+    }
+    if (run.attempt.endedAt !== undefined) launch.endedAt = run.attempt.endedAt;
+    if (run.attempt.sessionFile !== undefined) launch.sessionFile = run.attempt.sessionFile;
+    if (outcome.errorMessage) launch.errorMessage = redactFailureMessage(outcome.errorMessage);
+    if (failureReason) launch.failureReason = failureReason;
+    if (outcome.finalReport) launch.finalReport = outcome.finalReport;
+    reviewLaunches.push(launch);
+
+    const canFallback =
+      failureReason?.kind === "provider_failure" && modelIndex < models.length - 1;
+    if (!canFallback) break;
   }
 
   let verdict =
@@ -770,27 +855,30 @@ export async function reviewTask(options: {
     // Reviewer usage is billed against the task for honest per-task cost.
     const attempt = fresh.attempts.at(-1);
     if (attempt) {
-      attempt.usage.input += outcome.usage.input;
-      attempt.usage.output += outcome.usage.output;
-      attempt.usage.cost += outcome.usage.cost;
-      attempt.usage.turns += outcome.usage.turns;
-      attempt.reviewUsage = { ...outcome.usage };
-      const reviewModel = outcome.model ?? run.attempt.model;
-      if (reviewModel !== undefined) {
-        attempt.reviewModel = reviewModel;
-        const reviewProvider = providerFromModel(reviewModel);
-        if (reviewProvider !== undefined) attempt.reviewProvider = reviewProvider;
-      }
+      const reviewUsage = reviewLaunches.reduce(
+        (total, launch) => ({
+          input: total.input + launch.usage.input,
+          output: total.output + launch.usage.output,
+          cost: total.cost + launch.usage.cost,
+          turns: total.turns + launch.usage.turns,
+        }),
+        { input: 0, output: 0, cost: 0, turns: 0 }
+      );
+      attempt.usage.input += reviewUsage.input;
+      attempt.usage.output += reviewUsage.output;
+      attempt.usage.cost += reviewUsage.cost;
+      attempt.usage.turns += reviewUsage.turns;
+      attempt.reviewUsage = reviewUsage;
+      attempt.reviewLaunches = [...(attempt.reviewLaunches ?? []), ...reviewLaunches];
+      const latestLaunch = reviewLaunches.at(-1);
+      if (latestLaunch?.model !== undefined) attempt.reviewModel = latestLaunch.model;
+      if (latestLaunch?.provider !== undefined) attempt.reviewProvider = latestLaunch.provider;
       // Keep the full review report and session for post-hoc inspection.
       if (outcome.finalReport) attempt.reviewReport = outcome.finalReport;
       if (run.attempt.sessionFile) attempt.reviewSessionFile = run.attempt.sessionFile;
 
-      // startExecutor classifies its own process failures in executor terms.
-      // Reclassify from the raw outcome here so the persisted reason reflects
-      // that this run was a review, while preserving provider/abort/cap causes.
       const reviewFailure =
-        classifyFailure(outcome, "review") ??
-        outcome.failureReason ??
+        latestLaunch?.failureReason ??
         (!verdict
           ? {
               kind: "reviewer_failure" as const,
@@ -799,6 +887,7 @@ export async function reviewTask(options: {
             }
           : undefined);
       if (reviewFailure) attempt.failureReason = reviewFailure;
+      else delete attempt.failureReason;
     }
     if (!verdict) return; // aborted/failed/no verdict: stays ready_for_review
     if (verdict.approved) {
