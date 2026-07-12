@@ -28,6 +28,19 @@ export interface FailureReason {
   retryable: boolean;
 }
 
+export interface ReviewLaunch {
+  model?: string;
+  provider?: string;
+  sessionFile?: string;
+  startedAt: number;
+  endedAt?: number;
+  exitCode?: number;
+  errorMessage?: string;
+  failureReason?: FailureReason;
+  usage: Usage;
+  finalReport?: string;
+}
+
 export interface Attempt {
   index: number;
   /** Session file in pi's default session storage, reported by the executor via get_state. */
@@ -46,7 +59,9 @@ export interface Attempt {
   errorMessage?: string;
   /** Structured, redacted reason for the last failure or review rejection. */
   failureReason?: FailureReason;
-  /** Failed before any model turn and therefore does not consume maxAttempts. */
+  /** Whether this raw executor launch consumes maxAttempts. Defaults to true for legacy boards. */
+  consumesAttempt?: boolean;
+  /** @deprecated Legacy marker for a non-consuming provider launch. */
   providerFailure?: boolean;
   usage: Usage;
   finalReport?: string;
@@ -63,7 +78,9 @@ export interface Attempt {
   /** Model and provider used by the reviewer. */
   reviewModel?: string;
   reviewProvider?: string;
-  /** Review-only usage, also included in the attempt's aggregate usage. */
+  /** Every reviewer launch, including failed fallback models. */
+  reviewLaunches?: ReviewLaunch[];
+  /** Aggregate review usage, also included in the attempt's aggregate usage. */
   reviewUsage?: Usage;
   /** Session file of the last review run, for post-hoc inspection. */
   reviewSessionFile?: string;
@@ -80,6 +97,8 @@ export interface Task {
   status: TaskStatus;
   dependsOn: string[];
   reviewNotes?: string;
+  /** Consecutive genuine reviewer rejections; the autonomous drive escalates at the limit. */
+  reviewRejections?: number;
   attempts: Attempt[];
   createdAt: number;
   updatedAt: number;
@@ -148,7 +167,7 @@ export interface Board {
 export interface TierConfig {
   /** Model pattern like "openai/gpt-5-mini". Omit to inherit pi's default model. */
   model?: string;
-  /** Ordered model patterns tried when the primary fails before completing a turn. */
+  /** Ordered model patterns tried when the primary has a provider failure. */
   fallbacks?: string[];
   /** Thinking level: off, minimal, low, medium, high, xhigh. */
   thinking: string;

@@ -6,7 +6,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { createTask, findTask, forceStatus, loadBoard, saveBoard } from "../src/board.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
-import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/types.js";
+import {
+  type Attempt,
+  type Board,
+  type MaestroConfig,
+  type Task,
+  type TierConfig,
+} from "../src/types.js";
 import {
   driveBoard,
   executeTask,
@@ -17,6 +23,7 @@ import {
   snapshot,
   taskCommitMessage,
 } from "../src/workflow.js";
+import { createWorktree } from "../src/worktree.js";
 
 const tier = { thinking: "low" };
 const config: MaestroConfig = {
@@ -156,7 +163,10 @@ test("formatDriveSummary reports outcomes, attempts, meaningful cost, and identi
   });
 
   assert.match(summary, /1 approved · 1 failed · 0 cancelled · 1 blocked/);
-  assert.match(summary, /2 attempts · \$0\.0600 total · \$0\.0600 avg billed attempt/);
+  assert.match(
+    summary,
+    /2 consuming attempts · 2 launches · \$0\.0600 total · \$0\.0600 avg billed launch/
+  );
   assert.match(summary, /models: openai\/gpt-5, anthropic\/claude/);
   assert.match(summary, /providers: openai, anthropic/);
   assert.match(summary, /dependency unavailable$/);
@@ -884,7 +894,7 @@ test("zero-turn provider failure is persisted and retries on fallback without co
   }
 });
 
-test("zero-turn process failure keeps its cause while using configured fallback accounting", async () => {
+test("zero-turn process failure consumes an attempt and does not use provider fallbacks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-process-fallback-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -917,12 +927,13 @@ test("zero-turn process failure keeps its cause while using configured fallback 
     });
 
     const persisted = findTask(loadBoard(cwd), task.id);
-    assert.equal(calls, 2, "zero-turn failure should retain existing fallback behavior");
-    assert.equal(result.status, "ready_for_review");
-    assert.equal(persisted?.attempts[0]?.providerFailure, true);
+    assert.equal(calls, 1, "process failures must not trigger provider fallbacks");
+    assert.equal(result.status, "failed");
+    assert.equal(persisted?.attempts[0]?.consumesAttempt, true);
+    assert.equal(persisted?.attempts[0]?.providerFailure, undefined);
     assert.equal(persisted?.attempts[0]?.failureReason?.kind, "executor_failure");
     assert.equal(persisted?.attempts[0]?.failureReason?.message, "spawn pi ENOENT");
-    assert.equal(persisted?.attempts.filter((item) => !item.providerFailure).length, 1);
+    assert.equal(persisted?.attempts.filter((item) => item.consumesAttempt).length, 1);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -1240,6 +1251,261 @@ test("approval auto-commits the task's touched files as one conventional commit"
   }
 });
 
+test("single-model 429 stops drive without consuming maxAttempts or hot-looping", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-blocked-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let providerBlocked = true;
+    let calls = 0;
+    const startExecutor: StartExecutor = (options) => {
+      calls += 1;
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: "Verified.\nVERDICT: APPROVE",
+        })(options);
+      }
+      if (!providerBlocked) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: "done",
+        })(options);
+      }
+      return executor({
+        exitCode: 1,
+        usage: { input: 2, output: 0, cost: 0, turns: 1 },
+        errorMessage: "HTTP 429: token=private quota exceeded",
+        failureCause: "provider",
+        model: "provider-a/model-a",
+      })(options);
+    };
+    const options = {
+      cwd,
+      config: { ...config, maxAttempts: 1 },
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", { thinking: "low", model: "provider-a/model-a" }],
+        ["review", tier],
+      ]),
+      startExecutor,
+      taskIds: [task.id],
+      onUpdate,
+      trackRun,
+    };
+
+    const blocked = await driveBoard(options);
+
+    assert.equal(blocked.stoppedBecause.code, "provider_blocked");
+    assert.equal(blocked.rounds, 1);
+    assert.equal(calls, 1, "the same provider must not be retried autonomously");
+    assert.equal(blocked.tasks[0]?.attempts, 0);
+    assert.equal(blocked.tasks[0]?.launches, 1);
+    assert.match(blocked.stoppedBecause.message, /provider-a\/model-a \(provider-a\)/);
+    assert.match(blocked.stoppedBecause.message, /token=\[REDACTED\]/);
+    assert.match(blocked.stoppedBecause.message, /\/maestro resume/);
+
+    providerBlocked = false;
+    const resumed = await driveBoard(options);
+    assert.equal(resumed.stoppedBecause.code, "completed");
+    assert.equal(calls, 3, "an explicit fresh drive may retry and then review");
+    assert.equal(resumed.tasks[0]?.attempts, 1);
+    assert.equal(resumed.tasks[0]?.launches, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("provider blocking waits for active peer executors and starts no review batch", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-peer-test-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    createTask(board, { title: "Blocked", brief: "work", tier: "standard" });
+    const peer = createTask(board, { title: "Peer", brief: "work", tier: "standard" });
+    saveBoard(cwd, board);
+    let finishPeer!: (outcome: RunOutcome) => void;
+    const peerOutcome = new Promise<RunOutcome>((resolve) => {
+      finishPeer = resolve;
+    });
+    let peerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      peerStarted = resolve;
+    });
+    let aborts = 0;
+    let reviews = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) reviews += 1;
+      const blocked = options.prompt.includes("Blocked");
+      if (!blocked) peerStarted();
+      return {
+        attempt: attempt(),
+        outcome: blocked
+          ? Promise.resolve({
+              exitCode: 1,
+              usage: { input: 1, output: 0, cost: 0, turns: 1 },
+              finalReport: "",
+              touchedFiles: [],
+              aborted: false,
+              errorMessage: "HTTP 429",
+              failureCause: "provider",
+            })
+          : peerOutcome,
+        steer: () => {},
+        abort: () => {
+          aborts += 1;
+        },
+      };
+    };
+
+    const driving = driveBoard({
+      cwd,
+      config: { ...config, maxParallel: 2 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+    await started;
+    assert.equal(aborts, 0);
+    finishPeer({
+      exitCode: 0,
+      usage: { input: 1, output: 1, cost: 0, turns: 1 },
+      finalReport: "peer completed",
+      touchedFiles: [],
+      aborted: false,
+    });
+
+    const result = await driving;
+    assert.equal(result.stoppedBecause.code, "provider_blocked");
+    assert.equal(aborts, 0, "provider blocking must not abort an active peer");
+    assert.equal(reviews, 0, "no new review batch should start after provider blocking");
+    assert.equal(findTask(loadBoard(cwd), peer.id)?.status, "ready_for_review");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("exhausted provider fallback chain stops once and preserves every launch", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-fallback-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const models: (string | undefined)[] = [];
+    const alwaysBlocked: StartExecutor = (options) => {
+      models.push(options.tier.model);
+      return executor({
+        exitCode: 1,
+        usage: { input: 10, output: 2, cost: 0.01, turns: 2 },
+        errorMessage: "rate limit reached",
+        failureCause: "provider",
+        model: options.tier.model ?? "unknown/model",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map<string, TierConfig>([
+        [
+          "standard",
+          {
+            thinking: "low",
+            model: "provider-a/model-a",
+            fallbacks: ["provider-b/model-b"],
+          },
+        ],
+        ["review", tier],
+      ]),
+      startExecutor: alwaysBlocked,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.deepEqual(models, ["provider-a/model-a", "provider-b/model-b"]);
+    assert.equal(result.stoppedBecause.code, "provider_blocked");
+    assert.equal(result.tasks[0]?.attempts, 0);
+    assert.equal(result.tasks[0]?.launches, 2);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.attempts.length, 2);
+    assert.ok(persisted?.attempts.every((item) => item.consumesAttempt === false));
+    assert.match(result.stoppedBecause.message, /provider-b\/model-b \(provider-b\)/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("reviewer provider failures use fallbacks, block drive, and resume explicitly", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-review-provider-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let reviewBlocked = true;
+    const reviewModels: (string | undefined)[] = [];
+    const startExecutor: StartExecutor = (options) => {
+      if (!options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 2, output: 1, cost: 0, turns: 1 },
+          finalReport: "implemented",
+        })(options);
+      }
+      reviewModels.push(options.tier.model);
+      if (!reviewBlocked) {
+        return executor({
+          usage: { input: 2, output: 1, cost: 0, turns: 1 },
+          finalReport: "Verified.\nVERDICT: APPROVE",
+          model: options.tier.model ?? "unknown/model",
+        })(options);
+      }
+      return executor({
+        exitCode: 1,
+        usage: { input: 2, output: 1, cost: 0, turns: 1 },
+        errorMessage: "HTTP 429 too many requests",
+        failureCause: "provider",
+        model: options.tier.model ?? "unknown/model",
+      })(options);
+    };
+    const options = {
+      cwd,
+      config,
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", tier],
+        [
+          "review",
+          {
+            thinking: "low",
+            model: "review-a/model",
+            fallbacks: ["review-b/model"],
+          },
+        ],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    };
+
+    const blocked = await driveBoard(options);
+    assert.equal(blocked.stoppedBecause.code, "provider_blocked");
+    assert.deepEqual(reviewModels, ["review-a/model", "review-b/model"]);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "ready_for_review");
+    assert.equal(persisted?.attempts[0]?.reviewLaunches?.length, 2);
+    assert.ok(
+      persisted?.attempts[0]?.reviewLaunches?.every(
+        (launch) => launch.failureReason?.kind === "provider_failure"
+      )
+    );
+
+    reviewBlocked = false;
+    const resumed = await driveBoard(options);
+    assert.equal(resumed.stoppedBecause.code, "completed");
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts[0]?.reviewLaunches?.length, 3);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("mid-run quota exhaustion falls back to the next model without consuming attempts", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-quota-test-"));
   try {
@@ -1289,6 +1555,253 @@ test("mid-run quota exhaustion falls back to the next model without consuming at
     assert.equal(snap.status, "ready_for_review");
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.attempts.filter((a) => !a.providerFailure).length, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a merge conflict on an approved review does not count as a reviewer rejection", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-conflict-count-test-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, "file.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+
+    const { board, task } = boardWithTask("ready_for_review");
+    const worktree = createWorktree(cwd, task.id, 1);
+    const done = attempt("Executor completed the task");
+    done.worktreePath = worktree.worktreePath;
+    done.branch = worktree.branch;
+    task.attempts.push(done);
+    saveBoard(cwd, board);
+    // Diverge both trees on the same line so the merge cannot fast-forward.
+    writeFileSync(join(worktree.worktreePath, "file.txt"), "worktree change\n");
+    execFileSync("git", ["commit", "-aqm", "work"], { cwd: worktree.worktreePath });
+    writeFileSync(join(cwd, "file.txt"), "main change\n");
+    git("commit", "-aqm", "conflicting main change");
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: executor({ finalReport: "Verified.\nVERDICT: APPROVE" }),
+      onUpdate,
+      trackRun,
+    });
+
+    assert.match(result.note ?? "", /git conflict/);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "changes_requested");
+    assert.equal(persisted?.reviewRejections, undefined, "a merge conflict is not a rejection");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("first reviewer rejection retries with notes and approval resets the counter", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-first-rejection-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const notes = "1. Handle the empty input in src/thing.ts.";
+    let reviews = 0;
+    const retryPrompts: string[] = [];
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        reviews += 1;
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport:
+            reviews === 1 ? `VERDICT: REQUEST_CHANGES\n${notes}` : "Verified.\nVERDICT: APPROVE",
+        })(options);
+      }
+      retryPrompts.push(options.prompt);
+      return executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "done",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.equal(result.rounds, 2);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "approved");
+    assert.equal(persisted?.reviewRejections, undefined, "approval clears the rejection counter");
+    assert.ok(
+      retryPrompts.at(-1)?.includes("Handle the empty input"),
+      "the retry executor must receive the reviewer notes"
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("second consecutive reviewer rejection escalates instead of re-dispatching", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-escalation-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const notes = "1. Still wrong in src/thing.ts.\n2. Add a regression test.";
+    let executions = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: `VERDICT: REQUEST_CHANGES\n${notes}`,
+        })(options);
+      }
+      executions += 1;
+      return executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "done",
+      })(options);
+    };
+    const ladderConfig: MaestroConfig = {
+      ...config,
+      maxAttempts: 5,
+      tiers: { standard: tier, complex: tier },
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config: ladderConfig,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "escalation_required");
+    assert.equal(executions, 2, "escalation must stop the third executor dispatch");
+    assert.deepEqual(result.stoppedBecause.taskIds, [task.id]);
+    assert.match(result.stoppedBecause.message, /Reviewer rejected the same work 2 times/);
+    assert.match(result.stoppedBecause.message, /Still wrong in src\/thing\.ts/);
+    assert.match(result.stoppedBecause.message, /raise the tier to "complex"/);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "changes_requested");
+    assert.equal(persisted?.reviewRejections, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("only genuine reviewer rejections advance the escalation counter", async () => {
+  const genuine = mkdtempSync(join(tmpdir(), "maestro-count-genuine-test-"));
+  const noVerdict = mkdtempSync(join(tmpdir(), "maestro-count-noverdict-test-"));
+  const reviewerFailure = mkdtempSync(join(tmpdir(), "maestro-count-failure-test-"));
+  try {
+    const seed = (cwd: string) => {
+      const { board, task } = boardWithTask("ready_for_review");
+      task.attempts.push(attempt("Executor completed the task"));
+      saveBoard(cwd, board);
+      return task;
+    };
+
+    const genuineTask = seed(genuine);
+    await reviewTask({
+      cwd: genuine,
+      task: genuineTask,
+      tier,
+      startExecutor: executor({ finalReport: "VERDICT: REQUEST_CHANGES\n1. Fix it." }),
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(findTask(loadBoard(genuine), genuineTask.id)?.reviewRejections, 1);
+
+    const noVerdictTask = seed(noVerdict);
+    await reviewTask({
+      cwd: noVerdict,
+      task: noVerdictTask,
+      tier,
+      startExecutor: executor({ finalReport: "Looks fine but I forgot the verdict line" }),
+      onUpdate,
+      trackRun,
+    });
+    const noVerdictPersisted = findTask(loadBoard(noVerdict), noVerdictTask.id);
+    assert.equal(noVerdictPersisted?.status, "ready_for_review");
+    assert.equal(noVerdictPersisted?.reviewRejections, undefined);
+
+    const failureTask = seed(reviewerFailure);
+    await reviewTask({
+      cwd: reviewerFailure,
+      task: failureTask,
+      tier,
+      startExecutor: executor({
+        exitCode: 1,
+        errorMessage: "review process crashed",
+        usage: { input: 1, output: 0, cost: 0, turns: 1 },
+      }),
+      onUpdate,
+      trackRun,
+    });
+    const failurePersisted = findTask(loadBoard(reviewerFailure), failureTask.id);
+    assert.equal(failurePersisted?.status, "ready_for_review");
+    assert.equal(failurePersisted?.reviewRejections, undefined);
+  } finally {
+    rmSync(genuine, { recursive: true, force: true });
+    rmSync(noVerdict, { recursive: true, force: true });
+    rmSync(reviewerFailure, { recursive: true, force: true });
+  }
+});
+
+test("escalation clears and the drive continues after the counter is reset", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-escalation-continue-test-"));
+  try {
+    const { board, task } = boardWithTask("changes_requested");
+    const prior = attempt("Prior work under review");
+    prior.reviewNotes = "1. The complex change is still broken.";
+    task.attempts.push(prior);
+    task.reviewNotes = prior.reviewNotes;
+    task.reviewRejections = 2;
+    task.tier = "complex";
+    saveBoard(cwd, board);
+    const options = {
+      cwd,
+      config: { ...config, tiers: { standard: tier, complex: tier } },
+      resolvedTiers: new Map([
+        ["complex", tier],
+        ["review", tier],
+      ]),
+      startExecutor: executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "Verified.\nVERDICT: APPROVE",
+      }),
+      onUpdate,
+      trackRun,
+    };
+
+    const blocked = await driveBoard(options);
+    assert.equal(blocked.stoppedBecause.code, "escalation_required");
+    assert.deepEqual(blocked.stoppedBecause.taskIds, [task.id]);
+    assert.match(blocked.stoppedBecause.message, /rewrite, split, or cancel/);
+
+    // Orchestrator intervention resets the counter (as maestro_update would).
+    const reset = loadBoard(cwd);
+    delete findTask(reset, task.id)?.reviewRejections;
+    saveBoard(cwd, reset);
+
+    const resumed = await driveBoard(options);
+    assert.equal(resumed.stoppedBecause.code, "completed");
+    assert.equal(findTask(loadBoard(cwd), task.id)?.status, "approved");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

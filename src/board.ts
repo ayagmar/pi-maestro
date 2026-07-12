@@ -193,7 +193,8 @@ function isTask(value: unknown): value is Task {
     isNumber(value.createdAt) &&
     isNumber(value.updatedAt) &&
     (value.commitMessage === undefined || typeof value.commitMessage === "string") &&
-    (value.reviewNotes === undefined || typeof value.reviewNotes === "string")
+    (value.reviewNotes === undefined || typeof value.reviewNotes === "string") &&
+    (value.reviewRejections === undefined || isNumber(value.reviewRejections))
   );
 }
 
@@ -218,6 +219,7 @@ function isAttempt(value: unknown): boolean {
     (value.exitCode === undefined || isNumber(value.exitCode)) &&
     (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
     (value.failureReason === undefined || isFailureReason(value.failureReason)) &&
+    (value.consumesAttempt === undefined || typeof value.consumesAttempt === "boolean") &&
     (value.providerFailure === undefined || typeof value.providerFailure === "boolean") &&
     (value.finalReport === undefined || typeof value.finalReport === "string") &&
     (value.diff === undefined || typeof value.diff === "string") &&
@@ -227,8 +229,25 @@ function isAttempt(value: unknown): boolean {
     (value.reviewNotes === undefined || typeof value.reviewNotes === "string") &&
     (value.reviewModel === undefined || typeof value.reviewModel === "string") &&
     (value.reviewProvider === undefined || typeof value.reviewProvider === "string") &&
+    (value.reviewLaunches === undefined ||
+      (Array.isArray(value.reviewLaunches) && value.reviewLaunches.every(isReviewLaunch))) &&
     (value.reviewUsage === undefined || isUsage(value.reviewUsage)) &&
     (value.reviewSessionFile === undefined || typeof value.reviewSessionFile === "string")
+  );
+}
+
+function isReviewLaunch(value: unknown): boolean {
+  if (!isRecord(value) || !isUsage(value.usage)) return false;
+  return (
+    isNumber(value.startedAt) &&
+    (value.model === undefined || typeof value.model === "string") &&
+    (value.provider === undefined || typeof value.provider === "string") &&
+    (value.sessionFile === undefined || typeof value.sessionFile === "string") &&
+    (value.endedAt === undefined || isNumber(value.endedAt)) &&
+    (value.exitCode === undefined || isNumber(value.exitCode)) &&
+    (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
+    (value.failureReason === undefined || isFailureReason(value.failureReason)) &&
+    (value.finalReport === undefined || typeof value.finalReport === "string")
   );
 }
 
@@ -386,7 +405,7 @@ export function attemptFailureCause(attempt: Attempt): FailureKind | undefined {
   if (
     attempt.errorMessage &&
     (attempt.usage.turns === 0 ||
-      /usage limit|rate limit|quota|too many requests|resource.?exhausted/i.test(
+      /\b429\b|usage limit|rate limit|quota|too many requests|resource.?exhausted/i.test(
         attempt.errorMessage
       ))
   ) {
@@ -530,6 +549,7 @@ export function applyPlanTaskEdits(
     if (!brief) throw new Error(`${task.id} brief cannot be empty.`);
     task.brief = brief;
     delete task.reviewNotes;
+    delete task.reviewRejections;
     if (task.status === "changes_requested" || task.status === "failed") {
       forceStatus(task, "todo");
     }
@@ -539,6 +559,7 @@ export function applyPlanTaskEdits(
       throw new Error(`${task.id} uses unknown tier "${edits.tier}".`);
     }
     task.tier = edits.tier;
+    delete task.reviewRejections;
   }
   if (edits.dependsOn !== undefined) {
     task.dependsOn = edits.dependsOn.map((id) => id.trim().toUpperCase()).filter(Boolean);

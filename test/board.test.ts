@@ -292,6 +292,18 @@ test("plan edits update every editable field and can cancel or reactivate a task
   assert.equal(task.status, "todo");
 });
 
+test("changing the brief or tier resets the reviewer rejection counter", () => {
+  const task = createTask(emptyBoard(), { title: "Task", brief: "brief", tier: "standard" });
+  task.reviewRejections = 2;
+
+  applyPlanTaskEdits(task, { tier: "complex" }, ["standard", "complex"]);
+  assert.equal(task.reviewRejections, undefined);
+
+  task.reviewRejections = 2;
+  applyPlanTaskEdits(task, { brief: "reworked brief" }, ["standard", "complex"]);
+  assert.equal(task.reviewRejections, undefined);
+});
+
 test("plan edits reject empty fields and unknown tiers without changing them", () => {
   const task = createTask(emptyBoard(), { title: "Title", brief: "brief", tier: "standard" });
 
@@ -555,6 +567,7 @@ test("restoreArchivedBoard rejects invalid optional Attempt fields without repla
       ["exitCode", "0"],
       ["errorMessage", 1],
       ["failureReason", { kind: "unknown", message: "x", retryable: true }],
+      ["consumesAttempt", "false"],
       ["providerFailure", "false"],
       ["finalReport", 1],
       ["diff", 1],
@@ -564,6 +577,7 @@ test("restoreArchivedBoard rejects invalid optional Attempt fields without repla
       ["reviewNotes", 1],
       ["reviewModel", 1],
       ["reviewProvider", 1],
+      ["reviewLaunches", [{ startedAt: 1, usage: { input: 1 } }]],
       ["reviewUsage", { input: 1 }],
       ["reviewSessionFile", 1],
     ];

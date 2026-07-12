@@ -106,8 +106,12 @@ and then wait for the next pulse. This keeps the interactive session observable 
 provider-cache-idle gaps. `/maestro pause` requests a safe stop:
 active executors finish, but no new executor batch starts. `/maestro resume` later continues the same
 task scope from the board's fresh persisted state; `/maestro abort` instead aborts active executors.
-The loop stops when work is complete or when a pause, plan gate, run budget, attempt cap, abort,
-blocked state, error, or its 20-round safety limit requires intervention. An optional task-id list
+The loop stops when work is complete or when a pause, plan gate, run budget, attempt cap, provider
+block, repeated-rejection escalation, abort, blocked state, error, or its 20-round safety limit
+requires intervention. When the reviewer rejects the same task twice in a row, the drive stops with
+an escalation notice (evidence, current tier, and a recommended next tier or rewrite/split/cancel)
+instead of blindly retrying; changing the brief or tier — or an explicit `maestro_run` — resets the
+counter so a chosen intervention can continue via `/maestro resume`. An optional task-id list
 limits the drive to those tasks. Session switches are blocked while a drive or executor is active;
 pause and wait (or abort) before switching.
 

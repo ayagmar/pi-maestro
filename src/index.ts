@@ -42,6 +42,7 @@ import {
   describeTiersForPlanning,
   loadConfig,
   resolveTierModel,
+  resolveTierModels,
 } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
 import { Dashboard, type DashboardTaskAction } from "./dashboard.js";
@@ -329,15 +330,18 @@ export default function maestro(
       const reviewTier: TierConfig = {
         ...(config.tiers.review ?? { thinking: "high", tools: "read,bash,grep,find,ls" }),
       };
-      const resolution = resolveTierModel(
+      const resolution = resolveTierModels(
         "review",
         reviewTier,
         ctx.modelRegistry,
         ctx.model?.provider
       );
       if (!resolution.ok) throw new Error(resolution.error);
-      if (resolution.modelArg === undefined) delete reviewTier.model;
-      else reviewTier.model = resolution.modelArg;
+      const [primary, ...fallbacks] = resolution.modelArgs;
+      if (primary === undefined) delete reviewTier.model;
+      else reviewTier.model = primary;
+      if (fallbacks.length === 0) delete reviewTier.fallbacks;
+      else reviewTier.fallbacks = fallbacks.filter((model): model is string => model !== undefined);
       resolvedTiers.set("review", reviewTier);
     }
 
@@ -426,7 +430,11 @@ export default function maestro(
       if (activeDrive === control) activeDrive = undefined;
     }
 
-    if (summary.stoppedBecause.code === "paused") {
+    if (
+      summary.stoppedBecause.code === "paused" ||
+      summary.stoppedBecause.code === "provider_blocked" ||
+      summary.stoppedBecause.code === "escalation_required"
+    ) {
       const paused: PausedDriveState = {};
       if (taskIds) paused.taskIds = taskIds;
       if (ownerSession) paused.ownerSession = ownerSession;

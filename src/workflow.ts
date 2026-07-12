@@ -110,6 +110,7 @@ export type DriveStopCode =
   | "plan_gate"
   | "budget_blocked"
   | "provider_blocked"
+  | "escalation_required"
   | "attempt_cap"
   | "blocked"
   | "round_limit"
@@ -176,6 +177,12 @@ export type DriveRoundPhase = "run" | "review";
 export type DriveRoundUpdate = (round: number, phase: DriveRoundPhase, taskIds: string[]) => void;
 
 const DRIVE_ROUND_LIMIT = 20;
+
+/** Consecutive genuine reviewer rejections before the drive escalates instead of retrying. */
+const REVIEW_REJECTION_LIMIT = 2;
+
+/** Built-in tiers, cheapest first, used to recommend the next rung on escalation. */
+const TIER_LADDER = ["trivial", "standard", "complex"] as const;
 
 function consumesMaxAttempt(attempt: Attempt): boolean {
   return attempt.consumesAttempt ?? !attempt.providerFailure;
@@ -333,6 +340,11 @@ export async function driveBoard(options: {
           message: "drive paused before starting the next executor batch",
         });
       }
+      // Stop before re-dispatching a task the reviewer has rejected twice; a
+      // fresh drive or /maestro resume only continues after the orchestrator
+      // changes the brief/tier (which resets the counter) or retries explicitly.
+      const escalated = tasks.filter(escalatedTask);
+      if (escalated.length > 0) return finish(escalationReason(escalated, config));
 
       rounds += 1;
       const capped = tasks.filter(
@@ -511,6 +523,33 @@ export async function driveBoard(options: {
     code: "round_limit",
     message: `drive stopped after the hard limit of ${DRIVE_ROUND_LIMIT} rounds`,
   });
+}
+
+function escalatedTask(task: Task): boolean {
+  return (
+    task.status === "changes_requested" && (task.reviewRejections ?? 0) >= REVIEW_REJECTION_LIMIT
+  );
+}
+
+function escalationReason(tasks: Task[], config: MaestroConfig): DriveStopReason {
+  const details = tasks.map((task) => {
+    const notes = task.reviewNotes ?? task.attempts.at(-1)?.reviewNotes;
+    const evidence = notes
+      ? redactFailureMessage(truncateText(notes, 3))
+      : "no reviewer notes recorded";
+    const rung = TIER_LADDER.indexOf(task.tier as (typeof TIER_LADDER)[number]);
+    const nextTier =
+      rung >= 0 ? TIER_LADDER.slice(rung + 1).find((name) => config.tiers[name]) : undefined;
+    const action = nextTier
+      ? `raise the tier to "${nextTier}" with maestro_update`
+      : "rewrite, split, or cancel the brief with maestro_update and apply orchestrator judgment";
+    return `${task.id} [tier ${task.tier}]: ${evidence}\n  → ${action}`;
+  });
+  return {
+    code: "escalation_required",
+    message: `Reviewer rejected the same work ${REVIEW_REJECTION_LIMIT} times; autonomous retries stopped for orchestrator intervention.\n${details.join("\n")}\nAfter changing the brief/tier (which resets the counter) or an explicit maestro_run, use /maestro resume.`,
+    taskIds: tasks.map((task) => task.id),
+  };
 }
 
 function providerBlockedTask(task: Task): boolean {
@@ -893,10 +932,16 @@ export async function reviewTask(options: {
     if (verdict.approved) {
       transition(fresh, "approved");
       delete fresh.reviewNotes;
+      // A chosen intervention succeeded; let a later retry start fresh.
+      delete fresh.reviewRejections;
     } else {
       const notes = verdict.notes || outcome.finalReport;
       transition(fresh, "changes_requested");
       fresh.reviewNotes = notes;
+      // Only a genuine REQUEST_CHANGES verdict counts toward escalation; merge
+      // conflicts, aborts, provider/process failures, and missing verdicts do not
+      // reach this branch.
+      if (!mergeConflict) fresh.reviewRejections = (fresh.reviewRejections ?? 0) + 1;
       if (attempt) {
         attempt.reviewNotes = notes;
         attempt.failureReason = {
