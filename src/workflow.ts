@@ -601,10 +601,11 @@ export async function executeTask(options: {
     const updated = updateTask(cwd, task.id, (fresh) => {
       forceStatus(fresh, "failed");
     });
-    return snapshot(
-      updated ?? task,
-      `attempt cap reached (${config.maxAttempts}); rewrite the brief with maestro_update or raise maxAttempts`
-    );
+    const recoveryGuidance = `attempt cap reached (${config.maxAttempts}); create a narrowly scoped successor with maestro_plan, use maestro_update to rewire every downstream dependency to it, then start maestro_drive with an explicit taskIds list containing the successor and every rewired dependent while excluding this capped predecessor`;
+    const result = snapshot(updated ?? task, recoveryGuidance);
+    delete result.retryAction;
+    result.note = recoveryGuidance;
+    return result;
   }
 
   const dependencyReports = task.dependsOn

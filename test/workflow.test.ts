@@ -1560,6 +1560,41 @@ test("mid-run quota exhaustion falls back to the next model without consuming at
   }
 });
 
+test("executeTask caps a predecessor with executable successor and scoped-drive guidance", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-attempt-cap-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    task.attempts.push(attempt("failed work"));
+    saveBoard(cwd, board);
+
+    const snap = await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config: { ...config, maxAttempts: 1 },
+      startExecutor: () => {
+        throw new Error("a capped predecessor must not launch");
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(snap.status, "failed");
+    assert.equal(snap.retryAction, undefined);
+    assert.match(snap.note ?? "", /create a narrowly scoped successor with maestro_plan/);
+    assert.match(snap.note ?? "", /use maestro_update to rewire every downstream dependency to it/);
+    assert.match(
+      snap.note ?? "",
+      /explicit taskIds list containing the successor and every rewired dependent while excluding this capped predecessor/
+    );
+    assert.doesNotMatch(snap.note ?? "", /maestro_run\s+\[?['"]?T1/i);
+    assert.doesNotMatch(snap.note ?? "", /rewrite the brief|raise maxAttempts/i);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("a merge conflict on an approved review does not count as a reviewer rejection", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-conflict-count-test-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
