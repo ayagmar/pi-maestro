@@ -1,4 +1,4 @@
-import { sep } from "node:path";
+import { resolve, sep } from "node:path";
 import {
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -31,9 +31,10 @@ import {
   loadStatusHistory,
   planValidationMessage,
   rejectPlan,
+  replaceBoard,
   restoreArchivedBoard,
   saveBoard,
-  transition,
+  sweepDispatchState,
   updateTask,
   validatePlan,
 } from "./board.js";
@@ -61,10 +62,17 @@ import {
 } from "./format.js";
 import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
 import {
+  captureBoardLogs,
+  cleanupStaleLogs,
+  inspectLogRetention,
+  pruneStaleLogs,
+  pruneTaskLogs,
+} from "./retention.js";
+import {
+  startExecutor as defaultStartExecutor,
   findSessionFile,
   mapWithConcurrencyLimit,
   type RunUpdate,
-  startExecutor as defaultStartExecutor,
 } from "./runner.js";
 import { showSettings } from "./settings-ui.js";
 import {
@@ -360,6 +368,8 @@ export default function maestro(
         reportProgress(`Round ${round}: ${phase} ${ids.join(", ")}`);
       },
       trackRun: (run) => trackRun(ctx, run),
+      isLive: (taskId) => liveRuns.has(taskId),
+      onRetentionWarning: (warning) => notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
     };
     if (taskIds) driveOptions.taskIds = taskIds;
     if (signal) driveOptions.signal = signal;
@@ -804,9 +814,14 @@ export default function maestro(
           tier: reviewTier,
           startExecutor: dependencies.startExecutor,
           autoCommit: config.autoCommit,
+          logEvents: config.logEvents,
+          maxLogBytes: config.maxLogBytesPerRun,
           availableTiers: Object.keys(config.tiers),
           onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
           trackRun: (run) => trackRun(ctx, run),
+          isLive: (taskId) => liveRuns.has(taskId),
+          onRetentionWarning: (warning) =>
+            notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
         };
         if (signal) workflowOptions.signal = signal;
         return reviewTask(workflowOptions);
@@ -1206,12 +1221,35 @@ export default function maestro(
           // A new goal is a new run: archive the previous board instead of
           // piling tasks from different goals onto one endless list.
           if (board.tasks.length > 0) {
+            const previousRevision = board.revision ?? 0;
+            const archivedLogs = captureBoardLogs(ctx.cwd, board);
+            for (const warning of archivedLogs.warnings) {
+              notify(ctx, `Log cleanup warning: ${warning}`, "warning");
+            }
             const archivePath = archiveBoard(ctx.cwd);
-            board = { version: 1, nextTaskNumber: 1, tasks: [] };
-            if (archivePath) notify(ctx, `Previous board archived: ${archivePath}`);
+            board = { version: 1, nextTaskNumber: 1, tasks: [], goal: rest };
+            replaceBoard(ctx.cwd, board, previousRevision);
+            if (archivePath) {
+              const cleanup = pruneStaleLogs(
+                ctx.cwd,
+                archivedLogs.entries,
+                () => loadBoard(ctx.cwd),
+                (id) => liveRuns.has(id),
+                archivedLogs.warnings
+              );
+              if (cleanup.warnings.length > 0) {
+                notify(
+                  ctx,
+                  `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
+                  "warning"
+                );
+              }
+              notify(ctx, `Previous board archived: ${archivePath}`);
+            }
+          } else {
+            board.goal = rest;
+            saveBoard(ctx.cwd, board);
           }
-          board.goal = rest;
-          saveBoard(ctx.cwd, board);
           adoptBoard(ctx);
           refreshUI(ctx);
           nameSessionAfterGoal(ctx, rest, "maestro");
@@ -1362,21 +1400,24 @@ export default function maestro(
             return;
           }
 
-          const candidates = inspectManagedWorktrees(
-            ctx.cwd,
-            loadBoard(ctx.cwd),
-            liveTaskIds
-          ).filter((entry) => entry.state === "orphaned" || entry.state === "stale");
-          if (candidates.length === 0) {
-            notify(ctx, "No stale or orphaned managed worktrees to clean.");
+          const board = loadBoard(ctx.cwd);
+          const candidates = inspectManagedWorktrees(ctx.cwd, board, liveTaskIds).filter(
+            (entry) => entry.state === "orphaned" || entry.state === "stale"
+          );
+          const logCandidates = inspectLogRetention(ctx.cwd, board, liveTaskIds).filter(
+            (entry) => entry.state === "stale"
+          );
+          if (candidates.length === 0 && logCandidates.length === 0) {
+            notify(ctx, "No stale logs or stale/orphaned managed worktrees to clean.");
             return;
           }
 
           let confirmed = restParts[1]?.toLowerCase() === "confirm";
           if (ctx.hasUI && !confirmed) {
+            const logBytes = logCandidates.reduce((total, entry) => total + entry.size, 0);
             confirmed = await ctx.ui.confirm(
-              "Clean stale maestro worktrees?",
-              `Remove ${candidates.length} stale/orphaned checkout(s)? Active, recoverable, and retained-conflict worktrees will be rechecked and preserved.`
+              "Clean stale maestro state?",
+              `Remove ${candidates.length} stale/orphaned checkout(s) and ${logCandidates.length} stale log(s) (${Math.ceil(logBytes / 1024)} KB)? Candidates will be rechecked; active and retained state is preserved.`
             );
           }
           if (!ctx.hasUI && !confirmed) {
@@ -1399,15 +1440,24 @@ export default function maestro(
             () => loadBoard(ctx.cwd),
             (taskId) => liveRuns.has(taskId)
           );
+          const logResult = cleanupStaleLogs(
+            ctx.cwd,
+            new Set(logCandidates.map((entry) => resolve(entry.file))),
+            () => loadBoard(ctx.cwd),
+            (taskId) => liveRuns.has(taskId)
+          );
           const preserved = result.preserved.filter(
             (entry) =>
               entry.state === "active" ||
               entry.state === "recoverable" ||
               entry.state === "retained-conflict"
           ).length;
+          const warnings = logResult.warnings.length
+            ? ` Warnings: ${logResult.warnings.join("; ").slice(0, 500)}`
+            : "";
           notify(
             ctx,
-            `Removed ${result.removed.length} stale/orphaned worktree(s). Preserved ${preserved} active or recoverable worktree(s).`
+            `Removed ${result.removed.length} stale/orphaned worktree(s) and ${logResult.removed.length} stale log(s). Preserved ${preserved + logResult.preserved.length} active or retained item(s).${warnings}`
           );
           return;
         }
@@ -1511,7 +1561,27 @@ export default function maestro(
           }
 
           try {
+            const archivedLogs = captureBoardLogs(ctx.cwd, loadBoard(ctx.cwd));
+            for (const warning of archivedLogs.warnings) {
+              notify(ctx, `Log cleanup warning: ${warning}`, "warning");
+            }
             const restored = restoreArchivedBoard(ctx.cwd, selectedFile);
+            if (restored.archivedCurrent) {
+              const cleanup = pruneStaleLogs(
+                ctx.cwd,
+                archivedLogs.entries,
+                () => loadBoard(ctx.cwd),
+                (id) => liveRuns.has(id),
+                archivedLogs.warnings
+              );
+              if (cleanup.warnings.length > 0) {
+                notify(
+                  ctx,
+                  `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
+                  "warning"
+                );
+              }
+            }
             refreshUI(ctx);
             const previous = restored.archivedCurrent
               ? ` Current board archived at ${restored.archivedCurrent}.`
@@ -1532,6 +1602,10 @@ export default function maestro(
             notify(ctx, "Executors are still running. Abort them before resetting.", "warning");
             return;
           }
+          const archivedLogs = captureBoardLogs(ctx.cwd, board);
+          for (const warning of archivedLogs.warnings) {
+            notify(ctx, `Log cleanup warning: ${warning}`, "warning");
+          }
           const archivePath = archiveBoard(ctx.cwd);
           if (!archivePath) {
             notify(ctx, "Could not archive the board; reset cancelled.", "error");
@@ -1544,7 +1618,21 @@ export default function maestro(
             );
             if (!ok) return;
           }
-          saveBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] }); // also drops goal
+          replaceBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] }, board.revision ?? 0); // also drops goal
+          const cleanup = pruneStaleLogs(
+            ctx.cwd,
+            archivedLogs.entries,
+            () => loadBoard(ctx.cwd),
+            (id) => liveRuns.has(id),
+            archivedLogs.warnings
+          );
+          if (cleanup.warnings.length > 0) {
+            notify(
+              ctx,
+              `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
+              "warning"
+            );
+          }
           refreshUI(ctx);
           notify(ctx, `Board reset. Archived at ${archivePath}`);
           return;
@@ -1622,6 +1710,17 @@ export default function maestro(
             updateTask(ctx.cwd, taskId, (fresh) => {
               forceStatus(fresh, status);
             });
+            if (status === "approved") {
+              const cleanup = pruneTaskLogs(
+                ctx.cwd,
+                taskId,
+                () => loadBoard(ctx.cwd),
+                (id) => liveRuns.has(id)
+              );
+              for (const warning of cleanup.warnings) {
+                notify(ctx, `Log cleanup warning: ${warning}`, "warning");
+              }
+            }
             refreshUI(ctx);
           },
           hasExecutorSession: (taskId) => {
@@ -2034,6 +2133,17 @@ export default function maestro(
       updateTask(ctx.cwd, task.id, (fresh) => {
         forceStatus(fresh, status);
       });
+      if (status === "approved") {
+        const cleanup = pruneTaskLogs(
+          ctx.cwd,
+          task.id,
+          () => loadBoard(ctx.cwd),
+          (id) => liveRuns.has(id)
+        );
+        for (const warning of cleanup.warnings) {
+          notify(ctx, `Log cleanup warning: ${warning}`, "warning");
+        }
+      }
       refreshUI(ctx);
       notify(ctx, `${task.id} → ${STATUS_LABELS[status]}`);
     }
@@ -2198,7 +2308,8 @@ export default function maestro(
     // Session switches reload extensions, so switchWithReturn's in-memory
     // reference does not survive. Executor sessions may have a worktree cwd,
     // while their board and owner session remain linked from the main checkout.
-    const navigationBoard = loadBoard(maestroBoardCwd(ctx.cwd));
+    const boardCwd = maestroBoardCwd(ctx.cwd);
+    const navigationBoard = loadBoard(boardCwd);
     const executorSessions = navigationBoard.tasks.flatMap((task) =>
       task.attempts.flatMap((attempt) =>
         [attempt.sessionFile, attempt.reviewSessionFile].filter(
@@ -2213,22 +2324,11 @@ export default function maestro(
       executorSessions
     );
 
-    const board = loadBoard(ctx.cwd);
-    // Executors die with the pi process; a task still marked running on
-    // startup is a stale leftover from a crash or hard exit.
-    for (const task of board.tasks) {
-      if (task.status !== "running") continue;
-      updateTask(ctx.cwd, task.id, (fresh) => {
-        transition(fresh, "failed");
-      });
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          `${task.id} was running when pi exited; marked failed. Retry with maestro_run ["${task.id}"].`,
-          "warning"
-        );
-      }
-    }
-    const recovered = loadBoard(ctx.cwd);
+    // Recovery is lease-aware: live owners survive extension reloads and only
+    // expired claims are reclaimed with their attempt in one board transaction.
+    const recoveryNotes = sweepDispatchState(boardCwd);
+    for (const note of recoveryNotes) notify(ctx, note, "warning");
+    const recovered = loadBoard(boardCwd);
     const knownWorktrees = recovered.tasks.flatMap((task) =>
       task.attempts.flatMap((attempt) =>
         attempt.worktreePath && attempt.branch
@@ -2245,7 +2345,7 @@ export default function maestro(
           : [];
       });
     try {
-      sweepWorktrees(ctx.cwd, retained, knownWorktrees);
+      sweepWorktrees(boardCwd, retained, knownWorktrees);
     } catch (error) {
       notify(ctx, `Could not clean stale maestro worktrees: ${String(error)}`, "warning");
     }

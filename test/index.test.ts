@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -236,6 +236,31 @@ function loadMaestro(
   assert.ok(command, "maestro must register its command");
   return { ctx, notices, command, tools, events };
 }
+
+test("session startup preserves a running task with an active dispatch lease", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-startup-recovery-test-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const task = createTask(board, { title: "Running", brief: "work", tier: "standard" });
+    task.status = "running";
+    task.dispatchClaim = {
+      id: "live-owner",
+      kind: "execute",
+      claimedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    };
+    saveBoard(cwd, board);
+
+    const { ctx, events } = loadMaestro(cwd);
+    events.get("session_start")?.({ previousSessionFile: undefined }, ctx);
+
+    const recovered = findTask(loadBoard(cwd), task.id);
+    assert.equal(recovered?.status, "running");
+    assert.equal(recovered?.dispatchClaim?.id, "live-owner");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 function billedAttempt(cost: number, model: string): Attempt {
   return {
@@ -1026,6 +1051,45 @@ function approvingReviewer(): RunOutcome {
     aborted: false,
   };
 }
+
+test("maestro_review reports one bounded retention warning and still approves", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, { title: "Review me", brief: "done", tier: "standard" });
+      task.status = "ready_for_review";
+      const completed = executorAttempt();
+      completed.index = 1;
+      completed.finalReport = "Implemented and verified";
+      task.attempts.push(completed);
+      saveBoard(cwd, board);
+
+      const maestroDir = join(cwd, ".pi", "maestro");
+      mkdirSync(maestroDir, { recursive: true });
+      writeFileSync(join(maestroDir, "logs"), "temporarily not a directory");
+    },
+    async (cwd) => {
+      const startExecutor: StartExecutor = () => ({
+        attempt: executorAttempt(),
+        outcome: Promise.resolve(approvingReviewer()),
+        steer: () => {},
+        abort: () => {},
+      });
+      const { ctx, notices, tools } = loadMaestro(cwd, startExecutor);
+      const review = tools.get("maestro_review");
+      assert.ok(review);
+
+      const result = await review.execute("review", { taskIds: ["T1"] }, undefined, undefined, ctx);
+
+      assert.equal(findTask(loadBoard(cwd), "T1")?.status, "approved");
+      assert.match(result.content[0]?.text ?? "", /approved/i);
+      const warnings = notices.filter((notice) => notice.startsWith("Log cleanup warning:"));
+      assert.equal(warnings.length, 1);
+      assert.ok((warnings[0]?.length ?? 0) <= 280);
+      assert.equal(warnings[0]?.includes(cwd), false);
+    }
+  );
+});
 
 function altSession(ctx: CommandCtx, sessionFile: string): CommandCtx {
   return {
