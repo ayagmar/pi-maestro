@@ -787,7 +787,16 @@ export async function executeTask(options: {
       ...(config.watchdogTerminationTurns === undefined
         ? {}
         : { watchdogTerminationTurns: config.watchdogTerminationTurns }),
-      onUpdate: (update) => onUpdate(task.id, update),
+      onUpdate: (update) => {
+        const sessionFile = update.sessionFile;
+        if (sessionFile) {
+          updateTask(cwd, task.id, (fresh) => {
+            const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
+            if (attempt) attempt.sessionFile = sessionFile;
+          });
+        }
+        onUpdate(task.id, update);
+      },
     };
     if (signal) runOptions.signal = signal;
     if (config.maxCostPerTask > 0) runOptions.maxCost = config.maxCostPerTask;

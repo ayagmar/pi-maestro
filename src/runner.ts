@@ -170,6 +170,8 @@ export interface RunUpdate {
   phase?: "starting" | "exploring" | "editing" | "verifying" | "reporting";
   changedFileCount?: number;
   turnsWithoutProgress?: number;
+  /** Persisted as soon as RPC get_state returns so interrupted runs remain navigable. */
+  sessionFile?: string;
 }
 
 export function cappedLogWriter(
@@ -436,6 +438,17 @@ export function startExecutor(options: {
 
       if (event.type === "response" && event.command === "get_state" && event.data?.sessionFile) {
         attempt.sessionFile = event.data.sessionFile;
+        options.onUpdate?.({
+          turns: attempt.usage.turns,
+          cost: attempt.usage.cost,
+          lastActivity,
+          lastEventAt,
+          lastProgressAt,
+          phase: "starting",
+          changedFileCount: attempt.touchedFiles.length,
+          turnsWithoutProgress: attempt.usage.turns - progressTurns,
+          sessionFile: event.data.sessionFile,
+        });
         return;
       }
 

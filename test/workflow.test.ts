@@ -771,6 +771,66 @@ test("successful execution persists ready_for_review", async () => {
   }
 });
 
+test("executor session is persisted before the run settles", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-session-persistence-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let finish!: (outcome: RunOutcome) => void;
+    const outcome = new Promise<RunOutcome>((resolve) => {
+      finish = resolve;
+    });
+    const execution = executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      startExecutor: (options) => {
+        queueMicrotask(() =>
+          options.onUpdate?.({
+            turns: 0,
+            cost: 0,
+            lastActivity: "starting",
+            sessionFile: "/sessions/live-executor.jsonl",
+          })
+        );
+        return {
+          attempt: {
+            index: 0,
+            logFile: "executor.jsonl",
+            thinking: "medium",
+            startedAt: Date.now(),
+            usage: { input: 0, output: 0, cost: 0, turns: 0 },
+            touchedFiles: [],
+          },
+          outcome,
+          steer: () => {},
+          abort: () => {},
+        };
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.sessionFile,
+      "/sessions/live-executor.jsonl"
+    );
+    finish({
+      exitCode: 0,
+      usage: { input: 0, output: 0, cost: 0, turns: 1 },
+      finalReport: "done",
+      touchedFiles: [],
+      aborted: false,
+    });
+    await execution;
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("successful main-tree execution captures only touched-file changes", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" });
