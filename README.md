@@ -16,10 +16,10 @@ you ──▶ orchestrator (SOTA model, your session)
               ▼                         │ .pi/maestro/board.json   │
         task board  ◀──────────────────▶│ logs/  history.jsonl       │
               │ plan approval (optional) └────────────────────────────┘
-              │ /maestro run or maestro_drive
+              │ /maestro drive or maestro_drive
               ▼
    executors in parallel (cheap models, fresh context each)
-              │ /maestro review (or drive continues automatically)
+              │ adversarial review (drive continues automatically)
               ▼
    adversarial reviewers (default config: read-only tools, fresh context)
               │ approve / request changes
@@ -72,7 +72,7 @@ with these tools:
 | `maestro_update` | Refines or cancels planned work |
 | `maestro_drive` | Starts, inspects, or intervenes in the state-aware background run/review/retry loop |
 
-The human-only `/maestro run`, `/maestro review`, and `/maestro status` commands remain available for manual recovery and inspection; they are not model-facing tools.
+Human-only slash commands and dashboard controls provide planning approval, drive, pause/resume/abort, simulation, timeline, reconciliation, and recovery without adding model-facing tools.
 
 You can also call these tools yourself in plain prompts ("plan these three tasks…"), or manage the
 board manually — the workflow is just tools plus a JSON file. If you already have a plan (design
@@ -109,7 +109,7 @@ The loop stops when work is complete or when a pause, plan gate, run budget, att
 block, repeated-rejection escalation, abort, blocked state, error, or its 20-round safety limit
 requires intervention. When the reviewer rejects the same task twice in a row, the drive stops with
 an escalation notice (evidence, current tier, and a recommended next tier or rewrite/split/cancel)
-instead of blindly retrying; changing the brief or tier — or an explicit `/maestro run` — resets the
+instead of blindly retrying; changing the brief or tier — or an explicit scoped `/maestro drive` — resets the
 counter so a chosen intervention can continue via `/maestro resume`. At each decision point the
 orchestrator chooses autonomously among the configured fallback/resume, `maestro_update`
 (brief/tier/dependencies), a `maestro_plan` split, cancellation, or asking you when scope or cost
@@ -171,7 +171,7 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   - `t` switch the selected pane between the live transcript and derived task timeline
   - `enter` open the executor's full session in your TUI
 - **Failure and retry actions**: failed and cancelled tasks can be retried by explicitly naming
-  them in `/maestro run`; changes-requested tasks carry reviewer notes into the next attempt.
+  them in a scoped `/maestro drive T1`; changes-requested tasks carry reviewer notes into the next attempt.
   Rewrite a repeatedly failing brief with `maestro_update`, or use the dashboard's reopen action.
   Maestro tracks two different counts per task: **launches** (every raw executor process start,
   including provider failures and model fallbacks) and **attempts** (launches that consumed the
@@ -241,7 +241,7 @@ whole tier object replacing the earlier object of the same name:
 - `maxParallel` — maximum executor or reviewer processes run concurrently (default 3).
   Dependencies can reduce the number that are runnable at once.
 - `planGate` — when enabled, every non-empty `maestro_plan` marks the board pending and both
-  `/maestro run` and `maestro_drive` refuse to start executors. `/maestro plan` lists task metadata,
+  `/maestro drive` and `maestro_drive` refuse to start executors. `/maestro plan` lists task metadata,
   can display a full brief, and offers **Approve plan** or **Reject plan**. Approval opens the gate;
   rejection archives the board and, after confirmation, clears it (default false).
 - `useWorktrees` — when enabled, every runnable task, including a one-task dispatch, gets an
@@ -253,7 +253,7 @@ whole tier object replacing the earlier object of the same name:
   The commit message comes from the task's `commitMessage` (the orchestrator plans one per
   task, e.g. `fix: handle empty board`) or falls back to `feat: <title>`. Main-tree runs
   commit only the files the executor touched; worktree runs use the message for the merge
-  commit. A failed commit (no repo, hooks) never blocks the approval.
+  commit. A failed commit or missing artifact proof blocks automated approval and preserves recovery evidence.
 - `maxAttempts` — hard cap on execute attempts per task (default 3), counting only launches that
   produced real work (see raw launches vs. attempts above). Stops orchestrator retry loops. A capped
   task cannot be made runnable by changing its brief or tier because its consumed attempts remain;
@@ -263,13 +263,12 @@ whole tier object replacing the earlier object of the same name:
   `/maestro config` changes it.
 - `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default $5;
   0 disables the cap). Safety net against a stuck executor burning tokens unattended.
-- `statusWaitSeconds` — how long `/maestro status` waits before returning a live progress pulse
-  while a background drive is active (default 60, maximum 240). Pass `waitSeconds: 0` for an
-  immediate snapshot. Short pulses let the orchestrator narrate progress and keep its provider
-  prompt cache warm without enabling long cache retention.
+- `statusWaitSeconds` — interval for mechanical background-drive progress pulses (default 60,
+  maximum 240). Routine pulses update persisted/dashboard state without waking the orchestrator;
+  only a decision or completion queues a bounded owner-scoped message.
 - `maxRunCost` — gate new executor batches once total cost recorded across the board exceeds this
   USD amount (default $25; 0 disables the cap). The settings editor offers off, $5, $10, $25, and $50. A blocked
-  `/maestro run` returns the budget warning on each otherwise-runnable task; `maestro_drive` stops
+  `/maestro drive` reports the budget warning and stops before another batch; `maestro_drive` stops
   with the same warning. Already-running executors are not aborted, reviews can still run, and
   `maxCostPerTask` continues to enforce its separate per-attempt cap. Because gating happens before
   a batch, its concurrent executors can take the recorded total beyond the cap before the next gate.
