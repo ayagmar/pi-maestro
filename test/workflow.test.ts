@@ -83,7 +83,7 @@ function boardWithTask(status: Task["status"] = "todo"): { board: Board; task: T
 const onUpdate = () => {};
 const trackRun = () => () => {};
 
-test("artifact gates reject scope, empty work, test deletion, config narrowing, and conflict markers", () => {
+test("artifact gates reject empty work, test deletion, config narrowing, and conflict markers", () => {
   const { task } = boardWithTask("ready_for_review");
   task.writePaths = ["src/**"];
   const candidate = attempt("done");
@@ -100,7 +100,7 @@ test("artifact gates reject scope, empty work, test deletion, config narrowing, 
 
   assert.deepEqual(
     artifactFindings(task, candidate)?.map((finding) => finding.fingerprint),
-    ["scope-violation", "deleted-tests", "test-discovery", "conflict-markers"]
+    ["deleted-tests", "test-discovery", "conflict-markers"]
   );
 
   candidate.touchedFiles = [];

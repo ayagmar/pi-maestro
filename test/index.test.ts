@@ -605,6 +605,51 @@ test("maestro_plan requires bounded write scope except explicit no-file work", a
   );
 });
 
+test("incremental recovery planning does not reopen the initial plan gate", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, { title: "Capped", brief: "Old work", tier: "standard" });
+      task.status = "failed";
+      task.attempts.push({
+        index: 1,
+        logFile: "attempt.jsonl",
+        thinking: "medium",
+        startedAt: 1,
+        endedAt: 2,
+        exitCode: 1,
+        usage: { input: 0, output: 0, cost: 0, turns: 1 },
+        touchedFiles: [],
+      });
+      saveBoard(cwd, board);
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, planGate: true });
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const plan = tools.get("maestro_plan");
+      assert.ok(plan);
+      await plan.execute(
+        "successor",
+        {
+          tasks: [
+            {
+              title: "Successor for T1",
+              brief: "Continue the approved goal after capped T1",
+              tier: "standard",
+              writePaths: ["src/fix.ts"],
+              successCriteria: ["The replacement work passes"],
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.equal(loadBoard(cwd).planPending, undefined);
+    }
+  );
+});
+
 test("maestro_drive inspect returns bounded board state without starting work", async () => {
   await withBoard(
     (cwd) => {

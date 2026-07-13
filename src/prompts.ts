@@ -1,3 +1,4 @@
+import { pathsOutsideWriteScope } from "./artifact-policy.js";
 import { type Task } from "./types.js";
 
 export const MAX_INJECTED_CONTEXT_LENGTH = 10_000;
@@ -157,7 +158,14 @@ export function buildReviewPrompt(task: Task, report: string): string {
       `## Authoritative artifact\nGit tree: ${task.provenance.candidateTree}\nReview this complete Git tree. The bounded diff below is presentation context only.`
     );
   }
-  const diff = task.attempts.at(-1)?.diff;
+  const latestAttempt = task.attempts.at(-1);
+  const outsideScope = latestAttempt ? pathsOutsideWriteScope(task, latestAttempt) : [];
+  if (outsideScope.length > 0) {
+    sections.push(
+      `## Write-scope deviation\nThe executor changed paths not predicted by the plan: ${outsideScope.join(", ")}\nTreat writePaths as planning and scheduling guidance. Decide whether these changes are necessary for the task, and request changes only when the deviation is unsafe, unrelated, or insufficiently justified.`
+    );
+  }
+  const diff = latestAttempt?.diff;
   if (diff) sections.push(`## Bounded display diff\n${truncateContext(diff, 8_000)}`);
   sections.push(
     [

@@ -193,12 +193,14 @@ export default function maestro(
     const running = status.running;
     const usage = boardUsage(board.tasks);
     const runningPart = running > 0 ? ` · ${running} running` : "";
+    const reviewPart = status.reviewable > 0 ? ` · ${status.reviewable} review` : "";
+    const blockedPart = status.blocked > 0 ? ` · ${status.blocked} blocked` : "";
     const pausedPart = board.pausedDrive ? " · paused" : "";
     ctx.ui.setStatus(
       COMMAND,
       ctx.ui.theme.fg(
         running > 0 || board.pausedDrive ? "warning" : "muted",
-        `⚡ maestro ${status.code} · ${progress}${runningPart}${pausedPart} · $${usage.cost.toFixed(4)}`
+        `⚡ maestro ${status.code} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart} · $${usage.cost.toFixed(4)}`
       )
     );
 
@@ -332,6 +334,8 @@ export default function maestro(
     const ownerSession = ctx.sessionManager.getSessionFile();
     if (ownerSession) operation.ownerSession = ownerSession;
     driveController.setBackground(operation);
+    const statusRefresh = setInterval(() => refreshUI(ctx), 1_000);
+    statusRefresh.unref();
     operation.promise = runControlledDrive(ctx, taskIds, signal, reportProgress)
       .then((summary) => {
         operation.summary = summary;
@@ -343,7 +347,10 @@ export default function maestro(
       .catch((error) => {
         operation.error = error instanceof Error ? error.message : String(error);
       })
-      .finally(() => refreshUI(ctx));
+      .finally(() => {
+        clearInterval(statusRefresh);
+        refreshUI(ctx);
+      });
     return driveController.getBackground() ?? operation;
   }
 

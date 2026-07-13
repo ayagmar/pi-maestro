@@ -92,6 +92,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       adoptBoard(ctx);
       const config = loadConfig(ctx.cwd);
       const board = loadBoard(ctx.cwd);
+      const initialTaskCount = board.tasks.length;
       const created: Task[] = [];
       for (const input of params.tasks as {
         title: string;
@@ -136,12 +137,18 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         if (verificationProfile) taskInput.verificationProfile = verificationProfile;
         created.push(createTask(board, taskInput));
       }
-      if (config.planGate && created.length > 0) board.planPending = true;
+      // The plan gate protects the initial board. Once execution has started,
+      // the orchestrator may add recovery/successor tasks without stopping the
+      // drive for another human approval. Explicit recipe/discovery expansion
+      // keeps its own mandatory approval gate.
+      if (config.planGate && created.length > 0 && initialTaskCount === 0) {
+        board.planPending = true;
+      }
       saveBoard(ctx.cwd, board);
       refreshUI(ctx);
 
       const lines = created.map((task) => `${task.id}: ${task.title} (${task.tier})`);
-      const approval = config.planGate
+      const approval = board.planPending
         ? `\n\nPlan awaits user approval via /${COMMAND} plan. Do not start maestro_drive yet.`
         : "";
       return {

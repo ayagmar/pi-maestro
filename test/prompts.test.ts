@@ -167,6 +167,25 @@ test("review prompt is adversarial, scoped, and demands a verdict", () => {
   assert.match(prompt, /VERDICT: REQUEST_CHANGES/);
 });
 
+test("review prompt asks the reviewer to judge write-scope deviations", () => {
+  const task = makeTask();
+  task.writePaths = ["src/**"];
+  task.attempts = [
+    {
+      index: 1,
+      logFile: "attempt.jsonl",
+      thinking: "medium",
+      startedAt: 1,
+      usage: { input: 0, output: 0, cost: 0, turns: 1 },
+      touchedFiles: ["README.md", "src/app.ts"],
+    },
+  ];
+  const prompt = buildReviewPrompt(task, "done");
+  assert.match(prompt, /Write-scope deviation/);
+  assert.match(prompt, /README\.md/);
+  assert.match(prompt, /planning and scheduling guidance/);
+});
+
 test("review prompt includes only a bounded diff when the attempt has one", () => {
   const attempt = {
     index: 1,

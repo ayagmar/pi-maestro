@@ -42,13 +42,17 @@ export interface WorktreeCleanupResult {
   preserved: ManagedWorktreeInspection[];
 }
 
-function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
+function gitOutput(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     ...(env ? { env } : {}),
-  }).trim();
+  });
+}
+
+function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
+  return gitOutput(cwd, args, env).trim();
 }
 
 export function headCommit(cwd: string): string {
@@ -102,7 +106,7 @@ export function worktreeExists(ref: WorktreeRef): boolean {
 
 /** Git-authoritative changed paths for one checkout, including staged, unstaged, and untracked files. */
 export function changedPaths(cwd: string): string[] {
-  const output = git(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const output = gitOutput(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
   if (!output) return [];
 
   const entries = output.split("\0").filter(Boolean);

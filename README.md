@@ -240,8 +240,10 @@ whole tier object replacing the earlier object of the same name:
 
 - `maxParallel` — maximum executor or reviewer processes run concurrently (default 3).
   Dependencies can reduce the number that are runnable at once.
-- `planGate` — when enabled, every non-empty `maestro_plan` marks the board pending and both
-  `/maestro drive` and `maestro_drive` refuse to start executors. `/maestro plan` lists task metadata,
+- `planGate` — when enabled, the initial non-empty `maestro_plan` marks a new board pending and both
+  `/maestro drive` and `maestro_drive` refuse to start executors. Once execution has begun, the
+  orchestrator may add recovery or successor tasks without reopening the gate. Recipe and discovery
+  expansion retain their explicit approval gates. `/maestro plan` lists task metadata,
   can display a full brief, and offers **Approve plan** or **Reject plan**. Approval opens the gate;
   rejection archives the board and, after confirmation, clears it (default false).
 - `useWorktrees` — when enabled, every runnable task, including a one-task dispatch, gets an
@@ -296,7 +298,7 @@ checks the review tier's primary model. This happens before spawning executors.
 
 ### Safety and reconciliation
 
-When worktrees are enabled, every attempt—including a single task—runs in an isolated checkout. Git status is authoritative for staged, unstaged, and untracked paths; an empty path list never broadens a commit. New executable tasks require 1–12 explicit `successCriteria` plus bounded `writePaths`; read-only/no-file investigations may use an empty scope. Declared paths prevent independent overlapping plans and make out-of-scope changes visible. Scoped drives reject omitted unresolved dependencies instead of silently expanding scope. Review feedback is retained as a bounded, deduplicated finding checklist. Reviewed approvals record an authoritative immutable Git tree plus separate review, integration-commit, and trusted-verification provenance. Bounded diffs are presentation context only; dashboard acceptance records `approvalKind: "manual"` instead.
+When worktrees are enabled, every attempt—including a single task—runs in an isolated checkout. Git status is authoritative for staged, unstaged, and untracked paths; an empty path list never broadens a commit. New executable tasks require 1–12 explicit `successCriteria` plus bounded `writePaths`; read-only/no-file investigations may use an empty scope. Declared paths prevent independent overlapping plans and make unpredicted changes visible to the reviewer. They are scheduling guidance rather than an automatic rejection boundary; the reviewer decides whether a deviation is necessary and safe. Scoped drives reject omitted unresolved dependencies instead of silently expanding scope. Review feedback is retained as a bounded, deduplicated finding checklist. Reviewed approvals record an authoritative immutable Git tree plus separate review, integration-commit, and trusted-verification provenance. Bounded diffs are presentation context only; dashboard acceptance records `approvalKind: "manual"` instead.
 
 Trusted verification commands are arbitrary local code and may be defined only in the operator-owned user config (`~/.pi/agent/maestro.json`) with `verificationProfiles` entries shaped as `{ "command": "pnpm test", "timeoutSeconds": 300 }`. Repository `.pi/maestro.json` may select a known user profile with `defaultVerificationProfile`, but repository-defined commands and unknown selections are ignored. Task briefs and model instructions are never executed. Verification runs in a dedicated process group on Unix; timeout or abort sends TERM followed by KILL, bounds captured output, and logs under `.pi/maestro/verification/`. Candidate mutation invalidates review. Failed post-integration verification retains the task worktree and branch as recovery evidence; successful approval removes them only after provenance is persisted.
 

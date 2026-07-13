@@ -11,6 +11,7 @@ import { type Attempt, type Board, type Task } from "../src/types.js";
 import { reviewTask, type StartExecutor } from "../src/workflow.js";
 import {
   captureDiff,
+  changedPaths,
   cleanupManagedWorktrees,
   createWorktree,
   inspectManagedWorktrees,
@@ -98,6 +99,18 @@ test("worktree refs sanitize task ids deterministically", () => {
   const ref = worktreeRef("/repo", "../Feature / A", 2);
   assert.equal(ref.worktreePath, "/repo/.pi/maestro/worktrees/feature-a-attempt-2");
   assert.equal(ref.branch, "maestro/feature-a-attempt-2");
+});
+
+test("changed paths preserve the first character for unstaged tracked files", () => {
+  const cwd = repository();
+  try {
+    writeFileSync(join(cwd, "shared.txt"), "modified\n");
+    writeFileSync(join(cwd, "README.md"), "new\n");
+    assert.deepEqual(changedPaths(cwd), ["README.md", "shared.txt"]);
+    assert.ok(snapshotArtifact(cwd, changedPaths(cwd)));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("artifact snapshots include untracked content and exclude unrelated dirty files", () => {

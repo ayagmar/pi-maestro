@@ -7,6 +7,11 @@ function pathInWriteScope(path: string, writePaths: string[]): boolean {
   );
 }
 
+export function pathsOutsideWriteScope(task: Task, attempt: Attempt): string[] {
+  if (!task.writePaths) return [];
+  return attempt.touchedFiles.filter((path) => !pathInWriteScope(path, task.writePaths ?? []));
+}
+
 export function artifactFindings(task: Task, attempt: Attempt): Task["findings"] {
   const findings: NonNullable<Task["findings"]> = [];
   const add = (fingerprint: string, message: string) => {
@@ -22,10 +27,6 @@ export function artifactFindings(task: Task, attempt: Attempt): Task["findings"]
   const paths = attempt.touchedFiles;
 
   if (task.writePaths) {
-    const outside = paths.filter((path) => !pathInWriteScope(path, task.writePaths ?? []));
-    if (outside.length > 0) {
-      add("scope-violation", `Changed paths outside writePaths: ${outside.join(", ")}`);
-    }
     if (task.writePaths.length > 0 && paths.length === 0) {
       add("empty-artifact", "Expected file work produced no attributable Git changes.");
     }
