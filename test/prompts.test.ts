@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  accountPromptContext,
   buildExecutorPrompt,
   buildOrchestratorBriefing,
   buildReviewPrompt,
   buildSupervisorBriefing,
   MAX_INJECTED_CONTEXT_LENGTH,
+  MODEL_PROMPT_BUDGET,
   parseVerdict,
 } from "../src/prompts.js";
 import { type Task } from "../src/types.js";
@@ -50,7 +52,7 @@ test("dependency reports preserve boundary values and truncate oversized values"
   const prompt = buildExecutorPrompt(makeTask(), [{ id: "T0", title: "Setup", report }]);
   const injected = injectedSection(prompt, prefix);
   assert.equal(injected.length, MAX_INJECTED_CONTEXT_LENGTH);
-  assert.match(injected, /\[\.\.\. injected context truncated \.\.\.\]$/);
+  assert.match(injected, /\[\.\.\. lower-priority context omitted;.*\]$/);
 });
 
 test("review notes are bounded in executor retry and review prompts", () => {
@@ -62,8 +64,7 @@ test("review notes are bounded in executor retry and review prompts", () => {
     },
     {
       build: (reviewNotes: string) => buildReviewPrompt(makeTask({ reviewNotes }), "done"),
-      prefix:
-        "## Previous review findings\nAn earlier attempt was rejected for these reasons. Verify each one was addressed:\n",
+      prefix: "## Previous review findings\nExplicitly verify every prior finding:\n",
     },
   ];
 
@@ -76,7 +77,47 @@ test("review notes are bounded in executor retry and review prompts", () => {
     const prompt = build("r".repeat(MAX_INJECTED_CONTEXT_LENGTH + 1));
     const injected = injectedSection(prompt, prefix);
     assert.equal(injected.length, MAX_INJECTED_CONTEXT_LENGTH);
-    assert.match(injected, /\[\.\.\. injected context truncated \.\.\.\]$/);
+    assert.match(injected, /\[\.\.\. lower-priority context omitted;.*\]$/);
+  }
+});
+
+test("large prompts retain criteria and blockers within the deterministic budget", () => {
+  const task = makeTask({
+    brief: "b".repeat(20_000),
+    successCriteria: Array.from(
+      { length: 12 },
+      (_, index) => `criterion-${index} ${"c".repeat(400)}`
+    ),
+    findings: Array.from({ length: 8 }, (_, index) => ({
+      fingerprint: `finding-${index}`,
+      message: `blocker-${index} ${"x".repeat(450)}`,
+      status: "open" as const,
+      firstAttempt: 1,
+      lastAttempt: 1,
+    })),
+  });
+  const dependencies = Array.from({ length: 8 }, (_, index) => ({
+    id: `D${index}`,
+    title: "Dependency",
+    report: "d".repeat(10_000),
+  }));
+  const prompt = buildExecutorPrompt(task, dependencies);
+  const accounting = accountPromptContext(prompt);
+
+  assert.ok(accounting.characters < MODEL_PROMPT_BUDGET);
+  assert.ok(accounting.sections.some((section) => section.name === "Success criteria"));
+  for (let index = 0; index < 12; index += 1)
+    assert.match(prompt, new RegExp(`criterion-${index}`));
+  for (let index = 0; index < 8; index += 1) assert.match(prompt, new RegExp(`finding-${index}`));
+});
+
+test("explicit success criteria appear once in executor and reviewer prompts", () => {
+  const task = makeTask({
+    successCriteria: ["Returns the expected value", "Passes focused tests"],
+  });
+  for (const prompt of [buildExecutorPrompt(task, []), buildReviewPrompt(task, "Done.")]) {
+    assert.equal(prompt.match(/Returns the expected value/g)?.length, 1);
+    assert.equal(prompt.match(/Passes focused tests/g)?.length, 1);
   }
 });
 
@@ -137,11 +178,11 @@ test("review prompt includes only a bounded diff when the attempt has one", () =
     diff: "d".repeat(MAX_INJECTED_CONTEXT_LENGTH + 1),
   };
   const prompt = buildReviewPrompt(makeTask({ attempts: [attempt] }), "Done.");
-  const diff = injectedSection(prompt, "## Diff of the attempt\n");
+  const diff = injectedSection(prompt, "## Bounded display diff\n");
 
-  assert.equal(diff.length, MAX_INJECTED_CONTEXT_LENGTH);
-  assert.match(diff, /\[\.\.\. injected context truncated \.\.\.\]$/);
-  assert.doesNotMatch(buildReviewPrompt(makeTask(), "Done."), /## Diff of the attempt/);
+  assert.equal(diff.length, 8_000);
+  assert.match(diff, /\[\.\.\. lower-priority context omitted;.*\]$/);
+  assert.doesNotMatch(buildReviewPrompt(makeTask(), "Done."), /## Bounded display diff/);
 });
 
 test("parseVerdict handles approve, request changes, and missing verdicts", () => {
@@ -247,8 +288,8 @@ test("orchestrator briefing embeds the goal, tier guidance, and workflow tools",
   assert.match(briefing, /Migrate to Spring Boot 4/);
   assert.match(briefing, /maestro_plan/);
   assert.match(briefing, /maestro_drive/);
-  assert.match(briefing, /maestro_run/);
-  assert.match(briefing, /maestro_review/);
+  assert.match(briefing, /maestro_update/);
+  assert.doesNotMatch(briefing, /maestro_(?:run|review|status)/);
   assert.match(briefing, /You do not implement tasks yourself/);
   assert.match(briefing, /fails twice with the same root cause/);
 });

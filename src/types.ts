@@ -16,6 +16,7 @@ export interface Usage {
 
 export type FailureKind =
   | "provider_failure"
+  | "stalled"
   | "executor_failure"
   | "reviewer_rejection"
   | "reviewer_failure"
@@ -39,6 +40,9 @@ export interface ReviewLaunch {
   failureReason?: FailureReason;
   usage: Usage;
   finalReport?: string;
+  promptCharacters?: number;
+  promptApproximateTokens?: number;
+  promptSections?: Array<{ name: string; characters: number; omitted: boolean }>;
 }
 
 export interface Attempt {
@@ -65,6 +69,10 @@ export interface Attempt {
   providerFailure?: boolean;
   usage: Usage;
   finalReport?: string;
+  /** Compact deterministic accounting for the executor prompt. */
+  promptCharacters?: number;
+  promptApproximateTokens?: number;
+  promptSections?: Array<{ name: string; characters: number; omitted: boolean }>;
   /** Bounded git diff captured after this executor completed successfully. */
   diff?: string;
   /** Isolated checkout used by this executor and its reviewer. */
@@ -87,6 +95,32 @@ export interface Attempt {
   touchedFiles: string[];
 }
 
+export interface DispatchClaim {
+  id: string;
+  kind: "execute" | "review";
+  claimedAt: number;
+  /** Deadline after which crash recovery may atomically reclaim the dispatch. */
+  expiresAt?: number;
+}
+
+export interface ReviewFinding {
+  fingerprint: string;
+  message: string;
+  status: "open" | "verified";
+  firstAttempt: number;
+  lastAttempt: number;
+}
+
+export interface ArtifactProvenance {
+  candidateTree: string;
+  capturedAt: number;
+  reviewedAt?: number;
+  integratedCommit?: string;
+  integratedTree?: string;
+  verifiedAt?: number;
+  verificationProfile?: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -96,9 +130,27 @@ export interface Task {
   tier: string;
   status: TaskStatus;
   dependsOn: string[];
+  /** Declared repository-relative write scope. Optional only for legacy boards. */
+  writePaths?: string[];
+  /** Explicit bounded outcomes required for newly planned executable tasks. */
+  successCriteria?: string[];
+  /** Trusted configured verification profile selected for this task. */
+  verificationProfile?: string;
+  findings?: ReviewFinding[];
   reviewNotes?: string;
+  /** Provenance for acceptance; automated approval is recorded only after integration. */
+  approvalKind?: "reviewed" | "manual";
+  /** Legacy bounded-diff hash. Loadable for migration, but never authoritative. */
+  reviewedPatchHash?: string;
+  integratedCommit?: string;
+  verificationSummary?: string;
+  provenance?: ArtifactProvenance;
   /** Consecutive genuine reviewer rejections; the autonomous drive escalates at the limit. */
   reviewRejections?: number;
+  /** Exclusive persisted ownership of an executor or reviewer dispatch. */
+  dispatchClaim?: DispatchClaim;
+  /** Bounded diagnostic recorded when dispatch recovery skips unsafe state. */
+  dispatchNote?: string;
   attempts: Attempt[];
   createdAt: number;
   updatedAt: number;
@@ -123,6 +175,8 @@ export interface PlanValidation {
   /** Each cycle repeats its first task ID at the end, for example T1 → T2 → T1. */
   dependencyCycles: string[][];
   invalidTiers: Array<{ taskId: string; tier: string }>;
+  writePathOverlaps?: Array<{ leftTaskId: string; rightTaskId: string; path: string }>;
+  contractErrors?: Array<{ taskId: string; message: string }>;
 }
 
 export interface PlanTaskEdits {
@@ -130,6 +184,9 @@ export interface PlanTaskEdits {
   brief?: string;
   tier?: string;
   dependsOn?: string[];
+  writePaths?: string[];
+  successCriteria?: string[];
+  verificationProfile?: string;
   cancelled?: boolean;
 }
 
@@ -149,6 +206,18 @@ export interface PausedDriveState {
   ownerSession?: string;
 }
 
+export interface DriveDecision {
+  id: string;
+  ownerSession?: string;
+  kind: string;
+  taskIds: string[];
+  evidence: string;
+  allowedInterventions: Array<"handoff" | "abort" | "steer">;
+  createdAt: number;
+  deliveredAt?: number;
+  resolution?: { intervention: "handoff" | "abort" | "steer"; resolvedAt: number };
+}
+
 export interface Board {
   version: 1;
   revision?: number;
@@ -161,6 +230,8 @@ export interface Board {
   planPending?: boolean;
   /** A safely paused autonomous drive that can be resumed from fresh board state. */
   pausedDrive?: PausedDriveState;
+  /** Current bounded drive completion or decision awaiting owner handling. */
+  activeDecision?: DriveDecision;
   tasks: Task[];
 }
 
@@ -175,6 +246,11 @@ export interface TierConfig {
   tools?: string;
 }
 
+export interface VerificationProfile {
+  command: string;
+  timeoutSeconds: number;
+}
+
 export interface MaestroConfig {
   maxParallel: number;
   /** Require explicit user approval after planning before executors can start. */
@@ -187,10 +263,27 @@ export interface MaestroConfig {
   maxCostPerTask: number;
   /** Stop starting executor batches once total board cost (USD) exceeds this. 0 disables the cap. */
   maxRunCost: number;
-  /** How long batch tools and maestro_status wait (seconds) for running executors before returning progress. 0 disables waiting. */
+  /** How long the human status command waits (seconds) for running executors before returning progress. 0 disables waiting. */
   statusWaitSeconds: number;
+  /** Event detail mirrored to per-run JSONL logs. */
+  logEvents?: "compact" | "full";
+  /** Maximum bytes mirrored per run. 0 disables the limit. */
+  maxLogBytesPerRun?: number;
+  /** Seconds without any executor event before watchdog steering. */
+  watchdogIdleSeconds?: number;
+  /** Turns without meaningful progress before one automatic steer. */
+  watchdogWarningTurns?: number;
+  /** Additional no-progress turns after steering before the attempt is stalled. */
+  watchdogTerminationTurns?: number;
+  /** Context usage ratio that queues a safe supervisor handoff; 0 disables it. */
+  handoffContextRatio?: number;
+  /** Clear completed tasks from the live board after every selected task is approved. */
+  cleanupCompletedTasks?: boolean;
   /** Commit each task's work on approval (one conventional commit per task). */
   autoCommit: boolean;
+  /** Trusted user/project commands; model task text is never executed. */
+  verificationProfiles?: Record<string, VerificationProfile>;
+  defaultVerificationProfile?: string;
   /** Named tiers. "review" is used for adversarial review runs. */
   tiers: Record<string, TierConfig>;
 }

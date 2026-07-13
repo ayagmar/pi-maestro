@@ -2,6 +2,8 @@ import { type Theme } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { blockedReason, findTask, groupTasks, taskGroup } from "./board.js";
 import { boardUsage, STATUS_GLYPHS, STATUS_LABELS, taskUsage } from "./format.js";
+import { projectStatus } from "./status.js";
+import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
 import { TranscriptTail } from "./transcript.js";
 import { type Attempt, type Board, type Task, type TaskGroup, type TaskStatus } from "./types.js";
 
@@ -86,6 +88,7 @@ export class Dashboard {
   private scrollUp = 0;
   private hideDone = false;
   private filter: DashboardFilter = "all";
+  private detailView: "transcript" | "timeline" = "transcript";
   private steerOption = 0;
   private steerInput = new Input();
   private tails = new Map<string, TranscriptTail>();
@@ -188,6 +191,9 @@ export class Dashboard {
       const current = FILTERS.indexOf(this.filter);
       this.filter = FILTERS[(current + 1) % FILTERS.length] ?? "all";
       this.selected = 0;
+      this.scrollUp = 0;
+    } else if (data === "t") {
+      this.detailView = this.detailView === "transcript" ? "timeline" : "transcript";
       this.scrollUp = 0;
     } else if (matchesKey(data, "pageUp")) {
       this.scrollUp += 10;
@@ -293,7 +299,11 @@ export class Dashboard {
 
     const lines: string[] = [];
     const usage = boardUsage(board.tasks);
-    const running = board.tasks.filter((t) => this.actions.isLive(t.id)).length;
+    const status = projectStatus(
+      board,
+      board.tasks.filter((task) => this.actions.isLive(task.id)).map((task) => task.id)
+    );
+    const running = status.running;
     const hiddenCount = board.tasks.length - visible.length;
     const doneFilterPart = this.hideDone ? ` · hiding ${hiddenCount} done` : "";
     const statusFilterPart = this.filter === "all" ? "" : ` · filter: ${GROUP_LABELS[this.filter]}`;
@@ -302,7 +312,7 @@ export class Dashboard {
       board.tasks.every((task) => task.status === "approved" || task.status === "cancelled")
         ? " · board complete"
         : "";
-    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${running} running · $${usage.cost.toFixed(4)}${completed}${statusFilterPart}${doneFilterPart} `;
+    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${status.code} · ${running} running · $${usage.cost.toFixed(4)}${completed}${statusFilterPart}${doneFilterPart} `;
     lines.push(theme.fg("accent", truncateToWidth(title + "─".repeat(width), width)));
 
     for (let i = 0; i < bodyHeight; i++) {
@@ -380,17 +390,22 @@ export class Dashboard {
     const maxSummaryHeight = Math.min(11, Math.max(1, Math.ceil(height / 2)));
     const summary = this.renderSelectedTask(task, width).slice(0, maxSummaryHeight);
     const transcriptHeight = Math.max(0, height - summary.length);
-    const tail = this.tailFor(task);
+    const tail = this.detailView === "transcript" ? this.tailFor(task) : undefined;
     tail?.poll();
 
     const wrapped: string[] = [];
-    if (!tail) {
+    if (this.detailView === "timeline") {
+      const timeline = formatRunTimeline(deriveRunTimeline(this.actions.getBoard(), task.id));
+      for (const raw of timeline.split("\n")) {
+        for (const line of wrapText(raw, width)) wrapped.push(theme.fg("toolOutput", line));
+      }
+    } else if (!tail) {
       wrapped.push(theme.fg("muted", "No attempt yet — task has not run."));
     } else if (tail.items.length === 0) {
       wrapped.push(theme.fg("muted", "Waiting for executor output…"));
     }
 
-    for (const item of tail?.items ?? []) {
+    for (const item of this.detailView === "transcript" ? (tail?.items ?? []) : []) {
       if (item.kind === "tool") {
         wrapped.push(
           theme.fg("muted", "→ ") +
@@ -568,6 +583,7 @@ export class Dashboard {
     const groupFilter = this.filter === "all" ? "all" : GROUP_LABELS[this.filter];
     parts.push(
       `g group:${groupFilter}`,
+      `t ${this.detailView === "transcript" ? "timeline" : "transcript"}`,
       this.hideDone ? "f show done" : "f hide done",
       "esc close"
     );

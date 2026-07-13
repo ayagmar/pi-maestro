@@ -16,10 +16,10 @@ you ──▶ orchestrator (SOTA model, your session)
               ▼                         │ .pi/maestro/board.json   │
         task board  ◀──────────────────▶│ logs/  history.jsonl       │
               │ plan approval (optional) └────────────────────────────┘
-              │ maestro_run or maestro_drive
+              │ /maestro run or maestro_drive
               ▼
    executors in parallel (cheap models, fresh context each)
-              │ maestro_review (or drive continues automatically)
+              │ /maestro review (or drive continues automatically)
               ▼
    adversarial reviewers (default config: read-only tools, fresh context)
               │ approve / request changes
@@ -32,8 +32,7 @@ you ──▶ orchestrator (SOTA model, your session)
 - **Lower cost per run.** The orchestrator (expensive model) only plans, dispatches, and reads
   short reports. Executors run on cheaper models with per-tier thinking levels.
 - **No context rot.** Every executor and reviewer starts with a fresh context containing only its
-  self-contained brief (plus approved dependency reports). The orchestrator pulses
-  `maestro_status` instead of ingesting transcripts.
+  self-contained brief (plus approved dependency reports). Routine progress stays in the dashboard; the orchestrator receives only bounded decision and completion messages.
 - **Independent review by default.** The automated path sends every task through an adversarial
   review with read-only tools before approval. Rejected work is retried with the reviewer's notes
   injected into the next attempt. Manual approval skips that review, and configuring writable
@@ -50,7 +49,13 @@ pi install git:github.com/ayagmar/pi-maestro
 pi install /path/to/pi-maestro
 ```
 
-## Usage
+## Five-minute start
+
+1. Install the extension with the command above.
+2. Run `/maestro start <goal>` in the repository.
+3. Let the orchestrator create tasks with explicit success criteria and write scopes.
+4. If `planGate` is enabled, inspect and approve with `/maestro plan`.
+5. Start or resume with `/maestro drive`; use `/maestro timeline` for model-free history.
 
 ### Start an orchestrated run
 
@@ -63,12 +68,11 @@ with these tools:
 
 | Tool | What it does |
 |------|--------------|
-| `maestro_plan` | Creates tasks with self-contained briefs, a complexity tier, and optional dependencies |
-| `maestro_run` | Runs one batch of runnable tasks in parallel fresh-context executors (respects dependencies, `maxParallel`, plan approval, and run budget) |
-| `maestro_review` | Spawns adversarial fresh-context reviewers that approve or request changes (reviewer tools are read-only by default) |
-| `maestro_drive` | Starts a background run/review/retry loop and returns immediately |
-| `maestro_update` | Refines a task's title, brief, or tier, or cancels it |
-| `maestro_status` | Waits for the next progress pulse, then reports statuses and live executor activity |
+| `maestro_plan` | Creates tasks with self-contained briefs, complexity tiers, dependencies, and bounded write scopes |
+| `maestro_update` | Refines or cancels planned work |
+| `maestro_drive` | Starts, inspects, or intervenes in the state-aware background run/review/retry loop |
+
+The human-only `/maestro run`, `/maestro review`, and `/maestro status` commands remain available for manual recovery and inspection; they are not model-facing tools.
 
 You can also call these tools yourself in plain prompts ("plan these three tasks…"), or manage the
 board manually — the workflow is just tools plus a JSON file. If you already have a plan (design
@@ -85,9 +89,7 @@ board, so the planning context is disposable once the plan exists.
 `/maestro handoff` starts a fresh session where a supervising orchestrator takes over from
 the board alone: goal + task list + tier guidance, none of the planning tokens. It drives
 run/review/retry and is instructed not to re-plan unless a task keeps failing. The planning
-session stays on disk (`/resume` to revisit). The orchestrator briefing suggests the handoff
-itself when planning required heavy investigation. Once per orchestrator session, maestro also
-shows a handoff nudge when context usage reaches 65%; executor sessions do not receive it.
+session stays on disk (`/resume` to revisit). The orchestrator briefing suggests the handoff itself when planning required heavy investigation. At the configured context threshold, Maestro queues the existing handoff command once it reaches a safe boundary; executor sessions do not receive it.
 
 Recommended flow for large goals:
 
@@ -100,24 +102,24 @@ Recommended flow for large goals:
 For small goals, skip the handoff — one session is fine. You can also start the autonomous loop
 from the current session with `/maestro drive` (or let the model call `maestro_drive`). It runs
 independent work in parallel, reviews completed attempts, carries review feedback into retries,
-and waits for approved dependencies before advancing them. Tool-driven orchestrators poll
-`maestro_status` at the configured cadence while it runs. Each pulse reports what advanced since the
-last pulse, live executor turns/cost/activity, any failures, and — once the drive settles at a
-decision point — the recommended tool actions to choose among. The orchestrator narrates that
-progress to you and then waits for the next pulse. This keeps the interactive session observable and
-avoids long provider-cache-idle gaps. `/maestro pause` requests a safe stop:
+and waits for approved dependencies before advancing them. Routine progress remains in the dashboard. Completion or a decision point sends one bounded wakeup to the orchestrator; `maestro_drive` inspect returns bounded live evidence on demand. `/maestro pause` requests a safe stop:
 active executors finish, but no new executor batch starts. `/maestro resume` later continues the same
 task scope from the board's fresh persisted state; `/maestro abort` instead aborts active executors.
 The loop stops when work is complete or when a pause, plan gate, run budget, attempt cap, provider
 block, repeated-rejection escalation, abort, blocked state, error, or its 20-round safety limit
 requires intervention. When the reviewer rejects the same task twice in a row, the drive stops with
 an escalation notice (evidence, current tier, and a recommended next tier or rewrite/split/cancel)
-instead of blindly retrying; changing the brief or tier — or an explicit `maestro_run` — resets the
+instead of blindly retrying; changing the brief or tier — or an explicit `/maestro run` — resets the
 counter so a chosen intervention can continue via `/maestro resume`. At each decision point the
 orchestrator chooses autonomously among the configured fallback/resume, `maestro_update`
 (brief/tier/dependencies), a `maestro_plan` split, cancellation, or asking you when scope or cost
 judgment is required; it never blindly retries a blocked provider or raises the project
-`maxAttempts` to force another attempt. Settled completion and intervention summaries stay on the
+`maxAttempts` to force another attempt. At an attempt cap, changing the capped task's tier or brief
+cannot make it runnable because its consumed attempts remain. Create a narrowly scoped successor
+whose title and brief identify the capped task, keep the capped predecessor visible, and replace its
+id in every downstream dependency while preserving unrelated dependencies. Then start
+`maestro_drive` with an explicit `taskIds` list containing the successor and every rewired dependent
+while excluding the capped predecessor. Settled completion and intervention summaries stay on the
 next pulse until the owning session observes them once, so a stray status call from another session
 cannot discard them. An optional task-id list
 limits the drive to those tasks. Session switches are blocked while a drive or executor is active;
@@ -125,8 +127,8 @@ pause and wait (or abort) before switching.
 
 With `planGate` enabled, use an explicit plan-approve-drive flow. The gate validates dependency
 references, dependency cycles, and configured tiers before any executor or reviewer starts.
-`/maestro plan` opens each pending task's title, full brief, tier, dependencies, and cancellation
-state for draft editing. Choose **Save changes** to validate and persist the draft, or **Cancel
+`/maestro plan` opens each pending task's title, full brief, tier, dependencies, success criteria,
+verification profile, and cancellation state for draft editing. Choose **Save changes** to validate and persist the draft, or **Cancel
 editing**/Esc to discard it. Invalid plans remain pending and unchanged until the listed task ids,
 references, cycles, or tiers are fixed. The same fields remain available through `maestro_update`.
 
@@ -166,15 +168,17 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
     failed, and cancelled. The selected-task pane lists unresolved blockers, failure/review notes,
     recent attempts, model/provider, turns, cost, and changed files.
   - `f` hide/show settled tasks (approved and cancelled) to focus on remaining work
+  - `t` switch the selected pane between the live transcript and derived task timeline
   - `enter` open the executor's full session in your TUI
 - **Failure and retry actions**: failed and cancelled tasks can be retried by explicitly naming
-  them in `maestro_run`; changes-requested tasks carry reviewer notes into the next attempt.
+  them in `/maestro run`; changes-requested tasks carry reviewer notes into the next attempt.
   Rewrite a repeatedly failing brief with `maestro_update`, or use the dashboard's reopen action.
   Maestro tracks two different counts per task: **launches** (every raw executor process start,
   including provider failures and model fallbacks) and **attempts** (launches that consumed the
   `maxAttempts` cap). A provider failure before useful work — an auth/rate-limit/quota error
   before any model turn — is a launch but not an attempt, so it never counts against
   `maxAttempts`; only launches that produced real work count.
+- **`/maestro simulate [taskIds]`**: deterministic, read-only preview of dependency waves, concurrency, caps, and blockers. It assumes every run/review succeeds; it does not predict quality, cost, or spawn children.
 - **`/maestro list`**: compact task picker (report view, status overrides, open session).
 - **`/maestro open T3`**: switches your TUI into that executor's persisted session so you can
   inspect exactly what it did — or continue working in it by hand. `/maestro back` returns to the
@@ -194,18 +198,18 @@ and deep SWE leaderboard (pass@1 / avg cost per run):
 
 | Preset | trivial | standard | complex | review | Parallel / attempts / attempt cap / run cap | Rationale |
 |--------|---------|----------|---------|--------|----------------------------------------------|-----------|
-| `inherit` (default) | pi default · low | pi default · medium | pi default · high | pi default · high | 3 / 3 / off / off | Works with any provider, zero setup |
-| `openai-balanced` | terra · high | sol · medium | sol · high | sol · medium | 3 / 3 / off / off | Best cost/quality knee per tier (sol-high: 69% @ $3.47) |
-| `openai-budget` | luna · high | terra · high | terra · xhigh | terra · xhigh | 4 / 3 / $2 / off | Cheapest sensible run (terra-xhigh: 60% @ $2.13) |
-| `openai-quality` | sol · medium | sol · high | sol · xhigh | sol · high | 3 / 4 / off / off | Frontier on every tier (sol-xhigh: 71% @ $4.70) |
-| `anthropic-balanced` | sonnet-5 · low | sonnet-5 · medium | opus-4-8 · high | fable-5 · high | 3 / 3 / off / off | Claude capability ladder; frontier model on read-only review |
-| `anthropic-budget` | haiku-4-5 · medium | sonnet-5 · medium | sonnet-5 · high | sonnet-5 · high | 4 / 3 / $2 / off | Cheapest sensible Claude run |
-| `anthropic-quality` | opus-4-8 · medium | opus-4-8 · high | fable-5 · high | fable-5 · high | 3 / 4 / off / off | Frontier Claude on every tier |
+| `inherit` (default) | pi default · low | pi default · medium | pi default · high | pi default · high | 3 / 3 / $5 / $25 | Works with any provider, zero setup |
+| `openai-balanced` | terra · high | sol · medium | sol · high | sol · medium | 3 / 3 / $5 / $25 | Best cost/quality knee per tier (sol-high: 69% @ $3.47) |
+| `openai-budget` | luna · high | terra · high | terra · xhigh | terra · xhigh | 4 / 3 / $2 / $25 | Cheapest sensible run (terra-xhigh: 60% @ $2.13) |
+| `openai-quality` | sol · medium | sol · high | sol · xhigh | sol · high | 3 / 4 / $5 / $25 | Frontier on every tier (sol-xhigh: 71% @ $4.70) |
+| `anthropic-balanced` | sonnet-5 · low | sonnet-5 · medium | opus-4-8 · high | fable-5 · high | 3 / 3 / $5 / $25 | Claude capability ladder; frontier model on read-only review |
+| `anthropic-budget` | haiku-4-5 · medium | sonnet-5 · medium | sonnet-5 · high | sonnet-5 · high | 4 / 3 / $2 / $25 | Cheapest sensible Claude run |
+| `anthropic-quality` | opus-4-8 · medium | opus-4-8 · high | fable-5 · high | fable-5 · high | 3 / 4 / $5 / $25 | Frontier Claude on every tier |
 
 Preset models are provider-qualified (`openai-codex/gpt-5.6-sol`, `anthropic/claude-sonnet-5`),
 so executors always run on that provider and fail fast with a `/login` hint if it is not authed.
 
-All presets set `planGate` and `useWorktrees` to `false`; all leave `maxRunCost` off.
+All presets set `planGate` and `useWorktrees` to `false`; all set `maxRunCost` to $25.
 
 Config files are plain JSON if you prefer editing by hand — user scope
 `~/.pi/agent/maestro.json`, project scope `.pi/maestro.json`. Resolution is defaults, then user,
@@ -237,12 +241,11 @@ whole tier object replacing the earlier object of the same name:
 - `maxParallel` — maximum executor or reviewer processes run concurrently (default 3).
   Dependencies can reduce the number that are runnable at once.
 - `planGate` — when enabled, every non-empty `maestro_plan` marks the board pending and both
-  `maestro_run` and `maestro_drive` refuse to start executors. `/maestro plan` lists task metadata,
+  `/maestro run` and `maestro_drive` refuse to start executors. `/maestro plan` lists task metadata,
   can display a full brief, and offers **Approve plan** or **Reject plan**. Approval opens the gate;
   rejection archives the board and, after confirmation, clears it (default false).
-- `useWorktrees` — when enabled, a single `maestro_run` dispatch with more than one runnable task
-  gives every task in that batch an isolated git worktree and branch. A one-task dispatch stays in
-  the current checkout. Reviewers use the executor's worktree. Approval commits its changes,
+- `useWorktrees` — when enabled, every runnable task, including a one-task dispatch, gets an
+  isolated git worktree and branch. Reviewers use the executor's worktree. Approval commits its changes,
   serializes merges into the original tree, then deletes the worktree and branch. A merge conflict
   is aborted, changes the task to `changes_requested`, and retains the checkout, branch, and
   recovery notes; the next retry reuses that worktree (default false).
@@ -252,18 +255,21 @@ whole tier object replacing the earlier object of the same name:
   commit only the files the executor touched; worktree runs use the message for the merge
   commit. A failed commit (no repo, hooks) never blocks the approval.
 - `maxAttempts` — hard cap on execute attempts per task (default 3), counting only launches that
-  produced real work (see raw launches vs. attempts above). Stops orchestrator retry loops; a
-  capped task fails with a hint to rewrite its brief via `maestro_update`. Never raised
-  automatically as a recovery action — only an explicit edit in `/maestro config` changes it.
-- `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default 0 =
-  off). Safety net against a stuck executor burning tokens unattended.
-- `statusWaitSeconds` — how long `maestro_status` waits before returning a live progress pulse
+  produced real work (see raw launches vs. attempts above). Stops orchestrator retry loops. A capped
+  task cannot be made runnable by changing its brief or tier because its consumed attempts remain;
+  recover by creating a successor, rewiring downstream dependencies, and starting a scoped
+  `maestro_drive` whose `taskIds` include the successor and rewired dependents but exclude the capped
+  predecessor. Never raised automatically as a recovery action — only an explicit edit in
+  `/maestro config` changes it.
+- `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default $5;
+  0 disables the cap). Safety net against a stuck executor burning tokens unattended.
+- `statusWaitSeconds` — how long `/maestro status` waits before returning a live progress pulse
   while a background drive is active (default 60, maximum 240). Pass `waitSeconds: 0` for an
   immediate snapshot. Short pulses let the orchestrator narrate progress and keep its provider
   prompt cache warm without enabling long cache retention.
 - `maxRunCost` — gate new executor batches once total cost recorded across the board exceeds this
-  USD amount (default 0 = off). The settings editor offers off, $5, $10, $25, and $50. A blocked
-  `maestro_run` returns the budget warning on each otherwise-runnable task; `maestro_drive` stops
+  USD amount (default $25; 0 disables the cap). The settings editor offers off, $5, $10, $25, and $50. A blocked
+  `/maestro run` returns the budget warning on each otherwise-runnable task; `maestro_drive` stops
   with the same warning. Already-running executors are not aborted, reviews can still run, and
   `maxCostPerTask` continues to enforce its separate per-attempt cap. Because gating happens before
   a batch, its concurrent executors can take the recorded total beyond the cap before the next gate.
@@ -289,6 +295,14 @@ Before an execution dispatch, maestro resolves the primary and fallbacks for eve
 that batch and fails with an actionable message if none are available. Before review, it similarly
 checks the review tier's primary model. This happens before spawning executors.
 
+### Safety and reconciliation
+
+When worktrees are enabled, every attempt—including a single task—runs in an isolated checkout. Git status is authoritative for staged, unstaged, and untracked paths; an empty path list never broadens a commit. New executable tasks require 1–12 explicit `successCriteria` plus bounded `writePaths`; read-only/no-file investigations may use an empty scope. Declared paths prevent independent overlapping plans and make out-of-scope changes visible. Scoped drives reject omitted unresolved dependencies instead of silently expanding scope. Review feedback is retained as a bounded, deduplicated finding checklist. Reviewed approvals record an authoritative immutable Git tree plus separate review, integration-commit, and trusted-verification provenance. Bounded diffs are presentation context only; dashboard acceptance records `approvalKind: "manual"` instead.
+
+Trusted verification commands are arbitrary local code and may be defined only in the operator-owned user config (`~/.pi/agent/maestro.json`) with `verificationProfiles` entries shaped as `{ "command": "pnpm test", "timeoutSeconds": 300 }`. Repository `.pi/maestro.json` may select a known user profile with `defaultVerificationProfile`, but repository-defined commands and unknown selections are ignored. Task briefs and model instructions are never executed. Verification runs in a dedicated process group on Unix; timeout or abort sends TERM followed by KILL, bounds captured output, and logs under `.pi/maestro/verification/`. Candidate mutation invalidates review. Failed post-integration verification retains the task worktree and branch as recovery evidence; successful approval removes them only after provenance is persisted.
+
+The watchdog steers once after `watchdogIdleSeconds` of silence (default 120) or `watchdogWarningTurns` without meaningful progress (default 12), then classifies continued inactivity as `stalled` after `watchdogTerminationTurns` (default 4 additional turns). `handoffContextRatio` controls automatic safe handoff. Model prompts use named, priority-bounded sections: success criteria and open blockers are retained before dependency conclusions, display diffs, and historical detail. Repeated dependency payloads share a fixed budget, and `/maestro costs` reports compact executor-context character/token estimates. Logs use `logEvents` (`compact` by default) and `maxLogBytesPerRun`; zero bytes means unlimited. New defaults cap a task at $5 and a drive at $25 without overriding explicit user configuration. `cleanupCompletedTasks` defaults to `true`: after every board task is approved or cancelled, Maestro archives the final board and clears tasks from the live board. Set it to `false` to retain completed tasks live. `/maestro reconcile` separately reports manual acceptance and missing authoritative-tree, review, integration, verification, or recovery-worktree evidence without rewriting state.
+
 `/maestro doctor` prints a non-secret readiness report: user/project config files and precedence,
 effective limits and tier settings, authenticated model and fallback resolution, git readiness, and
 managed worktrees classified as active, recoverable, retained after a merge conflict, orphaned, or
@@ -307,6 +321,8 @@ and recoverable worktrees remain untouched. In non-interactive mode, add `confir
 /maestro resume           continue the paused task scope from fresh board state
 /maestro abort            abort an active drive/executors, or discard a paused drive
 /maestro plan             inspect and approve or reject a plan awaiting approval
+/maestro plan export <file>  write a versioned plan-only JSON file; never overwrites
+/maestro plan import <file>  validate before replacing; non-empty boards require archive confirmation
 /maestro board            full-screen live dashboard (aliases: dash, dashboard; also ctrl+alt+b)
 /maestro list             compact task picker
 /maestro open <taskId>    switch into an executor's session
@@ -315,6 +331,9 @@ and recoverable worktrees remain untouched. In non-interactive mode, add `confir
 /maestro config project   interactive settings editor (repo scope)
 /maestro config show      print the resolved defaults + user + project configuration
 /maestro costs            show attempts, total/average billed cost, models, and providers
+/maestro reconcile        report board/artifact provenance inconsistencies
+/maestro timeline [id]    show bounded chronological evidence without waking a model
+/maestro timeline archive <file> [id]  inspect an archived board without restoring it
 /maestro doctor           diagnose config, models, authentication, git, and worktrees
 /maestro doctor cleanup   confirm removal of rechecked stale/orphaned worktrees
 /maestro history [n]      show the last n audited status changes (default 20)
@@ -324,9 +343,21 @@ and recoverable worktrees remain untouched. In non-interactive mode, add `confir
 
 Completed drives print a compact outcome summary with approved, failed, cancelled, and blocked
 counts, rounds and attempts, total cost, average cost across billed attempts, and the non-secret
-model/provider identifiers recorded by executors and reviewers. `maestro_status` includes the same
-cost rollup, and `/maestro costs` prints it directly without task details. Zero-cost startup/provider
+model/provider identifiers recorded by executors and reviewers. `/maestro costs` prints it directly
+without task details, including executor/reviewer context sizes, omission counts, and a reconciled
+cost breakdown. Zero-cost startup/provider
 failures count as attempts but are excluded from the meaningful average.
+
+## Guides
+
+- [Configuration reference](docs/configuration.md)
+- [Operations and recovery](docs/operations.md)
+- [Architecture and ownership](docs/architecture.md)
+- [Contributing](CONTRIBUTING.md)
+
+## Limitations and trust boundaries
+
+Maestro is not a sandbox, CI service, analytics database, or generic plugin system. Executors can edit files within the permissions of the local account. Verification profiles execute arbitrary operator-selected local commands; repository config cannot define those commands. Git worktrees and immutable objects provide attribution and recovery, not protection from malicious local code.
 
 ## How it stays deterministic
 
@@ -364,7 +395,7 @@ failures count as attempts but are excluded from the meaningful average.
   finishing in any order cannot clobber each other's status updates.
 - On pi exit, live executors are aborted (no orphan processes). On startup, tasks stuck in
   `running` from a crash are marked `failed` with a notice; retry them with
-  `maestro_run ["T3"]` — explicitly named failed/cancelled tasks are runnable again.
+  `maestro_drive({ action: "start", taskIds: ["T3"] })` — explicitly scoped failed/cancelled tasks are runnable again.
 - `/maestro replay [file]` refuses while executors are live and rechecks after the archive picker
   closes. With no file it lists valid archives newest first; `file` may be an archive filename or a
   path, but must resolve inside `.pi/maestro/archive/`. Maestro fully validates the archived board

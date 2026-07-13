@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,10 +14,12 @@ import {
   type TierConfig,
 } from "../src/types.js";
 import {
+  artifactFindings,
   driveBoard,
   executeTask,
   formatDriveSummary,
   reviewTask,
+  simulatePlan,
   type StartExecutor,
   sessionLabel,
   snapshot,
@@ -81,6 +83,130 @@ function boardWithTask(status: Task["status"] = "todo"): { board: Board; task: T
 const onUpdate = () => {};
 const trackRun = () => () => {};
 
+test("artifact gates reject scope, empty work, test deletion, config narrowing, and conflict markers", () => {
+  const { task } = boardWithTask("ready_for_review");
+  task.writePaths = ["src/**"];
+  const candidate = attempt("done");
+  candidate.index = 2;
+  candidate.touchedFiles = ["outside.ts", "root.test.ts"];
+  candidate.diff = [
+    "deleted file mode 100644",
+    "- testMatch: all",
+    "+ testMatch: narrow exclude",
+    "<<<<<<< HEAD",
+    "=======",
+    ">>>>>>> branch",
+  ].join("\n");
+
+  assert.deepEqual(
+    artifactFindings(task, candidate)?.map((finding) => finding.fingerprint),
+    ["scope-violation", "deleted-tests", "test-discovery", "conflict-markers"]
+  );
+
+  candidate.touchedFiles = [];
+  candidate.diff = "";
+  assert.deepEqual(
+    artifactFindings(task, candidate)?.map((finding) => finding.fingerprint),
+    ["empty-artifact"]
+  );
+});
+
+test("failed trusted candidate verification blocks reviewer launch", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-verification-gate-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    task.writePaths = ["src/file.ts"];
+    task.verificationProfile = "required";
+    const completed = attempt("done");
+    completed.touchedFiles = ["src/file.ts"];
+    completed.diff = "+change";
+    task.attempts.push(completed);
+    saveBoard(cwd, board);
+    let reviewerStarts = 0;
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      verificationProfiles: {
+        required: { command: `${process.execPath} -e "process.exit(2)"`, timeoutSeconds: 1 },
+      },
+      startExecutor: () => {
+        reviewerStarts += 1;
+        throw new Error("reviewer must not start");
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(reviewerStarts, 0);
+    assert.equal(result.status, "changes_requested");
+    assert.match(result.note ?? "", /Verification required failed/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("review ownership remains claimed through post-integration verification", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-review-ownership-"));
+  try {
+    execFileSync("git", ["init"], { cwd });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd });
+    writeFileSync(join(cwd, "file.txt"), "before\n");
+    execFileSync("git", ["add", "file.txt"], { cwd });
+    execFileSync("git", ["commit", "-m", "initial"], { cwd });
+
+    const { board, task } = boardWithTask("ready_for_review");
+    task.verificationProfile = "required";
+    const completed = attempt("done");
+    completed.touchedFiles = ["file.txt"];
+    completed.diff = "+after";
+    task.attempts.push(completed);
+    saveBoard(cwd, board);
+    writeFileSync(join(cwd, "file.txt"), "after\n");
+
+    const script = join(cwd, "verify.cjs");
+    writeFileSync(
+      script,
+      `const fs = require("node:fs");\nconst countFile = ${JSON.stringify(join(cwd, "count"))};\nconst marker = ${JSON.stringify(join(cwd, "integration-started"))};\nconst count = Number(fs.existsSync(countFile) ? fs.readFileSync(countFile, "utf8") : 0) + 1;\nfs.writeFileSync(countFile, String(count));\nif (count === 2) { fs.writeFileSync(marker, "started"); setTimeout(() => {}, 500); }\n`
+    );
+    let reviewerStarts = 0;
+    const startExecutor = executor({ finalReport: "VERDICT: APPROVE" });
+    const countedExecutor: StartExecutor = (options) => {
+      reviewerStarts += 1;
+      return startExecutor(options);
+    };
+    const reviewOptions = {
+      cwd,
+      task,
+      tier,
+      autoCommit: true,
+      verificationProfiles: {
+        required: { command: `${process.execPath} ${script}`, timeoutSeconds: 5 },
+      },
+      startExecutor: countedExecutor,
+      onUpdate,
+      trackRun,
+    };
+
+    const first = reviewTask(reviewOptions);
+    while (!existsSync(join(cwd, "integration-started"))) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const duplicate = await reviewTask(reviewOptions);
+    const approved = await first;
+
+    assert.equal(approved.status, "approved");
+    assert.equal(duplicate.status, "ready_for_review");
+    assert.match(duplicate.note ?? "", /dispatch declined|already claimed/);
+    assert.equal(reviewerStarts, 1);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts[0]?.reviewLaunches?.length, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("sessionLabel numbers attempts and reviews while preserving the label format", () => {
   const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
   const task = createTask(board, {
@@ -105,6 +231,23 @@ test("sessionLabel numbers attempts and reviews while preserving the label forma
     sessionLabel(task, "review", 2),
     "T1 A deliberately long title that exceeds f… · review 2"
   );
+});
+
+test("simulatePlan reports dependency waves without mutating the board", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const first = createTask(board, { title: "First", brief: "work", tier: "standard" });
+  const second = createTask(board, {
+    title: "Second",
+    brief: "work",
+    tier: "standard",
+    dependsOn: [first.id],
+  });
+  const before = structuredClone(board);
+  const report = simulatePlan(board, config, [first.id, second.id]);
+  assert.match(report, /wave 1: T1/);
+  assert.match(report, /wave 2: T1/);
+  assert.match(report, /wave 3: T2/);
+  assert.deepEqual(board, before);
 });
 
 test("formatDriveSummary reports outcomes, attempts, meaningful cost, and identities", () => {
@@ -564,7 +707,7 @@ test("rejected executor outcomes persist a redacted failure and return a retryab
     assert.deepEqual(failed?.history[0]?.touchedFiles, ["src/rejected.ts"]);
     assert.equal(failed?.history[0]?.model, "acme/executor");
     assert.equal(failed?.history[0]?.provider, "acme");
-    assert.equal(failed?.retryAction, 'maestro_run ["T1"]');
+    assert.equal(failed?.retryAction, 'maestro_drive({ action: "start", taskIds: ["T1"] })');
     assert.match(failed?.note ?? "", /executor promise failed token=\[REDACTED\]/);
     assert.equal(tracked, 0);
   } finally {
@@ -698,6 +841,36 @@ test("worktree execution records metadata and starts the executor in that checko
   }
 });
 
+test("synchronous executor spawn failure finalizes its reserved attempt and releases dispatch", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    const result = await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      startExecutor: () => {
+        throw new Error("spawn failed");
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(result.status, "failed");
+    assert.equal(persisted?.attempts.length, 1);
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "executor_failure");
+    assert.equal(persisted?.attempts[0]?.errorMessage, "spawn failed");
+    assert.equal(persisted?.dispatchClaim, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("failed execution persists failed status and returns the error note", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   try {
@@ -729,8 +902,8 @@ test("failed execution persists failed status and returns the error note", async
     assert.equal(persisted?.attempts[0]?.model, "acme/test-model");
     assert.equal(persisted?.attempts[0]?.provider, "acme");
     assert.match(result.note ?? "", /stub executor failed/);
-    assert.match(result.note ?? "", /Retry: maestro_run \["T1"\]/);
-    assert.equal(result.retryAction, 'maestro_run ["T1"]');
+    assert.match(result.note ?? "", /Retry: maestro_drive/);
+    assert.equal(result.retryAction, 'maestro_drive({ action: "start", taskIds: ["T1"] })');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -756,7 +929,7 @@ test("user abort persists a retryable structured reason", async () => {
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "cancelled");
     assert.equal(persisted?.attempts[0]?.failureReason?.kind, "user_abort");
-    assert.equal(result.retryAction, 'maestro_run ["T1"]');
+    assert.equal(result.retryAction, 'maestro_drive({ action: "start", taskIds: ["T1"] })');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -969,6 +1142,34 @@ test("nonzero-turn failures do not use a configured fallback", async () => {
   }
 });
 
+test("synchronous reviewer spawn failure is persisted without creating an execute attempt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    task.attempts.push(attempt("executor report"));
+    saveBoard(cwd, board);
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: () => {
+        throw new Error("review spawn failed");
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(result.status, "ready_for_review");
+    assert.equal(persisted?.attempts.length, 1);
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "reviewer_failure");
+    assert.equal(persisted?.dispatchClaim, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("approved review persists approved status and clears review notes", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   try {
@@ -988,6 +1189,10 @@ test("approved review persists approved status and clears review notes", async (
 
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "approved");
+    assert.equal(persisted?.approvalKind, "reviewed");
+    assert.equal(persisted?.reviewedPatchHash, undefined);
+    assert.equal(persisted?.integratedCommit, undefined);
+    assert.match(persisted?.verificationSummary ?? "", /unintegrated/);
     assert.equal(persisted?.reviewNotes, undefined);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -1048,7 +1253,7 @@ test("rejected reviewer outcomes persist a redacted failure and return a retryab
     assert.equal(persisted?.attempts[0]?.reviewModel, "reviewco/model");
     assert.equal(persisted?.attempts[0]?.reviewProvider, "reviewco");
     assert.equal(result.history[0]?.failureReason?.kind, "reviewer_failure");
-    assert.equal(result.retryAction, 'maestro_review ["T1"]');
+    assert.equal(result.retryAction, 'maestro_drive({ action: "start", taskIds: ["T1"] })');
     assert.match(result.note ?? "", /review promise failed secret=\[REDACTED\]/);
     assert.equal(tracked, 0);
   } finally {
@@ -1091,7 +1296,7 @@ test("production-shaped reviewer failure is reclassified and stays reviewable", 
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "ready_for_review");
     assert.equal(persisted?.attempts[0]?.failureReason?.kind, "reviewer_failure");
-    assert.equal(result.retryAction, 'maestro_review ["T1"]');
+    assert.equal(result.retryAction, 'maestro_drive({ action: "start", taskIds: ["T1"] })');
     assert.match(result.note ?? "", /review process failed/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -1121,7 +1326,7 @@ test("requested changes persist changes_requested status and reviewer notes", as
     assert.equal(persisted?.attempts[0]?.reviewNotes, notes);
     assert.equal(persisted?.attempts[0]?.failureReason?.kind, "reviewer_rejection");
     const snap = snapshot(persisted as Task);
-    assert.equal(snap.retryAction, 'maestro_run ["T1"]');
+    assert.equal(snap.retryAction, 'maestro_drive({ action: "start", taskIds: ["T1"] })');
     assert.match(snap.note ?? "", /Fix src\/example\.ts behavior/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -1242,6 +1447,7 @@ test("approval auto-commits the task's touched files as one conventional commit"
     });
 
     assert.equal(git("log", "-1", "--pretty=%s"), "fix: adjust the widget");
+    assert.equal(findTask(loadBoard(cwd), task.id)?.integratedCommit, git("rev-parse", "HEAD"));
     const committed = git("show", "--name-only", "--pretty=format:", "HEAD");
     assert.match(committed, /widget\.txt/);
     assert.doesNotMatch(committed, /unrelated\.txt/);
@@ -1611,6 +1817,7 @@ test("a merge conflict on an approved review does not count as a reviewer reject
     const done = attempt("Executor completed the task");
     done.worktreePath = worktree.worktreePath;
     done.branch = worktree.branch;
+    done.touchedFiles = ["file.txt"];
     task.attempts.push(done);
     saveBoard(cwd, board);
     // Diverge both trees on the same line so the merge cannot fast-forward.

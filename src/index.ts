@@ -1,4 +1,6 @@
-import { resolve, sep } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { StringEnum } from "@earendil-works/pi-ai";
 import {
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -21,12 +23,11 @@ import {
   applyPlanTaskEdits,
   approvePlan,
   archiveBoard,
-  blockedReason,
   createTask,
   findTask,
   forceStatus,
-  isRunnable,
   listArchivedBoards,
+  loadArchivedBoard,
   loadBoard,
   loadStatusHistory,
   planValidationMessage,
@@ -34,6 +35,7 @@ import {
   replaceBoard,
   restoreArchivedBoard,
   saveBoard,
+  scopedDependencyGaps,
   sweepDispatchState,
   updateTask,
   validatePlan,
@@ -42,24 +44,32 @@ import {
   describeConfig,
   describeTiersForPlanning,
   loadConfig,
-  resolveTierModel,
   resolveTierModels,
 } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
 import { Dashboard, type DashboardTaskAction } from "./dashboard.js";
+import { MAESTRO_COMMANDS, parseCommand } from "./commands.js";
 import { buildDoctorReport } from "./diagnostics.js";
 import {
+  type ActiveDriveControl,
+  type BackgroundDrive,
+  cleanupCompletedBoard,
+  deliverPendingDecision,
+  DriveRuntimeController,
+  persistDriveDecision,
+} from "./drive-controller.js";
+import {
   boardUsage,
-  describeProgressDelta,
   formatBoardProgress,
   formatCostSummary,
   formatUsage,
-  runBudgetWarning,
   STATUS_GLYPHS,
   STATUS_LABELS,
   taskLine,
   truncateText,
 } from "./format.js";
+import { notify, runHandoff } from "./handoff.js";
+import { exportPlan, importPlan } from "./plan-serialization.js";
 import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
 import {
   captureBoardLogs,
@@ -71,10 +81,26 @@ import {
 import {
   startExecutor as defaultStartExecutor,
   findSessionFile,
-  mapWithConcurrencyLimit,
   type RunUpdate,
 } from "./runner.js";
 import { showSettings } from "./settings-ui.js";
+import { formatStatusProjection, projectStatus } from "./status.js";
+import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
+import {
+  assertKnownTaskIds,
+  maestroBoardCwd,
+  previousBoardSession,
+  sessionCanControlDrive,
+  sessionSwitchBlocked,
+} from "./session-control.js";
+export {
+  assertKnownTaskIds,
+  maestroBoardCwd,
+  previousBoardSession,
+  sessionCanControlDrive,
+  sessionSwitchBlocked,
+} from "./session-control.js";
+import { type DriveToolInput, validateDriveToolInput } from "./tools.js";
 import {
   type Board,
   type PausedDriveState,
@@ -85,22 +111,18 @@ import {
 import {
   type DriveSummary,
   driveBoard,
-  executeTask,
   formatDriveSummary,
   lastReport,
   preflightTaskTiers,
-  reviewTask,
+  simulatePlan,
   snapshot,
   type TaskSnapshot,
   type WorkflowRun,
 } from "./workflow.js";
 import {
   cleanupManagedWorktrees,
-  createWorktree,
   inspectManagedWorktrees,
-  removeWorktree,
   sweepWorktrees,
-  type WorktreeRef,
   worktreeExists,
 } from "./worktree.js";
 
@@ -109,80 +131,6 @@ interface MaestroDetails {
   tasks: TaskSnapshot[];
   rounds?: number;
   stoppedBecause?: DriveSummary["stoppedBecause"];
-}
-
-interface ActiveDriveControl {
-  cwd: string;
-  ownerSession?: string;
-  taskIds?: string[];
-  pauseRequested: boolean;
-  abortController: AbortController;
-}
-
-interface BackgroundDrive {
-  promise: Promise<void>;
-  summary?: DriveSummary;
-  error?: string;
-  /** Owning session, so only it observes and clears settled pulses. */
-  ownerSession?: string;
-  /** Task statuses at the previous pulse, for reporting what advanced. */
-  lastPulseStatuses?: Map<string, TaskStatus>;
-}
-
-export function maestroBoardCwd(cwd: string): string {
-  const marker = `${sep}.pi${sep}maestro${sep}worktrees${sep}`;
-  const worktreeIndex = cwd.indexOf(marker);
-  return worktreeIndex === -1 ? cwd : cwd.slice(0, worktreeIndex);
-}
-
-export function sessionCanControlDrive(
-  ownerSession: string | undefined,
-  currentSession: string | undefined
-): boolean {
-  return (
-    ownerSession === undefined || currentSession === undefined || ownerSession === currentSession
-  );
-}
-
-export function sessionSwitchBlocked(activeDrive: boolean, liveRunCount: number): boolean {
-  return activeDrive || liveRunCount > 0;
-}
-
-export function assertKnownTaskIds(board: Board, taskIds: string[] | undefined): void {
-  if (!taskIds) return;
-  const unknown = taskIds.filter((id) => !findTask(board, id));
-  if (unknown.length > 0) throw new Error(`Unknown task id(s): ${unknown.join(", ")}`);
-}
-
-export function previousBoardSession(
-  previousSessionFile: string | undefined,
-  currentSessionFile: string | undefined,
-  ownerSessions: string[] | undefined,
-  executorSessions: string[]
-): string | undefined {
-  if (!previousSessionFile || !currentSessionFile || !ownerSessions) return undefined;
-
-  const previousIsOwner = ownerSessions.includes(previousSessionFile);
-  const currentIsOwner = ownerSessions.includes(currentSessionFile);
-  const previousIsExecutor = executorSessions.includes(previousSessionFile);
-  const currentIsExecutor = executorSessions.includes(currentSessionFile);
-
-  if (previousIsOwner && currentIsExecutor) return previousSessionFile;
-  if (previousIsExecutor && currentIsOwner) return previousSessionFile;
-  return undefined;
-}
-
-function notify(
-  ctx: ExtensionContext,
-  message: string,
-  level: "info" | "warning" | "error" = "info"
-): void {
-  try {
-    if (ctx.hasUI) ctx.ui.notify(message, level);
-    else console.log(message);
-  } catch {
-    console.log(message); // stale ctx after session switch
-  }
 }
 
 export interface MaestroDependencies {
@@ -199,8 +147,7 @@ export default function maestro(
   if (process.env.PI_MAESTRO_EXECUTOR === "1") return;
 
   const liveRuns = new Map<string, WorkflowRun>();
-  let activeDrive: ActiveDriveControl | undefined;
-  let backgroundDrive: BackgroundDrive | undefined;
+  const driveController = new DriveRuntimeController();
   let contextNudgeShown = false;
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
@@ -377,27 +324,38 @@ export default function maestro(
     return driveBoard(driveOptions);
   }
 
+  function sendDecision(evidence: string): void {
+    pi.sendMessage(
+      { customType: MESSAGE_TYPE, content: evidence, display: true },
+      { triggerTurn: true, deliverAs: "followUp" }
+    );
+  }
+
   function startBackgroundDrive(
     ctx: ExtensionContext,
     taskIds: string[] | undefined,
     signal?: AbortSignal,
     reportProgress: (message: string) => void = () => {}
   ): BackgroundDrive {
-    if (activeDrive) throw new Error("An autonomous drive is already active.");
+    if (driveController.hasActive()) throw new Error("An autonomous drive is already active.");
 
     const operation: BackgroundDrive = { promise: Promise.resolve() };
     const ownerSession = ctx.sessionManager.getSessionFile();
     if (ownerSession) operation.ownerSession = ownerSession;
-    backgroundDrive = operation;
+    driveController.setBackground(operation);
     operation.promise = runControlledDrive(ctx, taskIds, signal, reportProgress)
       .then((summary) => {
         operation.summary = summary;
+        const message = formatDrivePulse(summary).slice(0, 4000);
+        if (summary.stoppedBecause.code === "completed") cleanupCompletedBoard(ctx.cwd);
+        persistDriveDecision(ctx.cwd, ownerSession, summary, message);
+        deliverPendingDecision(ctx.cwd, ownerSession, sendDecision);
       })
       .catch((error) => {
         operation.error = error instanceof Error ? error.message : String(error);
       })
       .finally(() => refreshUI(ctx));
-    return operation;
+    return driveController.getBackground() ?? operation;
   }
 
   function savePausedDrive(cwd: string, pausedDrive: PausedDriveState | undefined): void {
@@ -413,12 +371,22 @@ export default function maestro(
     signal: AbortSignal | undefined,
     reportProgress: (message: string) => void
   ): Promise<DriveSummary> {
-    if (activeDrive) throw new Error("An autonomous drive is already active.");
+    if (driveController.hasActive()) throw new Error("An autonomous drive is already active.");
     const board = loadBoard(ctx.cwd);
     const config = loadConfig(ctx.cwd);
     const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
     if (validationError) throw new Error(validationError);
     assertKnownTaskIds(board, taskIds);
+    if (taskIds) {
+      const gaps = scopedDependencyGaps(board, taskIds);
+      if (gaps.length > 0) {
+        throw new Error(
+          `Scoped drive omits unresolved dependencies: ${gaps
+            .map((gap) => `${gap.taskId} requires ${gap.dependencyId}`)
+            .join(", ")}`
+        );
+      }
+    }
 
     const ownerSession = ctx.sessionManager.getSessionFile();
     const control: ActiveDriveControl = {
@@ -428,7 +396,7 @@ export default function maestro(
     };
     if (ownerSession) control.ownerSession = ownerSession;
     if (taskIds) control.taskIds = taskIds;
-    activeDrive = control;
+    driveController.begin(control);
     savePausedDrive(ctx.cwd, undefined);
 
     const combinedSignal = signal
@@ -444,7 +412,7 @@ export default function maestro(
         () => control.pauseRequested
       );
     } finally {
-      if (activeDrive === control) activeDrive = undefined;
+      driveController.finish(control);
     }
 
     if (
@@ -495,6 +463,19 @@ export default function maestro(
               "Self-contained instructions: goal, relevant file paths, constraints, acceptance criteria, verification command",
           }),
           tier: Type.String({ description: "Complexity tier: trivial, standard, or complex" }),
+          writePaths: Type.Array(Type.String(), {
+            maxItems: 64,
+            description:
+              "Repository-relative files or directory/** scopes this task may change. Use [] only for explicit investigation/no-file work.",
+          }),
+          successCriteria: Type.Array(Type.String({ maxLength: 500 }), {
+            minItems: 1,
+            maxItems: 12,
+            description: "Explicit observable outcomes the executor and reviewer must verify.",
+          }),
+          verificationProfile: Type.Optional(
+            Type.String({ description: "Trusted configured verification profile name" })
+          ),
           commitMessage: Type.Optional(
             Type.String({
               description:
@@ -522,7 +503,26 @@ export default function maestro(
         tier: string;
         commitMessage?: string;
         dependsOn?: string[];
+        writePaths?: string[];
+        successCriteria?: string[];
+        verificationProfile?: string;
       }[]) {
+        const verificationProfile = input.verificationProfile ?? config.defaultVerificationProfile;
+        if (verificationProfile && !config.verificationProfiles?.[verificationProfile]) {
+          throw new Error(`Unknown verification profile: ${verificationProfile}`);
+        }
+        if (!input.writePaths) throw new Error("writePaths is required for every new task");
+        const noFileTask =
+          input.writePaths.length === 0 && /investigat|no[- ]file|read[- ]only/i.test(input.brief);
+        if (!noFileTask && !input.successCriteria) {
+          throw new Error("successCriteria is required for every executable task");
+        }
+        if (
+          input.writePaths.length === 0 &&
+          !/investigat|no[- ]file|read[- ]only/i.test(input.brief)
+        ) {
+          throw new Error("Empty writePaths requires an explicit investigation or no-file brief");
+        }
         if (!config.tiers[input.tier]) {
           throw new Error(
             `Unknown tier "${input.tier}". Available tiers: ${Object.keys(config.tiers).join(", ")}`
@@ -535,6 +535,9 @@ export default function maestro(
         };
         if (input.commitMessage) taskInput.commitMessage = input.commitMessage;
         if (input.dependsOn) taskInput.dependsOn = input.dependsOn;
+        taskInput.writePaths = input.writePaths;
+        if (input.successCriteria) taskInput.successCriteria = input.successCriteria;
+        if (verificationProfile) taskInput.verificationProfile = verificationProfile;
         created.push(createTask(board, taskInput));
       }
       if (config.planGate && created.length > 0) board.planPending = true;
@@ -543,7 +546,7 @@ export default function maestro(
 
       const lines = created.map((task) => `${task.id}: ${task.title} (${task.tier})`);
       const approval = config.planGate
-        ? `\n\nPlan awaits user approval via /${COMMAND} plan. Do not call maestro_run yet.`
+        ? `\n\nPlan awaits user approval via /${COMMAND} plan. Do not start maestro_drive yet.`
         : "";
       return {
         content: [
@@ -570,314 +573,106 @@ export default function maestro(
   });
 
   pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
-    name: "maestro_run",
-    label: "Maestro Run",
-    description:
-      "Execute runnable tasks from the maestro board in fresh-context executor agents. Independent tasks run in parallel. Tasks with changes_requested are retried with the review notes. Pass taskIds to run a subset; explicitly named failed or cancelled tasks are retried too.",
-    promptSnippet: "Run planned tasks in parallel fresh-context executors (maestro board)",
-    parameters: Type.Object({
-      taskIds: Type.Optional(
-        Type.Array(Type.String(), {
-          description: "Specific task ids to run. Omit to run all runnable tasks.",
-        })
-      ),
-    }),
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const config = loadConfig(ctx.cwd);
-      const board = loadBoard(ctx.cwd);
-      const requestedIds = params.taskIds as string[] | undefined;
-      const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
-      if (validationError) {
-        return {
-          content: [{ type: "text", text: validationError }],
-          details: { action: "run", tasks: [] },
-        };
-      }
-      assertKnownTaskIds(board, requestedIds);
-      adoptBoard(ctx);
-
-      if (board.planPending) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Plan approval is pending. Ask the user to review it with /${COMMAND} plan before running executors.`,
-            },
-          ],
-          details: { action: "run", tasks: [] },
-        };
-      }
-
-      // Explicitly named tasks may also retry failed/cancelled ones.
-      const explicit = requestedIds !== undefined;
-      const candidates = explicit
-        ? requestedIds.map((id) => findTask(board, id)).filter((t): t is Task => t !== undefined)
-        : board.tasks;
-      const runnable = candidates.filter((task) => isRunnable(board, task, explicit));
-      const blocked = candidates
-        .filter(
-          (task) =>
-            !isRunnable(board, task, explicit) &&
-            (task.status === "todo" || task.status === "changes_requested")
-        )
-        .map((task) => snapshot(task, blockedReason(board, task)));
-
-      if (runnable.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: "No runnable tasks. Check dependencies and statuses with maestro_status.",
-            },
-          ],
-          details: { action: "run", tasks: blocked },
-        };
-      }
-
-      const budgetWarning = runBudgetWarning(board.tasks, config.maxRunCost);
-      if (budgetWarning) {
-        const budgetBlocked = runnable.map((task) => snapshot(task, budgetWarning));
-        return {
-          content: [{ type: "text", text: budgetWarning }],
-          details: { action: "run", tasks: [...budgetBlocked, ...blocked] },
-        };
-      }
-
-      // Preflight tier models before spawning anything: a bad pattern or
-      // missing API key should fail with an actionable message, not N dead runs.
-      const resolvedTiers = preflightTaskTiers(
-        runnable,
-        config,
-        ctx.modelRegistry,
-        ctx.model?.provider
-      );
-
-      const taskWorktrees = new Map<string, WorktreeRef>();
-      const isolateBatch = config.useWorktrees && runnable.length > 1;
-      const created: WorktreeRef[] = [];
-      try {
-        for (const task of runnable) {
-          const previous = task.attempts.at(-1);
-          const retained =
-            task.status === "changes_requested" &&
-            previous?.worktreePath &&
-            previous.branch &&
-            worktreeExists({ worktreePath: previous.worktreePath, branch: previous.branch })
-              ? { worktreePath: previous.worktreePath, branch: previous.branch }
-              : undefined;
-          if (retained) {
-            taskWorktrees.set(task.id, retained);
-          } else if (isolateBatch) {
-            const ref = createWorktree(ctx.cwd, task.id, task.attempts.length + 1);
-            created.push(ref);
-            taskWorktrees.set(task.id, ref);
-          }
-        }
-      } catch (error) {
-        for (const ref of created) removeWorktree(ctx.cwd, ref);
-        throw error;
-      }
-
-      const emitProgress = () => {
-        onUpdate?.({
-          content: [{ type: "text", text: `Running ${liveRuns.size} executor(s)…` }],
-          details: { action: "run", tasks: runnable.map((task) => snapshot(task)) },
-        });
-      };
-
-      const results = await mapWithConcurrencyLimit(runnable, config.maxParallel, (task) => {
-        const tier = resolvedTiers.get(task.tier);
-        if (!tier) throw new Error(`No tier config for "${task.tier}"`);
-        const workflowOptions: Parameters<typeof executeTask>[0] = {
-          cwd: ctx.cwd,
-          board,
-          task,
-          tier,
-          config,
-          startExecutor: dependencies.startExecutor,
-          onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
-          trackRun: (run) => trackRun(ctx, run),
-        };
-        const worktree = taskWorktrees.get(task.id);
-        if (worktree) workflowOptions.worktree = worktree;
-        if (signal) workflowOptions.signal = signal;
-        return executeTask(workflowOptions);
-      });
-
-      // Reports were written by executors after our board copy was loaded.
-      const freshBoard = loadBoard(ctx.cwd);
-      refreshUI(ctx);
-      const all = [...results, ...blocked];
-      const summary = all
-        .map((snap) => {
-          const detail = snap.note ? ` — ${snap.note}` : "";
-          const report =
-            snap.status === "ready_for_review" ? getReportPreview(freshBoard, snap.id) : "";
-          return `${snap.id} (${snap.title}): ${STATUS_LABELS[snap.status]}${detail}${report}`;
-        })
-        .join("\n\n");
-      return {
-        content: [
-          {
-            type: "text",
-            text: `${results.length} executor(s) finished.\n\n${summary}\n\nNext: call maestro_review for tasks that are ready for review.`,
-          },
-        ],
-        details: { action: "run", tasks: all },
-      };
-    },
-    renderCall(args, theme) {
-      const ids = args.taskIds as string[] | undefined;
-      const scope = ids && ids.length > 0 ? ids.join(", ") : "all runnable tasks";
-      return new Text(
-        theme.fg("toolTitle", theme.bold("maestro run ")) + theme.fg("accent", scope),
-        0,
-        0
-      );
-    },
-    renderResult: renderTaskListResult,
-  });
-
-  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
-    name: "maestro_review",
-    label: "Maestro Review",
-    description:
-      "Run adversarial fresh-context reviewers over tasks that are ready for review. Reviewers have read-only tools, independently verify the executor's claims, and either approve the task or request changes (stored as review notes for the next run).",
-    promptSnippet:
-      "Adversarially review executor work and approve or request changes (maestro board)",
-    parameters: Type.Object({
-      taskIds: Type.Optional(
-        Type.Array(Type.String(), {
-          description: "Task ids to review. Omit to review everything that is ready for review.",
-        })
-      ),
-    }),
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const config = loadConfig(ctx.cwd);
-      const board = loadBoard(ctx.cwd);
-      const requestedIds = params.taskIds as string[] | undefined;
-      const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
-      if (validationError) {
-        return {
-          content: [{ type: "text", text: validationError }],
-          details: { action: "review", tasks: [] },
-        };
-      }
-      assertKnownTaskIds(board, requestedIds);
-      if (board.planPending) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Plan approval is pending. Review it with /${COMMAND} plan before starting reviewers.`,
-            },
-          ],
-          details: { action: "review", tasks: [] },
-        };
-      }
-
-      const candidates = requestedIds
-        ? requestedIds.map((id) => findTask(board, id)).filter((t): t is Task => t !== undefined)
-        : board.tasks;
-      const reviewable = candidates.filter((task) => task.status === "ready_for_review");
-
-      if (reviewable.length === 0) {
-        return {
-          content: [{ type: "text", text: "No tasks are ready for review." }],
-          details: { action: "review", tasks: [] },
-        };
-      }
-
-      const reviewTier: TierConfig = {
-        ...(config.tiers.review ?? { thinking: "high", tools: "read,bash,grep,find,ls" }),
-      };
-      const resolution = resolveTierModel(
-        "review",
-        reviewTier,
-        ctx.modelRegistry,
-        ctx.model?.provider
-      );
-      if (!resolution.ok) throw new Error(resolution.error);
-      if (resolution.modelArg === undefined) delete reviewTier.model;
-      else reviewTier.model = resolution.modelArg;
-      const emitProgress = () => {
-        onUpdate?.({
-          content: [{ type: "text", text: `Reviewing ${liveRuns.size} task(s)…` }],
-          details: { action: "review", tasks: reviewable.map((task) => snapshot(task)) },
-        });
-      };
-
-      const results = await mapWithConcurrencyLimit(reviewable, config.maxParallel, (task) => {
-        const workflowOptions: Parameters<typeof reviewTask>[0] = {
-          cwd: ctx.cwd,
-          task,
-          tier: reviewTier,
-          startExecutor: dependencies.startExecutor,
-          autoCommit: config.autoCommit,
-          logEvents: config.logEvents,
-          maxLogBytes: config.maxLogBytesPerRun,
-          availableTiers: Object.keys(config.tiers),
-          onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, emitProgress),
-          trackRun: (run) => trackRun(ctx, run),
-          isLive: (taskId) => liveRuns.has(taskId),
-          onRetentionWarning: (warning) =>
-            notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
-        };
-        if (signal) workflowOptions.signal = signal;
-        return reviewTask(workflowOptions);
-      });
-
-      refreshUI(ctx);
-      const summary = results
-        .map(
-          (snap) =>
-            `${snap.id} (${snap.title}): ${STATUS_LABELS[snap.status]}${snap.note ? `\n${snap.note}` : ""}`
-        )
-        .join("\n\n");
-      const needsRerun = results.some((snap) => snap.status === "changes_requested");
-      const next = needsRerun
-        ? "\n\nNext: call maestro_run to retry tasks with requested changes."
-        : "";
-      return {
-        content: [{ type: "text", text: `${summary}${next}` }],
-        details: { action: "review", tasks: results },
-      };
-    },
-    renderCall(args, theme) {
-      const ids = args.taskIds as string[] | undefined;
-      const scope = ids && ids.length > 0 ? ids.join(", ") : "all ready tasks";
-      return new Text(
-        theme.fg("toolTitle", theme.bold("maestro review ")) + theme.fg("accent", scope),
-        0,
-        0
-      );
-    },
-    renderResult: renderTaskListResult,
-  });
-
-  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
     name: "maestro_drive",
     label: "Maestro Drive",
     description:
-      "Start an autonomous background drive that runs, reviews, and retries maestro tasks. Returns immediately. While it is active, call maestro_status repeatedly; each status pulse waits for progress and lets you keep the user informed.",
+      "Start or inspect a state-aware background drive, or intervene in live work. Routine progress stays in the dashboard; completion and decisions wake the orchestrator.",
     promptSnippet: "Drive mechanical run/review/retry cycles to completion (maestro board)",
     parameters: Type.Object({
+      action: StringEnum(["start", "inspect", "intervene"] as const),
       taskIds: Type.Optional(
         Type.Array(Type.String(), {
           description: "Specific task ids to drive. Omit to drive the whole board.",
         })
       ),
+      intervention: Type.Optional(StringEnum(["steer", "abort", "handoff"] as const)),
+      decisionId: Type.Optional(Type.String({ description: "Active settled decision to resolve" })),
+      instruction: Type.Optional(Type.String({ maxLength: 1000 })),
     }),
+    prepareArguments(args) {
+      if (args && typeof args === "object" && !("action" in args))
+        return { ...args, action: "start" };
+      return args as Record<PropertyKey, unknown>;
+    },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const taskIds = params.taskIds as string[] | undefined;
-      if (activeDrive) throw new Error("An autonomous drive is already active.");
+      const input = params as unknown as DriveToolInput;
+      validateDriveToolInput(input);
+      if (input.action === "inspect") {
+        const board = loadBoard(ctx.cwd);
+        const tasks = board.tasks.map((task) => snapshot(task));
+        const live = [...liveRuns.values()]
+          .map((run) => `${run.taskId}: ${run.lastActivity}`)
+          .join("\n");
+        const decision = board.activeDecision;
+        const decisionText = decision
+          ? `\nDecision ${decision.id} (${decision.kind}): ${decision.evidence}`
+          : "";
+        const statusText = formatStatusProjection(projectStatus(board, liveRuns.keys()));
+        return {
+          content: [
+            {
+              type: "text",
+              text: truncateText(
+                `${statusText}\n${live || "No live executors."}${decisionText}`,
+                4000
+              ),
+            },
+          ],
+          details: { action: "drive", tasks },
+        };
+      }
+      if (input.action === "intervene") {
+        const intervention = input.intervention;
+        if (!intervention) throw new Error("intervention is required");
+        if (input.decisionId) {
+          const board = loadBoard(ctx.cwd);
+          const decision = board.activeDecision;
+          if (!decision || decision.id !== input.decisionId || decision.resolution) {
+            throw new Error("Decision is stale or already resolved");
+          }
+          const current = ctx.sessionManager.getSessionFile();
+          if (decision.ownerSession && current && decision.ownerSession !== current) {
+            throw new Error("Only the decision owner may resolve it");
+          }
+          if (!decision.allowedInterventions.includes(intervention)) {
+            throw new Error(`${intervention} is not allowed for this decision`);
+          }
+          decision.resolution = { intervention, resolvedAt: Date.now() };
+          saveBoard(ctx.cwd, board);
+          if (input.intervention === "handoff") {
+            pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
+          }
+          return {
+            content: [{ type: "text", text: `Decision ${decision.id} resolved.` }],
+            details: { action: "drive", tasks: [] },
+          };
+        }
+        if (input.intervention === "handoff") {
+          pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
+        } else {
+          if (liveRuns.size === 0) throw new Error("No live executor to intervene in.");
+          for (const run of liveRuns.values()) {
+            if (input.intervention === "abort") run.handle.abort();
+            else
+              run.handle.steer(
+                input.instruction ?? "Report the concrete blocker or finish the scoped task."
+              );
+          }
+        }
+        return {
+          content: [{ type: "text", text: `${input.intervention} queued.` }],
+          details: { action: "drive", tasks: [] },
+        };
+      }
+      const taskIds = input.taskIds;
+      if (driveController.hasActive()) throw new Error("An autonomous drive is already active.");
       assertKnownTaskIds(loadBoard(ctx.cwd), taskIds);
       startBackgroundDrive(ctx, taskIds, signal);
       return {
         content: [
           {
             type: "text",
-            text: `Drive started for ${taskIds?.join(", ") ?? "the whole board"}. Call maestro_status now and repeat until the drive finishes. Briefly tell the user what changed after each pulse.`,
+            text: `Drive started for ${taskIds?.join(", ") ?? "the whole board"}. Wait for a completion or decision message.`,
           },
         ],
         details: {
@@ -914,20 +709,52 @@ export default function maestro(
       dependsOn: Type.Optional(
         Type.Array(Type.String(), { description: "Replacement dependency task ids" })
       ),
+      writePaths: Type.Optional(
+        Type.Array(Type.String(), { maxItems: 64, description: "Replacement write scope" })
+      ),
+      successCriteria: Type.Optional(
+        Type.Array(Type.String({ maxLength: 500 }), {
+          minItems: 1,
+          maxItems: 12,
+          description: "Replacement observable success criteria",
+        })
+      ),
+      verificationProfile: Type.Optional(
+        Type.String({ description: "Replacement trusted verification profile; empty clears it" })
+      ),
       cancel: Type.Optional(
         Type.Boolean({ description: "Set true to cancel, or false to reactivate a cancelled task" })
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const { taskId, title, brief, tier, dependsOn, cancel } = params as {
+      const {
+        taskId,
+        title,
+        brief,
+        tier,
+        dependsOn,
+        writePaths,
+        successCriteria,
+        verificationProfile,
+        cancel,
+      } = params as {
         taskId: string;
         title?: string;
         brief?: string;
         tier?: string;
         dependsOn?: string[];
+        writePaths?: string[];
+        successCriteria?: string[];
+        verificationProfile?: string;
         cancel?: boolean;
       };
       const config = loadConfig(ctx.cwd);
+      if (
+        verificationProfile?.trim() &&
+        !config.verificationProfiles?.[verificationProfile.trim()]
+      ) {
+        throw new Error(`Unknown verification profile: ${verificationProfile}`);
+      }
       if (liveRuns.has(taskId.trim().toUpperCase())) {
         throw new Error(`${taskId} is running. Abort it first or wait for it to finish.`);
       }
@@ -939,6 +766,9 @@ export default function maestro(
             ...(brief !== undefined ? { brief } : {}),
             ...(tier !== undefined ? { tier } : {}),
             ...(dependsOn !== undefined ? { dependsOn } : {}),
+            ...(writePaths !== undefined ? { writePaths } : {}),
+            ...(successCriteria !== undefined ? { successCriteria } : {}),
+            ...(verificationProfile !== undefined ? { verificationProfile } : {}),
             ...(cancel !== undefined ? { cancelled: cancel } : {}),
           },
           Object.keys(config.tiers)
@@ -972,132 +802,6 @@ export default function maestro(
     renderResult: renderTaskListResult,
   });
 
-  pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
-    name: "maestro_status",
-    label: "Maestro Status",
-    description:
-      "Wait for the active background drive to finish or reach the next progress pulse, then report what advanced since the last pulse, live executor activity, failures, and any settled decision (provider block, review escalation, attempt cap, blocked, error) with the recommended tool actions. Default wait is configurable (60s). While a drive is active, narrate progress to the user after every pulse and call maestro_status again until it settles.",
-    promptSnippet: "Wait for and report live maestro executor progress",
-    parameters: Type.Object({
-      waitSeconds: Type.Optional(
-        Type.Number({
-          minimum: 0,
-          maximum: 240,
-          description:
-            "Seconds to wait for drive completion before returning progress. Omit for the configured default; use 0 for an immediate snapshot.",
-        })
-      ),
-    }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const requestedWait = (params as { waitSeconds?: number }).waitSeconds;
-      const configuredWait = loadConfig(ctx.cwd).statusWaitSeconds;
-      const waitSeconds = Math.min(240, Math.max(0, requestedWait ?? configuredWait));
-      const operation = backgroundDrive;
-      const driveRunning =
-        operation && operation.summary === undefined && operation.error === undefined;
-
-      if (driveRunning && waitSeconds > 0) {
-        await new Promise<void>((resolve) => {
-          const finish = () => {
-            clearTimeout(timer);
-            signal?.removeEventListener("abort", finish);
-            resolve();
-          };
-          const timer = setTimeout(finish, waitSeconds * 1000);
-          void operation.promise.then(finish);
-          signal?.addEventListener("abort", finish, { once: true });
-          if (signal?.aborted) finish();
-        });
-      }
-
-      const board = loadBoard(ctx.cwd);
-      if (board.tasks.length === 0) {
-        return {
-          content: [{ type: "text", text: "Board is empty. Plan tasks with maestro_plan." }],
-          details: { action: "status", tasks: [] },
-        };
-      }
-
-      const lines = board.tasks.map((task) => {
-        const blocked = blockedReason(board, task);
-        const live = liveRuns.get(task.id);
-        const activity = live
-          ? ` · ${live.kind === "review" ? "reviewing" : "executing"} · ${live.turns} turns · $${live.cost.toFixed(4)} · ${live.lastActivity}`
-          : "";
-        return taskLine(task) + activity + (blocked ? ` (${blocked})` : "");
-      });
-      const usage = boardUsage(board.tasks);
-
-      // A pulse reports what advanced since the previous one. The baseline is
-      // per background operation and only the owning session may read or move
-      // it, so a stranger's status call never leaks in or resets the delta.
-      const pulse = backgroundDrive;
-      const currentSession = ctx.sessionManager.getSessionFile();
-      const ownsPulse =
-        pulse !== undefined && sessionCanControlDrive(pulse.ownerSession, currentSession);
-      const progress = ownsPulse
-        ? describeProgressDelta(pulse.lastPulseStatuses, board.tasks)
-        : undefined;
-      if (ownsPulse) {
-        pulse.lastPulseStatuses = new Map(board.tasks.map((task) => [task.id, task.status]));
-      }
-
-      const failed = board.tasks.filter((task) => task.status === "failed");
-      const failureLine =
-        failed.length > 0
-          ? `Failures: ${failed
-              .map(
-                (task) =>
-                  `${task.id} — ${truncateText(task.attempts.at(-1)?.failureReason?.message ?? "failed", 1)}`
-              )
-              .join("; ")}`
-          : undefined;
-
-      // Settled summaries are session-owned: only the session that started the
-      // drive clears them, so a stray status call from another session can't
-      // discard the completion/intervention report before the owner sees it.
-      const settled = backgroundDrive;
-      const ownsSettled = ownsPulse;
-      let driveState = "No background drive is active.";
-      if (settled?.summary && ownsSettled) {
-        driveState = formatDrivePulse(settled.summary);
-        backgroundDrive = undefined;
-      } else if (settled?.error && ownsSettled) {
-        driveState = `Drive failed: ${settled.error}\nDecide the recovery: fix the root cause, then /maestro resume, or use maestro_run/maestro_review for targeted recovery. Do not blindly retry.`;
-        backgroundDrive = undefined;
-      } else if (settled && !ownsSettled) {
-        driveState =
-          "A background drive owned by another session is active; only its owner observes and clears its pulses.";
-      } else if (activeDrive || liveRuns.size > 0) {
-        driveState = `Drive still active with ${liveRuns.size} live executor(s). Briefly report this progress to the user, then call maestro_status again after the next pulse.`;
-      }
-
-      const report = [
-        lines.join("\n"),
-        progress,
-        failureLine,
-        driveState,
-        `Total: ${formatUsage(usage)}\nCosts: ${formatCostSummary(board.tasks)}`,
-      ]
-        .filter((part): part is string => part !== undefined && part.length > 0)
-        .join("\n\n");
-
-      return {
-        content: [{ type: "text", text: report }],
-        details: { action: "status", tasks: board.tasks.map((task) => snapshot(task)) },
-      };
-    },
-    renderCall(_args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("maestro status")), 0, 0);
-    },
-    renderResult: renderTaskListResult,
-  });
-
-  /**
-   * A settled drive pulse: the summary plus, for decision-point stops, the
-   * explicit tool actions the orchestrator should choose among. Completed and
-   * ordinary stops just show the summary.
-   */
   function formatDrivePulse(summary: DriveSummary): string {
     const base = formatDriveSummary(summary);
     const code = summary.stoppedBecause.code;
@@ -1107,13 +811,16 @@ export default function maestro(
     if (code === "escalation_required") {
       return `${base}\n\nChoose one: maestro_update to raise the tier or rewrite the brief, maestro_plan to split the task, cancel it, or ask the user when scope/cost judgment is required, then /maestro resume. Do not blindly retry or raise maxAttempts.`;
     }
-    if (code === "attempt_cap" || code === "blocked") {
+    if (code === "attempt_cap") {
+      return `${base}\n\nThe capped predecessor cannot run again because its consumed attempts remain even if its tier or brief changes. Create a narrowly scoped successor with maestro_plan whose title and brief identify the capped task. Keep the capped predecessor visible, then use maestro_update to replace its id in every downstream dependency while preserving unrelated dependencies. Start maestro_drive with an explicit taskIds list containing the successor and every rewired dependent, and excluding the capped predecessor. Do not raise the project maxAttempts to force another retry.`;
+    }
+    if (code === "blocked") {
       return `${base}\n\nChoose one: maestro_update the brief/tier, maestro_plan to split, cancel the task, or ask the user. Do not raise the project maxAttempts to force another retry.`;
     }
     return base;
   }
 
-  function getReportPreview(board: Board, taskId: string): string {
+  function _getReportPreview(board: Board, taskId: string): string {
     const task = findTask(board, taskId);
     const report = task ? lastReport(task) : undefined;
     if (!report) return "";
@@ -1171,39 +878,15 @@ export default function maestro(
 
   pi.registerCommand(COMMAND, {
     description:
-      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | pause | resume | abort | plan | board | costs | open <taskId> | history [n] | replay [file] | config | doctor [cleanup] | reset",
+      "Orchestrator/executor workflows: start <goal> | drive [taskIds] | pause | resume | abort | plan | board | costs | simulate [taskIds] | open <taskId> | history [n] | timeline [taskId] | replay [file] | config | doctor [cleanup] | reset",
     getArgumentCompletions: (prefix) => {
-      const options = [
-        "start",
-        "handoff",
-        "back",
-        "drive",
-        "pause",
-        "resume",
-        "abort",
-        "board",
-        "plan",
-        "list",
-        "costs",
-        "open",
-        "config",
-        "config project",
-        "config show",
-        "doctor",
-        "doctor cleanup",
-        "doctor cleanup confirm",
-        "history",
-        "replay",
-        "reset",
-      ];
-      const matches = options.filter((option) => option.startsWith(prefix.toLowerCase()));
+      const matches = MAESTRO_COMMANDS.filter((option) => option.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
     },
     handler: async (args, ctx) => {
-      const [sub, ...restParts] = args.trim().split(/\s+/);
-      const rest = restParts.join(" ");
+      const { subcommand, rest, restParts } = parseCommand(args);
 
-      switch ((sub ?? "").toLowerCase()) {
+      switch (subcommand) {
         case "start": {
           if (!rest) {
             notify(ctx, "Usage: /maestro start <goal>", "warning");
@@ -1277,7 +960,7 @@ export default function maestro(
           return;
         }
         case "drive": {
-          if (activeDrive || liveRuns.size > 0) {
+          if (driveController.hasActive() || liveRuns.size > 0) {
             notify(ctx, "An autonomous drive or executor batch is already running.", "warning");
             return;
           }
@@ -1288,7 +971,7 @@ export default function maestro(
         }
         case "pause": {
           const currentSession = ctx.sessionManager.getSessionFile();
-          if (!activeDrive) {
+          if (!driveController.hasActive()) {
             const paused = loadBoard(ctx.cwd).pausedDrive;
             notify(
               ctx,
@@ -1297,14 +980,15 @@ export default function maestro(
             );
             return;
           }
+          const activeOwner = driveController.activeOwner();
           if (
-            activeDrive.cwd !== ctx.cwd ||
-            !sessionCanControlDrive(activeDrive.ownerSession, currentSession)
+            activeOwner?.cwd !== ctx.cwd ||
+            !sessionCanControlDrive(activeOwner.ownerSession, currentSession)
           ) {
             notify(ctx, "Only the session that started this drive may pause it.", "warning");
             return;
           }
-          activeDrive.pauseRequested = true;
+          driveController.requestPause();
           notify(ctx, "Pause requested. Active executors will finish; no new batch will start.");
           return;
         }
@@ -1315,7 +999,7 @@ export default function maestro(
             notify(ctx, "No paused autonomous drive to resume.", "warning");
             return;
           }
-          if (activeDrive || liveRuns.size > 0) {
+          if (driveController.hasActive() || liveRuns.size > 0) {
             notify(ctx, "Executors are already running.", "warning");
             return;
           }
@@ -1329,15 +1013,16 @@ export default function maestro(
         }
         case "abort": {
           const currentSession = ctx.sessionManager.getSessionFile();
-          if (activeDrive) {
+          if (driveController.hasActive()) {
+            const activeOwner = driveController.activeOwner();
             if (
-              activeDrive.cwd !== ctx.cwd ||
-              !sessionCanControlDrive(activeDrive.ownerSession, currentSession)
+              activeOwner?.cwd !== ctx.cwd ||
+              !sessionCanControlDrive(activeOwner.ownerSession, currentSession)
             ) {
               notify(ctx, "Only the session that started this drive may abort it.", "warning");
               return;
             }
-            activeDrive.abortController.abort();
+            driveController.abort();
             notify(ctx, "Abort requested for the drive and its active executors.", "warning");
             return;
           }
@@ -1354,9 +1039,69 @@ export default function maestro(
           notify(ctx, "Paused autonomous drive aborted. No executors were running.", "warning");
           return;
         }
-        case "plan":
+        case "plan": {
+          const [planAction, planPath] = restParts;
+          if (planAction === "export") {
+            if (!planPath) {
+              notify(ctx, `Usage: /${COMMAND} plan export <file>`, "warning");
+              return;
+            }
+            const file = resolve(ctx.cwd, planPath);
+            if (existsSync(file)) {
+              notify(ctx, `Refusing to overwrite existing file: ${file}`, "error");
+              return;
+            }
+            writeFileSync(file, exportPlan(loadBoard(ctx.cwd)), { flag: "wx" });
+            notify(ctx, `Plan exported to ${file}`);
+            return;
+          }
+          if (planAction === "import") {
+            if (!planPath) {
+              notify(ctx, `Usage: /${COMMAND} plan import <file>`, "warning");
+              return;
+            }
+            if (liveRuns.size > 0) {
+              notify(ctx, "Executors are still running. Import cancelled.", "warning");
+              return;
+            }
+            const config = loadConfig(ctx.cwd);
+            let imported: Board;
+            try {
+              imported = importPlan(
+                readFileSync(resolve(ctx.cwd, planPath), "utf-8"),
+                Object.keys(config.tiers),
+                Object.keys(config.verificationProfiles ?? {})
+              );
+            } catch (error) {
+              notify(ctx, error instanceof Error ? error.message : String(error), "error");
+              return;
+            }
+            const current = loadBoard(ctx.cwd);
+            if (current.tasks.length > 0) {
+              const confirmed =
+                ctx.hasUI &&
+                (await ctx.ui.confirm(
+                  "Replace current plan?",
+                  `Archive ${current.tasks.length} current task(s), then import ${imported.tasks.length}?`
+                ));
+              if (!confirmed) {
+                notify(ctx, "Plan import cancelled; current board was not changed.", "warning");
+                return;
+              }
+              const archive = archiveBoard(ctx.cwd);
+              if (!archive) {
+                notify(ctx, "Could not archive the current board; import cancelled.", "error");
+                return;
+              }
+            }
+            replaceBoard(ctx.cwd, imported, current.revision ?? 0);
+            refreshUI(ctx);
+            notify(ctx, `Imported ${imported.tasks.length} task(s); plan approval is required.`);
+            return;
+          }
           await showPlan(ctx);
           return;
+        }
         case "board":
         case "dash":
         case "dashboard":
@@ -1383,6 +1128,16 @@ export default function maestro(
           refreshUI(ctx);
           return;
         }
+        case "simulate": {
+          const taskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
+          const board = loadBoard(ctx.cwd);
+          assertKnownTaskIds(board, taskIds);
+          const validationError = planValidationMessage(
+            validatePlan(board, Object.keys(loadConfig(ctx.cwd).tiers))
+          );
+          notify(ctx, validationError ?? simulatePlan(board, loadConfig(ctx.cwd), taskIds));
+          return;
+        }
         case "costs": {
           const board = loadBoard(ctx.cwd);
           notify(
@@ -1390,6 +1145,45 @@ export default function maestro(
             board.tasks.length === 0
               ? "No recorded costs; the board is empty."
               : formatCostSummary(board.tasks)
+          );
+          return;
+        }
+        case "reconcile": {
+          const warnings: string[] = [];
+          for (const task of loadBoard(ctx.cwd).tasks) {
+            if (task.approvalKind === "manual") warnings.push(`${task.id}: manually accepted`);
+            if (task.status === "approved" && task.approvalKind !== "reviewed") {
+              warnings.push(`${task.id}: approved without a reviewed artifact`);
+            }
+            if (task.approvalKind === "reviewed" && !task.provenance?.candidateTree) {
+              warnings.push(`${task.id}: reviewed approval is missing its authoritative Git tree`);
+            }
+            if (task.approvalKind === "reviewed" && !task.provenance?.reviewedAt) {
+              warnings.push(`${task.id}: artifact has no persisted review proof`);
+            }
+            if (task.approvalKind === "reviewed" && !task.integratedCommit) {
+              warnings.push(`${task.id}: reviewed approval is missing its integration commit`);
+            }
+            if (
+              task.verificationProfile &&
+              task.approvalKind === "reviewed" &&
+              !task.provenance?.verifiedAt
+            ) {
+              warnings.push(`${task.id}: reviewed artifact is missing trusted verification proof`);
+            }
+            const attempt = task.attempts.at(-1);
+            if (
+              attempt?.worktreePath &&
+              !worktreeExists({ worktreePath: attempt.worktreePath, branch: attempt.branch ?? "" })
+            ) {
+              warnings.push(`${task.id}: recorded recovery worktree is missing`);
+            }
+          }
+          notify(
+            ctx,
+            warnings.length > 0
+              ? `Reconciliation warnings:\n- ${warnings.join("\n- ")}`
+              : "Board artifacts are consistent."
           );
           return;
         }
@@ -1482,25 +1276,15 @@ export default function maestro(
             );
             if (!ok) return;
           }
-          await ctx.waitForIdle();
-          const briefing = buildSupervisorBriefing(
-            board.goal,
-            board.tasks,
-            describeTiersForPlanning(loadConfig(ctx.cwd))
-          );
-          const parentSession = ctx.sessionManager.getSessionFile();
-          // Post-switch work must use the fresh ctx from withSession; the
-          // captured ctx is stale after session replacement.
-          await ctx.newSession({
-            ...(parentSession ? { parentSession } : {}),
-            withSession: async (fresh) => {
-              adoptBoard(fresh);
-              nameSessionAfterGoal(fresh, board.goal ?? "maestro run", "supervisor");
-              await fresh.sendMessage(
-                { customType: MESSAGE_TYPE, content: briefing, display: true },
-                { triggerTurn: true }
-              );
-            },
+          await runHandoff({
+            ctx,
+            briefing: buildSupervisorBriefing(
+              board.goal,
+              board.tasks,
+              describeTiersForPlanning(loadConfig(ctx.cwd))
+            ),
+            goal: board.goal ?? "maestro run",
+            adoptBoard,
           });
           return;
         }
@@ -1517,6 +1301,25 @@ export default function maestro(
             .slice(-count)
             .map((entry) => `${entry.ts} ${entry.taskId} ${entry.from} → ${entry.to}`);
           notify(ctx, lines.join("\n"));
+          return;
+        }
+        case "timeline": {
+          const [first, archiveName, archivedTaskId] = restParts;
+          const archived = first?.toLowerCase() === "archive";
+          let board: Board;
+          let taskId: string | undefined;
+          try {
+            board = archived ? loadArchivedBoard(ctx.cwd, archiveName ?? "") : loadBoard(ctx.cwd);
+            taskId = archived ? archivedTaskId : first;
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+            return;
+          }
+          if (taskId && !findTask(board, taskId)) {
+            notify(ctx, `Unknown task: ${taskId}`, "warning");
+            return;
+          }
+          notify(ctx, formatRunTimeline(deriveRunTimeline(board, taskId)));
           return;
         }
         case "replay": {
@@ -1654,9 +1457,14 @@ export default function maestro(
               `/${COMMAND} back           switch back to the previous session`,
               `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
               `/${COMMAND} costs          show attempts, total/average cost, models, and providers`,
+              `/${COMMAND} simulate [ids] preview deterministic dependency waves without running work`,
               `/${COMMAND} doctor         diagnose config, models, authentication, git, and managed worktrees`,
               `/${COMMAND} doctor cleanup remove rechecked stale/orphaned worktrees after confirmation`,
               `/${COMMAND} history [n]    show recent task status changes (default 20)`,
+              `/${COMMAND} timeline [id]  show derived run/task evidence chronologically`,
+              `/${COMMAND} timeline archive <file> [id]  show archived evidence`,
+              `/${COMMAND} plan export <file>  export a versioned plan without run evidence`,
+              `/${COMMAND} plan import <file>  validate, archive current work, and import`,
               `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
               `/${COMMAND} reset          archive and clear the board`,
             ].join("\n")
@@ -1852,7 +1660,7 @@ export default function maestro(
         }
         saveBoard(ctx.cwd, fresh);
         refreshUI(ctx);
-        notify(ctx, "Plan approved. Executors may now be started with maestro_run.");
+        notify(ctx, "Plan approved. Executors may now be started with maestro_drive.");
         return;
       }
 
@@ -1896,6 +1704,15 @@ export default function maestro(
         },
         { value: "save", label: "Save changes", description: "Validate and update the board" },
         { value: "cancel", label: "Cancel editing", description: "Discard all draft changes" },
+        {
+          value: "criteria",
+          label: `Success criteria · ${draft.successCriteria?.length ?? 0}`,
+          description: (draft.successCriteria ?? []).join(" · "),
+        },
+        {
+          value: "verification",
+          label: `Verification · ${draft.verificationProfile ?? "none"}`,
+        },
       ]);
       if (!action || action === "cancel") return;
 
@@ -1937,6 +1754,45 @@ export default function maestro(
         }
         continue;
       }
+      if (action === "criteria") {
+        const value = await editPlanText(
+          ctx,
+          "Success criteria (one per line)",
+          (draft.successCriteria ?? []).join("\n"),
+          true
+        );
+        if (value !== null) {
+          try {
+            applyPlanTaskEdits(
+              draft,
+              {
+                successCriteria: value
+                  .split("\n")
+                  .map((item) => item.trim())
+                  .filter(Boolean),
+              },
+              tiers
+            );
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          }
+        }
+        continue;
+      }
+      if (action === "verification") {
+        const config = loadConfig(ctx.cwd);
+        const profile = await pickFromList(ctx, "Verification profile", [
+          { value: "", label: "None" },
+          ...Object.keys(config.verificationProfiles ?? {}).map((name) => ({
+            value: name,
+            label: name,
+          })),
+        ]);
+        if (profile !== undefined && profile !== null) {
+          applyPlanTaskEdits(draft, { verificationProfile: profile }, tiers);
+        }
+        continue;
+      }
       if (action === "cancellation") {
         const state = await pickFromList(ctx, "Cancellation state", [
           { value: "active", label: "Active" },
@@ -1956,6 +1812,9 @@ export default function maestro(
           brief: draft.brief,
           tier: draft.tier,
           dependsOn: draft.dependsOn,
+          ...(draft.writePaths ? { writePaths: draft.writePaths } : {}),
+          ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
+          verificationProfile: draft.verificationProfile ?? "",
           cancelled: draft.status === "cancelled",
         },
         tiers
@@ -1980,6 +1839,9 @@ export default function maestro(
             brief: draft.brief,
             tier: draft.tier,
             dependsOn: draft.dependsOn,
+            ...(draft.writePaths ? { writePaths: draft.writePaths } : {}),
+            ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
+            verificationProfile: draft.verificationProfile ?? "",
             cancelled: draft.status === "cancelled",
           },
           tiers
@@ -2132,6 +1994,10 @@ export default function maestro(
       const status = action.slice("status:".length) as TaskStatus;
       updateTask(ctx.cwd, task.id, (fresh) => {
         forceStatus(fresh, status);
+        if (status === "approved") {
+          fresh.approvalKind = "manual";
+          fresh.verificationSummary = "accepted manually from the dashboard";
+        }
       });
       if (status === "approved") {
         const cleanup = pruneTaskLogs(
@@ -2213,7 +2079,7 @@ export default function maestro(
     ctx: ExtensionCommandContext,
     sessionFile: string
   ): Promise<void> {
-    if (sessionSwitchBlocked(activeDrive !== undefined, liveRuns.size)) {
+    if (sessionSwitchBlocked(driveController.hasActive(), liveRuns.size)) {
       notify(
         ctx,
         `Pause the autonomous drive and wait for active executors before switching sessions. Use /${COMMAND} abort to stop them immediately.`,
@@ -2268,22 +2134,27 @@ export default function maestro(
 
     try {
       const usage = ctx.getContextUsage();
-      if (!usage || usage.percent === null || usage.percent < CONTEXT_NUDGE_PERCENT) return;
+      const config = loadConfig(ctx.cwd);
+      const threshold = (config.handoffContextRatio ?? CONTEXT_NUDGE_PERCENT / 100) * 100;
+      if (!usage || usage.percent === null || threshold <= 0 || usage.percent < threshold) return;
 
       const board = loadBoard(ctx.cwd);
-      if (board.tasks.length === 0 || !sessionOwnsBoard(ctx, board) || !ctx.hasUI) return;
+      if (board.tasks.length === 0 || !sessionOwnsBoard(ctx, board)) return;
+      if (driveController.hasActive() || liveRuns.size > 0) {
+        if (ctx.hasUI)
+          ctx.ui.notify("Maestro handoff pending until live work reaches a safe boundary.");
+        return;
+      }
 
-      ctx.ui.notify(
-        `Orchestrator context at ${Math.round(usage.percent)}% - consider /maestro handoff to continue with a clean supervisor.`
-      );
       contextNudgeShown = true;
+      pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
     } catch {
       // The turn may belong to a context invalidated by a session switch.
     }
   });
 
   pi.on("session_before_switch", (_event, ctx) => {
-    if (!sessionSwitchBlocked(activeDrive !== undefined, liveRuns.size)) return;
+    if (!sessionSwitchBlocked(driveController.hasActive(), liveRuns.size)) return;
     notify(
       ctx,
       `Session switch blocked while maestro work is active. Use /${COMMAND} pause and wait, or /${COMMAND} abort.`,
@@ -2293,7 +2164,7 @@ export default function maestro(
   });
 
   pi.on("session_before_fork", (_event, ctx) => {
-    if (!sessionSwitchBlocked(activeDrive !== undefined, liveRuns.size)) return;
+    if (!sessionSwitchBlocked(driveController.hasActive(), liveRuns.size)) return;
     notify(
       ctx,
       `Session fork blocked while maestro work is active. Use /${COMMAND} pause and wait, or /${COMMAND} abort.`,
@@ -2329,6 +2200,7 @@ export default function maestro(
     const recoveryNotes = sweepDispatchState(boardCwd);
     for (const note of recoveryNotes) notify(ctx, note, "warning");
     const recovered = loadBoard(boardCwd);
+    deliverPendingDecision(boardCwd, ctx.sessionManager.getSessionFile(), sendDecision);
     const knownWorktrees = recovered.tasks.flatMap((task) =>
       task.attempts.flatMap((attempt) =>
         attempt.worktreePath && attempt.branch
@@ -2355,7 +2227,7 @@ export default function maestro(
   // The before-switch/fork guards normally keep active work in this runtime.
   // Shutdown still aborts as a final safety net so a forced reload or exit can never orphan it.
   pi.on("session_shutdown", () => {
-    activeDrive?.abortController.abort();
+    driveController.shutdown();
     for (const run of liveRuns.values()) {
       run.handle.abort();
     }

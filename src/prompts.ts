@@ -1,13 +1,51 @@
 import { type Task } from "./types.js";
 
 export const MAX_INJECTED_CONTEXT_LENGTH = 10_000;
+export const MODEL_PROMPT_BUDGET = 40_000;
 
-const TRUNCATION_MARKER = "\n\n[... injected context truncated ...]";
+const TRUNCATION_MARKER =
+  "\n\n[... lower-priority context omitted; use the recorded session/log reference if needed ...]";
+
+function truncateContext(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  return value.slice(0, limit - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+}
 
 function truncateInjectedContext(value: string): string {
-  if (value.length <= MAX_INJECTED_CONTEXT_LENGTH) return value;
+  return truncateContext(value, MAX_INJECTED_CONTEXT_LENGTH);
+}
 
-  return value.slice(0, MAX_INJECTED_CONTEXT_LENGTH - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
+function joinBudgetedSections(sections: string[], budget = MODEL_PROMPT_BUDGET): string {
+  const output: string[] = [];
+  let remaining = budget;
+  for (const section of sections) {
+    const separator = output.length === 0 ? 0 : 2;
+    if (remaining <= separator) break;
+    const bounded = truncateContext(section, remaining - separator);
+    output.push(bounded);
+    remaining -= bounded.length + separator;
+    if (bounded.length < section.length) break;
+  }
+  return output.join("\n\n");
+}
+
+export interface PromptContextAccounting {
+  characters: number;
+  approximateTokens: number;
+  sections: Array<{ name: string; characters: number; omitted: boolean }>;
+}
+
+export function accountPromptContext(prompt: string): PromptContextAccounting {
+  const sections = prompt.split(/(?=^## )/m).map((section) => section.trim());
+  return {
+    characters: prompt.length,
+    approximateTokens: Math.ceil(prompt.length / 4),
+    sections: sections.map((section) => ({
+      name: section.match(/^## ([^\n]+)/)?.[1] ?? "role",
+      characters: section.length,
+      omitted: section.includes(TRUNCATION_MARKER.trim()),
+    })),
+  };
 }
 
 /**
@@ -26,28 +64,52 @@ export function buildExecutorPrompt(
   const sections = [
     `Role: executor agent with a fresh context, completing one task end to end.`,
     `## Task ${task.id}: ${task.title}`,
-    task.brief,
+    truncateContext(task.brief, 6_000),
   ];
 
-  if (task.reviewNotes) {
+  if (task.successCriteria?.length) {
     sections.push(
-      `## Review feedback\nA reviewer rejected the previous attempt. Address every point:\n${truncateInjectedContext(task.reviewNotes)}`
+      `## Success criteria\n${task.successCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n")}`
     );
   }
 
-  for (const dep of dependencyReports) {
+  const openFindings = task.findings?.filter((finding) => finding.status === "open").slice(0, 8);
+  const feedback = openFindings?.length
+    ? openFindings
+        .map((finding) => `- [${finding.fingerprint}] ${finding.message.slice(0, 500)}`)
+        .join("\n")
+    : task.reviewNotes;
+  if (feedback) {
+    sections.push(
+      `## Review feedback\nA reviewer rejected the previous attempt. Address every point:\n${truncateInjectedContext(feedback)}`
+    );
+  }
+
+  const uniqueDependencies = dependencyReports.filter(
+    (dependency, index) =>
+      dependencyReports.findIndex(
+        (candidate) => candidate.id === dependency.id && candidate.report === dependency.report
+      ) === index
+  );
+  const dependencyBudget = Math.max(
+    500,
+    Math.floor(10_000 / Math.max(1, uniqueDependencies.length))
+  );
+  for (const dep of uniqueDependencies) {
     const transcriptReference = dep.sessionFile
       ? `\nFull transcript (read sparingly, only if this report is insufficient): ${dep.sessionFile}`
       : "";
     sections.push(
-      `## Context from completed dependency ${dep.id} (${dep.title})\n${truncateInjectedContext(dep.report)}${transcriptReference}`
+      `## Context from completed dependency ${dep.id} (${dep.title})\n${truncateContext(dep.report, dependencyBudget)}${transcriptReference}`
     );
   }
 
   sections.push(
     [
-      "## Success criteria",
-      "- The acceptance criteria in the task brief are met.",
+      task.successCriteria?.length ? "## Execution contract" : "## Success criteria",
+      task.successCriteria?.length
+        ? "- Verify every numbered success criterion above."
+        : "- The acceptance criteria in the task brief are met.",
       "- Changes are verified with the most relevant available check: the verification command from the brief, targeted tests, type/lint checks, or a minimal smoke test. If none can run, say why and name the next best check.",
       "- Scope stays within this task; unrelated improvements are not included.",
       "",
@@ -63,7 +125,7 @@ export function buildExecutorPrompt(
     ].join("\n")
   );
 
-  return sections.join("\n\n");
+  return joinBudgetedSections(sections);
 }
 
 /** Prompt for an adversarial reviewer with read-only tools and a fresh context. */
@@ -71,16 +133,32 @@ export function buildReviewPrompt(task: Task, report: string): string {
   const sections = [
     `Role: adversarial code reviewer with a fresh context and read-only tools. An executor claims it completed the task below. Verify the claims independently; your job is to find real problems, not to be agreeable.`,
     `## Task ${task.id}: ${task.title}`,
-    task.brief,
+    truncateContext(task.brief, 6_000),
   ];
-  if (task.reviewNotes) {
+  if (task.successCriteria?.length) {
     sections.push(
-      `## Previous review findings\nAn earlier attempt was rejected for these reasons. Verify each one was addressed:\n${truncateInjectedContext(task.reviewNotes)}`
+      `## Success criteria\n${task.successCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n")}`
     );
   }
-  sections.push(`## Executor report\n${report}`);
+  const openFindings = task.findings?.filter((finding) => finding.status === "open").slice(0, 8);
+  const feedback = openFindings?.length
+    ? openFindings
+        .map((finding) => `- [${finding.fingerprint}] ${finding.message.slice(0, 500)}`)
+        .join("\n")
+    : task.reviewNotes;
+  if (feedback) {
+    sections.push(
+      `## Previous review findings\nExplicitly verify every prior finding:\n${truncateInjectedContext(feedback)}`
+    );
+  }
+  sections.push(`## Executor report\n${truncateContext(report, 4_000)}`);
+  if (task.provenance?.candidateTree) {
+    sections.push(
+      `## Authoritative artifact\nGit tree: ${task.provenance.candidateTree}\nReview this complete Git tree. The bounded diff below is presentation context only.`
+    );
+  }
   const diff = task.attempts.at(-1)?.diff;
-  if (diff) sections.push(`## Diff of the attempt\n${truncateInjectedContext(diff)}`);
+  if (diff) sections.push(`## Bounded display diff\n${truncateContext(diff, 8_000)}`);
   sections.push(
     [
       "## Success criteria",
@@ -88,15 +166,15 @@ export function buildReviewPrompt(task: Task, report: string): string {
       "- Findings are limited to real problems: incorrect logic, missing requirements, broken edge cases, unverified claims, scope creep. Style preferences are not findings.",
       "",
       "## Stop rule",
-      "Stop verifying once you have either confirmed the acceptance criteria or found enough evidence to reject. Do not exhaustively audit unrelated code.",
+      "Verify every acceptance criterion and every open prior finding. Report all blocking in-scope findings found, up to eight. Approve only when all criteria and prior findings pass. Stop early only when one blocker makes further verification impossible, and state why. Do not audit unrelated code.",
       "",
       "## Verdict",
       "End your final message with exactly one of:",
       "- `VERDICT: APPROVE` when the work is correct and complete",
-      "- `VERDICT: REQUEST_CHANGES` followed by a numbered list of required fixes, each naming the file or behavior affected",
+      "- `VERDICT: REQUEST_CHANGES` followed by a numbered list of required fixes. Prefix criterion failures with `Criterion N:` and name the file or behavior affected",
     ].join("\n")
   );
-  return sections.join("\n\n");
+  return joinBudgetedSections(sections);
 }
 
 /**
@@ -153,14 +231,15 @@ export function buildSupervisorBriefing(
       "",
       "## Workflow",
       "1. Call `maestro_drive` once to start the mechanical run/review/retry loop in the background. It runs independent tasks in parallel, waits for approved dependencies, and carries review feedback into retries.",
-      "2. While the drive is active, poll `maestro_status` at the configured cadence. Each pulse reports what advanced, live executor activity, and failures. After every pulse, briefly narrate meaningful progress to the user, then call it again until the drive settles.",
-      "3. The drive stops itself at decision points (plan gate, budget or attempt cap, provider block, review escalation, abort, blocked dependency, or error). Each settled pulse names the recommended tool actions; choose among them yourself.",
+      "2. Wait while routine progress stays in the dashboard. A compact completion or decision message wakes you exactly when judgment is needed.",
+      "3. Resolve a decision with `maestro_update`, `maestro_plan`, or `maestro_drive` intervention, then start/resume drive once.",
       "4. When all tasks are approved, summarize.",
       "",
       "## Decision rules",
-      "- Use `maestro_status` instead of re-reading executor output.",
+      "- Use `maestro_drive` inspect only for bounded evidence when a decision requires it.",
       "- At a provider block: switch to a configured fallback then `/maestro resume`, or ask the user if it is a quota/cost decision. Never blindly retry the same blocked provider.",
       "- At a review escalation or repeated same-cause failure: `maestro_update` the brief/tier, `maestro_plan` to split, or cancel the task. Do not re-plan the whole board.",
+      "- At an attempt cap, changing the capped task's tier or brief cannot make it runnable because its consumed attempts remain. Create a narrowly scoped successor with `maestro_plan` whose title and brief identify the capped task. Keep the capped predecessor visible, then use `maestro_update` to replace its id in every downstream dependency while preserving unrelated dependencies. Start `maestro_drive` with an explicit `taskIds` list containing the successor and every rewired dependent, and excluding the capped predecessor.",
       "- Never force another attempt by raising the project `maxAttempts`; fix the root cause instead.",
       tierGuidance,
       "- Ask the user before expanding scope beyond the stated goal or making a cost tradeoff.",
@@ -183,18 +262,19 @@ export function buildOrchestratorBriefing(goal: string, tierGuidance: string): s
       "1. Investigate just enough to split the goal into small, independently verifiable tasks. Tasks that would edit the same files must not run in parallel: chain them with dependsOn even when logically independent.",
       "2. `maestro_plan`: each brief must be self-contained (executors see only the brief plus approved dependency reports) and include goal, relevant file paths, constraints, acceptance criteria, and a verification command. Give each task a conventional commitMessage (fix:/feat:/refactor:/test:/docs:) describing its change.",
       "3. `maestro_drive`: starts the mechanical run/review/retry loop in the background. It runs independent tasks in parallel, waits for approved dependencies, and carries review feedback into retries.",
-      "4. While the drive is active, poll `maestro_status` at the configured cadence. Each pulse reports what advanced, live executor activity, and failures. After every pulse, briefly narrate meaningful progress to the user, then call it again until the drive settles.",
-      "5. The drive stops itself at decision points (plan gate, budget or attempt cap, provider block, review escalation, abort, blocked dependency, or error). Each settled pulse names the recommended tool actions; choose among them yourself. Use `maestro_run` and `maestro_review` only for targeted manual recovery after you have fixed the root cause.",
+      "4. Wait while routine progress stays in the dashboard. A compact completion or decision message wakes you exactly when judgment is needed.",
+      "5. Resolve decisions with `maestro_update`, `maestro_plan`, or `maestro_drive` intervention, then start/resume drive once.",
       "6. When all tasks are approved, summarize.",
       "",
       "## Tier selection",
       tierGuidance,
       "",
       "## Decision rules",
-      "- Use `maestro_status` instead of re-reading executor output.",
+      "- Use `maestro_drive` inspect only for bounded evidence when a decision requires it.",
       "- Reference file paths in briefs; paste file contents only when an executor cannot discover them itself.",
       "- At a provider block: switch to a configured fallback then `/maestro resume`, or ask the user if it is a quota/cost decision. Never blindly retry the same blocked provider.",
-      "- At a review escalation, attempt cap, or a task that fails twice with the same root cause: `maestro_update` its brief or tier, split it with `maestro_plan`, or cancel it. Never raise the project `maxAttempts` to force another attempt.",
+      "- At a review escalation or a task that fails twice with the same root cause: `maestro_update` its brief or tier, split it with `maestro_plan`, or cancel it. Never raise the project `maxAttempts` to force another attempt.",
+      "- At an attempt cap, changing the capped task's tier or brief cannot make it runnable because its consumed attempts remain. Create a narrowly scoped successor with `maestro_plan` whose title and brief identify the capped task. Keep the capped predecessor visible, then use `maestro_update` to replace its id in every downstream dependency while preserving unrelated dependencies. Start `maestro_drive` with an explicit `taskIds` list containing the successor and every rewired dependent, and excluding the capped predecessor.",
       "- Ask the user before expanding scope beyond the stated goal or making a cost tradeoff.",
       "- After changing a brief/tier, `/maestro resume` to continue the drive.",
       "- If planning required heavy investigation, suggest `/maestro handoff` after the plan is on the board: it continues run/review in a fresh session without this session's planning context.",

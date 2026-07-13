@@ -1,11 +1,16 @@
 import {
   appendFileSync,
+  closeSync,
   copyFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -23,6 +28,15 @@ import {
 
 export const BOARD_FILE = "board.json";
 const HISTORY_FILE = "history.jsonl";
+const BOARD_LOCK_STALE_MS = 30_000;
+const BOARD_LOCK_RETRIES = 500;
+export const DISPATCH_LEASE_MS = 30_000;
+
+interface BoardLock {
+  fd: number;
+  file: string;
+  token: string;
+}
 
 export interface StatusHistoryEntry {
   ts: string;
@@ -42,6 +56,17 @@ function boardFile(cwd: string): string {
   return join(stateDir(cwd), BOARD_FILE);
 }
 
+export function inspectBoardStorage(cwd: string): { boardBytes: number; archiveCount: number } {
+  const file = boardFile(cwd);
+  const archiveDirectory = join(stateDir(cwd), "archive");
+  return {
+    boardBytes: existsSync(file) ? statSync(file).size : 0,
+    archiveCount: existsSync(archiveDirectory)
+      ? readdirSync(archiveDirectory).filter((name) => name.endsWith("-board.json")).length
+      : 0,
+  };
+}
+
 export function loadBoard(cwd: string): Board {
   const file = boardFile(cwd);
   if (!existsSync(file)) return structuredClone(EMPTY_BOARD);
@@ -55,6 +80,29 @@ export function loadBoard(cwd: string): Board {
 }
 
 export function saveBoard(cwd: string, board: Board): void {
+  const lock = acquireBoardLock(cwd);
+  try {
+    saveBoardUnlocked(cwd, board);
+  } finally {
+    releaseBoardLock(lock);
+  }
+}
+
+export function replaceBoard(cwd: string, board: Board, expectedRevision: number): void {
+  const lock = acquireBoardLock(cwd);
+  try {
+    const currentRevision = loadBoard(cwd).revision ?? 0;
+    if (currentRevision !== expectedRevision) {
+      throw new Error("Cannot replace a stale maestro board; reload it before replacing");
+    }
+    board.revision = currentRevision;
+    saveBoardUnlocked(cwd, board);
+  } finally {
+    releaseBoardLock(lock);
+  }
+}
+
+function saveBoardUnlocked(cwd: string, board: Board): void {
   const dir = stateDir(cwd);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -63,9 +111,102 @@ export function saveBoard(cwd: string, board: Board): void {
   }
   board.revision = (board.revision ?? 0) + 1;
   const file = boardFile(cwd);
-  const tmp = `${file}.tmp`;
+  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
   writeFileSync(tmp, `${JSON.stringify(board, null, 2)}\n`, "utf-8");
   renameSync(tmp, file);
+}
+
+function acquireBoardLock(cwd: string): BoardLock {
+  const dir = stateDir(cwd);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "board.lock");
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  for (let tries = 0; tries < BOARD_LOCK_RETRIES; tries += 1) {
+    try {
+      const fd = openSync(file, "wx");
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, token }));
+      return { fd, file, token };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const staleOwner = staleLockOwner(file);
+      if (staleOwner && reclaimStaleLock(file, staleOwner)) continue;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+  throw new Error("Timed out waiting for maestro board lock");
+}
+
+interface StaleLockOwner {
+  identity: string;
+}
+
+function staleLockOwner(file: string): StaleLockOwner | undefined {
+  try {
+    const stat = statSync(file);
+    if (Date.now() - stat.mtimeMs <= BOARD_LOCK_STALE_MS) return undefined;
+    const contents = readFileSync(file, "utf-8");
+    const owner = JSON.parse(contents) as { pid?: unknown; token?: unknown };
+    if (typeof owner.pid === "number") {
+      try {
+        process.kill(owner.pid, 0);
+        return undefined;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") return undefined;
+      }
+    }
+    const token = typeof owner.token === "string" ? owner.token : "invalid";
+    return { identity: `${stat.dev}-${stat.ino}-${token}` };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    // Old malformed lock files are reclaimable, but their inode still provides
+    // the identity used by the ownership-safe hard-link protocol below.
+    const stat = statSync(file);
+    return { identity: `${stat.dev}-${stat.ino}-invalid` };
+  }
+}
+
+function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
+  const claimed = `${file}.stale-${owner.identity}`;
+  try {
+    // linkSync is the ownership claim: exactly one contender can create this
+    // name. Losers never unlink board.lock and therefore cannot remove the
+    // winner's newly acquired lock.
+    linkSync(file, claimed);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST" || code === "ENOENT") return false;
+    throw error;
+  }
+
+  let reclaimed = false;
+  try {
+    const current = statSync(file);
+    const stale = statSync(claimed);
+    if (current.dev === stale.dev && current.ino === stale.ino) {
+      unlinkSync(file);
+      reclaimed = true;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  try {
+    unlinkSync(claimed);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return reclaimed;
+}
+
+function releaseBoardLock(lock: BoardLock): void {
+  closeSync(lock.fd);
+  try {
+    const owner = JSON.parse(readFileSync(lock.file, "utf-8")) as { token?: unknown };
+    if (owner.token === lock.token) unlinkSync(lock.file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 export function recordStatusChange(
@@ -104,6 +245,19 @@ export interface ArchivedBoard {
   taskCount: number;
 }
 
+export function loadArchivedBoard(cwd: string, selectedFile: string): Board {
+  const archiveDirectory = resolve(stateDir(cwd), "archive");
+  const file = resolve(
+    isAbsolute(selectedFile) ? selectedFile : join(archiveDirectory, selectedFile)
+  );
+  if (dirname(file) !== archiveDirectory) {
+    throw new Error(`Archive file must be in ${archiveDirectory}`);
+  }
+  const board = readArchivedBoard(file);
+  if (!board) throw new Error(`Archive is missing or invalid: ${file}`);
+  return board;
+}
+
 export function listArchivedBoards(cwd: string): ArchivedBoard[] {
   const directory = join(stateDir(cwd), "archive");
   if (!existsSync(directory)) return [];
@@ -137,8 +291,9 @@ export function restoreArchivedBoard(
   const board = readArchivedBoard(file);
   if (!board) throw new Error(`Archive is not a valid maestro board: ${file}`);
 
+  const currentRevision = loadBoard(cwd).revision ?? 0;
   const archivedCurrent = archiveBoard(cwd);
-  saveBoard(cwd, board);
+  replaceBoard(cwd, board, currentRevision);
   return { archivedCurrent, selectedFile: file };
 }
 
@@ -159,6 +314,7 @@ function isBoard(value: unknown): value is Board {
   if (value.revision !== undefined && !isNumber(value.revision)) return false;
   if (value.goal !== undefined && typeof value.goal !== "string") return false;
   if (value.planPending !== undefined && typeof value.planPending !== "boolean") return false;
+  if (value.activeDecision !== undefined && !isDriveDecision(value.activeDecision)) return false;
   if (
     value.ownerSessions !== undefined &&
     (!Array.isArray(value.ownerSessions) ||
@@ -167,6 +323,29 @@ function isBoard(value: unknown): value is Board {
     return false;
   }
   return value.tasks.every(isTask);
+}
+
+function isDriveDecision(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const interventions = ["handoff", "abort", "steer"];
+  return (
+    typeof value.id === "string" &&
+    (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
+    typeof value.kind === "string" &&
+    Array.isArray(value.taskIds) &&
+    value.taskIds.length <= 64 &&
+    value.taskIds.every((id) => typeof id === "string") &&
+    typeof value.evidence === "string" &&
+    value.evidence.length <= 4000 &&
+    Array.isArray(value.allowedInterventions) &&
+    value.allowedInterventions.every((item) => interventions.includes(String(item))) &&
+    isNumber(value.createdAt) &&
+    (value.deliveredAt === undefined || isNumber(value.deliveredAt)) &&
+    (value.resolution === undefined ||
+      (isRecord(value.resolution) &&
+        interventions.includes(String(value.resolution.intervention)) &&
+        isNumber(value.resolution.resolvedAt)))
+  );
 }
 
 function isTask(value: unknown): value is Task {
@@ -188,13 +367,65 @@ function isTask(value: unknown): value is Task {
     statuses.includes(value.status as TaskStatus) &&
     Array.isArray(value.dependsOn) &&
     value.dependsOn.every((dependency) => typeof dependency === "string") &&
+    (value.writePaths === undefined ||
+      (Array.isArray(value.writePaths) &&
+        value.writePaths.every((path) => typeof path === "string"))) &&
+    (value.successCriteria === undefined ||
+      (Array.isArray(value.successCriteria) &&
+        value.successCriteria.every((criterion) => typeof criterion === "string"))) &&
+    (value.verificationProfile === undefined || typeof value.verificationProfile === "string") &&
+    (value.findings === undefined ||
+      (Array.isArray(value.findings) && value.findings.every(isReviewFinding))) &&
     Array.isArray(value.attempts) &&
     value.attempts.every(isAttempt) &&
     isNumber(value.createdAt) &&
     isNumber(value.updatedAt) &&
     (value.commitMessage === undefined || typeof value.commitMessage === "string") &&
     (value.reviewNotes === undefined || typeof value.reviewNotes === "string") &&
-    (value.reviewRejections === undefined || isNumber(value.reviewRejections))
+    (value.approvalKind === undefined ||
+      value.approvalKind === "reviewed" ||
+      value.approvalKind === "manual") &&
+    (value.reviewedPatchHash === undefined || typeof value.reviewedPatchHash === "string") &&
+    (value.integratedCommit === undefined || typeof value.integratedCommit === "string") &&
+    (value.verificationSummary === undefined || typeof value.verificationSummary === "string") &&
+    (value.provenance === undefined || isArtifactProvenance(value.provenance)) &&
+    (value.reviewRejections === undefined || isNumber(value.reviewRejections)) &&
+    (value.dispatchNote === undefined || typeof value.dispatchNote === "string") &&
+    (value.dispatchClaim === undefined || isDispatchClaim(value.dispatchClaim))
+  );
+}
+
+function isArtifactProvenance(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.candidateTree === "string" &&
+    isNumber(value.capturedAt) &&
+    (value.reviewedAt === undefined || isNumber(value.reviewedAt)) &&
+    (value.integratedCommit === undefined || typeof value.integratedCommit === "string") &&
+    (value.integratedTree === undefined || typeof value.integratedTree === "string") &&
+    (value.verifiedAt === undefined || isNumber(value.verifiedAt)) &&
+    (value.verificationProfile === undefined || typeof value.verificationProfile === "string")
+  );
+}
+
+function isReviewFinding(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.fingerprint === "string" &&
+    typeof value.message === "string" &&
+    (value.status === "open" || value.status === "verified") &&
+    isNumber(value.firstAttempt) &&
+    isNumber(value.lastAttempt)
+  );
+}
+
+function isDispatchClaim(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    (value.kind === "execute" || value.kind === "review") &&
+    isNumber(value.claimedAt) &&
+    (value.expiresAt === undefined || isNumber(value.expiresAt))
   );
 }
 
@@ -222,6 +453,9 @@ function isAttempt(value: unknown): boolean {
     (value.consumesAttempt === undefined || typeof value.consumesAttempt === "boolean") &&
     (value.providerFailure === undefined || typeof value.providerFailure === "boolean") &&
     (value.finalReport === undefined || typeof value.finalReport === "string") &&
+    (value.promptCharacters === undefined || isNumber(value.promptCharacters)) &&
+    (value.promptApproximateTokens === undefined || isNumber(value.promptApproximateTokens)) &&
+    (value.promptSections === undefined || isPromptSections(value.promptSections)) &&
     (value.diff === undefined || typeof value.diff === "string") &&
     (value.worktreePath === undefined || typeof value.worktreePath === "string") &&
     (value.branch === undefined || typeof value.branch === "string") &&
@@ -247,7 +481,23 @@ function isReviewLaunch(value: unknown): boolean {
     (value.exitCode === undefined || isNumber(value.exitCode)) &&
     (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
     (value.failureReason === undefined || isFailureReason(value.failureReason)) &&
-    (value.finalReport === undefined || typeof value.finalReport === "string")
+    (value.finalReport === undefined || typeof value.finalReport === "string") &&
+    (value.promptCharacters === undefined || isNumber(value.promptCharacters)) &&
+    (value.promptApproximateTokens === undefined || isNumber(value.promptApproximateTokens)) &&
+    (value.promptSections === undefined || isPromptSections(value.promptSections))
+  );
+}
+
+function isPromptSections(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (section) =>
+        isRecord(section) &&
+        typeof section.name === "string" &&
+        isNumber(section.characters) &&
+        typeof section.omitted === "boolean"
+    )
   );
 }
 
@@ -304,6 +554,9 @@ export function createTask(
     tier: string;
     commitMessage?: string;
     dependsOn?: string[];
+    writePaths?: string[];
+    successCriteria?: string[];
+    verificationProfile?: string;
   }
 ): Task {
   const task: Task = {
@@ -318,6 +571,9 @@ export function createTask(
     updatedAt: Date.now(),
   };
   if (input.commitMessage) task.commitMessage = input.commitMessage;
+  if (input.writePaths) task.writePaths = normalizeWritePaths(input.writePaths);
+  if (input.successCriteria) task.successCriteria = normalizeSuccessCriteria(input.successCriteria);
+  if (input.verificationProfile) task.verificationProfile = input.verificationProfile;
   board.nextTaskNumber += 1;
   board.tasks.push(task);
   return task;
@@ -334,17 +590,185 @@ export function updateTask(
   taskId: string,
   mutate: (task: Task, board: Board) => void
 ): Task | undefined {
-  const board = loadBoard(cwd);
-  const task = findTask(board, taskId);
-  if (!task) return undefined;
-  const previousStatus = task.status;
-  mutate(task, board);
-  task.updatedAt = Date.now();
-  saveBoard(cwd, board);
-  if (task.status !== previousStatus) {
-    recordStatusChange(cwd, task.id, previousStatus, task.status, board.revision as number);
+  const lock = acquireBoardLock(cwd);
+  try {
+    const board = loadBoard(cwd);
+    const task = findTask(board, taskId);
+    if (!task) return undefined;
+    const previousStatus = task.status;
+    mutate(task, board);
+    task.updatedAt = Date.now();
+    saveBoardUnlocked(cwd, board);
+    if (task.status !== previousStatus) {
+      recordStatusChange(cwd, task.id, previousStatus, task.status, board.revision as number);
+    }
+    return task;
+  } finally {
+    releaseBoardLock(lock);
   }
-  return task;
+}
+
+export interface DispatchClaimResult {
+  task: Task;
+  claimed: boolean;
+  claimId: string;
+  attemptIndex?: number;
+  note?: string;
+}
+
+export function claimTaskDispatch(
+  cwd: string,
+  taskId: string,
+  kind: "execute" | "review",
+  dispatchable: (board: Board, task: Task) => boolean
+): DispatchClaimResult | undefined {
+  const claimId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let claimed = false;
+  let note: string | undefined;
+  let attemptIndex: number | undefined;
+  const task = updateTask(cwd, taskId, (fresh, board) => {
+    if (fresh.dispatchClaim) {
+      const expiresAt =
+        fresh.dispatchClaim.expiresAt ?? fresh.dispatchClaim.claimedAt + DISPATCH_LEASE_MS;
+      if (expiresAt > Date.now()) {
+        note = `${fresh.id} dispatch declined; held by ${fresh.dispatchClaim.id} (${fresh.dispatchClaim.kind})`;
+        return;
+      }
+      recoverExpiredClaim(fresh);
+    }
+    if (!dispatchable(board, fresh)) {
+      note = `${fresh.id} dispatch declined; status is ${fresh.status}`;
+      return;
+    }
+    const now = Date.now();
+    fresh.dispatchClaim = { id: claimId, kind, claimedAt: now, expiresAt: now + DISPATCH_LEASE_MS };
+    delete fresh.dispatchNote;
+    claimed = true;
+    if (kind === "execute") {
+      attemptIndex = Math.max(0, ...fresh.attempts.map((attempt) => attempt.index)) + 1;
+      fresh.attempts.push({
+        index: attemptIndex,
+        logFile: "pending",
+        thinking: "pending",
+        startedAt: Date.now(),
+        usage: { input: 0, output: 0, cost: 0, turns: 0 },
+        touchedFiles: [],
+      });
+      transition(fresh, "running");
+    }
+  });
+  if (!task) return undefined;
+  return {
+    task,
+    claimed,
+    claimId,
+    ...(attemptIndex ? { attemptIndex } : {}),
+    ...(note ? { note } : {}),
+  };
+}
+
+export function releaseTaskDispatch(cwd: string, taskId: string, claimId: string): boolean {
+  let released = false;
+  updateTask(cwd, taskId, (task) => {
+    if (task.dispatchClaim?.id !== claimId) return;
+    delete task.dispatchClaim;
+    released = true;
+  });
+  return released;
+}
+
+export function renewTaskDispatch(cwd: string, taskId: string, claimId: string): boolean {
+  let renewed = false;
+  updateTask(cwd, taskId, (task) => {
+    if (task.dispatchClaim?.id !== claimId) return;
+    task.dispatchClaim.expiresAt = Date.now() + DISPATCH_LEASE_MS;
+    renewed = true;
+  });
+  return renewed;
+}
+
+export function reserveClaimedAttempt(
+  cwd: string,
+  taskId: string,
+  claimId: string
+): number | undefined {
+  let index: number | undefined;
+  updateTask(cwd, taskId, (task) => {
+    if (task.dispatchClaim?.id !== claimId) return;
+    index = Math.max(0, ...task.attempts.map((attempt) => attempt.index)) + 1;
+    task.attempts.push({
+      index,
+      logFile: "pending",
+      thinking: "pending",
+      startedAt: Date.now(),
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      touchedFiles: [],
+    });
+  });
+  return index;
+}
+
+function recoverExpiredClaim(task: Task): void {
+  const claim = task.dispatchClaim;
+  if (!claim) return;
+  if (claim.kind === "execute" && task.status === "running") {
+    const attempt = task.attempts.at(-1);
+    if (attempt && attempt.endedAt === undefined) {
+      const message = "orphan attempt recovered after expired dispatch lease";
+      attempt.endedAt = Date.now();
+      attempt.exitCode = 1;
+      attempt.errorMessage = message;
+      attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+    }
+    forceStatus(task, "failed");
+  }
+  delete task.dispatchClaim;
+}
+
+export function sweepDispatchState(cwd: string): string[] {
+  const notes: string[] = [];
+  for (const stale of loadBoard(cwd).tasks) {
+    const orphanCount =
+      stale.status === "running"
+        ? 0
+        : stale.attempts.filter(
+            (attempt) => attempt.endedAt === undefined && attempt.usage.turns === 0
+          ).length;
+    const claimExpired =
+      stale.dispatchClaim !== undefined &&
+      (stale.dispatchClaim.expiresAt ?? stale.dispatchClaim.claimedAt + DISPATCH_LEASE_MS) <=
+        Date.now();
+    if (!claimExpired && orphanCount === 0) continue;
+    updateTask(cwd, stale.id, (task) => {
+      const parts: string[] = [];
+      const claimExpired =
+        task.dispatchClaim !== undefined &&
+        (task.dispatchClaim.expiresAt ?? task.dispatchClaim.claimedAt + DISPATCH_LEASE_MS) <=
+          Date.now();
+      if (task.dispatchClaim && claimExpired) {
+        parts.push(`cleared stale ${task.dispatchClaim.kind} claim ${task.dispatchClaim.id}`);
+        recoverExpiredClaim(task);
+      }
+      const orphans = task.attempts.filter(
+        (attempt) => attempt.endedAt === undefined && attempt.usage.turns === 0
+      );
+      for (const attempt of orphans) {
+        const message = "orphan attempt recovered after interrupted dispatch";
+        attempt.endedAt = Date.now();
+        attempt.exitCode = 1;
+        attempt.errorMessage = message;
+        attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+      }
+      if (orphans.length > 0) {
+        parts.push(`flagged ${orphans.length} orphan attempt${orphans.length === 1 ? "" : "s"}`);
+      }
+      if (parts.length === 0) return;
+      const note = `${task.id}: ${parts.join("; ")}`.slice(0, 500);
+      task.dispatchNote = note;
+      notes.push(note);
+    });
+  }
+  return notes;
 }
 
 export function findTask(board: Board, id: string): Task | undefined {
@@ -381,7 +805,7 @@ export function setStatus(task: Task, status: TaskStatus): void {
 
 /**
  * A task is runnable when it is pending work and all dependencies are approved.
- * With explicit=true (task named directly in maestro_run), failed and
+ * With explicit=true (task named directly in a scoped drive), failed and
  * cancelled tasks are also runnable so dead ends can be retried on purpose.
  */
 export function isRunnable(board: Board, task: Task, explicit = false): boolean {
@@ -390,6 +814,34 @@ export function isRunnable(board: Board, task: Task, explicit = false): boolean 
   const retryable = explicit && (task.status === "failed" || task.status === "cancelled");
   if (!pending && !retryable) return false;
   return task.dependsOn.every((depId) => findTask(board, depId)?.status === "approved");
+}
+
+export function scopedDependencyGaps(
+  board: Board,
+  taskIds: readonly string[]
+): Array<{ taskId: string; dependencyId: string }> {
+  const selected = new Set(taskIds.map((id) => id.trim().toUpperCase()));
+  const gaps: Array<{ taskId: string; dependencyId: string }> = [];
+  for (const taskId of selected) {
+    const task = findTask(board, taskId);
+    if (!task) continue;
+    const visit = (dependencyId: string) => {
+      const dependency = findTask(board, dependencyId);
+      if (!dependency || dependency.status === "approved") return;
+      if (!selected.has(dependency.id.toUpperCase())) {
+        gaps.push({ taskId: task.id, dependencyId: dependency.id });
+      }
+      for (const nested of dependency.dependsOn) visit(nested);
+    };
+    for (const dependencyId of task.dependsOn) visit(dependencyId);
+  }
+  return gaps.filter(
+    (gap, index) =>
+      gaps.findIndex(
+        (candidate) =>
+          candidate.taskId === gap.taskId && candidate.dependencyId === gap.dependencyId
+      ) === index
+  );
 }
 
 export function blockedReason(board: Board, task: Task): string | undefined {
@@ -503,13 +955,43 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
     if (!visited.has(task.id.toUpperCase())) visit(task);
   }
 
-  return { missingDependencies, dependencyCycles, invalidTiers };
+  const unresolved = board.tasks.filter(
+    (task) => task.status !== "approved" && task.status !== "cancelled" && task.writePaths
+  );
+  const dependsTransitively = (task: Task, targetId: string, seen = new Set<string>()): boolean => {
+    if (seen.has(task.id)) return false;
+    seen.add(task.id);
+    return task.dependsOn.some((id) => {
+      if (id.toUpperCase() === targetId.toUpperCase()) return true;
+      const dependency = tasksById.get(id.toUpperCase());
+      return dependency ? dependsTransitively(dependency, targetId, seen) : false;
+    });
+  };
+  const writePathOverlaps: NonNullable<PlanValidation["writePathOverlaps"]> = [];
+  for (let leftIndex = 0; leftIndex < unresolved.length; leftIndex += 1) {
+    const left = unresolved[leftIndex];
+    if (!left) continue;
+    for (const right of unresolved.slice(leftIndex + 1)) {
+      if (dependsTransitively(left, right.id) || dependsTransitively(right, left.id)) continue;
+      const path = left.writePaths?.find((candidate) =>
+        right.writePaths?.some((other) => writePathsOverlap(candidate, other))
+      );
+      if (path) writePathOverlaps.push({ leftTaskId: left.id, rightTaskId: right.id, path });
+    }
+  }
+
+  return {
+    missingDependencies,
+    dependencyCycles,
+    invalidTiers,
+    ...(writePathOverlaps.length > 0 ? { writePathOverlaps } : {}),
+  };
 }
 
 export function rejectPlan(cwd: string): string | undefined {
   const archivePath = archiveBoard(cwd);
   if (!archivePath) return undefined;
-  saveBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+  replaceBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] }, loadBoard(cwd).revision ?? 0);
   return archivePath;
 }
 
@@ -530,8 +1012,53 @@ export function planValidationMessage(validation: PlanValidation): string | unde
   for (const invalid of validation.invalidTiers) {
     problems.push(`${invalid.taskId} uses unknown tier "${invalid.tier}"`);
   }
+  for (const contractError of validation.contractErrors ?? []) {
+    problems.push(
+      `${contractError.taskId} ${contractError.message}; update the task before dispatch`
+    );
+  }
+  for (const overlap of validation.writePathOverlaps ?? []) {
+    problems.push(
+      `${overlap.leftTaskId} and ${overlap.rightTaskId} both write "${overlap.path}"; add a dependency or narrow writePaths`
+    );
+  }
   if (problems.length === 0) return undefined;
   return `Invalid plan:\n- ${problems.join("\n- ")}`;
+}
+
+export function normalizeSuccessCriteria(criteria: string[]): string[] {
+  if (criteria.length < 1 || criteria.length > 12) {
+    throw new Error("successCriteria must contain 1-12 items.");
+  }
+  return criteria.map((value) => {
+    const criterion = value.trim();
+    if (!criterion || criterion.length > 500) {
+      throw new Error("Each success criterion must contain 1-500 characters.");
+    }
+    return criterion;
+  });
+}
+
+export function normalizeWritePaths(paths: string[]): string[] {
+  if (paths.length > 64) throw new Error("writePaths cannot contain more than 64 paths.");
+  return [
+    ...new Set(
+      paths.map((value) => {
+        const path = value.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+        if (!path || path.length > 240 || isAbsolute(path) || path.split("/").includes("..")) {
+          throw new Error(`Invalid repository-relative write path: ${value}`);
+        }
+        return path;
+      })
+    ),
+  ].sort();
+}
+
+function writePathsOverlap(left: string, right: string): boolean {
+  if (left === right) return true;
+  if (left.endsWith("/**")) return right.startsWith(left.slice(0, -2));
+  if (right.endsWith("/**")) return left.startsWith(right.slice(0, -2));
+  return false;
 }
 
 export function applyPlanTaskEdits(
@@ -563,6 +1090,15 @@ export function applyPlanTaskEdits(
   }
   if (edits.dependsOn !== undefined) {
     task.dependsOn = edits.dependsOn.map((id) => id.trim().toUpperCase()).filter(Boolean);
+  }
+  if (edits.writePaths !== undefined) task.writePaths = normalizeWritePaths(edits.writePaths);
+  if (edits.successCriteria !== undefined) {
+    task.successCriteria = normalizeSuccessCriteria(edits.successCriteria);
+  }
+  if (edits.verificationProfile !== undefined) {
+    const profile = edits.verificationProfile.trim();
+    if (profile) task.verificationProfile = profile;
+    else delete task.verificationProfile;
   }
   if (edits.cancelled === true) forceStatus(task, "cancelled");
   if (edits.cancelled === false && task.status === "cancelled") forceStatus(task, "todo");

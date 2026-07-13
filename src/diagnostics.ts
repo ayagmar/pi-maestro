@@ -7,14 +7,16 @@ import {
   loadConfig,
   matchingPreset,
   resolveTierModel,
+  validateConfig,
 } from "./config.js";
 import { inspectGit, inspectManagedWorktrees } from "./worktree.js";
 
 function inspectConfigFile(scope: "user" | "project", file: string): string {
   if (!existsSync(file)) return `${scope}: ${file} (not present)`;
   try {
-    JSON.parse(readFileSync(file, "utf-8"));
-    return `${scope}: ${file} (loaded)`;
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf-8"));
+    const error = validateConfig(parsed);
+    return error ? `${scope}: ${file} (INVALID CONFIG — ${error})` : `${scope}: ${file} (loaded)`;
   } catch {
     return `${scope}: ${file} (INVALID JSON — fix or remove it; maestro normally archives it on load)`;
   }

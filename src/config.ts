@@ -20,9 +20,16 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   useWorktrees: false,
   autoCommit: true,
   maxAttempts: 3,
-  maxCostPerTask: 0,
-  maxRunCost: 0,
+  maxCostPerTask: 5,
+  maxRunCost: 25,
   statusWaitSeconds: 60,
+  logEvents: "compact",
+  maxLogBytesPerRun: 1_000_000,
+  watchdogIdleSeconds: 120,
+  watchdogWarningTurns: 12,
+  watchdogTerminationTurns: 4,
+  handoffContextRatio: 0.68,
+  cleanupCompletedTasks: true,
   tiers: {
     trivial: { thinking: "low" },
     standard: { thinking: "medium" },
@@ -72,9 +79,16 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
-      maxCostPerTask: 0,
-      maxRunCost: 0,
+      maxCostPerTask: 5,
+      maxRunCost: 25,
       statusWaitSeconds: 60,
+      logEvents: "compact",
+      maxLogBytesPerRun: 1_000_000,
+      watchdogIdleSeconds: 120,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 4,
+      handoffContextRatio: 0.68,
+      cleanupCompletedTasks: true,
       tiers: {
         trivial: { model: "openai-codex/gpt-5.6-terra", thinking: "high" },
         standard: { model: "openai-codex/gpt-5.6-sol", thinking: "medium" },
@@ -95,8 +109,15 @@ export const PRESETS: Preset[] = [
       autoCommit: true,
       maxAttempts: 3,
       maxCostPerTask: 2,
-      maxRunCost: 0,
+      maxRunCost: 25,
       statusWaitSeconds: 60,
+      logEvents: "compact",
+      maxLogBytesPerRun: 1_000_000,
+      watchdogIdleSeconds: 120,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 4,
+      handoffContextRatio: 0.68,
+      cleanupCompletedTasks: true,
       tiers: {
         trivial: { model: "openai-codex/gpt-5.6-luna", thinking: "high" },
         standard: { model: "openai-codex/gpt-5.6-terra", thinking: "high" },
@@ -117,8 +138,15 @@ export const PRESETS: Preset[] = [
       autoCommit: true,
       maxAttempts: 3,
       maxCostPerTask: 2,
-      maxRunCost: 0,
+      maxRunCost: 25,
       statusWaitSeconds: 60,
+      logEvents: "compact",
+      maxLogBytesPerRun: 1_000_000,
+      watchdogIdleSeconds: 120,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 4,
+      handoffContextRatio: 0.68,
+      cleanupCompletedTasks: true,
       tiers: {
         trivial: { model: "anthropic/claude-haiku-4-5", thinking: "medium" },
         standard: { model: "anthropic/claude-sonnet-5", thinking: "medium" },
@@ -138,9 +166,16 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
-      maxCostPerTask: 0,
-      maxRunCost: 0,
+      maxCostPerTask: 5,
+      maxRunCost: 25,
       statusWaitSeconds: 60,
+      logEvents: "compact",
+      maxLogBytesPerRun: 1_000_000,
+      watchdogIdleSeconds: 120,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 4,
+      handoffContextRatio: 0.68,
+      cleanupCompletedTasks: true,
       tiers: {
         trivial: { model: "anthropic/claude-sonnet-5", thinking: "low" },
         standard: { model: "anthropic/claude-sonnet-5", thinking: "medium" },
@@ -160,9 +195,16 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
-      maxCostPerTask: 0,
-      maxRunCost: 0,
+      maxCostPerTask: 5,
+      maxRunCost: 25,
       statusWaitSeconds: 60,
+      logEvents: "compact",
+      maxLogBytesPerRun: 1_000_000,
+      watchdogIdleSeconds: 120,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 4,
+      handoffContextRatio: 0.68,
+      cleanupCompletedTasks: true,
       tiers: {
         trivial: { model: "anthropic/claude-opus-4-8", thinking: "medium" },
         standard: { model: "anthropic/claude-opus-4-8", thinking: "high" },
@@ -182,9 +224,16 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
-      maxCostPerTask: 0,
-      maxRunCost: 0,
+      maxCostPerTask: 5,
+      maxRunCost: 25,
       statusWaitSeconds: 60,
+      logEvents: "compact",
+      maxLogBytesPerRun: 1_000_000,
+      watchdogIdleSeconds: 120,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 4,
+      handoffContextRatio: 0.68,
+      cleanupCompletedTasks: true,
       tiers: {
         trivial: { model: "openai-codex/gpt-5.6-sol", thinking: "medium" },
         standard: { model: "openai-codex/gpt-5.6-sol", thinking: "high" },
@@ -221,6 +270,23 @@ export function mergeConfig(
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
     maxRunCost: override.maxRunCost ?? base.maxRunCost,
     statusWaitSeconds: override.statusWaitSeconds ?? base.statusWaitSeconds,
+    logEvents: override.logEvents ?? base.logEvents ?? "compact",
+    maxLogBytesPerRun: override.maxLogBytesPerRun ?? base.maxLogBytesPerRun ?? 1_000_000,
+    watchdogIdleSeconds: override.watchdogIdleSeconds ?? base.watchdogIdleSeconds ?? 120,
+    watchdogWarningTurns: override.watchdogWarningTurns ?? base.watchdogWarningTurns ?? 12,
+    watchdogTerminationTurns:
+      override.watchdogTerminationTurns ?? base.watchdogTerminationTurns ?? 4,
+    handoffContextRatio: override.handoffContextRatio ?? base.handoffContextRatio ?? 0.68,
+    cleanupCompletedTasks: override.cleanupCompletedTasks ?? base.cleanupCompletedTasks ?? true,
+    ...((override.verificationProfiles ?? base.verificationProfiles)
+      ? { verificationProfiles: { ...base.verificationProfiles, ...override.verificationProfiles } }
+      : {}),
+    ...((override.defaultVerificationProfile ?? base.defaultVerificationProfile)
+      ? {
+          defaultVerificationProfile:
+            override.defaultVerificationProfile ?? base.defaultVerificationProfile,
+        }
+      : {}),
     tiers: { ...base.tiers, ...override.tiers },
   };
 }
@@ -230,22 +296,166 @@ export function configFile(scope: ConfigScope, cwd: string): string {
   return join(cwd, PROJECT_CONFIG_FILE);
 }
 
+const CONFIG_KEYS = new Set([
+  "maxParallel",
+  "planGate",
+  "useWorktrees",
+  "autoCommit",
+  "maxAttempts",
+  "maxCostPerTask",
+  "maxRunCost",
+  "statusWaitSeconds",
+  "logEvents",
+  "maxLogBytesPerRun",
+  "watchdogIdleSeconds",
+  "watchdogWarningTurns",
+  "watchdogTerminationTurns",
+  "handoffContextRatio",
+  "cleanupCompletedTasks",
+  "verificationProfiles",
+  "defaultVerificationProfile",
+  "tiers",
+]);
+
+export function validateConfig(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "must be a JSON object";
+  const config = value as Record<string, unknown>;
+  const unknown = Object.keys(config).find((key) => !CONFIG_KEYS.has(key));
+  if (unknown) return `unknown field ${unknown}`;
+  const booleanKeys = ["planGate", "useWorktrees", "autoCommit", "cleanupCompletedTasks"];
+  for (const key of booleanKeys) {
+    if (config[key] !== undefined && typeof config[key] !== "boolean")
+      return `${key} must be boolean`;
+  }
+  const ranges: Record<string, [number, number]> = {
+    maxParallel: [1, 64],
+    maxAttempts: [1, 100],
+    maxCostPerTask: [0, 1_000_000],
+    maxRunCost: [0, 1_000_000],
+    statusWaitSeconds: [0, 240],
+    maxLogBytesPerRun: [0, 1_000_000_000],
+    watchdogIdleSeconds: [0, 86_400],
+    watchdogWarningTurns: [0, 10_000],
+    watchdogTerminationTurns: [0, 10_000],
+    handoffContextRatio: [0, 1],
+  };
+  for (const [key, [minimum, maximum]] of Object.entries(ranges)) {
+    const candidate = config[key];
+    if (candidate === undefined) continue;
+    if (
+      typeof candidate !== "number" ||
+      !Number.isFinite(candidate) ||
+      candidate < minimum ||
+      candidate > maximum
+    ) {
+      return `${key} must be a finite number from ${minimum} to ${maximum}`;
+    }
+  }
+  if (
+    config.logEvents !== undefined &&
+    config.logEvents !== "compact" &&
+    config.logEvents !== "full"
+  ) {
+    return "logEvents must be compact or full";
+  }
+  if (
+    config.defaultVerificationProfile !== undefined &&
+    typeof config.defaultVerificationProfile !== "string"
+  ) {
+    return "defaultVerificationProfile must be a string";
+  }
+  if (config.verificationProfiles !== undefined) {
+    if (
+      !config.verificationProfiles ||
+      typeof config.verificationProfiles !== "object" ||
+      Array.isArray(config.verificationProfiles)
+    ) {
+      return "verificationProfiles must be an object";
+    }
+    const profiles = Object.entries(config.verificationProfiles as Record<string, unknown>);
+    if (profiles.length > 32) return "verificationProfiles cannot contain more than 32 profiles";
+    for (const [name, raw] of profiles) {
+      if (!name.trim() || name.length > 64)
+        return "verification profile names must be 1-64 characters";
+      if (!raw || typeof raw !== "object" || Array.isArray(raw))
+        return `verification profile ${name} must be an object`;
+      const profile = raw as Record<string, unknown>;
+      if (
+        typeof profile.command !== "string" ||
+        profile.command.length === 0 ||
+        profile.command.length > 1000
+      )
+        return `verification profile ${name} has an invalid command`;
+      if (
+        typeof profile.timeoutSeconds !== "number" ||
+        !Number.isFinite(profile.timeoutSeconds) ||
+        profile.timeoutSeconds <= 0 ||
+        profile.timeoutSeconds > 3600
+      )
+        return `verification profile ${name} has an invalid timeoutSeconds`;
+    }
+  }
+  if (config.tiers !== undefined) {
+    if (!config.tiers || typeof config.tiers !== "object" || Array.isArray(config.tiers))
+      return "tiers must be an object";
+    for (const [name, rawTier] of Object.entries(config.tiers as Record<string, unknown>)) {
+      if (!name.trim()) return "tier names cannot be empty";
+      if (!rawTier || typeof rawTier !== "object" || Array.isArray(rawTier))
+        return `tier ${name} must be an object`;
+      const tier = rawTier as Record<string, unknown>;
+      if (
+        typeof tier.thinking !== "string" ||
+        !["off", "minimal", "low", "medium", "high", "xhigh"].includes(tier.thinking)
+      )
+        return `tier ${name} has invalid thinking`;
+      if (tier.model !== undefined && typeof tier.model !== "string")
+        return `tier ${name} model must be a string`;
+      if (tier.tools !== undefined && typeof tier.tools !== "string")
+        return `tier ${name} tools must be a string`;
+      if (
+        tier.fallbacks !== undefined &&
+        (!Array.isArray(tier.fallbacks) ||
+          !tier.fallbacks.every((item) => typeof item === "string"))
+      )
+        return `tier ${name} fallbacks must be strings`;
+    }
+  }
+  return undefined;
+}
+
 function readConfigFile(file: string): Partial<MaestroConfig> | undefined {
   if (!existsSync(file)) return undefined;
   const contents = readFileSync(file, "utf-8");
   try {
-    return JSON.parse(contents) as Partial<MaestroConfig>;
+    const parsed: unknown = JSON.parse(contents);
+    const error = validateConfig(parsed);
+    if (error) {
+      renameSync(file, `${file}.invalid-${Date.now()}`);
+      return undefined;
+    }
+    return parsed as Partial<MaestroConfig>;
   } catch {
     renameSync(file, `${file}.corrupt-${Date.now()}`);
     return undefined;
   }
 }
 
-/** Resolve config: defaults ← ~/.pi/agent/maestro.json ← <cwd>/.pi/maestro.json */
+/**
+ * Resolve config: defaults ← trusted user config ← non-executable project settings.
+ * A repository may select a user-defined verification profile, but cannot define commands.
+ */
 export function loadConfig(cwd: string): MaestroConfig {
   const user = readConfigFile(configFile("user", cwd));
   const project = readConfigFile(configFile("project", cwd));
-  return mergeConfig(mergeConfig(DEFAULT_CONFIG, user), project);
+  const trusted = mergeConfig(DEFAULT_CONFIG, user);
+  if (!project) return trusted;
+
+  const { verificationProfiles: _ignoredCommands, ...projectSettings } = project;
+  const selected = projectSettings.defaultVerificationProfile;
+  if (selected && !trusted.verificationProfiles?.[selected]) {
+    delete projectSettings.defaultVerificationProfile;
+  }
+  return mergeConfig(trusted, projectSettings);
 }
 
 /** Persist a full config to the given scope file (settings UI writes here). */
@@ -271,6 +481,15 @@ export function describeConfig(config: MaestroConfig): string {
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
     `maxRunCost: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,
     `statusWaitSeconds: ${config.statusWaitSeconds}`,
+    `logEvents: ${config.logEvents ?? "compact"}`,
+    `maxLogBytesPerRun: ${config.maxLogBytesPerRun === 0 ? "unlimited" : (config.maxLogBytesPerRun ?? 1_000_000)}`,
+    `watchdogIdleSeconds: ${config.watchdogIdleSeconds ?? 120}`,
+    `watchdogWarningTurns: ${config.watchdogWarningTurns ?? 12}`,
+    `watchdogTerminationTurns: ${config.watchdogTerminationTurns ?? 4}`,
+    `handoffContextRatio: ${config.handoffContextRatio ?? 0.68}`,
+    `cleanupCompletedTasks: ${config.cleanupCompletedTasks ?? true}`,
+    `verificationProfiles: ${Object.keys(config.verificationProfiles ?? {}).length} trusted user profile(s)`,
+    `defaultVerificationProfile: ${config.defaultVerificationProfile ?? "(none)"}`,
     "tiers:",
   ];
   for (const [name, tier] of Object.entries(config.tiers)) {

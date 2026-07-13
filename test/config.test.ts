@@ -25,6 +25,7 @@ import {
   resolveTierModel,
   resolveTierModels,
   saveConfig,
+  validateConfig,
 } from "../src/config.js";
 
 test("mergeConfig without override returns base", () => {
@@ -56,8 +57,11 @@ test("default config has the documented tiers and no model overrides", () => {
   assert.equal(DEFAULT_CONFIG.maxParallel, 3);
   assert.equal(DEFAULT_CONFIG.planGate, false);
   assert.equal(DEFAULT_CONFIG.useWorktrees, false);
-  assert.equal(DEFAULT_CONFIG.maxRunCost, 0);
+  assert.equal(DEFAULT_CONFIG.maxCostPerTask, 5);
+  assert.equal(DEFAULT_CONFIG.maxRunCost, 25);
   assert.equal(DEFAULT_CONFIG.statusWaitSeconds, 60);
+  assert.equal(DEFAULT_CONFIG.watchdogWarningTurns, 12);
+  assert.equal(DEFAULT_CONFIG.watchdogTerminationTurns, 4);
   for (const tier of Object.values(DEFAULT_CONFIG.tiers)) {
     assert.equal(tier.model, undefined);
   }
@@ -72,7 +76,7 @@ test("every preset defines all four tiers and keeps review read-only", () => {
     );
     assert.equal(preset.config.planGate, false, `preset ${preset.name}`);
     assert.equal(preset.config.useWorktrees, false, `preset ${preset.name}`);
-    assert.equal(preset.config.maxRunCost, 0, `preset ${preset.name}`);
+    assert.equal(preset.config.maxRunCost, 25, `preset ${preset.name}`);
     assert.equal(preset.config.statusWaitSeconds, 60, `preset ${preset.name}`);
     assert.equal(preset.config.tiers.review?.tools, REVIEW_TOOLS, `preset ${preset.name}`);
     assert.ok(preset.description.length > 0, `preset ${preset.name} needs a description`);
@@ -94,7 +98,7 @@ test("describeConfig lists preset name and every tier", () => {
   assert.match(text, /maxParallel: 3/);
   assert.match(text, /planGate: false/);
   assert.match(text, /useWorktrees: false/);
-  assert.match(text, /maxRunCost: off/);
+  assert.match(text, /maxRunCost: \$25/);
   assert.match(text, /statusWaitSeconds: 60/);
   assert.match(text, /trivial: \(pi default model\) thinking=low/);
   assert.match(text, new RegExp(`review: .* tools=${REVIEW_TOOLS}`));
@@ -239,9 +243,39 @@ test("mergeConfig carries attempt, cost, and pulse settings", () => {
   assert.equal(merged.statusWaitSeconds, 30);
   const untouched = mergeConfig(DEFAULT_CONFIG, {});
   assert.equal(untouched.maxAttempts, DEFAULT_CONFIG.maxAttempts);
-  assert.equal(untouched.maxCostPerTask, 0);
-  assert.equal(untouched.maxRunCost, 0);
+  assert.equal(untouched.maxCostPerTask, 5);
+  assert.equal(untouched.maxRunCost, 25);
   assert.equal(untouched.statusWaitSeconds, 60);
+});
+
+test("validateConfig rejects malformed fields and accepts explicit zero partials", () => {
+  assert.equal(validateConfig({ maxRunCost: 0, watchdogIdleSeconds: 0 }), undefined);
+  assert.match(validateConfig({ maxParallel: -1 }) ?? "", /maxParallel/);
+  assert.match(validateConfig({ logEvents: "verbose" }) ?? "", /logEvents/);
+  assert.match(validateConfig({ cleanupCompletedTasks: "yes" }) ?? "", /boolean/);
+  assert.match(validateConfig({ tiers: { "": { thinking: "low" } } }) ?? "", /tier names/);
+  assert.match(
+    validateConfig({ tiers: { bad: { thinking: "extreme", fallbacks: [3] } } }) ?? "",
+    /thinking/
+  );
+});
+
+test("loadConfig preserves and ignores structurally invalid project config", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-invalid-"));
+  const directory = join(cwd, ".pi");
+  const file = join(directory, "maestro.json");
+  try {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(file, JSON.stringify({ maxParallel: "many" }));
+    assert.equal(loadConfig(cwd).maxParallel, DEFAULT_CONFIG.maxParallel);
+    assert.equal(existsSync(file), false);
+    assert.equal(
+      readdirSync(directory).filter((name) => /^maestro\.json\.invalid-\d+$/.test(name)).length,
+      1
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("loadConfig archives corrupt project config and falls back", () => {
@@ -296,6 +330,32 @@ test("loadConfig resolves defaults, then user, then project, in that precedence 
     mkdirSync(join(cwd, ".pi"), { recursive: true });
     writeFileSync(join(cwd, ".pi", "maestro.json"), JSON.stringify({ maxAttempts: 9 }));
     assert.equal(loadConfig(cwd).maxAttempts, 9);
+
+    // Repository config may select, but never define, executable verification commands.
+    writeFileSync(
+      join(agentDir, "maestro.json"),
+      JSON.stringify({
+        maxAttempts: 6,
+        verificationProfiles: { trusted: { command: "pnpm test", timeoutSeconds: 60 } },
+      })
+    );
+    writeFileSync(
+      join(cwd, ".pi", "maestro.json"),
+      JSON.stringify({
+        defaultVerificationProfile: "trusted",
+        verificationProfiles: { malicious: { command: "touch owned", timeoutSeconds: 60 } },
+      })
+    );
+    const selected = loadConfig(cwd);
+    assert.equal(selected.defaultVerificationProfile, "trusted");
+    assert.deepEqual(Object.keys(selected.verificationProfiles ?? {}), ["trusted"]);
+
+    // An unknown project selection is ignored instead of becoming executable.
+    writeFileSync(
+      join(cwd, ".pi", "maestro.json"),
+      JSON.stringify({ defaultVerificationProfile: "malicious" })
+    );
+    assert.equal(loadConfig(cwd).defaultVerificationProfile, undefined);
 
     // Removing the project override falls back to the user config again.
     rmSync(join(cwd, ".pi", "maestro.json"));

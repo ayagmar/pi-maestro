@@ -150,6 +150,7 @@ export function applySettingsChange(
   else if (id === "maxParallel") config.maxParallel = Number(value);
   else if (id === "useWorktrees") config.useWorktrees = value === "on";
   else if (id === "autoCommit") config.autoCommit = value === "on";
+  else if (id === "cleanupCompletedTasks") config.cleanupCompletedTasks = value === "on";
   else if (id === "maxAttempts") config.maxAttempts = Number(value);
   else if (id === "maxCostPerTask") {
     config.maxCostPerTask = value === "off" ? 0 : Number(value.slice(1));
@@ -369,6 +370,13 @@ export async function showSettings(
             description: "Commit each approved task with one conventional commit.",
           },
           {
+            id: "cleanupCompletedTasks",
+            label: "Clear completed live board",
+            currentValue: (config.cleanupCompletedTasks ?? true) ? "on" : "off",
+            values: ["on", "off"],
+            description: "Archive and remove live tasks after a drive completes successfully.",
+          },
+          {
             id: "maxAttempts",
             label: "Max attempts per task",
             currentValue: String(config.maxAttempts),
@@ -394,7 +402,8 @@ export async function showSettings(
             label: "Progress pulse interval",
             currentValue: `${config.statusWaitSeconds}`,
             values: ["15", "30", "60", "90", "120", "180"],
-            description: "Seconds maestro_status waits before returning live executor progress.",
+            description:
+              "Seconds the human status command waits before returning live executor progress.",
           },
         ];
       }

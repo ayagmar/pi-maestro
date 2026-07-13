@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { MAX_INJECTED_CONTEXT_LENGTH } from "./prompts.js";
 import { type Board, type Task } from "./types.js";
 
@@ -41,12 +42,17 @@ export interface WorktreeCleanupResult {
   preserved: ManagedWorktreeInspection[];
 }
 
-function git(cwd: string, args: string[]): string {
+function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
+    ...(env ? { env } : {}),
   }).trim();
+}
+
+export function headCommit(cwd: string): string {
+  return git(cwd, ["rev-parse", "HEAD"]);
 }
 
 export function inspectGit(cwd: string): GitReadiness {
@@ -94,6 +100,64 @@ export function worktreeExists(ref: WorktreeRef): boolean {
   return existsSync(ref.worktreePath);
 }
 
+/** Git-authoritative changed paths for one checkout, including staged, unstaged, and untracked files. */
+export function changedPaths(cwd: string): string[] {
+  const output = git(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  if (!output) return [];
+
+  const entries = output.split("\0").filter(Boolean);
+  const paths: string[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!entry || entry.length < 4) continue;
+    const status = entry.slice(0, 2);
+    const path = entry.slice(3);
+    paths.push(path);
+    if ((status.includes("R") || status.includes("C")) && entries[index + 1]) index += 1;
+  }
+  return [...new Set(paths.map((path) => path.replaceAll("\\", "/")))].sort();
+}
+
+/**
+ * Snapshot task paths into an immutable Git tree without touching the checkout index.
+ * The tree includes HEAD plus exactly the supplied staged, unstaged, deleted, and untracked paths.
+ */
+export function snapshotArtifact(cwd: string, paths: string[]): string | undefined {
+  if (paths.length === 0) return undefined;
+
+  const directory = mkdtempSync(join(tmpdir(), "maestro-index-"));
+  const indexFile = join(directory, "index");
+  const env = { ...process.env, GIT_INDEX_FILE: indexFile };
+  try {
+    git(cwd, ["read-tree", "HEAD"], env);
+    git(cwd, ["add", "-A", "--", ...paths], env);
+    return git(cwd, ["write-tree"], env);
+  } catch {
+    return undefined;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+export function commitTree(cwd: string, commit: string): string {
+  return git(cwd, ["rev-parse", `${commit}^{tree}`]);
+}
+
+export function artifactMatchesCommit(
+  cwd: string,
+  candidateTree: string,
+  commit: string,
+  paths: string[]
+): boolean {
+  if (paths.length === 0) return false;
+  try {
+    git(cwd, ["diff", "--quiet", candidateTree, commit, "--", ...paths]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Capture a bounded diff. An empty paths list deliberately captures nothing. */
 export function captureDiff(cwd: string, paths?: string[]): string {
   if (paths?.length === 0) return "";
@@ -108,7 +172,8 @@ export function captureDiff(cwd: string, paths?: string[]): string {
 
 /** Commit staged-and-unstaged changes in a tree. Returns false when there was nothing to commit. */
 export function commitAll(cwd: string, message: string, paths?: string[]): boolean {
-  if (paths && paths.length > 0) git(cwd, ["add", "--", ...paths]);
+  if (paths?.length === 0) return false;
+  if (paths) git(cwd, ["add", "--", ...paths]);
   else git(cwd, ["add", "-A"]);
   const status = git(cwd, ["status", "--porcelain"]);
   if (!status) return false;

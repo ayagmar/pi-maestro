@@ -14,6 +14,7 @@ import {
   cleanupManagedWorktrees,
   createWorktree,
   inspectManagedWorktrees,
+  snapshotArtifact,
   sweepWorktrees,
   worktreeRef,
 } from "../src/worktree.js";
@@ -97,6 +98,65 @@ test("worktree refs sanitize task ids deterministically", () => {
   const ref = worktreeRef("/repo", "../Feature / A", 2);
   assert.equal(ref.worktreePath, "/repo/.pi/maestro/worktrees/feature-a-attempt-2");
   assert.equal(ref.branch, "maestro/feature-a-attempt-2");
+});
+
+test("artifact snapshots include untracked content and exclude unrelated dirty files", () => {
+  const cwd = repository();
+  try {
+    writeFileSync(join(cwd, "candidate.txt"), "one\n");
+    writeFileSync(join(cwd, "unrelated.txt"), "dirty\n");
+    const first = snapshotArtifact(cwd, ["candidate.txt"]);
+    const identical = snapshotArtifact(cwd, ["candidate.txt"]);
+
+    writeFileSync(join(cwd, "candidate.txt"), "two\n");
+    const changed = snapshotArtifact(cwd, ["candidate.txt"]);
+
+    assert.ok(first);
+    assert.equal(first, identical);
+    assert.notEqual(first, changed);
+    assert.equal(git(cwd, "status", "--porcelain").includes("unrelated.txt"), true);
+    assert.equal(snapshotArtifact(cwd, []), undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("trusted verifier mutation invalidates the candidate before review", async () => {
+  const cwd = repository();
+  try {
+    const task = readyTask(cwd);
+    const ref = createWorktree(cwd, task.id, 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "candidate\n");
+    task.verificationProfile = "mutating";
+    task.attempts.push(attempt(ref.worktreePath, ref.branch));
+    saveBoard(cwd, { ...loadBoard(cwd), tasks: [task] });
+    let reviewerStarts = 0;
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "high" },
+      verificationProfiles: {
+        mutating: {
+          command: `${process.execPath} -e "require('fs').appendFileSync('shared.txt','mutation\\n')"`,
+          timeoutSeconds: 5,
+        },
+      },
+      startExecutor: () => {
+        reviewerStarts += 1;
+        return approvingReviewer([])({} as never);
+      },
+      onUpdate: () => {},
+      trackRun: () => () => {},
+    });
+
+    assert.equal(result.status, "changes_requested");
+    assert.equal(reviewerStarts, 0);
+    assert.match(result.note ?? "", /changed during trusted verification/);
+    assert.equal(existsSync(ref.worktreePath), true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("diff capture includes staged task files, excludes unrelated files, and is bounded", () => {
@@ -378,9 +438,48 @@ test("approved review uses its worktree, merges it, then removes worktree and br
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.deepEqual(cwdSeen, [ref.worktreePath]);
     assert.equal(persisted?.status, "approved");
+    assert.ok(persisted?.provenance?.candidateTree);
+    assert.ok(persisted?.provenance?.reviewedAt);
+    assert.equal(persisted?.provenance?.integratedCommit, git(cwd, "rev-parse", "HEAD"));
     assert.equal(readFileSync(join(cwd, "shared.txt"), "utf-8"), "executor change\n");
     assert.equal(existsSync(ref.worktreePath), false);
     assert.equal(git(cwd, "branch", "--list", ref.branch), "");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("failed post-integration verification retains the recovery worktree", async () => {
+  const cwd = repository();
+  try {
+    const task = readyTask(cwd);
+    const ref = createWorktree(cwd, task.id, 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "executor change\n");
+    writeFileSync(join(cwd, ".integration-fail"), "fail\n");
+    task.verificationProfile = "required";
+    task.attempts.push(attempt(ref.worktreePath, ref.branch));
+    saveBoard(cwd, { ...loadBoard(cwd), tasks: [task] });
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "high" },
+      verificationProfiles: {
+        required: {
+          command: `${process.execPath} -e "process.exit(require('fs').existsSync('.integration-fail') ? 2 : 0)"`,
+          timeoutSeconds: 5,
+        },
+      },
+      startExecutor: approvingReviewer([]),
+      onUpdate: () => {},
+      trackRun: () => () => {},
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(result.status, "changes_requested");
+    assert.ok(persisted?.provenance?.integratedCommit);
+    assert.equal(existsSync(ref.worktreePath), true);
+    assert.notEqual(git(cwd, "branch", "--list", ref.branch), "");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

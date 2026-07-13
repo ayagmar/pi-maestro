@@ -13,7 +13,9 @@
   "main": "./src/index.ts",
   "files": [
     "src/",
-    "README.md"
+    "docs/",
+    "README.md",
+    "CONTRIBUTING.md"
   ],
   "scripts": {
     "lint": "biome lint . --error-on-warnings",

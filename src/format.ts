@@ -105,6 +105,52 @@ export function formatCostSummary(tasks: Task[]): string {
   ];
   if (usage.models.length > 0) parts.push(`models: ${usage.models.join(", ")}`);
   if (usage.providers.length > 0) parts.push(`providers: ${usage.providers.join(", ")}`);
+  const promptAccounting = tasks.reduce(
+    (total, task) => {
+      for (const attempt of task.attempts) {
+        total.executor += attempt.promptCharacters ?? 0;
+        total.reviewer += (attempt.reviewLaunches ?? []).reduce(
+          (sum, launch) => sum + (launch.promptCharacters ?? 0),
+          0
+        );
+        total.omissions += (attempt.promptSections ?? []).filter(
+          (section) => section.omitted
+        ).length;
+        total.omissions += (attempt.reviewLaunches ?? []).reduce(
+          (sum, launch) =>
+            sum + (launch.promptSections ?? []).filter((section) => section.omitted).length,
+          0
+        );
+      }
+      return total;
+    },
+    { executor: 0, reviewer: 0, omissions: 0 }
+  );
+  if (promptAccounting.executor > 0 || promptAccounting.reviewer > 0) {
+    parts.push(
+      `context: executor ${promptAccounting.executor} chars · reviewer ${promptAccounting.reviewer} chars · ${promptAccounting.omissions} omitted section(s)`
+    );
+  }
+  const categorized = new Map<string, number>();
+  for (const task of tasks) {
+    for (const attempt of task.attempts) {
+      const kind = attempt.failureReason?.kind;
+      const label =
+        task.integratedCommit && task.approvalKind === "reviewed"
+          ? "reviewed-integrated"
+          : kind === "provider_failure"
+            ? "provider-failure"
+            : kind === "reviewer_rejection"
+              ? "reviewer-rejection"
+              : kind === "stalled" || kind === "cost_cap" || kind === "user_abort"
+                ? kind.replaceAll("_", "-")
+                : "other";
+      categorized.set(label, (categorized.get(label) ?? 0) + attempt.usage.cost);
+    }
+  }
+  for (const [label, cost] of categorized) parts.push(`${label} spend: $${cost.toFixed(4)}`);
+  const reconciledCost = [...categorized.values()].reduce((sum, cost) => sum + cost, 0);
+  if (usage.totalAttempts > 0) parts.push(`reconciled: $${reconciledCost.toFixed(4)}`);
   return parts.join(" · ");
 }
 

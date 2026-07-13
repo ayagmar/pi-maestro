@@ -1,11 +1,107 @@
 import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { type Writable } from "node:stream";
 import { KILL_GRACE_MS, LOGS_DIR } from "./constants.js";
+
+const VERIFICATION_KILL_GRACE_MS = 250;
 import { type Attempt, type FailureReason, type TierConfig, type Usage } from "./types.js";
 
-export type RunFailureCause = "provider" | "process" | "user_abort" | "cost_cap";
+export type RunFailureCause = "provider" | "process" | "user_abort" | "cost_cap" | "stalled";
+
+export interface VerificationResult {
+  ok: boolean;
+  exitCode: number;
+  timedOut: boolean;
+  durationMs: number;
+  outputTail: string;
+  logFile: string;
+}
+
+export async function runVerification(options: {
+  cwd: string;
+  stateDir: string;
+  name: string;
+  command: string;
+  timeoutSeconds: number;
+  signal?: AbortSignal;
+}): Promise<VerificationResult> {
+  const directory = join(options.stateDir, "verification");
+  mkdirSync(directory, { recursive: true });
+  const logFile = join(directory, `${options.name}-${Date.now()}.log`);
+  const startedAt = Date.now();
+  return await new Promise((resolve) => {
+    const grouped = process.platform !== "win32";
+    const child = spawn(options.command, {
+      cwd: options.cwd,
+      shell: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: grouped,
+    });
+    let output = "";
+    let timedOut = false;
+    let settled = false;
+    let killTimer: NodeJS.Timeout | undefined;
+    const append = (chunk: Buffer) => {
+      output = `${output}${chunk.toString()}`.slice(-16_000);
+    };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+
+    const kill = (signal: NodeJS.Signals) => {
+      if (!child.pid) return;
+      try {
+        if (grouped) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        // The process already exited.
+      }
+    };
+    const stop = () => {
+      kill("SIGTERM");
+      if (killTimer) return;
+      killTimer = setTimeout(() => kill("SIGKILL"), VERIFICATION_KILL_GRACE_MS);
+      killTimer.unref();
+    };
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      options.signal?.removeEventListener("abort", stop);
+      writeFileSync(logFile, output);
+      const exitCode = code ?? 1;
+      resolve({
+        ok: exitCode === 0 && !timedOut && !options.signal?.aborted,
+        exitCode,
+        timedOut,
+        durationMs: Date.now() - startedAt,
+        outputTail: output.slice(-4000),
+        logFile,
+      });
+    };
+
+    options.signal?.addEventListener("abort", stop, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop();
+    }, options.timeoutSeconds * 1000);
+    timer.unref();
+    child.on("close", finish);
+    child.on("error", (error) => {
+      output = `${output}\n${error.message}`;
+      finish(1);
+    });
+    if (options.signal?.aborted) stop();
+  });
+}
 
 export interface RunOutcome {
   exitCode: number;
@@ -46,6 +142,13 @@ export function classifyFailure(
   if (outcome.failureCause === "cost_cap" || message.startsWith("cost cap exceeded:")) {
     return { kind: "cost_cap", message, retryable: true };
   }
+  if (outcome.failureCause === "stalled") {
+    return {
+      kind: "stalled",
+      message: "executor stalled after watchdog steering",
+      retryable: false,
+    };
+  }
   const providerFailure =
     outcome.failureCause === "provider" ||
     (outcome.failureCause === undefined &&
@@ -62,6 +165,11 @@ export interface RunUpdate {
   turns: number;
   cost: number;
   lastActivity: string;
+  lastEventAt?: number;
+  lastProgressAt?: number;
+  phase?: "starting" | "exploring" | "editing" | "verifying" | "reporting";
+  changedFileCount?: number;
+  turnsWithoutProgress?: number;
 }
 
 export function cappedLogWriter(
@@ -97,6 +205,17 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
     return { command: process.execPath, args: [currentScript, ...args] };
   }
   return { command: "pi", args };
+}
+
+function compactLogEvent(event: JsonEvent): boolean {
+  return (
+    event.type === "tool_execution_start" ||
+    event.type === "tool_execution_end" ||
+    event.type === "agent_start" ||
+    event.type === "agent_end" ||
+    event.type === "message_end" ||
+    (event.type === "response" && event.command === "get_state")
+  );
 }
 
 export interface JsonEvent {
@@ -184,8 +303,13 @@ export function startExecutor(options: {
   sessionLabel?: string;
   /** Abort the run when attempt cost exceeds this (USD). 0 disables the cap. */
   maxCost?: number;
+  /** Event detail mirrored to the run log. Compact keeps lifecycle, tool, and final events. */
+  logEvents?: "compact" | "full";
   /** Stop appending to this run's event log after this many bytes. */
   maxLogBytes?: number;
+  watchdogIdleSeconds?: number;
+  watchdogWarningTurns?: number;
+  watchdogTerminationTurns?: number;
   signal?: AbortSignal;
   onUpdate?: (update: RunUpdate) => void;
 }): ExecutorHandle {
@@ -227,8 +351,8 @@ export function startExecutor(options: {
     if (proc.stdin.writable) proc.stdin.write(`${JSON.stringify(command)}\n`);
   };
 
-  let abortCause: "user_abort" | "cost_cap" | undefined;
-  const abortWithCause = (cause: "user_abort" | "cost_cap") => {
+  let abortCause: "user_abort" | "cost_cap" | "stalled" | undefined;
+  const abortWithCause = (cause: "user_abort" | "cost_cap" | "stalled") => {
     if (abortCause) return;
     abortCause = cause;
     send({ type: "abort" });
@@ -255,16 +379,53 @@ export function startExecutor(options: {
     let stderr = "";
     let buffer = "";
     let lastActivity = "starting…";
+    let lastEventAt = Date.now();
+    let lastProgressAt = lastEventAt;
+    let progressTurns = 0;
+    let watchdogSteeredAt: number | undefined;
+    const actionSignatures: string[] = [];
+    const idleMs = Math.max(0, (options.watchdogIdleSeconds ?? 120) * 1000);
+
+    const evaluateWatchdog = () => {
+      const turnsWithoutProgress = attempt.usage.turns - progressTurns;
+      const warningTurns = options.watchdogWarningTurns ?? 0;
+      const silent = idleMs > 0 && Date.now() - lastEventAt >= idleMs;
+      if (
+        (silent || (warningTurns > 0 && turnsWithoutProgress >= warningTurns)) &&
+        watchdogSteeredAt === undefined
+      ) {
+        watchdogSteeredAt = attempt.usage.turns;
+        send({
+          type: "steer",
+          message:
+            "Stop broad investigation. Either make the smallest in-scope implementation and run targeted verification, or report one concrete blocker within the next few turns.",
+        });
+        return;
+      }
+      if (
+        watchdogSteeredAt !== undefined &&
+        (silent || turnsWithoutProgress >= warningTurns + (options.watchdogTerminationTurns ?? 4))
+      ) {
+        abortWithCause("stalled");
+      }
+    };
+    const watchdog = setInterval(
+      evaluateWatchdog,
+      Math.max(10, Math.min(1000, idleMs / 4 || 1000))
+    );
+    watchdog.unref();
 
     const processLine = (line: string) => {
       if (!line.trim()) return;
-      writeLogLine(line);
       let event: JsonEvent;
       try {
         event = JSON.parse(line) as JsonEvent;
       } catch {
+        if (options.logEvents !== "compact") writeLogLine(line);
         return;
       }
+      if (options.logEvents !== "compact" || compactLogEvent(event)) writeLogLine(line);
+      lastEventAt = Date.now();
 
       // Executors run headless: auto-cancel any extension dialog so
       // permission gates fail safe instead of hanging the run.
@@ -292,6 +453,13 @@ export function startExecutor(options: {
 
       if (event.type === "tool_execution_start" && event.toolName) {
         lastActivity = event.toolName;
+        actionSignatures.push(event.toolName.toLowerCase());
+        if (actionSignatures.length > 8) actionSignatures.shift();
+        if (/^(edit|write)$/.test(event.toolName)) {
+          lastProgressAt = Date.now();
+          progressTurns = attempt.usage.turns;
+          watchdogSteeredAt = undefined;
+        }
       }
 
       if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -309,6 +477,9 @@ export function startExecutor(options: {
       const touched = touchedFile(event, options.cwd);
       if (touched && !attempt.touchedFiles.includes(touched)) {
         attempt.touchedFiles.push(touched);
+        lastProgressAt = Date.now();
+        progressTurns = attempt.usage.turns;
+        watchdogSteeredAt = undefined;
       }
 
       if (event.type === "agent_end") {
@@ -319,7 +490,25 @@ export function startExecutor(options: {
         }, KILL_GRACE_MS).unref();
       }
 
-      options.onUpdate?.({ turns: attempt.usage.turns, cost: attempt.usage.cost, lastActivity });
+      const turnsWithoutProgress = attempt.usage.turns - progressTurns;
+      evaluateWatchdog();
+      const phase = /test|check|verify/.test(lastActivity)
+        ? "verifying"
+        : attempt.touchedFiles.length > 0
+          ? "editing"
+          : attempt.usage.turns > 0
+            ? "exploring"
+            : "starting";
+      options.onUpdate?.({
+        turns: attempt.usage.turns,
+        cost: attempt.usage.cost,
+        lastActivity,
+        lastEventAt,
+        lastProgressAt,
+        phase,
+        changedFileCount: attempt.touchedFiles.length,
+        turnsWithoutProgress,
+      });
     };
 
     proc.stdout.on("data", (data: Buffer) => {
@@ -334,6 +523,7 @@ export function startExecutor(options: {
     });
 
     proc.on("close", (code) => {
+      clearInterval(watchdog);
       if (buffer.trim()) processLine(buffer);
       log.end();
       result.exitCode = code ?? 0;
@@ -366,6 +556,7 @@ export function startExecutor(options: {
     });
 
     proc.on("error", (error) => {
+      clearInterval(watchdog);
       log.end();
       result.exitCode = 1;
       result.errorMessage = redactFailureMessage(error.message);

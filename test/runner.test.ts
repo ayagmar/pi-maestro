@@ -11,6 +11,7 @@ import {
   mapWithConcurrencyLimit,
   redactFailureMessage,
   type RunOutcome,
+  runVerification,
   startExecutor,
   touchedFile,
 } from "../src/runner.js";
@@ -109,6 +110,92 @@ process.stdin.on("end", () => process.exit(0));
     assert.deepEqual(outcome.usage, { input: 7, output: 3, cost: 0.25, turns: 1 });
     assert.equal(outcome.model, "test/model");
     assert.equal(outcome.exitCode, 0);
+  } finally {
+    process.argv[1] = originalScript;
+  }
+});
+
+test("trusted verification bounds output and reports pass, failure, and timeout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-verification-"));
+  const passed = await runVerification({
+    cwd: root,
+    stateDir: root,
+    name: "pass",
+    command: `${process.execPath} -e "console.log('ok')"`,
+    timeoutSeconds: 1,
+  });
+  assert.equal(passed.ok, true);
+  assert.match(passed.outputTail, /ok/);
+
+  const failed = await runVerification({
+    cwd: root,
+    stateDir: root,
+    name: "fail",
+    command: `${process.execPath} -e "process.exit(3)"`,
+    timeoutSeconds: 1,
+  });
+  assert.equal(failed.exitCode, 3);
+  assert.equal(failed.ok, false);
+
+  const timedOut = await runVerification({
+    cwd: root,
+    stateDir: root,
+    name: "timeout",
+    command: `${process.execPath} -e "setTimeout(() => {}, 1000)"`,
+    timeoutSeconds: 0.02,
+  });
+  assert.equal(timedOut.timedOut, true);
+  assert.equal(timedOut.ok, false);
+
+  if (process.platform !== "win32") {
+    const startedAt = Date.now();
+    const ignoredTerm = await runVerification({
+      cwd: root,
+      stateDir: root,
+      name: "ignored-term",
+      command: `${process.execPath} -e "process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"`,
+      timeoutSeconds: 0.02,
+    });
+    assert.equal(ignoredTerm.timedOut, true);
+    assert.ok(Date.now() - startedAt < 1000);
+  }
+});
+
+test("wall-clock watchdog steers once and aborts a silent executor as stalled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-"));
+  const fakePi = join(root, "silent-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "steer") console.error("steered");
+    if (command.type === "abort") process.exit(1);
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "silent",
+      cwd: root,
+      prompt: "hang",
+      tier: { thinking: "low" },
+      watchdogIdleSeconds: 0.02,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 4,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.failureCause, "stalled");
+    assert.equal(outcome.failureReason?.kind, "stalled");
   } finally {
     process.argv[1] = originalScript;
   }

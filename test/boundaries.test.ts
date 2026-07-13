@@ -90,6 +90,15 @@ test("only board owns the board persistence name", () => {
   );
 });
 
+test("pure policy modules do not import Pi, TUI, process, runner, or Git adapters", () => {
+  const pureFiles = new Set(["artifact-policy.ts"]);
+  const forbidden = /@earendil-works\/pi-|node:child_process|\.\/runner\.js|\.\/worktree\.js/;
+  const violations = sourceFiles()
+    .filter((file) => pureFiles.has(file.name) && forbidden.test(file.contents))
+    .map((file) => file.name);
+  assert.deepEqual(violations, []);
+});
+
 test("board-facing modules do not depend on the coding agent", () => {
   const codingAgentImport =
     /\bfrom\s*["']@earendil-works\/pi-coding-agent["']|\bimport\s*(?:\(\s*)?["']@earendil-works\/pi-coding-agent["']/;
