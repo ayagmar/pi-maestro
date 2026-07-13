@@ -88,12 +88,12 @@ Create fixed large fixtures and record before/after prompt lengths in tests. Req
 
 ## Done criteria
 
-- [ ] Every model-facing payload has named bounded sections.
-- [ ] Mandatory quality evidence survives truncation.
-- [ ] Repeated retries do not grow context linearly.
-- [ ] Routine progress consumes no orchestrator turn.
-- [ ] Human diagnostics expose compact context/cost accounting.
-- [ ] Full checks pass and row is DONE.
+- [x] Every model-facing payload has named bounded sections.
+- [x] Mandatory quality evidence survives truncation.
+- [x] Repeated retries do not grow context linearly.
+- [x] Routine progress consumes no orchestrator turn.
+- [x] Human diagnostics expose compact context/cost accounting.
+- [x] Full checks pass and row is DONE.
 
 ## STOP conditions
 

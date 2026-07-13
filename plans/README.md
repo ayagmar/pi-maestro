@@ -27,11 +27,11 @@ Plans 001–007 record the completed initial program. Plans 008–016 record the
 | 017 | Hold review ownership through final persistence | P0 | M | — | DONE |
 | 018 | Make Git artifacts authoritative | P0 | L | 017 | DONE |
 | 019 | Harden verification trust, processes, and recovery | P0 | L | 017, 018 | DONE |
-| 020 | Separate pure core from Pi adapters | P1 | L | 017, 018, 019 | IN PROGRESS |
-| 021 | Make task plans mechanically complete | P1 | L | 020 | IN PROGRESS |
-| 022 | Budget model context and repeated tokens | P1 | M | 020, 021 | IN PROGRESS |
-| 023 | Add a durable derived run timeline | P1 | L | 020, 021 | IN PROGRESS |
-| 024 | Make onboarding and docs executable truth | P2 | M | 017–023 | IN PROGRESS |
+| 020 | Separate pure core from Pi adapters | P1 | L | 017, 018, 019 | DONE |
+| 021 | Make task plans mechanically complete | P1 | L | 020 | DONE |
+| 022 | Budget model context and repeated tokens | P1 | M | 020, 021 | DONE |
+| 023 | Add a durable derived run timeline | P1 | L | 020, 021 | DONE |
+| 024 | Make onboarding and docs executable truth | P2 | M | 017–023 | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with rationale)
 

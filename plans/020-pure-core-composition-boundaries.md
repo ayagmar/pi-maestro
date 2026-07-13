@@ -95,12 +95,12 @@ Move slash command registration/dispatch to `src/commands.ts`; move session repl
 
 ## Done criteria
 
-- [ ] `index.ts` is a wiring root, not runtime implementation.
-- [ ] One drive controller owns all mutable drive state.
-- [ ] Pure core has no Pi/TUI/process imports.
-- [ ] Exactly three model tools and all human controls remain.
-- [ ] No generic framework or dependency added.
-- [ ] Full suite passes twice and row is DONE.
+- [x] `index.ts` is a wiring root, not runtime implementation.
+- [x] One drive controller owns all mutable drive state.
+- [x] Pure core has no Pi/TUI/process imports.
+- [x] Exactly three model tools and all human controls remain.
+- [x] No generic framework or dependency added.
+- [x] Full suite passes twice and row is DONE.
 
 ## STOP conditions
 

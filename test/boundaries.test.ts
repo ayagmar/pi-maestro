@@ -91,12 +91,37 @@ test("only board owns the board persistence name", () => {
 });
 
 test("pure policy modules do not import Pi, TUI, process, runner, or Git adapters", () => {
-  const pureFiles = new Set(["artifact-policy.ts"]);
+  const pureFiles = new Set([
+    "artifact-policy.ts",
+    "plan-serialization.ts",
+    "status.ts",
+    "timeline.ts",
+  ]);
   const forbidden = /@earendil-works\/pi-|node:child_process|\.\/runner\.js|\.\/worktree\.js/;
   const violations = sourceFiles()
     .filter((file) => pureFiles.has(file.name) && forbidden.test(file.contents))
     .map((file) => file.name);
   assert.deepEqual(violations, []);
+});
+
+test("index is a composition entry point and adapters own registrations", () => {
+  const files = sourceFiles();
+  const index = files.find((file) => file.name === "index.ts")?.contents ?? "";
+  assert.ok(index.split("\n").length <= 10, "src/index.ts must remain a small composition root");
+  assert.doesNotMatch(index, /registerTool|registerCommand|newSession/);
+
+  const toolRegistrations = files
+    .filter((file) => /\.registerTool\s*</.test(file.contents))
+    .map((file) => file.name);
+  assert.deepEqual(toolRegistrations, ["tools.ts"]);
+  const commandRegistrations = files
+    .filter((file) => /\.registerCommand\s*\(/.test(file.contents))
+    .map((file) => file.name);
+  assert.deepEqual(commandRegistrations, ["commands.ts"]);
+  const sessionReplacement = files
+    .filter((file) => /\.newSession\s*\(/.test(file.contents))
+    .map((file) => file.name);
+  assert.deepEqual(sessionReplacement, ["handoff.ts"]);
 });
 
 test("board-facing modules do not depend on the coding agent", () => {

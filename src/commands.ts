@@ -1,3 +1,6 @@
+import { type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { COMMAND } from "./constants.js";
+
 export const MAESTRO_COMMANDS = [
   "start",
   "handoff",
@@ -25,6 +28,22 @@ export const MAESTRO_COMMANDS = [
   "replay",
   "reset",
 ] as const;
+
+export function registerMaestroCommand(
+  pi: ExtensionAPI,
+  handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>
+): void {
+  pi.registerCommand(COMMAND, {
+    description: "Plan, delegate, review, and monitor work across fresh executor contexts",
+    getArgumentCompletions: (prefix) => {
+      const matches = MAESTRO_COMMANDS.filter((command) =>
+        command.startsWith(prefix.toLowerCase())
+      );
+      return matches.map((command) => ({ value: command, label: command }));
+    },
+    handler,
+  });
+}
 
 export function parseCommand(args: string): {
   subcommand: string;

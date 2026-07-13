@@ -9,6 +9,7 @@ import {
   resolveTierModel,
   validateConfig,
 } from "./config.js";
+import { formatStatusProjection, projectStatus } from "./status.js";
 import { inspectGit, inspectManagedWorktrees } from "./worktree.js";
 
 function inspectConfigFile(scope: "user" | "project", file: string): string {
@@ -35,9 +36,12 @@ export function buildDoctorReport(
     inspectConfigFile("project", projectFile),
   ];
   const config = loadConfig(cwd);
+  const board = loadBoard(cwd);
   const git = inspectGit(cwd);
   const lines = [
     "Maestro doctor",
+    "",
+    `Status: ${formatStatusProjection(projectStatus(board, liveTaskIds))}`,
     "",
     "Config (defaults → user → project):",
     ...configFiles.map((file) => `  ${file}`),
@@ -94,7 +98,7 @@ export function buildDoctorReport(
   }
 
   if (git.ok) {
-    const worktrees = inspectManagedWorktrees(cwd, loadBoard(cwd), liveTaskIds);
+    const worktrees = inspectManagedWorktrees(cwd, board, liveTaskIds);
     if (worktrees.length === 0) {
       lines.push("  ✓ no managed worktrees need attention");
     } else {

@@ -90,12 +90,12 @@ Derive raw launches, consumed attempts, reviewed-integrated spend, provider-fail
 
 ## Done criteria
 
-- [ ] One pure timeline derives all important run events without duplicate storage.
-- [ ] Human command and dashboard expose bounded history.
-- [ ] Status/recovery semantics agree across surfaces.
-- [ ] Accounting reconciles to total recorded cost.
-- [ ] No model wakeup or fourth tool is added.
-- [ ] Full checks pass and row is DONE.
+- [x] One pure timeline derives all important run events without duplicate storage.
+- [x] Human command and dashboard expose bounded history.
+- [x] Status/recovery semantics agree across surfaces.
+- [x] Accounting reconciles to total recorded cost.
+- [x] No model wakeup or fourth tool is added.
+- [x] Full checks pass and row is DONE.
 
 ## STOP conditions
 

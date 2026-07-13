@@ -8,7 +8,10 @@
 - `src/drive-controller.ts`: drive ownership and decisions
 - `src/runner.ts`: child processes and verification
 - `src/worktree.ts`: all Git operations
-- `src/index.ts`: Pi composition and UI adapters
+- `src/index.ts`: minimal extension entry point
+- `src/extension.ts`: Pi lifecycle and UI composition
+- `src/tools.ts`: the three model tool adapters
+- `src/commands.ts`: human slash-command registration and parsing
 - `test/boundaries.test.ts`: enforced architecture ownership
 
 Keep code readable and local. Prefer early returns and the smallest correct implementation. Do not add fallback paths or abstractions without a proven caller.

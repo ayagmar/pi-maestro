@@ -86,12 +86,12 @@ Update human plan editor/list output to show criteria, write scope, dependency c
 
 ## Done criteria
 
-- [ ] Every new executable task has explicit success criteria and write scope.
-- [ ] Scoped drives explain incomplete dependency closure before launch.
-- [ ] Reviewer evidence maps to criteria without raw transcript injection.
-- [ ] Plan import/export is versioned, validated, human-only, and non-destructive.
-- [ ] Exactly three model tools remain.
-- [ ] Full checks pass and row is DONE.
+- [x] Every new executable task has explicit success criteria and write scope.
+- [x] Scoped drives explain incomplete dependency closure before launch.
+- [x] Reviewer evidence maps to criteria without raw transcript injection.
+- [x] Plan import/export is versioned, validated, human-only, and non-destructive.
+- [x] Exactly three model tools remain.
+- [x] Full checks pass and row is DONE.
 
 ## STOP conditions
 

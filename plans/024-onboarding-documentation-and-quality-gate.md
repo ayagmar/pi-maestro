@@ -114,12 +114,12 @@ Expected tools are exactly `maestro_plan`, `maestro_update`, and `maestro_drive`
 
 ## Done criteria
 
-- [ ] A new user can reach a first approved task from the README without reading recovery internals.
-- [ ] Architecture, operations, configuration, and contribution docs match runtime.
-- [ ] Defaults and command/status enums are checked automatically.
-- [ ] Installed package shape is smoke-tested without publication.
-- [ ] Exactly three model tools remain and human controls remain.
-- [ ] Full suite passes twice; all 017–024 rows are DONE.
+- [x] A new user can reach a first approved task from the README without reading recovery internals.
+- [x] Architecture, operations, configuration, and contribution docs match runtime.
+- [x] Defaults and command/status enums are checked automatically.
+- [x] Installed package shape is smoke-tested without publication.
+- [x] Exactly three model tools remain and human controls remain.
+- [x] Full suite passes twice; all 017–024 rows are DONE.
 
 ## STOP conditions
 
