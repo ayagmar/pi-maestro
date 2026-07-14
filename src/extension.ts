@@ -1938,6 +1938,15 @@ export default function maestro(
             getConfig: () => loadConfig(ctx.cwd),
             isLive: (taskId) => liveRuns.has(taskId),
             liveKind: (taskId) => liveRuns.get(taskId)?.kind,
+            getLiveRun: (taskId) => {
+              const live = liveRuns.get(taskId);
+              if (!live) return undefined;
+              return {
+                cost: live.cost,
+                turns: live.turns,
+                lastActivity: live.lastActivity,
+              };
+            },
             liveActivity: (taskId) => {
               const live = liveRuns.get(taskId);
               if (!live) return undefined;

@@ -1411,6 +1411,86 @@ test("dashboard snapshots the board once per render", () => {
   }
 });
 
+test("dashboard prefers live usage while settled tasks keep persisted usage", () => {
+  const liveTask = makeTask({
+    attempts: [
+      {
+        index: 1,
+        logFile: "live.log",
+        thinking: "medium",
+        startedAt: 0,
+        usage: { input: 10, output: 5, cost: 0.1, turns: 2 },
+        touchedFiles: [],
+      },
+    ],
+  });
+  const settledTask = makeTask({
+    id: "T2",
+    status: "approved",
+    attempts: [
+      {
+        index: 1,
+        logFile: "settled.log",
+        thinking: "medium",
+        startedAt: 0,
+        usage: { input: 20, output: 10, cost: 0.25, turns: 3 },
+        touchedFiles: [],
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 3, tasks: [liveTask, settledTask] };
+  const originalBoard = structuredClone(board);
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: (taskId) => taskId === "T1",
+      getLiveRun: (taskId) =>
+        taskId === "T1" ? { cost: 0.9, turns: 7, lastActivity: "live now" } : undefined,
+    })
+  );
+  try {
+    const output = dashboard.render(160).join("\n");
+    assert.match(output, /running \[standard\] · 7t · \$0\.9000/);
+    assert.match(output, /Dependencies: none · 1 attempt · \$0\.9000 · 7 turns · live now/);
+    assert.match(output, /approved \[standard\] · \$0\.2500/);
+    assert.doesNotMatch(output, /approved \[standard\] · 3t/);
+    assert.deepEqual(board, originalBoard);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard reads each live run once per frame for both row and summary", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [makeTask(), makeTask({ id: "T2", status: "approved" })],
+  };
+  const reads = new Map<string, number>();
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: (taskId) => taskId === "T1",
+      getLiveRun: (taskId) => {
+        reads.set(taskId, (reads.get(taskId) ?? 0) + 1);
+        return { cost: 0.5, turns: 4, lastActivity: "checking" };
+      },
+    })
+  );
+  try {
+    reads.clear();
+    const firstFrame = dashboard.render(160).join("\n");
+    assert.match(firstFrame, /4t · \$0\.5000/);
+    assert.match(firstFrame, /\$0\.5000 · 4 turns · checking/);
+    assert.deepEqual([...reads], [["T1", 1]]);
+
+    dashboard.render(160);
+    assert.deepEqual([...reads], [["T1", 2]]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard uses live terminal rows for its body height", () => {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
   const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 40 });

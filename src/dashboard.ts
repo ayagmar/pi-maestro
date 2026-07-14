@@ -49,6 +49,7 @@ export interface DashboardActions {
   isLive(taskId: string): boolean;
   liveKind(taskId: string): "execute" | "review" | undefined;
   liveActivity(taskId: string): string | undefined;
+  getLiveRun?(taskId: string): { cost: number; turns: number; lastActivity: string } | undefined;
   steer(taskId: string, message: string): void;
   abort(taskId: string): void;
   setTaskStatus(taskId: string, status: TaskStatus): void;
@@ -207,6 +208,7 @@ type DashboardFrame = {
   grouped: ReturnType<typeof groupTasks>;
   phases: ReturnType<typeof projectRunPhases>;
   staleTaskIds: Set<string>;
+  liveRuns: Map<string, { cost: number; turns: number; lastActivity: string }>;
 };
 
 function statusColor(status: TaskStatus): "success" | "error" | "warning" | "accent" | "muted" {
@@ -276,9 +278,13 @@ export class Dashboard {
     const board = this.actions.getBoard();
     const config = this.actions.getConfig?.();
     const liveKinds = new Map<string, "execute" | "review">();
+    const liveRuns = new Map<string, { cost: number; turns: number; lastActivity: string }>();
     for (const task of board.tasks) {
       const kind = this.actions.liveKind(task.id);
       if (kind) liveKinds.set(task.id, kind);
+      if (!this.actions.isLive(task.id)) continue;
+      const liveRun = this.actions.getLiveRun?.(task.id);
+      if (liveRun) liveRuns.set(task.id, liveRun);
     }
     const staleTaskIds = new Set<string>();
     if (config) {
@@ -298,6 +304,7 @@ export class Dashboard {
       grouped: groupTasks(board),
       phases: projectRunPhases(board, liveKinds, config),
       staleTaskIds,
+      liveRuns,
     };
   }
 
@@ -812,15 +819,21 @@ export class Dashboard {
       const title = truncateToWidth(`${task.id} ${task.title}`, width - 8);
       const line1 = `${marker}${glyph} ${isSelected ? theme.bold(title) : title}`;
 
-      const usage = taskUsage(task);
-      const activity = live ? ` · ${this.actions.liveActivity(task.id) ?? "…"}` : "";
+      const liveRun = live ? this.frame.liveRuns.get(task.id) : undefined;
+      const usage = liveRun ?? taskUsage(task);
+      const activity = live
+        ? ` · ${liveRun?.lastActivity ?? this.actions.liveActivity(task.id) ?? "…"}`
+        : "";
       const group = GROUP_LABELS[taskGroup(this.frame.board, task)];
       let status =
         group === STATUS_LABELS[task.status] ? group : `${group} · ${STATUS_LABELS[task.status]}`;
       if (this.frame.staleTaskIds.has(task.id)) status += " (stale)";
       const reason = blockedReason(this.frame.board, task);
       if (reason) status += ` · ${reason}`;
-      const detail = `${status} [${task.tier}] · $${usage.cost.toFixed(4)}${activity}`;
+      const usageDetail = liveRun
+        ? `${liveRun.turns}t · $${usage.cost.toFixed(4)}`
+        : `$${usage.cost.toFixed(4)}`;
+      const detail = `${status} [${task.tier}] · ${usageDetail}${activity}`;
       const line2 = `     ${theme.fg("dim", truncateToWidth(detail, width - 5))}`;
 
       lines.push(line1);
@@ -915,7 +928,9 @@ export class Dashboard {
 
   private renderSelectedTask(task: Task, width: number): string[] {
     const board = this.frame.board;
-    const usage = taskUsage(task);
+    const liveRun = this.frame.liveRuns.get(task.id);
+    const usage = liveRun ?? taskUsage(task);
+    const liveDetail = liveRun ? ` · ${liveRun.turns} turns · ${liveRun.lastActivity}` : "";
     const dependencies = task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none";
     const attempts = `${task.attempts.length} attempt${task.attempts.length === 1 ? "" : "s"}`;
     const group = GROUP_LABELS[taskGroup(board, task)];
@@ -931,7 +946,7 @@ export class Dashboard {
       this.theme.fg(
         "dim",
         truncateToWidth(
-          `Group: ${group} · Dependencies: ${dependencies} · ${attempts} · $${usage.cost.toFixed(4)}`,
+          `Group: ${group} · Dependencies: ${dependencies} · ${attempts} · $${usage.cost.toFixed(4)}${liveDetail}`,
           width
         )
       ),
