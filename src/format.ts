@@ -1,6 +1,13 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { type BoardUsageSummary, type Task, type TaskStatus, type Usage } from "./types.js";
 
+export interface StatusHistoryRow {
+  ts: string;
+  taskId: string;
+  from: TaskStatus;
+  to: TaskStatus;
+}
+
 export const STATUS_GLYPHS: Record<TaskStatus, string> = {
   todo: "○",
   running: "◐",
@@ -100,6 +107,36 @@ export function boardUsageSummary(tasks: Task[]): BoardUsageSummary {
 export function padText(value: string, width: number): string {
   const currentWidth = visibleWidth(value);
   return currentWidth >= width ? value : value + " ".repeat(width - currentWidth);
+}
+
+export function formatStatusHistory(
+  entries: readonly StatusHistoryRow[],
+  skipped = 0,
+  count = 20
+): string {
+  const selected = entries.slice(-count);
+  if (selected.length === 0)
+    return skipped > 0 ? `(${skipped} unreadable line(s) skipped)` : "No history yet.";
+  const taskWidth = Math.max(4, ...selected.map((entry) => entry.taskId.length));
+  const fromWidth = Math.max(4, ...selected.map((entry) => entry.from.length));
+  const dates = new Set(selected.map((entry) => new Date(entry.ts).toISOString().slice(0, 10)));
+  const lines = [
+    `${padText("time", 8)}  ${padText("task", taskWidth)}  ${padText("from", fromWidth)} → to`,
+  ];
+  let currentDate: string | undefined;
+  for (const entry of selected) {
+    const timestamp = new Date(entry.ts).toISOString();
+    const date = timestamp.slice(0, 10);
+    if (dates.size > 1 && date !== currentDate) {
+      lines.push(date);
+      currentDate = date;
+    }
+    lines.push(
+      `${timestamp.slice(11, 19)}  ${padText(entry.taskId, taskWidth)}  ${padText(entry.from, fromWidth)} → ${entry.to}`
+    );
+  }
+  if (skipped > 0) lines.push(`(${skipped} unreadable line(s) skipped)`);
+  return lines.join("\n");
 }
 
 export function formatCostSummary(tasks: Task[]): string {
