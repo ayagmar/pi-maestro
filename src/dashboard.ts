@@ -14,7 +14,14 @@ import {
   type HumanRetryEligibility,
   taskGroup,
 } from "./board.js";
-import { boardUsage, STATUS_GLYPHS, STATUS_LABELS, taskUsage } from "./format.js";
+import {
+  boardUsage,
+  formatCostSummary,
+  formatStatusHistory,
+  STATUS_GLYPHS,
+  STATUS_LABELS,
+  taskUsage,
+} from "./format.js";
 import { projectRunPhases, projectStatus } from "./status.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
 import { TranscriptTail } from "./transcript.js";
@@ -53,16 +60,30 @@ export interface DashboardActions {
   close(): void;
   requestRender(): void;
   getLatestArchive?(): { name: string; at: number } | undefined;
+  getStatusHistory?():
+    | {
+        entries: readonly { ts: string; taskId: string; from: TaskStatus; to: TaskStatus }[];
+        skipped: number;
+      }
+    | undefined;
 }
 
 const REFRESH_MS = 500;
 export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
 const MIN_DASHBOARD_BODY_HEIGHT = 2;
 
-type Mode = "browse" | "steer_templates" | "steer" | "confirm_abort" | "confirm_accept" | "help";
+type Mode =
+  | "browse"
+  | "steer_templates"
+  | "steer"
+  | "manual_status"
+  | "confirm_abort"
+  | "confirm_accept"
+  | "help";
 type ConfirmAction = "abort" | "accept";
 type DashboardFilter = "all" | TaskGroup;
 type NavigationLevel = "phase" | "task" | "launch";
+type DetailView = "transcript" | "timeline" | "summary" | "evidence";
 
 export interface DashboardLaunch {
   key: string;
@@ -139,6 +160,7 @@ export const DASHBOARD_BINDINGS = [
   { key: "s", context: "Task", description: "steer" },
   { key: "x", context: "Task", description: "abort" },
   { key: "a", context: "Task", description: "approve (review bypass)" },
+  { key: "m", context: "Task", description: "manual status" },
   { key: "r", context: "Task", description: "retry" },
   { key: "p", context: "Task", description: "report" },
   { key: "v", context: "Task", description: "verdict" },
@@ -158,6 +180,19 @@ const STEER_OPTIONS = [
   "Stay strictly within the task brief scope",
   "Custom message...",
 ] as const;
+
+const MANUAL_STATUS_OPTIONS: readonly TaskStatus[] = [
+  "todo",
+  "ready_for_review",
+  "changes_requested",
+  "approved",
+  "cancelled",
+];
+
+function isManualStatusEligible(task: Task, isLive: boolean): boolean {
+  if (isLive) return false;
+  return !(["approved", "failed", "cancelled"] as TaskStatus[]).includes(task.status);
+}
 
 export interface DashboardOptions {
   /** Number of rows shared by the task list and transcript panes. */
@@ -198,10 +233,13 @@ export class Dashboard {
   private selectedLaunchKey: string | undefined;
   private mode: Mode = "browse";
   private pendingConfirm: { taskId: string; action: ConfirmAction } | undefined;
+  private pendingManualStatus:
+    | { taskId: string; options: readonly TaskStatus[]; selected: number }
+    | undefined;
   private scrollUp = 0;
   private hideDone = false;
   private filter: DashboardFilter = "all";
-  private detailView: "transcript" | "timeline" | "evidence" = "transcript";
+  private detailView: DetailView = "transcript";
   private steerOption = 0;
   private steerInput = new Input();
   private tails = new Map<string, TranscriptTail>();
@@ -351,6 +389,12 @@ export class Dashboard {
       return;
     }
 
+    if (this.mode === "manual_status") {
+      this.handleManualStatusInput(data);
+      this.actions.requestRender();
+      return;
+    }
+
     if (this.mode === "confirm_abort" || this.mode === "confirm_accept") {
       const pending = this.pendingConfirm;
       const task = pending ? findTask(this.frame.board, pending.taskId) : undefined;
@@ -454,7 +498,12 @@ export class Dashboard {
       this.selectedTaskId = undefined;
       this.scrollUp = 0;
     } else if (data === "t") {
-      this.detailView = this.detailView === "transcript" ? "timeline" : "transcript";
+      this.detailView =
+        this.detailView === "transcript"
+          ? "timeline"
+          : this.detailView === "timeline"
+            ? "summary"
+            : "transcript";
       this.scrollUp = 0;
     } else if (data === "e") {
       this.detailView = this.detailView === "evidence" ? "transcript" : "evidence";
@@ -476,6 +525,13 @@ export class Dashboard {
     ) {
       this.pendingConfirm = { taskId: task.id, action: "accept" };
       this.mode = "confirm_accept";
+    } else if (data === "m" && task && isManualStatusEligible(task, this.actions.isLive(task.id))) {
+      this.pendingManualStatus = {
+        taskId: task.id,
+        options: MANUAL_STATUS_OPTIONS.filter((status) => status !== task.status),
+        selected: 0,
+      };
+      this.mode = "manual_status";
     } else if (
       data === "r" &&
       task &&
@@ -513,6 +569,37 @@ export class Dashboard {
       return;
     }
     this.actions.requestRender();
+  }
+
+  private handleManualStatusInput(data: string): void {
+    const pending = this.pendingManualStatus;
+    const task = pending ? findTask(this.frame.board, pending.taskId) : undefined;
+    if (!pending || !task || !isManualStatusEligible(task, this.actions.isLive(task.id))) {
+      this.pendingManualStatus = undefined;
+      this.mode = "browse";
+      return;
+    }
+    if (matchesKey(data, "escape")) {
+      this.pendingManualStatus = undefined;
+      this.mode = "browse";
+      return;
+    }
+    if (matchesKey(data, "up")) {
+      pending.selected = Math.max(0, pending.selected - 1);
+      return;
+    }
+    if (matchesKey(data, "down")) {
+      pending.selected = Math.min(pending.options.length - 1, pending.selected + 1);
+      return;
+    }
+    if (!matchesKey(data, "return")) return;
+
+    const status = pending.options[pending.selected];
+    this.pendingManualStatus = undefined;
+    this.mode = "browse";
+    if (!status || status === task.status) return;
+    this.actions.setTaskStatus(task.id, status);
+    this.frameFresh = false;
   }
 
   private handleSteerTemplateInput(data: string): void {
@@ -749,7 +836,23 @@ export class Dashboard {
     const task = this.selectedTask();
     if (!task) return [];
 
-    if (this.detailView === "evidence") return this.renderEvidence(task, width, height);
+    if (this.detailView === "evidence") {
+      const evidence = this.renderEvidence(task, width, height);
+      return this.mode === "manual_status"
+        ? [...evidence, ...this.renderManualStatusControls(width, height)].slice(0, height)
+        : evidence;
+    }
+    if (this.detailView === "summary") {
+      const history = this.actions.getStatusHistory?.();
+      return [
+        ...formatCostSummary(this.frame.board.tasks).split("\n"),
+        "",
+        "Recent status history",
+        formatStatusHistory(history?.entries ?? [], history?.skipped ?? 0, 20),
+      ]
+        .flatMap((line) => wrapText(line, width))
+        .slice(0, height);
+    }
 
     const maxSummaryHeight = Math.min(11, Math.max(1, Math.ceil(height / 2)));
     const summary = this.renderSelectedTask(task, width).slice(0, maxSummaryHeight);
@@ -788,8 +891,11 @@ export class Dashboard {
       }
     }
 
-    const steerLines = this.renderSteerControls(width, transcriptHeight);
-    const visible = Math.max(0, transcriptHeight - steerLines.length);
+    const modeLines =
+      this.mode === "manual_status"
+        ? this.renderManualStatusControls(width, transcriptHeight)
+        : this.renderSteerControls(width, transcriptHeight);
+    const visible = Math.max(0, transcriptHeight - modeLines.length);
     if (this.scrollUp > 0) {
       if (this.transcriptLinesAtScroll !== undefined) {
         this.scrollUp += Math.max(0, wrapped.length - this.transcriptLinesAtScroll);
@@ -803,7 +909,7 @@ export class Dashboard {
     const end = wrapped.length - this.scrollUp;
     const body = wrapped.slice(Math.max(0, end - visible), end);
 
-    body.push(...steerLines);
+    body.push(...modeLines);
     return [...summary, ...body].slice(0, height);
   }
 
@@ -980,6 +1086,26 @@ export class Dashboard {
     return "Ready to run when the orchestrator dispatches it.";
   }
 
+  private renderManualStatusControls(width: number, height: number): string[] {
+    const pending = this.pendingManualStatus;
+    if (!pending) return [];
+    const task = findTask(this.frame.board, pending.taskId);
+    if (!task || !isManualStatusEligible(task, this.actions.isLive(task.id))) {
+      this.pendingManualStatus = undefined;
+      this.mode = "browse";
+      return [];
+    }
+
+    const lines = [this.theme.fg("accent", `Set ${task.id} status:`)];
+    for (const [index, status] of pending.options.entries()) {
+      const marker = index === pending.selected ? "▶ " : "  ";
+      const text = truncateToWidth(`${marker}${STATUS_LABELS[status]}`, width);
+      lines.push(index === pending.selected ? this.theme.fg("accent", text) : text);
+    }
+    lines.push(this.theme.fg("dim", "↑↓ select · enter apply · esc cancel"));
+    return lines.slice(0, height);
+  }
+
   private renderSteerControls(width: number, height: number): string[] {
     if (this.mode === "steer") {
       return [
@@ -1043,6 +1169,7 @@ export class Dashboard {
       if (this.actions.hasExecutorSession(task.id)) parts.push(bindingLabel("enter"));
       if (this.actions.hasReviewerSession(task.id)) parts.push(bindingLabel("O"));
       if (task.status === "ready_for_review") parts.push(bindingLabel("a"));
+      if (isManualStatusEligible(task, false)) parts.push(bindingLabel("m"));
       if (this.actions.retryEligibility(task.id).eligible) parts.push(bindingLabel("r"));
     }
     const groupFilter = this.filter === "all" ? "all" : GROUP_LABELS[this.filter];

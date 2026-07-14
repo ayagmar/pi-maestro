@@ -264,6 +264,121 @@ test("dashboard confirms the captured task after the list reorders", () => {
   }
 });
 
+test("dashboard manual status selector routes the captured task through setTaskStatus", () => {
+  const task = makeTask({ status: "todo" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const changes: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      setTaskStatus: (taskId, status) => changes.push(`${taskId}:${status}`),
+    })
+  );
+  try {
+    assert.match(dashboard.render(120).at(-1) ?? "", /m manual status/);
+    dashboard.handleInput("m");
+    assert.match(dashboard.render(120).join("\n"), /Set T1 status:/);
+    assert.match(dashboard.render(120).join("\n"), /ready for review/);
+    dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+
+    assert.deepEqual(changes, ["T1:approved"]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard cancels manual status selection without mutation", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask({ status: "todo" })] };
+  const changes: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      setTaskStatus: (taskId, status) => changes.push(`${taskId}:${status}`),
+    })
+  );
+  try {
+    dashboard.handleInput("m");
+    dashboard.handleInput("\x1b");
+
+    assert.deepEqual(changes, []);
+    assert.doesNotMatch(dashboard.render(120).join("\n"), /Set T1 status:/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard rejects manual status selection for live and terminal tasks", () => {
+  const task = makeTask({ status: "running" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const changes: string[] = [];
+  let live = true;
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => live,
+      setTaskStatus: (taskId, status) => changes.push(`${taskId}:${status}`),
+    })
+  );
+  try {
+    dashboard.handleInput("m");
+    assert.doesNotMatch(dashboard.render(120).join("\n"), /Set T1 status:/);
+
+    live = false;
+    task.status = "approved";
+    dashboard.handleInput("m");
+    dashboard.handleInput("\r");
+
+    assert.deepEqual(changes, []);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard cancels manual status when the captured task disappears", () => {
+  const first = makeTask({ status: "todo" });
+  const second = makeTask({ id: "T2", status: "todo" });
+  const board: Board = { version: 1, nextTaskNumber: 3, tasks: [first, second] };
+  const changes: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      setTaskStatus: (taskId, status) => changes.push(`${taskId}:${status}`),
+    })
+  );
+  try {
+    dashboard.handleInput("m");
+    board.tasks = [second];
+    dashboard.handleInput("\r");
+
+    assert.deepEqual(changes, []);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard cancels manual status when the captured task becomes terminal", () => {
+  const task = makeTask({ status: "todo" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const changes: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      setTaskStatus: (taskId, status) => changes.push(`${taskId}:${status}`),
+    })
+  );
+  try {
+    dashboard.handleInput("m");
+    task.status = "failed";
+    dashboard.handleInput("\r");
+
+    assert.deepEqual(changes, []);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard renders the mutated status immediately after a confirmed approval", () => {
   const task = makeTask({ status: "ready_for_review" });
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
@@ -280,6 +395,28 @@ test("dashboard renders the mutated status immediately after a confirmed approva
     dashboard.handleInput("a");
     dashboard.handleInput("y");
     assert.match(dashboard.render(100).join("\n"), /approved/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard ignores approval when the captured task leaves ready for review", () => {
+  const task = makeTask({ status: "ready_for_review" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const approved: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      setTaskStatus: (taskId) => approved.push(taskId),
+    })
+  );
+  try {
+    dashboard.handleInput("a");
+    assert.match(dashboard.render(100).at(-1) ?? "", /Approve T1/);
+    task.status = "todo";
+    dashboard.handleInput("y");
+
+    assert.deepEqual(approved, []);
   } finally {
     dashboard.dispose();
   }
