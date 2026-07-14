@@ -42,6 +42,7 @@ test("operations documents every drive stop and failure kind", () => {
     "escalation_required",
     "attempt_cap",
     "blocked",
+    "no_progress",
     "round_limit",
     "error",
     "provider_failure",

@@ -856,6 +856,9 @@ export default function maestro(
   function formatDrivePulse(summary: DriveSummary): string {
     const base = formatDriveSummary(summary);
     const code = summary.stoppedBecause.code;
+    if (code === "no_progress") {
+      return `${summary.stoppedBecause.message}\n\n${base}`;
+    }
     if (code === "provider_blocked") {
       return `${base}\n\nChoose a recovery: configure another fallback in /maestro config then /maestro resume, or maestro_update the task, or ask the user if the block is a cost/quota decision. Do not blindly retry the same provider.`;
     }

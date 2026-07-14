@@ -180,6 +180,7 @@ export type DriveStopCode =
   | "attempt_cap"
   | "stale_completion"
   | "blocked"
+  | "no_progress"
   | "round_limit"
   | "error";
 
@@ -577,7 +578,16 @@ export async function driveBoard(options: {
       );
       if (escalated.length > 0) return finish(escalationReason(escalated, config));
 
-      rounds += 1;
+      const roundNumber = rounds + 1;
+      const roundStartLaunches = rawLaunches;
+      const roundStartStatuses = new Map(tasks.map((task) => [task.id, task.status]));
+      const dispatchResults: TaskSnapshot[] = [];
+      let roundCounted = false;
+      const countRoundIfLaunched = (): void => {
+        if (roundCounted || rawLaunches === roundStartLaunches) return;
+        rounds += 1;
+        roundCounted = true;
+      };
       const wave = calculateSchedulingWave(board, currentFingerprintConfig(), taskIds);
       const runnable = tasks.filter(
         (task) =>
@@ -596,7 +606,7 @@ export async function driveBoard(options: {
           humanExecuteDispatched = true;
         }
         onRoundUpdate?.(
-          rounds,
+          roundNumber,
           "run",
           dispatchable.map((task) => task.id)
         );
@@ -630,32 +640,38 @@ export async function driveBoard(options: {
           throw error;
         }
 
-        await mapWithConcurrencyLimit(dispatchable, config.maxParallel, (task) => {
-          const tier = resolvedTiers.get(task.tier);
-          if (!tier) throw new Error(`No resolved tier for "${task.tier}"`);
-          const executeOptions: Parameters<typeof executeTask>[0] = {
-            cwd,
-            board,
-            task,
-            tier,
-            config,
-            startExecutor: boundedStartExecutor,
-            canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
-            humanRetry: task.id.toUpperCase() === humanRetryId,
-            onUpdate,
-            trackRun,
-          };
-          const worktree = worktrees.get(task.id);
-          if (worktree) executeOptions.worktree = worktree;
-          if (signal) executeOptions.signal = signal;
-          if (task.id.toUpperCase() === humanRetryId && humanRetryExpectedRiskToken) {
-            executeOptions.humanRetryExpectedRiskToken = humanRetryExpectedRiskToken;
+        const executeResults = await mapWithConcurrencyLimit(
+          dispatchable,
+          config.maxParallel,
+          (task) => {
+            const tier = resolvedTiers.get(task.tier);
+            if (!tier) throw new Error(`No resolved tier for "${task.tier}"`);
+            const executeOptions: Parameters<typeof executeTask>[0] = {
+              cwd,
+              board,
+              task,
+              tier,
+              config,
+              startExecutor: boundedStartExecutor,
+              canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+              humanRetry: task.id.toUpperCase() === humanRetryId,
+              onUpdate,
+              trackRun,
+            };
+            const worktree = worktrees.get(task.id);
+            if (worktree) executeOptions.worktree = worktree;
+            if (signal) executeOptions.signal = signal;
+            if (task.id.toUpperCase() === humanRetryId && humanRetryExpectedRiskToken) {
+              executeOptions.humanRetryExpectedRiskToken = humanRetryExpectedRiskToken;
+            }
+            if (task.id.toUpperCase() === humanRetryId && humanRetryOwnerSession) {
+              executeOptions.humanRetryOwnerSession = humanRetryOwnerSession;
+            }
+            return executeTask(executeOptions);
           }
-          if (task.id.toUpperCase() === humanRetryId && humanRetryOwnerSession) {
-            executeOptions.humanRetryOwnerSession = humanRetryOwnerSession;
-          }
-          return executeTask(executeOptions);
-        });
+        );
+        dispatchResults.push(...executeResults);
+        countRoundIfLaunched();
         const freshBoard = loadBoard(cwd);
         for (const ref of created) removeUnreferencedCleanWorktree(cwd, freshBoard, ref);
         const freshHumanRetry = humanRetryId
@@ -739,7 +755,7 @@ export async function driveBoard(options: {
       );
       if (reviewable.length > 0) {
         onRoundUpdate?.(
-          rounds,
+          roundNumber,
           "review",
           reviewable.map((task) => task.id)
         );
@@ -749,35 +765,41 @@ export async function driveBoard(options: {
           0,
           Math.max(0, config.maxTotalLaunchesPerRun - rawLaunches)
         );
-        await mapWithConcurrencyLimit(reviewDispatchable, config.maxParallel, (task) => {
-          const reviewOptions: Parameters<typeof reviewTask>[0] = {
-            cwd,
-            task,
-            tier: reviewTier,
-            startExecutor: boundedStartExecutor,
-            canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
-            autoCommit: config.autoCommit,
-            reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
-            maxReviewerLaunches: config.maxReviewerLaunches ?? 4,
-            availableTiers: Object.keys(config.tiers),
-            onUpdate,
-            trackRun,
-            isLive,
-            humanRetry: task.id.toUpperCase() === humanRetryId,
-          };
-          if (task.id.toUpperCase() === humanRetryId && humanRetryOwnerSession) {
-            reviewOptions.humanRetryOwnerSession = humanRetryOwnerSession;
+        const reviewResults = await mapWithConcurrencyLimit(
+          reviewDispatchable,
+          config.maxParallel,
+          (task) => {
+            const reviewOptions: Parameters<typeof reviewTask>[0] = {
+              cwd,
+              task,
+              tier: reviewTier,
+              startExecutor: boundedStartExecutor,
+              canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+              autoCommit: config.autoCommit,
+              reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
+              maxReviewerLaunches: config.maxReviewerLaunches ?? 4,
+              availableTiers: Object.keys(config.tiers),
+              onUpdate,
+              trackRun,
+              isLive,
+              humanRetry: task.id.toUpperCase() === humanRetryId,
+            };
+            if (task.id.toUpperCase() === humanRetryId && humanRetryOwnerSession) {
+              reviewOptions.humanRetryOwnerSession = humanRetryOwnerSession;
+            }
+            if (config.verificationProfiles)
+              reviewOptions.verificationProfiles = config.verificationProfiles;
+            if (config.logEvents !== undefined) reviewOptions.logEvents = config.logEvents;
+            if (config.maxLogBytesPerRun !== undefined)
+              reviewOptions.maxLogBytes = config.maxLogBytesPerRun;
+            if (options.onRetentionWarning)
+              reviewOptions.onRetentionWarning = options.onRetentionWarning;
+            if (signal) reviewOptions.signal = signal;
+            return reviewTask(reviewOptions);
           }
-          if (config.verificationProfiles)
-            reviewOptions.verificationProfiles = config.verificationProfiles;
-          if (config.logEvents !== undefined) reviewOptions.logEvents = config.logEvents;
-          if (config.maxLogBytesPerRun !== undefined)
-            reviewOptions.maxLogBytes = config.maxLogBytesPerRun;
-          if (options.onRetentionWarning)
-            reviewOptions.onRetentionWarning = options.onRetentionWarning;
-          if (signal) reviewOptions.signal = signal;
-          return reviewTask(reviewOptions);
-        });
+        );
+        dispatchResults.push(...reviewResults);
+        countRoundIfLaunched();
       }
 
       if (signal?.aborted) {
@@ -854,6 +876,13 @@ export async function driveBoard(options: {
         });
       }
 
+      const statusChanged =
+        freshTasks.length !== roundStartStatuses.size ||
+        freshTasks.some((task) => roundStartStatuses.get(task.id) !== task.status);
+      if (rawLaunches === roundStartLaunches && !statusChanged) {
+        return finish(noProgressReason(freshTasks, dispatchResults));
+      }
+
       const freshBoard = loadBoard(cwd);
       const canContinue = freshTasks.some(
         (task) =>
@@ -886,6 +915,24 @@ export async function driveBoard(options: {
     code: "round_limit",
     message: `drive stopped after the hard limit of ${DRIVE_ROUND_LIMIT} rounds`,
   });
+}
+
+function noProgressReason(tasks: Task[], dispatchResults: TaskSnapshot[]): DriveStopReason {
+  const notes = new Map(
+    dispatchResults.map((result) => [
+      result.id,
+      result.note ?? "dispatch declined without a reason",
+    ])
+  );
+  const pending = tasks.filter((task) => !["approved", "cancelled"].includes(task.status));
+  const details = pending.map(
+    (task) => `${task.id} (${task.status}): ${notes.get(task.id) ?? "no dispatch was attempted"}`
+  );
+  return {
+    code: "no_progress",
+    message: `Drive stopped because no executor or reviewer launched and no selected task changed status.\n${details.join("\n")}`,
+    taskIds: pending.map((task) => task.id),
+  };
 }
 
 function terminalReviewConvergence(task: Task): "disagreement" | "operational_failure" | undefined {

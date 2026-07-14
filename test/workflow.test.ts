@@ -745,6 +745,45 @@ test("formatDriveSummary reports outcomes, attempts, meaningful cost, and identi
   assert.match(summary, /dependency unavailable$/);
 });
 
+test("drive stops when a review dispatch declines without making progress", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-no-progress-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    task.attempts.push(attempt());
+    saveBoard(cwd, board);
+    let launches = 0;
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: () => {
+        launches += 1;
+        return executor({})({} as never);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "no_progress");
+    assert.equal(result.rounds, 0);
+    assert.equal(launches, 0);
+    assert.match(
+      result.stoppedBecause.message,
+      /T1 \(ready_for_review\): no executor report to review/
+    );
+    assert.match(
+      formatDriveSummary(result),
+      /T1 \(ready_for_review\): no executor report to review/
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("driveBoard approves dependent tasks across multiple rounds", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-test-"));
   try {

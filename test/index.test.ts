@@ -10,6 +10,7 @@ import {
   consumeQuarantineNotice,
   createTask,
   findTask,
+  forceStatus,
   listArchivedBoards,
   loadBoard,
   saveBoard,
@@ -1871,6 +1872,47 @@ test("maestro_drive inspect returns bounded scoped board state without starting 
       assert.match(result.content[0]?.text ?? "", /0\/1 approved/);
       assert.match(result.content[0]?.text ?? "", /No live executors/);
       assert.equal(findTask(loadBoard(cwd), "T1")?.status, "todo");
+    }
+  );
+});
+
+test("maestro_drive inspect preserves no-progress dispatch notes", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Inspect declined review",
+        brief: "stay reviewable",
+        tier: "standard",
+      });
+      forceStatus(task, "ready_for_review");
+      board.activeDecision = {
+        id: "no-progress-decision",
+        kind: "no_progress",
+        taskIds: [task.id],
+        evidence: "T1 (ready_for_review): no executor report to review",
+        allowedInterventions: ["handoff", "abort"],
+        createdAt: Date.now(),
+      };
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const drive = tools.get("maestro_drive");
+      assert.ok(drive);
+
+      const result = await drive.execute(
+        "inspect-no-progress",
+        { action: "inspect" },
+        undefined,
+        undefined,
+        ctx
+      );
+
+      assert.match(
+        result.content[0]?.text ?? "",
+        /T1 \(ready_for_review\): no executor report to review/
+      );
     }
   );
 });

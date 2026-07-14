@@ -23,6 +23,7 @@ Maestro preserves board state, attempts, logs, sessions, Git branches, and dirty
 | Orphan worktree | `/maestro doctor cleanup`, inspect, then `/maestro doctor cleanup confirm`. | Dirty or branch-ahead worktrees are classified recoverable and preserved. |
 | Manual acceptance | Use dashboard acceptance only when intentionally bypassing review. | `approvalKind: manual` remains visible to reconciliation. |
 | `completed` | Review the completion message or `/maestro timeline`; completed-board cleanup archives before clearing. | Archived board and logs under retention policy. |
+| `no_progress` | Inspect each pending task's dispatch-decline note, correct the named condition, then resume. | The decision and `maestro_drive` inspect output preserve per-task decline notes; no-op iterations consume no round budget. |
 | `round_limit`, `blocked`, or `error` | Inspect the decision evidence and blockers, correct one owner-scoped issue, then resume. | Durable decision delivery and resolution. |
 
 ## Routine controls

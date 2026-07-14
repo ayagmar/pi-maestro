@@ -346,7 +346,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             ? board.activeDecision
             : undefined;
         const decisionText = decision
-          ? `\nDecision ${decision.id} (${decision.kind}): ${decision.evidence}`
+          ? `Decision ${decision.id} (${decision.kind}): ${decision.evidence}\n`
           : "";
         const projectedBoard = { ...board, tasks: selectedTasks };
         if (!decision) delete projectedBoard.activeDecision;
@@ -362,7 +362,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             {
               type: "text",
               text: truncateText(
-                `${statusText}\n${live || "No live executors."}${decisionText}\nReview evidence:\n${JSON.stringify(evidence)}`,
+                `${decisionText}${statusText}\n${live || "No live executors."}\nReview evidence:\n${JSON.stringify(evidence)}`,
                 4000
               ),
             },
