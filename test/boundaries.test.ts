@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const sourceDirectory = join(testDirectory, "..", "src");
+const rootDirectory = join(testDirectory, "..");
 
 function sourceFiles(): { name: string; contents: string }[] {
   return readdirSync(sourceDirectory, { withFileTypes: true })
@@ -137,4 +138,45 @@ test("board-facing modules do not depend on the coding agent", () => {
     [],
     `Board-facing modules must not import @earendil-works/pi-coding-agent; violations: ${violations.join(", ")}`
   );
+});
+
+test("the model surface remains exactly three named tools", () => {
+  const tools = readFileSync(join(sourceDirectory, "tools.ts"), "utf-8");
+  const names = [...tools.matchAll(/name:\s*"(maestro_[a-z]+)"/g)].map((match) => match[1]);
+  assert.deepEqual([...new Set(names)].sort(), ["maestro_drive", "maestro_plan", "maestro_update"]);
+  assert.equal((tools.match(/\.registerTool\s*</g) ?? []).length, 3);
+});
+
+test("package shape adds no runtime dependency, database, analytics, plugin, or policy framework", () => {
+  const pkg = JSON.parse(readFileSync(join(rootDirectory, "package.json"), "utf-8")) as {
+    dependencies?: Record<string, string>;
+  };
+  assert.deepEqual(pkg.dependencies ?? {}, {});
+  const forbiddenDependency = /sqlite|prisma|typeorm|sequelize|analytics|telemetry|plugin|policy/i;
+  assert.deepEqual(
+    Object.keys(pkg.dependencies ?? {}).filter((name) => forbiddenDependency.test(name)),
+    []
+  );
+  for (const directory of ["database", "analytics", "plugins", "policies"]) {
+    assert.equal(
+      readdirSync(rootDirectory, { withFileTypes: true }).some(
+        (entry) => entry.isDirectory() && entry.name === directory
+      ),
+      false
+    );
+  }
+});
+
+test("repository config and recipes cannot introduce executable commands", () => {
+  const config = readFileSync(join(sourceDirectory, "config.ts"), "utf-8");
+  const recipes = readFileSync(join(sourceDirectory, "recipes.ts"), "utf-8");
+  assert.match(config, /verificationProfiles:\s*_ignoredCommands/);
+  const taskKeys = recipes.match(/const TASK_KEYS = new Set\(\[([\s\S]*?)\]\);/)?.[1] ?? "";
+  assert.doesNotMatch(taskKeys, /command|script|hook|executable/);
+});
+
+test("empty attributed paths are explicit no-op staging", () => {
+  const worktree = readFileSync(join(sourceDirectory, "worktree.ts"), "utf-8");
+  assert.match(worktree, /function commitAll[\s\S]*if \(paths\?\.length === 0\) return false;/);
+  assert.match(worktree, /function captureDiff[\s\S]*if \(paths\?\.length === 0\) return "";/);
 });

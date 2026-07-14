@@ -49,6 +49,9 @@ test("operations documents every drive stop and failure kind", () => {
     "executor_failure",
     "reviewer_rejection",
     "reviewer_failure",
+    "review_disagreement",
+    "launch_limit",
+    "stale_completion",
     "user_abort",
     "cost_cap",
   ];
@@ -63,6 +66,13 @@ test("configuration docs match runtime defaults and commands remain documented",
     ["useWorktrees", DEFAULT_CONFIG.useWorktrees],
     ["autoCommit", DEFAULT_CONFIG.autoCommit],
     ["maxAttempts", DEFAULT_CONFIG.maxAttempts],
+    ["maxPlanTasks", DEFAULT_CONFIG.maxPlanTasks],
+    ["maxDiscoveryGeneratedTasks", DEFAULT_CONFIG.maxDiscoveryGeneratedTasks],
+    ["maxTotalLaunchesPerRun", DEFAULT_CONFIG.maxTotalLaunchesPerRun],
+    ["confirmationPlanTasks", DEFAULT_CONFIG.confirmationPlanTasks],
+    ["confirmationTotalLaunches", DEFAULT_CONFIG.confirmationTotalLaunches],
+    ["reviewRequiredApprovals", DEFAULT_CONFIG.reviewRequiredApprovals],
+    ["maxReviewerLaunches", DEFAULT_CONFIG.maxReviewerLaunches],
     ["maxCostPerTask", DEFAULT_CONFIG.maxCostPerTask],
     ["maxRunCost", DEFAULT_CONFIG.maxRunCost],
     ["statusWaitSeconds", DEFAULT_CONFIG.statusWaitSeconds],
@@ -78,7 +88,17 @@ test("configuration docs match runtime defaults and commands remain documented",
   for (const [key, value] of defaults) {
     assert.ok(plainConfig.includes(`| ${key} | ${String(value)} |`));
   }
-  assert.ok(MAESTRO_COMMANDS.includes("timeline"));
+  for (const command of [
+    "retry",
+    "timeline",
+    "reconcile",
+    "plan diff",
+    "plan compare",
+    "recipe preview",
+  ] as const) {
+    assert.ok(MAESTRO_COMMANDS.includes(command));
+    assert.ok(read("README.md").includes(`/maestro ${command}`));
+  }
 });
 
 test("declared package shape contains runtime and required documentation", () => {
@@ -88,4 +108,8 @@ test("declared package shape contains runtime and required documentation", () =>
     assert.ok(pkg.files.includes(entry));
   }
   assert.equal(existsSync(join(root, pkg.main)), true);
+  for (const excluded of [".pi/", "plans/", "test/", "scripts/"]) {
+    assert.equal(pkg.files.includes(excluded), false);
+  }
+  assert.match(read("scripts/smoke-test.mjs"), /registers exactly three model tools/);
 });

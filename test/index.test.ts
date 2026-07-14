@@ -1,11 +1,23 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
-import { createTask, findTask, listArchivedBoards, loadBoard, saveBoard } from "../src/board.js";
+import { taskFingerprint } from "../src/artifact-policy.js";
+import {
+  createTask,
+  findTask,
+  listArchivedBoards,
+  loadBoard,
+  saveBoard,
+  saveStoredRecipe,
+  updateBoard,
+} from "../src/board.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
+import { deliverPendingDecision } from "../src/drive-controller.js";
+import { exportPlan } from "../src/plan-serialization.js";
 import maestro, {
   assertKnownTaskIds,
   maestroBoardCwd,
@@ -45,7 +57,7 @@ test("drive controls stay with their owning session", () => {
   assert.equal(sessionCanControlDrive(owner, owner), true);
   assert.equal(sessionCanControlDrive(owner, other), false);
   assert.equal(sessionCanControlDrive(undefined, other), true);
-  assert.equal(sessionCanControlDrive(owner, undefined), true);
+  assert.equal(sessionCanControlDrive(owner, undefined), false);
 });
 
 test("session switches are blocked for active drive ownership or live executors", () => {
@@ -82,6 +94,8 @@ interface RegisteredCommand {
 
 interface RegisteredTool {
   name: string;
+  parameters?: unknown;
+  prepareArguments?: (args: unknown) => unknown;
   execute: (
     toolCallId: string,
     params: unknown,
@@ -126,6 +140,7 @@ interface CommandCtx {
   mode: "tui";
   modelRegistry: object;
   sessionManager: {
+    getEntries?: () => unknown[];
     getSessionFile: () => string;
     getSessionName: () => string | undefined;
   };
@@ -158,6 +173,7 @@ interface TuiStep {
 interface UiScript {
   steps: TuiStep[];
   confirmations?: boolean[];
+  beforeConfirm?: () => void;
 }
 
 const enter = "\r";
@@ -218,7 +234,10 @@ function loadMaestro(
         for (const key of step.keys) component.handleInput(key);
       });
     },
-    confirm: async (): Promise<boolean> => uiScript?.confirmations?.shift() ?? false,
+    confirm: async (): Promise<boolean> => {
+      uiScript?.beforeConfirm?.();
+      return uiScript?.confirmations?.shift() ?? false;
+    },
   };
   const ctx: CommandCtx = {
     cwd,
@@ -340,6 +359,8 @@ test("gated plan editor saves title, brief, tier, dependencies, and cancellation
           { keys: [clearLine, "t2", enter] },
           { keys: select(4) },
           { keys: select(1) },
+          { keys: select(9) },
+          { keys: select(1) },
           {
             keys: select(5),
             before: () => {
@@ -349,6 +370,7 @@ test("gated plan editor saves title, brief, tier, dependencies, and cancellation
               assert.equal(unsaved?.tier, "standard");
               assert.deepEqual(unsaved?.dependsOn, []);
               assert.equal(unsaved?.status, "todo");
+              assert.equal(unsaved?.reviewPolicy, undefined);
             },
           },
           { keys: [escapeKey] },
@@ -364,6 +386,7 @@ test("gated plan editor saves title, brief, tier, dependencies, and cancellation
       assert.equal(saved?.tier, "complex");
       assert.deepEqual(saved?.dependsOn, ["T2"]);
       assert.equal(saved?.status, "cancelled");
+      assert.equal(saved?.reviewPolicy, "confirm");
       assert.ok(notices.includes("T1 plan changes saved."));
       assert.equal(script.steps.length, 0);
     }
@@ -436,6 +459,57 @@ test("gated plan approval reports invalid references and cycles without changing
   );
 });
 
+test("gated plan approval refuses a board changed during scale confirmation", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        confirmationPlanTasks: 1,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+      createTask(board, {
+        title: "First",
+        brief: "Implement first",
+        tier: "standard",
+        writePaths: ["src/first.ts"],
+        successCriteria: ["First works"],
+      });
+      createTask(board, {
+        title: "Second",
+        brief: "Implement second",
+        tier: "standard",
+        writePaths: ["src/second.ts"],
+        successCriteria: ["Second works"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = {
+        steps: [{ keys: select(2) }],
+        confirmations: [true],
+        beforeConfirm: () => {
+          updateBoard(cwd, (board) => {
+            const task = findTask(board, "T1");
+            assert.ok(task);
+            task.title = "Concurrent edit";
+            return true;
+          });
+        },
+      };
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("plan", ctx);
+
+      const board = loadBoard(cwd);
+      assert.equal(findTask(board, "T1")?.title, "Concurrent edit");
+      assert.equal(board.planPending, true);
+      assert.equal(board.scaleApproval, undefined);
+      assert.match(notices.at(-1) ?? "", /changed after preflight confirmation/);
+    }
+  );
+});
+
 test("gated plan rejection confirmation archives and clears the board", async () => {
   await withBoard(
     (cwd) => {
@@ -501,6 +575,188 @@ test("/maestro costs is offered by argument completion and dispatches case-insen
   );
 });
 
+test("retry command completion and risky confirmation preserve approved work on refusal or race", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Accepted",
+        brief: "accepted work",
+        tier: "standard",
+      });
+      task.status = "approved";
+      task.approvalKind = "manual";
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const declinedScript: UiScript = { steps: [], confirmations: [false] };
+      const declined = loadMaestro(cwd, undefined, owner, declinedScript);
+      assert.deepEqual(declined.command.getArgumentCompletions?.("ret"), [
+        { value: "retry", label: "retry" },
+      ]);
+      await declined.command.handler("retry T1", declined.ctx);
+      assert.equal(findTask(loadBoard(cwd), "T1")?.status, "approved");
+      assert.match(declined.notices.at(-1) ?? "", /Retry cancelled/);
+
+      const noUi = loadMaestro(cwd);
+      noUi.ctx.hasUI = false;
+      await noUi.command.handler("retry T1", noUi.ctx);
+      assert.equal(findTask(loadBoard(cwd), "T1")?.status, "approved");
+
+      const raceScript: UiScript = {
+        steps: [],
+        confirmations: [true],
+        beforeConfirm: () => {
+          updateBoard(cwd, (board) => {
+            const task = findTask(board, "T1");
+            assert.ok(task);
+            task.integratedCommit = "changed-during-confirmation";
+            return true;
+          });
+        },
+      };
+      const raced = loadMaestro(cwd, undefined, owner, raceScript);
+      await raced.command.handler("retry T1", raced.ctx);
+      assert.match(raced.notices.at(-1) ?? "", /evidence changed during confirmation/);
+      assert.equal(findTask(loadBoard(cwd), "T1")?.status, "approved");
+      assert.equal(findTask(loadBoard(cwd), "T1")?.integratedCommit, "changed-during-confirmation");
+    }
+  );
+});
+
+test("retry risk evidence is rechecked after scale confirmation", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        confirmationTotalLaunches: 1,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, { title: "Accepted", brief: "accepted", tier: "standard" });
+      task.status = "failed";
+      task.integratedCommit = "integrated-before-confirmation";
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let confirmations = 0;
+      const script: UiScript = {
+        steps: [],
+        confirmations: [true, true],
+        beforeConfirm: () => {
+          confirmations += 1;
+          if (confirmations !== 2) return;
+          updateBoard(cwd, (board) => {
+            const task = findTask(board, "T1");
+            assert.ok(task);
+            task.integratedCommit = "changed-during-scale-confirmation";
+            return true;
+          });
+        },
+      };
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("retry T1", ctx);
+
+      assert.equal(confirmations, 2);
+      assert.equal(findTask(loadBoard(cwd), "T1")?.status, "failed");
+      assert.match(notices.at(-1) ?? "", /evidence changed; confirm it again/);
+    }
+  );
+});
+
+test("a second runtime cannot retry work owned by another session", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, { title: "Failed", brief: "retry me", tier: "standard" });
+      task.status = "failed";
+      board.activeDrive = {
+        id: "owner-drive",
+        ownerSession: owner,
+        taskIds: [task.id],
+        startedAt: Date.now(),
+      };
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let launches = 0;
+      const startExecutor: StartExecutor = () => {
+        launches += 1;
+        throw new Error("foreign runtime launched work");
+      };
+      loadMaestro(cwd, startExecutor, owner);
+      const foreign = loadMaestro(cwd, startExecutor, other);
+      const before = readFileSync(join(cwd, ".pi", "maestro", "board.json"), "utf-8");
+
+      await foreign.command.handler("retry T1", foreign.ctx);
+
+      assert.equal(launches, 0);
+      assert.match(foreign.notices.at(-1) ?? "", /another session/);
+      assert.equal(readFileSync(join(cwd, ".pi", "maestro", "board.json"), "utf-8"), before);
+    }
+  );
+});
+
+test("manual acceptance rejects out-of-scope artifacts before recording versioned proof", async () => {
+  await withBoard(
+    (cwd) => {
+      execFileSync("git", ["init", "-q"], { cwd });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd });
+      mkdirSync(join(cwd, "src"), { recursive: true });
+      writeFileSync(join(cwd, "src", "allowed.ts"), "before\n");
+      writeFileSync(join(cwd, "outside.ts"), "before\n");
+      execFileSync("git", ["add", "."], { cwd });
+      execFileSync("git", ["commit", "-qm", "base"], { cwd });
+      writeFileSync(join(cwd, "src", "allowed.ts"), "after\n");
+      writeFileSync(join(cwd, "outside.ts"), "after\n");
+
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Scoped acceptance",
+        brief: "Change only the allowed file",
+        tier: "standard",
+        writePaths: ["src/allowed.ts"],
+        successCriteria: ["Allowed behavior works"],
+      });
+      task.status = "ready_for_review";
+      const completed = executorAttempt();
+      completed.endedAt = Date.now();
+      completed.finalReport = "Implemented the scoped change";
+      completed.touchedFiles = ["outside.ts"];
+      task.attempts.push(completed);
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const refusalScript: UiScript = {
+        steps: [{ keys: select(0) }, { keys: select(4) }],
+      };
+      const refused = loadMaestro(cwd, undefined, owner, refusalScript);
+      await refused.command.handler("list", refused.ctx);
+      assert.match(refused.notices.at(-1) ?? "", /outside write scope/);
+      assert.equal(findTask(loadBoard(cwd), "T1")?.status, "ready_for_review");
+
+      updateBoard(cwd, (board) => {
+        const task = findTask(board, "T1");
+        assert.ok(task);
+        const completed = task.attempts.at(-1);
+        assert.ok(completed);
+        completed.touchedFiles = ["src/allowed.ts"];
+      });
+      const approvalScript: UiScript = {
+        steps: [{ keys: select(0) }, { keys: select(4) }],
+      };
+      const accepted = loadMaestro(cwd, undefined, owner, approvalScript);
+      await accepted.command.handler("list", accepted.ctx);
+      const approved = findTask(loadBoard(cwd), "T1");
+      assert.equal(approved?.status, "approved");
+      assert.equal(approved?.approvalKind, "manual");
+      assert.ok(approved?.approvedProvenance);
+    }
+  );
+});
+
 test("/maestro simulate is deterministic and starts no executors or board writes", async () => {
   await withBoard(
     (cwd) => {
@@ -523,6 +779,421 @@ test("/maestro simulate is deterministic and starts no executors or board writes
   );
 });
 
+test("plan diff, plan compare, and recipe preview are bounded read-only inspections", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Current",
+        brief: "Implement current behavior",
+        tier: "standard",
+        writePaths: ["src/current.ts"],
+        successCriteria: ["Current works"],
+      });
+      saveBoard(cwd, board);
+      const candidate = structuredClone(board);
+      const first = candidate.tasks[0];
+      assert.ok(first);
+      first.brief = "Implement changed behavior";
+      first.reviewPolicy = "confirm";
+      writeFileSync(join(cwd, "candidate.json"), exportPlan(candidate));
+      saveStoredRecipe(
+        "project",
+        cwd,
+        "preview-safe",
+        `${JSON.stringify({
+          kind: "pi-maestro-recipe",
+          version: 1,
+          name: "preview-safe",
+          tasks: [
+            {
+              id: "step",
+              title: "Preview",
+              brief: "Preview declarative work",
+              tier: "standard",
+              dependsOn: [],
+              writePaths: ["src/preview.ts"],
+              successCriteria: ["Preview works"],
+            },
+          ],
+        })}\n`
+      );
+    },
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+      const boardFile = join(cwd, ".pi", "maestro", "board.json");
+      const beforeBoard = readFileSync(boardFile);
+      const beforeArchives = listArchivedBoards(cwd);
+
+      await command.handler("plan diff candidate.json", ctx);
+      await command.handler("plan compare candidate.json T1", ctx);
+      await command.handler("recipe preview preview-safe", ctx);
+
+      assert.match(notices.join("\n"), /Plan comparison/);
+      assert.match(notices.join("\n"), /fingerprint contract\+execution/);
+      assert.deepEqual(readFileSync(boardFile), beforeBoard);
+      assert.deepEqual(listArchivedBoards(cwd), beforeArchives);
+      assert.equal(loadBoard(cwd).planPending, undefined);
+    }
+  );
+});
+
+test("recipe commands list, inspect, run through the plan gate, save, and remove", async () => {
+  await withBoard(
+    (cwd) => {
+      saveStoredRecipe(
+        "project",
+        cwd,
+        "safe",
+        `${JSON.stringify({
+          kind: "pi-maestro-recipe",
+          version: 1,
+          name: "safe",
+          tasks: [
+            {
+              id: "step",
+              title: "Build core",
+              brief: "Implement core",
+              tier: "standard",
+              dependsOn: [],
+              writePaths: ["src/core.ts"],
+              successCriteria: ["Core works"],
+            },
+          ],
+        })}\n`
+      );
+    },
+    async (cwd) => {
+      const script: UiScript = { steps: [], confirmations: [true] };
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("recipe list", ctx);
+      await command.handler("recipe inspect safe", ctx);
+      await command.handler("recipe run safe", ctx);
+      assert.match(notices.join("\n"), /safe \[project\]|\[project\].*safe/s);
+      assert.equal(loadBoard(cwd).planPending, true);
+      assert.equal(loadBoard(cwd).tasks[0]?.title, "Build core");
+
+      await command.handler("recipe save snapshot project", ctx);
+      assert.match(notices.at(-1) ?? "", /Saved project recipe/);
+      await command.handler("recipe remove safe project", ctx);
+      assert.match(notices.at(-1) ?? "", /Removed project recipe/);
+    }
+  );
+});
+
+function discoveryReport(title = "Generated task"): string {
+  return JSON.stringify({
+    kind: "pi-maestro-discovery",
+    version: 1,
+    items: [
+      {
+        key: "generated",
+        title,
+        brief: "Implement generated work",
+        tier: "standard",
+        writePaths: ["src/generated.ts"],
+        successCriteria: ["Generated work passes"],
+        dependsOn: [],
+      },
+    ],
+  });
+}
+
+function addDiscoveryTask(board: Board, report = discoveryReport()): void {
+  const task = createTask(board, {
+    title: "Discover work",
+    brief: "Read-only investigation with no-file changes",
+    tier: "standard",
+    writePaths: [],
+    discovery: { allowedWritePaths: ["src/**"] },
+  });
+  task.attempts.push({
+    index: 1,
+    logFile: "discovery.jsonl",
+    thinking: "medium",
+    startedAt: 1,
+    endedAt: 2,
+    exitCode: 0,
+    usage: { input: 1, output: 1, cost: 0, turns: 1 },
+    finalReport: report,
+    touchedFiles: [],
+  });
+  task.status = "ready_for_review";
+}
+
+test("maestro_plan creates only explicit scoped no-file discovery tasks", async () => {
+  await withBoard(
+    () => {},
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const plan = tools.get("maestro_plan");
+      assert.ok(plan);
+      await assert.rejects(
+        plan.execute(
+          "writable-discovery",
+          {
+            tasks: [
+              {
+                title: "Discover",
+                brief: "Read-only investigation",
+                tier: "standard",
+                writePaths: ["src/discovery.ts"],
+                successCriteria: ["Done"],
+                discovery: { allowedWritePaths: ["src/**"] },
+              },
+            ],
+          },
+          undefined,
+          undefined,
+          ctx
+        ),
+        /Discovery tasks must use writePaths/
+      );
+      await plan.execute(
+        "discovery",
+        {
+          tasks: [
+            {
+              title: "Discover",
+              brief: "Read-only investigation with no-file changes",
+              tier: "standard",
+              writePaths: [],
+              discovery: { allowedWritePaths: ["src/**"] },
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.deepEqual(findTask(loadBoard(cwd), "T1")?.discovery?.allowedWritePaths, ["src/**"]);
+    }
+  );
+});
+
+test("discovery append requires confirmation and forces the plan gate", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      addDiscoveryTask(board);
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = { steps: [], confirmations: [true] };
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+      await command.handler("discover T1 append", ctx);
+      const board = loadBoard(cwd);
+      assert.equal(board.planPending, true);
+      assert.equal(board.tasks.length, 2);
+      assert.equal(board.tasks[1]?.title, "Generated task");
+      assert.match(notices[0] ?? "", /Discovery preview.*generated/s);
+      assert.match(notices.at(-1) ?? "", /plan approval is required/);
+      assert.equal(listArchivedBoards(cwd).length, 0);
+    }
+  );
+});
+
+test("discovery replace archives only after approval", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      addDiscoveryTask(board, discoveryReport("Replacement task"));
+      createTask(board, {
+        title: "Existing",
+        brief: "Implement existing work",
+        tier: "standard",
+        writePaths: ["src/existing.ts"],
+        successCriteria: ["Existing work passes"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = { steps: [], confirmations: [true] };
+      const { ctx, command } = loadMaestro(cwd, undefined, owner, script);
+      await command.handler("discover T1 replace", ctx);
+      const board = loadBoard(cwd);
+      assert.equal(board.planPending, true);
+      assert.deepEqual(
+        board.tasks.map(({ title }) => title),
+        ["Replacement task"]
+      );
+      assert.equal(listArchivedBoards(cwd).length, 1);
+    }
+  );
+});
+
+test("rejected and non-interactive discovery previews do not mutate or archive", async () => {
+  for (const interactive of [true, false]) {
+    await withBoard(
+      (cwd) => {
+        const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+        addDiscoveryTask(board);
+        saveBoard(cwd, board);
+      },
+      async (cwd) => {
+        const script: UiScript = { steps: [], confirmations: [false] };
+        const loaded = loadMaestro(cwd, undefined, owner, script);
+        const ctx = interactive ? loaded.ctx : { ...loaded.ctx, hasUI: false };
+        const boardFile = join(cwd, ".pi", "maestro", "board.json");
+        const before = readFileSync(boardFile, "utf-8");
+        await loaded.command.handler("discover T1 replace", ctx);
+        assert.equal(readFileSync(boardFile, "utf-8"), before);
+        assert.equal(listArchivedBoards(cwd).length, 0);
+      }
+    );
+  }
+});
+
+test("discovery parses only the latest retained final report", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      addDiscoveryTask(board);
+      const task = findTask(board, "T1");
+      assert.ok(task);
+      task.attempts.push({
+        index: 2,
+        logFile: "latest.jsonl",
+        thinking: "medium",
+        startedAt: 3,
+        endedAt: 4,
+        exitCode: 0,
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "not json",
+        touchedFiles: [],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const boardFile = join(cwd, ".pi", "maestro", "board.json");
+      const before = readFileSync(boardFile, "utf-8");
+      const { ctx, notices, command } = loadMaestro(cwd);
+      await command.handler("discover T1 append", ctx);
+      assert.match(notices.at(-1) ?? "", /one valid JSON object/);
+      assert.equal(readFileSync(boardFile, "utf-8"), before);
+    }
+  );
+});
+
+test("discovery refuses running tasks even when an older completed report exists", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      addDiscoveryTask(board);
+      const task = findTask(board, "T1");
+      assert.ok(task);
+      task.status = "running";
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const boardFile = join(cwd, ".pi", "maestro", "board.json");
+      const before = readFileSync(boardFile, "utf-8");
+      const { ctx, notices, command } = loadMaestro(cwd);
+      await command.handler("discover T1 append", ctx);
+      assert.match(notices.at(-1) ?? "", /does not have a retained completed discovery result/);
+      assert.equal(readFileSync(boardFile, "utf-8"), before);
+    }
+  );
+});
+
+test("discovery approval refuses a stale board instead of overwriting concurrent work", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      addDiscoveryTask(board);
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = {
+        steps: [],
+        confirmations: [true],
+        beforeConfirm: () => {
+          updateBoard(cwd, (board) => {
+            createTask(board, {
+              title: "Concurrent task",
+              brief: "Implement concurrent work",
+              tier: "standard",
+              writePaths: ["src/concurrent.ts"],
+              successCriteria: ["Concurrent work passes"],
+            });
+            return true;
+          });
+        },
+      };
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+      await command.handler("discover T1 replace", ctx);
+      assert.deepEqual(
+        loadBoard(cwd).tasks.map(({ title }) => title),
+        ["Discover work", "Concurrent task"]
+      );
+      assert.match(notices.at(-1) ?? "", /board changed after preview/);
+      assert.equal(listArchivedBoards(cwd).length, 0);
+    }
+  );
+});
+
+test("command parsing preserves spaces inside recipe JSON input", async () => {
+  await withBoard(
+    (cwd) => {
+      saveStoredRecipe(
+        "project",
+        cwd,
+        "spaced",
+        JSON.stringify({
+          kind: "pi-maestro-recipe",
+          version: 1,
+          name: "spaced",
+          inputs: { target: { required: true } },
+          tasks: [
+            {
+              id: "step",
+              title: "Build {{input.target}}",
+              brief: "Implement {{input.target}}",
+              tier: "standard",
+              dependsOn: [],
+              writePaths: ["src/spaced.ts"],
+              successCriteria: ["Spacing is preserved"],
+            },
+          ],
+        })
+      );
+    },
+    async (cwd) => {
+      const { ctx, command } = loadMaestro(cwd);
+      await command.handler('recipe run spaced {"target":"two  spaces"}', ctx);
+      assert.equal(loadBoard(cwd).tasks[0]?.title, "Build two  spaces");
+    }
+  );
+});
+
+test("running a malformed effective recipe reports its file without changing the board", async () => {
+  await withBoard(
+    (cwd) => {
+      const board = { version: 1 as const, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Existing",
+        brief: "Keep existing work",
+        tier: "standard",
+        writePaths: ["src/existing.ts"],
+        successCriteria: ["Existing work passes"],
+      });
+      saveBoard(cwd, board);
+      saveStoredRecipe("project", cwd, "broken", "{malformed");
+    },
+    async (cwd) => {
+      const boardFile = join(cwd, ".pi", "maestro", "board.json");
+      const before = readFileSync(boardFile, "utf-8");
+      const { ctx, notices, command } = loadMaestro(cwd);
+
+      await command.handler("recipe run broken", ctx);
+
+      assert.equal(readFileSync(boardFile, "utf-8"), before);
+      assert.match(notices.at(-1) ?? "", /Invalid project recipe.*broken.*maestro-recipes/s);
+    }
+  );
+});
+
 test("/maestro help lists the costs command", async () => {
   await withBoard(
     () => {},
@@ -530,6 +1201,7 @@ test("/maestro help lists the costs command", async () => {
       const { ctx, notices, command } = loadMaestro(cwd);
       await command.handler("", ctx);
       assert.match(notices[0] ?? "", /\/maestro costs/);
+      assert.match(notices[0] ?? "", /\/maestro recipe/);
     }
   );
 });
@@ -544,6 +1216,87 @@ test("registers exactly the three public model tools", async () => {
         "maestro_plan",
         "maestro_update",
       ]);
+    }
+  );
+});
+
+test("maestro_plan and maestro_update expose review convergence policy", async () => {
+  await withBoard(
+    () => {},
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      await tools.get("maestro_plan")?.execute(
+        "review-policy-plan",
+        {
+          tasks: [
+            {
+              title: "Reviewed work",
+              brief: "Implement reviewed work",
+              tier: "standard",
+              writePaths: ["src/reviewed.ts"],
+              successCriteria: ["Reviewed behavior works"],
+              reviewPolicy: "confirm",
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.equal(findTask(loadBoard(cwd), "T1")?.reviewPolicy, "confirm");
+
+      await tools
+        .get("maestro_update")
+        ?.execute(
+          "review-policy-update",
+          { taskId: "T1", reviewPolicy: "find-and-refute" },
+          undefined,
+          undefined,
+          ctx
+        );
+      assert.equal(findTask(loadBoard(cwd), "T1")?.reviewPolicy, "find-and-refute");
+    }
+  );
+});
+
+test("maestro_update cannot mutate a task owned by a persisted dispatch", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Reviewing",
+        brief: "work under review",
+        tier: "standard",
+        writePaths: ["src/reviewed.ts"],
+        successCriteria: ["Reviewed behavior works"],
+      });
+      task.status = "ready_for_review";
+      task.dispatchClaim = {
+        id: "review-claim",
+        kind: "review",
+        claimedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      };
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const boardFile = join(cwd, ".pi", "maestro", "board.json");
+      const before = readFileSync(boardFile, "utf-8");
+      const { ctx, tools } = loadMaestro(cwd);
+      const update = tools.get("maestro_update");
+      assert.ok(update);
+
+      await assert.rejects(
+        update.execute(
+          "mutate-reviewing-task",
+          { taskId: "T1", title: "Raced title" },
+          undefined,
+          undefined,
+          ctx
+        ),
+        /owned by an active review dispatch/
+      );
+      assert.equal(readFileSync(boardFile, "utf-8"), before);
     }
   );
 });
@@ -605,6 +1358,37 @@ test("maestro_plan requires bounded write scope except explicit no-file work", a
   );
 });
 
+test("maestro_plan enforces maxPlanTasks without partial board mutation", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        maxPlanTasks: 1,
+        maxDiscoveryGeneratedTasks: 1,
+        confirmationPlanTasks: 1,
+      });
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const tasks = ["one", "two"].map((name) => ({
+        title: name,
+        brief: `Implement ${name}`,
+        tier: "standard",
+        writePaths: [`src/${name}.ts`],
+        successCriteria: [`${name} works`],
+      }));
+      await assert.rejects(
+        tools
+          .get("maestro_plan")
+          ?.execute("too-many", { tasks }, undefined, undefined, ctx) as Promise<unknown>,
+        /2 tasks.*maxPlanTasks is 1/
+      );
+      assert.equal(loadBoard(cwd).tasks.length, 0);
+    }
+  );
+});
+
 test("incremental recovery planning does not reopen the initial plan gate", async () => {
   await withBoard(
     (cwd) => {
@@ -650,11 +1434,155 @@ test("incremental recovery planning does not reopen the initial plan gate", asyn
   );
 });
 
-test("maestro_drive inspect returns bounded board state without starting work", async () => {
+test("maestro_plan atomically supersedes a stopped task and rewires its dependents", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const predecessor = createTask(board, {
+        title: "Original",
+        brief: "change shared file",
+        tier: "standard",
+        writePaths: ["src/shared.ts"],
+        successCriteria: ["original works"],
+      });
+      predecessor.status = "changes_requested";
+      createTask(board, {
+        title: "Dependent",
+        brief: "continue after replacement",
+        tier: "standard",
+        dependsOn: [predecessor.id],
+        writePaths: ["src/dependent.ts"],
+        successCriteria: ["dependent works"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const result = await tools.get("maestro_plan")?.execute(
+        "successor",
+        {
+          tasks: [
+            {
+              title: "Replacement",
+              brief: "replace the rejected implementation",
+              tier: "standard",
+              supersedesTaskId: "T1",
+              writePaths: ["src/shared.ts"],
+              successCriteria: ["replacement works"],
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+
+      assert.match(result?.content[0]?.text ?? "", /Superseded atomically: T1 → T3/);
+      const board = loadBoard(cwd);
+      assert.equal(findTask(board, "T1")?.status, "cancelled");
+      assert.deepEqual(findTask(board, "T2")?.dependsOn, ["T3"]);
+      assert.equal(findTask(board, "T3")?.status, "todo");
+    }
+  );
+});
+
+test("maestro_update can transactionally adopt an existing successor", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const predecessor = createTask(board, {
+        title: "Rejected predecessor",
+        brief: "old implementation",
+        tier: "standard",
+        writePaths: ["src/shared.ts"],
+        successCriteria: ["old works"],
+      });
+      predecessor.status = "changes_requested";
+      createTask(board, {
+        title: "Dependent",
+        brief: "wait for replacement",
+        tier: "standard",
+        dependsOn: [predecessor.id],
+        writePaths: ["src/dependent.ts"],
+        successCriteria: ["dependent works"],
+      });
+      createTask(board, {
+        title: "Existing successor",
+        brief: "new implementation",
+        tier: "standard",
+        writePaths: ["src/shared.ts"],
+        successCriteria: ["new works"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      await tools
+        .get("maestro_update")
+        ?.execute(
+          "adopt-successor",
+          { taskId: "T3", supersedesTaskId: "T1" },
+          undefined,
+          undefined,
+          ctx
+        );
+      const board = loadBoard(cwd);
+      assert.equal(findTask(board, "T1")?.status, "cancelled");
+      assert.deepEqual(findTask(board, "T2")?.dependsOn, ["T3"]);
+    }
+  );
+});
+
+test("maestro_plan does not mutate the board when supersession is invalid", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Still active",
+        brief: "not replaceable",
+        tier: "standard",
+        writePaths: ["src/active.ts"],
+        successCriteria: ["active works"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const before = readFileSync(join(cwd, ".pi", "maestro", "board.json"), "utf8");
+      const { ctx, tools } = loadMaestro(cwd);
+      const plan = tools.get("maestro_plan");
+      assert.ok(plan);
+      await assert.rejects(
+        plan.execute(
+          "invalid-successor",
+          {
+            tasks: [
+              {
+                title: "Invalid replacement",
+                brief: "must not persist",
+                tier: "standard",
+                supersedesTaskId: "T1",
+                writePaths: ["src/active.ts"],
+                successCriteria: ["replacement works"],
+              },
+            ],
+          },
+          undefined,
+          undefined,
+          ctx
+        ),
+        /cannot be superseded while todo/
+      );
+      assert.equal(readFileSync(join(cwd, ".pi", "maestro", "board.json"), "utf8"), before);
+    }
+  );
+});
+
+test("maestro_drive inspect returns bounded scoped board state without starting work", async () => {
   await withBoard(
     (cwd) => {
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
       createTask(board, { title: "Inspect me", brief: "stay idle", tier: "standard" });
+      createTask(board, { title: "Hide me", brief: "stay idle", tier: "standard" });
       saveBoard(cwd, board);
     },
     async (cwd) => {
@@ -663,24 +1591,73 @@ test("maestro_drive inspect returns bounded board state without starting work", 
       assert.ok(drive);
       const result = await drive.execute(
         "inspect",
-        { action: "inspect" },
+        { action: "inspect", taskIds: ["T1"] },
         undefined,
         undefined,
         ctx
       );
+      assert.match(result.content[0]?.text ?? "", /0\/1 approved/);
       assert.match(result.content[0]?.text ?? "", /No live executors/);
       assert.equal(findTask(loadBoard(cwd), "T1")?.status, "todo");
     }
   );
 });
 
+test("maestro_drive normalizes common action aliases before schema validation", async () => {
+  await withBoard(
+    () => {},
+    async (cwd) => {
+      const drive = loadMaestro(cwd).tools.get("maestro_drive");
+      assert.ok(drive?.prepareArguments);
+      assert.deepEqual(drive.prepareArguments({}), { action: "start" });
+      assert.deepEqual(drive.prepareArguments({ action: "resume", taskIds: ["T1"] }), {
+        action: "start",
+        taskIds: ["T1"],
+      });
+      assert.deepEqual(drive.prepareArguments({ action: "status" }), { action: "inspect" });
+      assert.deepEqual(drive.prepareArguments({ action: "abort", taskIds: ["T1"] }), {
+        action: "intervene",
+        intervention: "abort",
+        taskIds: ["T1"],
+      });
+      assert.deepEqual(drive.prepareArguments({ intervention: "handoff" }), {
+        action: "intervene",
+        intervention: "handoff",
+      });
+    }
+  );
+});
+
+test("maestro_drive keeps a provider-compatible object schema with strict runtime actions", async () => {
+  await withBoard(
+    () => {},
+    async (cwd) => {
+      const drive = loadMaestro(cwd).tools.get("maestro_drive");
+      assert.ok(drive?.parameters);
+      const schema = drive.parameters as {
+        type?: string;
+        properties?: { action?: { enum?: string[] } };
+      };
+      assert.equal(schema.type, "object");
+      assert.deepEqual(schema.properties?.action?.enum, ["start", "inspect", "intervene"]);
+      assert.doesNotMatch(JSON.stringify(schema), /"(?:anyOf|oneOf)"/);
+      assert.deepEqual(
+        drive.prepareArguments?.({ action: "steer", taskIds: ["t1"], instruction: "stop" }),
+        {
+          action: "intervene",
+          taskIds: ["t1"],
+          instruction: "stop",
+          intervention: "steer",
+        }
+      );
+    }
+  );
+});
+
 const invalidDriveInputs = [
-  [{ action: "inspect", taskIds: ["T1"] }, /inspect does not accept/],
   [{ action: "inspect", intervention: "abort" }, /inspect does not accept/],
   [{ action: "intervene" }, /intervention is required/],
-  [{ action: "intervene", intervention: "abort", taskIds: ["T1"] }, /does not accept taskIds/],
   [{ action: "intervene", intervention: "steer" }, /steer requires an instruction/],
-  [{ action: "intervene", intervention: "abort", instruction: "wrong" }, /only valid for steer/],
   [{ action: "start", intervention: "abort" }, /start does not accept/],
 ] as const;
 
@@ -703,19 +1680,88 @@ test("maestro_drive handoff routes through the human command", async () => {
     () => {},
     async (cwd) => {
       const { ctx, tools, userMessages } = loadMaestro(cwd);
-      const result = await tools
-        .get("maestro_drive")
-        ?.execute(
-          "handoff",
-          { action: "intervene", intervention: "handoff" },
-          undefined,
-          undefined,
-          ctx
-        );
+      const result = await tools.get("maestro_drive")?.execute(
+        "handoff",
+        {
+          action: "intervene",
+          intervention: "handoff",
+          instruction: "Continue from the persisted board state",
+        },
+        undefined,
+        undefined,
+        ctx
+      );
       assert.deepEqual(userMessages, [
         { message: "/maestro handoff", options: { deliverAs: "followUp" } },
       ]);
       assert.match(result?.content[0]?.text ?? "", /handoff queued/);
+    }
+  );
+});
+
+test("maestro_drive start reports invalid plans synchronously instead of silently stopping", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "First",
+        brief: "change shared file",
+        tier: "standard",
+        writePaths: ["src/shared.ts"],
+        successCriteria: ["first works"],
+      });
+      createTask(board, {
+        title: "Second",
+        brief: "also change shared file",
+        tier: "standard",
+        writePaths: ["src/shared.ts"],
+        successCriteria: ["second works"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools, messages } = loadMaestro(cwd);
+      const drive = tools.get("maestro_drive");
+      assert.ok(drive);
+      await assert.rejects(
+        drive.execute("start", { action: "start" }, undefined, undefined, ctx),
+        /Invalid plan.*write/s
+      );
+      assert.equal(messages.length, 0);
+      assert.equal(loadBoard(cwd).pausedDrive, undefined);
+    }
+  );
+});
+
+test("slash drive preflight refuses invalid plans before announcing progress", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "First",
+        brief: "change shared file",
+        tier: "standard",
+        writePaths: ["src/shared.ts"],
+        successCriteria: ["first works"],
+      });
+      createTask(board, {
+        title: "Second",
+        brief: "also change shared file",
+        tier: "standard",
+        writePaths: ["src/shared.ts"],
+        successCriteria: ["second works"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, command, notices } = loadMaestro(cwd);
+      await command.handler("drive", ctx);
+      assert.ok(notices.some((notice) => notice.includes("Drive not started")));
+      assert.equal(
+        notices.some((notice) => notice.startsWith("Driving ")),
+        false
+      );
+      assert.equal(loadBoard(cwd).activeDrive, undefined);
     }
   );
 });
@@ -823,10 +1869,13 @@ test("slash drive can pause live work without aborting it, persist ownership, an
       assert.equal(abortCalls, 0);
 
       await command.handler("resume", ctx);
-      await waitFor(
-        () => findTask(loadBoard(cwd), "T1")?.status === "approved",
-        "resumed drive did not review fresh board state"
-      );
+      await waitFor(() => {
+        const resumed = loadBoard(cwd);
+        return (
+          findTask(resumed, "T1")?.status === "approved" ||
+          (resumed.tasks.length === 0 && starts === 2)
+        );
+      }, "resumed drive did not review fresh board state");
       assert.equal(loadBoard(cwd).pausedDrive, undefined);
       assert.equal(starts, 2, "resume should review the persisted attempt, not rerun it");
     }
@@ -1330,6 +2379,320 @@ test("completed drives archive and clear tasks by default", async () => {
   );
 });
 
+test("production recovery sequence supersedes, launches, clears stale status, and wakes once", async () => {
+  await withBoard(
+    (cwd) => {
+      execFileSync("git", ["init", "-q"], { cwd });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd });
+      mkdirSync(join(cwd, "src"), { recursive: true });
+      writeFileSync(join(cwd, "src", "shared.ts"), "export const shared = true;\n");
+      writeFileSync(join(cwd, "src", "downstream.ts"), "export const downstream = true;\n");
+      execFileSync("git", ["add", "src"], { cwd });
+      execFileSync("git", ["commit", "-qm", "initial"], { cwd });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const predecessor = createTask(board, {
+        title: "Capped predecessor",
+        brief: "old implementation",
+        tier: "standard",
+        writePaths: ["src/shared.ts"],
+        successCriteria: ["old behavior"],
+      });
+      predecessor.status = "changes_requested";
+      createTask(board, {
+        title: "Downstream",
+        brief: "use the corrected implementation",
+        tier: "standard",
+        dependsOn: [predecessor.id],
+        writePaths: ["src/downstream.ts"],
+        successCriteria: ["downstream works"],
+      });
+      board.activeDecision = {
+        id: "stale-t1-decision",
+        ownerSession: owner,
+        kind: "escalation_required",
+        taskIds: [predecessor.id],
+        evidence: "Old T1 escalation must not control the successor run",
+        allowedInterventions: ["handoff", "abort"],
+        createdAt: Date.now(),
+        deliveredAt: Date.now(),
+      };
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const launched: string[] = [];
+      const startExecutor: StartExecutor = (options) => {
+        launched.push(options.runId);
+        const isReview = options.runId.includes("-review-");
+        return {
+          attempt: executorAttempt(),
+          outcome: Promise.resolve({
+            exitCode: 0,
+            usage: { input: 1, output: 1, cost: 0, turns: 1 },
+            finalReport: isReview ? "VERDICT: APPROVE" : "done",
+            touchedFiles: isReview
+              ? []
+              : [options.runId.startsWith("T3-") ? "src/shared.ts" : "src/downstream.ts"],
+            aborted: false,
+          }),
+          steer: () => {},
+          abort: () => {},
+        };
+      };
+      const { ctx, tools, events, messages } = loadMaestro(cwd, startExecutor);
+      const plan = tools.get("maestro_plan");
+      const drive = tools.get("maestro_drive");
+      assert.ok(plan && drive);
+
+      await plan.execute(
+        "successor",
+        {
+          tasks: [
+            {
+              title: "Corrected successor",
+              brief: "replace the capped implementation",
+              tier: "standard",
+              supersedesTaskId: "T1",
+              writePaths: ["src/shared.ts"],
+              successCriteria: ["corrected behavior"],
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+
+      const inspected = await drive.execute(
+        "inspect-successor",
+        { action: "inspect", taskIds: ["t3"] },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.doesNotMatch(inspected.content[0]?.text ?? "", /Old T1 escalation/);
+
+      const started = await drive.execute(
+        "start-recovery",
+        { action: "start", taskIds: ["t3", "t2", "T3"] },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(started.content[0]?.text ?? "", /Drive started/);
+      const claimedOrSettled = loadBoard(cwd);
+      assert.ok(claimedOrSettled.activeDrive || claimedOrSettled.activeDecision);
+      if (claimedOrSettled.activeDrive) {
+        assert.deepEqual(claimedOrSettled.activeDrive.taskIds, ["T3", "T2"]);
+      }
+      if (claimedOrSettled.activeDecision?.id === "stale-t1-decision") {
+        assert.equal(claimedOrSettled.activeDecision.resolution?.intervention, "resume");
+      } else {
+        assert.notEqual(claimedOrSettled.activeDecision?.id, "stale-t1-decision");
+      }
+      await waitFor(
+        () => launched.some((runId) => runId.startsWith("T3-")),
+        "successor did not launch"
+      );
+
+      await waitFor(
+        () => loadBoard(cwd).activeDecision?.kind === "completed",
+        "drive started but stopped without a terminal decision"
+      );
+      assert.ok(launched.some((runId) => runId.startsWith("T2-")));
+      assert.equal(loadBoard(cwd).activeDrive, undefined);
+      assert.equal(messages.length, 1);
+
+      events.get("session_start")?.({ previousSessionFile: owner }, ctx);
+      assert.equal(messages.length, 1, "owner must not receive a duplicate wakeup");
+      const foreign = loadMaestro(cwd, undefined, other);
+      foreign.events.get("session_start")?.({ previousSessionFile: owner }, foreign.ctx);
+      assert.equal(foreign.messages.length, 0, "foreign session must not consume the wakeup");
+    }
+  );
+});
+
+test("review disagreement wakes only its owner once and is not redispatched", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        cleanupCompletedTasks: false,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Contested review",
+        brief: "Review the contested result",
+        tier: "standard",
+        writePaths: ["src/contested.ts"],
+        successCriteria: ["The contested result works"],
+        reviewPolicy: "find-and-refute",
+      });
+      task.status = "ready_for_review";
+      const completed = executorAttempt();
+      completed.finalReport = "executor completed contested result";
+      completed.touchedFiles = ["src/contested.ts"];
+      completed.diff = "+contested result";
+      task.attempts.push(completed);
+      const fingerprint = taskFingerprint(board, task, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        cleanupCompletedTasks: false,
+      });
+      assert.ok(fingerprint);
+      completed.executionFingerprint = fingerprint.fingerprint;
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let reviewerStarts = 0;
+      const startExecutor: StartExecutor = () => {
+        reviewerStarts += 1;
+        const approved = reviewerStarts === 1;
+        return {
+          attempt: executorAttempt(),
+          outcome: Promise.resolve({
+            exitCode: 0,
+            usage: { input: 1, output: 1, cost: 0, turns: 1 },
+            finalReport: approved
+              ? "CRITERION 1: PASS — finder verified it\nVERDICT: APPROVE"
+              : "CRITERION 1: FAIL — refuter found a gap\nVERDICT: REQUEST_CHANGES\nCriterion 1: gap remains",
+            touchedFiles: [],
+            aborted: false,
+          }),
+          steer: () => {},
+          abort: () => {},
+        };
+      };
+      const ownerRuntime = loadMaestro(cwd, startExecutor, owner);
+      await ownerRuntime.tools
+        .get("maestro_drive")
+        ?.execute("disagreement", { action: "start" }, undefined, undefined, ownerRuntime.ctx);
+      await waitFor(
+        () => loadBoard(cwd).activeDecision !== undefined,
+        "review disagreement produced no durable decision"
+      );
+
+      assert.equal(
+        loadBoard(cwd).activeDecision?.kind,
+        "review_disagreement",
+        findTask(loadBoard(cwd), "T1")?.attempts.at(-1)?.reviewConvergence?.summary
+      );
+      assert.equal(reviewerStarts, 2);
+      assert.equal(ownerRuntime.messages.length, 1);
+      assert.equal(loadBoard(cwd).activeDecision?.ownerSession, owner);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(reviewerStarts, 2, "terminal disagreement must not hot-loop reviewers");
+
+      ownerRuntime.events.get("session_start")?.({ reason: "resume" }, ownerRuntime.ctx);
+      assert.equal(ownerRuntime.messages.length, 1, "owner wakeup must be exactly once");
+      const foreign = loadMaestro(cwd, undefined, other);
+      foreign.events.get("session_start")?.({ reason: "resume" }, foreign.ctx);
+      assert.equal(foreign.messages.length, 0, "foreign session must not receive the decision");
+    }
+  );
+});
+
+test("active drive shutdown persists owner-scoped internal error for reload delivery", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Interrupted work",
+        brief: "remain active until reload",
+        tier: "standard",
+        writePaths: ["src/interrupted.ts"],
+        successCriteria: ["work completes"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let finish!: (outcome: RunOutcome) => void;
+      const outcome = new Promise<RunOutcome>((resolve) => {
+        finish = resolve;
+      });
+      const first = loadMaestro(cwd, () => ({
+        attempt: executorAttempt(),
+        outcome,
+        steer: () => {},
+        abort: () =>
+          finish({
+            exitCode: 1,
+            usage: { input: 0, output: 0, cost: 0, turns: 0 },
+            finalReport: "",
+            touchedFiles: [],
+            aborted: true,
+          }),
+      }));
+      const drive = first.tools.get("maestro_drive");
+      assert.ok(drive);
+      await drive.execute("start", { action: "start" }, undefined, undefined, first.ctx);
+      await waitFor(
+        () => loadBoard(cwd).activeDrive !== undefined,
+        "drive claim was not persisted"
+      );
+
+      first.events.get("session_shutdown")?.({ reason: "reload" }, first.ctx);
+      const stopped = loadBoard(cwd);
+      assert.equal(stopped.activeDrive, undefined);
+      assert.equal(stopped.activeDecision?.ownerSession, owner);
+      assert.equal(stopped.activeDecision?.kind, "error");
+      assert.match(stopped.activeDecision?.evidence ?? "", /internal error/i);
+      assert.equal(first.messages.length, 0, "shutdown must not use the stale runtime to notify");
+
+      const reloaded = loadMaestro(cwd, undefined, owner);
+      reloaded.events.get("session_start")?.({ reason: "reload" }, reloaded.ctx);
+      assert.equal(reloaded.messages.length, 1);
+      assert.ok(loadBoard(cwd).activeDecision?.deliveredAt);
+
+      const foreign = loadMaestro(cwd, undefined, other);
+      foreign.events.get("session_start")?.({ reason: "resume" }, foreign.ctx);
+      assert.equal(foreign.messages.length, 0);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(loadBoard(cwd).activeDecision?.kind, "error");
+    }
+  );
+});
+
+test("asynchronous drive setup failure cannot leave a silent stopped state", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Cannot launch",
+        brief: "exercise launch failure",
+        tier: "standard",
+        writePaths: ["src/failure.ts"],
+        successCriteria: ["failure is durable"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const runtime = loadMaestro(cwd, () => {
+        throw new Error("spawn failed before executor launch");
+      });
+      const drive = runtime.tools.get("maestro_drive");
+      assert.ok(drive);
+      const result = await drive.execute(
+        "start-failure",
+        { action: "start" },
+        undefined,
+        undefined,
+        runtime.ctx
+      );
+      assert.match(result.content[0]?.text ?? "", /Drive started/);
+      await waitFor(
+        () => loadBoard(cwd).activeDecision !== undefined,
+        "claimed drive failure produced no durable decision"
+      );
+      const board = loadBoard(cwd);
+      assert.equal(board.activeDrive, undefined);
+      assert.ok(board.activeDecision?.kind);
+      assert.equal(runtime.messages.length, 1);
+    }
+  );
+});
+
 test("settled decisions are owner-scoped, inspectable, and resolve exactly once", async () => {
   await withBoard(
     (cwd) => {
@@ -1385,6 +2748,84 @@ test("settled decisions are owner-scoped, inspectable, and resolve exactly once"
   );
 });
 
+test("steering a settled decision resumes the requested scope after board fixes", async () => {
+  await withBoard(
+    (cwd) => {
+      saveBoard(cwd, {
+        version: 1,
+        nextTaskNumber: 1,
+        tasks: [],
+        activeDecision: {
+          id: "decision-resume",
+          ownerSession: owner,
+          kind: "escalation_required",
+          taskIds: [],
+          evidence: "Rewrite or split the task",
+          allowedInterventions: ["handoff", "abort"],
+          createdAt: Date.now(),
+          deliveredAt: Date.now(),
+        },
+      });
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const result = await tools.get("maestro_drive")?.execute(
+        "resume-decision",
+        {
+          action: "intervene",
+          intervention: "steer",
+          decisionId: "decision-resume",
+          instruction: "The board has been corrected; continue.",
+          taskIds: [],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(result?.content[0]?.text ?? "", /decision-resume addressed; drive resumed/);
+      await waitFor(
+        () => loadBoard(cwd).activeDecision?.kind === "completed",
+        "resumed decision did not complete"
+      );
+    }
+  );
+});
+
+test("failed decision delivery remains pending and retries exactly once", async () => {
+  await withBoard(
+    (cwd) => {
+      saveBoard(cwd, {
+        version: 1,
+        nextTaskNumber: 1,
+        tasks: [],
+        activeDecision: {
+          id: "retry-delivery",
+          ownerSession: owner,
+          kind: "blocked",
+          taskIds: [],
+          evidence: "Drive failed before dispatch",
+          allowedInterventions: ["handoff"],
+          createdAt: Date.now(),
+        },
+      });
+    },
+    async (cwd) => {
+      assert.doesNotThrow(() =>
+        deliverPendingDecision(cwd, owner, () => {
+          throw new Error("session temporarily unavailable");
+        })
+      );
+      assert.equal(loadBoard(cwd).activeDecision?.deliveredAt, undefined);
+
+      const delivered: string[] = [];
+      deliverPendingDecision(cwd, owner, (evidence) => delivered.push(evidence));
+      deliverPendingDecision(cwd, owner, (evidence) => delivered.push(evidence));
+      assert.deepEqual(delivered, ["Drive failed before dispatch"]);
+      assert.ok(loadBoard(cwd).activeDecision?.deliveredAt);
+    }
+  );
+});
+
 test("an undelivered decision is not delivered to a foreign session", async () => {
   await withBoard(
     (cwd) => {
@@ -1408,6 +2849,43 @@ test("an undelivered decision is not delivered to a foreign session", async () =
       events.get("session_start")?.({ previousSessionFile: owner }, ctx);
       assert.equal(messages.length, 0);
       assert.equal(loadBoard(cwd).activeDecision?.deliveredAt, undefined);
+    }
+  );
+});
+
+test("reload acknowledges a decision already appended to the owner session without redelivery", async () => {
+  await withBoard(
+    (cwd) => {
+      saveBoard(cwd, {
+        version: 1,
+        nextTaskNumber: 1,
+        tasks: [],
+        activeDecision: {
+          id: "appended-before-reload",
+          ownerSession: owner,
+          kind: "blocked",
+          taskIds: [],
+          evidence: "Already persisted in the session",
+          allowedInterventions: ["handoff"],
+          createdAt: Date.now(),
+          deliveryClaim: { id: "interrupted-delivery", claimedAt: Date.now() },
+        },
+      });
+    },
+    async (cwd) => {
+      const { ctx, events, messages } = loadMaestro(cwd);
+      ctx.sessionManager.getEntries = () => [
+        {
+          type: "custom_message",
+          details: { decisionId: "appended-before-reload" },
+        },
+      ];
+
+      events.get("session_start")?.({ reason: "reload" }, ctx);
+
+      assert.equal(messages.length, 0);
+      assert.ok(loadBoard(cwd).activeDecision?.deliveredAt);
+      assert.equal(loadBoard(cwd).activeDecision?.deliveryClaim, undefined);
     }
   );
 });

@@ -3,8 +3,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -22,6 +22,7 @@ import {
   findTask,
   forceStatus,
   groupTasks,
+  humanRetryEligibility,
   isRunnable,
   loadBoard,
   loadStatusHistory,
@@ -142,6 +143,64 @@ test("failed and cancelled tasks are runnable only when explicitly named", () =>
   assert.equal(isRunnable(board, task, true), true);
   setStatus(task, "approved");
   assert.equal(isRunnable(board, task, true), false);
+});
+
+test("human retry eligibility is centralized across execution, review, caps, and risk", () => {
+  const board = emptyBoard();
+  const task = createTask(board, { title: "Retry", brief: "work", tier: "standard" });
+  const eligibility = () =>
+    humanRetryEligibility(board, task.id, { maxAttempts: 1, isLive: () => false });
+
+  assert.equal(eligibility().code, "not_retryable");
+  task.status = "running";
+  assert.equal(eligibility().code, "active");
+  task.status = "failed";
+  task.attempts.push({
+    index: 1,
+    logFile: "provider.log",
+    thinking: "low",
+    startedAt: 1,
+    consumesAttempt: false,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+  });
+  assert.deepEqual(
+    { code: eligibility().code, kind: eligibility().kind },
+    { code: "eligible", kind: "execute" }
+  );
+  const recorded = task.attempts[0];
+  assert.ok(recorded);
+  recorded.consumesAttempt = true;
+  assert.equal(eligibility().code, "attempt_cap");
+  assert.match(eligibility().message, /supersedesTaskId to T1/);
+
+  task.status = "ready_for_review";
+  recorded.reviewConvergence = {
+    policy: "single",
+    status: "operational_failure",
+    requiredApprovals: 1,
+    actualApprovals: 0,
+    reviewerCount: 1,
+    summary: "provider failed",
+    decidedAt: 2,
+  };
+  assert.deepEqual(
+    { code: eligibility().code, kind: eligibility().kind },
+    { code: "eligible", kind: "review" }
+  );
+  recorded.reviewConvergence.status = "disagreement";
+  assert.equal(eligibility().code, "review_disagreement");
+
+  delete recorded.reviewConvergence;
+  task.status = "approved";
+  recorded.consumesAttempt = false;
+  assert.equal(eligibility().requiresConfirmation, true);
+  task.status = "failed";
+  const dependency = createTask(board, { title: "Dependency", brief: "work", tier: "standard" });
+  task.dependsOn = [dependency.id];
+  assert.equal(eligibility().code, "dependency_blocked");
+  board.planPending = true;
+  assert.equal(eligibility().code, "plan_pending");
 });
 
 test("failure causes distinguish provider, executor, cost cap, review rejection, and abort", () => {
@@ -277,6 +336,7 @@ test("plan edits update every editable field and can cancel or reactivate a task
       brief: " New brief ",
       tier: "complex",
       dependsOn: [" t2 ", "T3"],
+      reviewPolicy: "confirm",
       cancelled: true,
     },
     ["trivial", "standard", "complex"]
@@ -286,10 +346,38 @@ test("plan edits update every editable field and can cancel or reactivate a task
   assert.equal(task.brief, "New brief");
   assert.equal(task.tier, "complex");
   assert.deepEqual(task.dependsOn, ["T2", "T3"]);
+  assert.equal(task.reviewPolicy, "confirm");
   assert.equal(task.status, "cancelled");
 
   applyPlanTaskEdits(task, { cancelled: false }, ["trivial", "standard", "complex"]);
   assert.equal(task.status, "todo");
+});
+
+test("changing review policy clears only a terminal unresolved convergence marker", () => {
+  const task = createTask(emptyBoard(), { title: "Task", brief: "brief", tier: "standard" });
+  task.attempts.push({
+    index: 1,
+    logFile: "review.jsonl",
+    thinking: "low",
+    startedAt: 1,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+    reviewConvergence: {
+      policy: "find-and-refute",
+      status: "disagreement",
+      requiredApprovals: 1,
+      actualApprovals: 1,
+      reviewerCount: 2,
+      summary: "reviewers disagreed",
+      decidedAt: 2,
+    },
+  });
+
+  applyPlanTaskEdits(task, { reviewPolicy: "confirm" }, ["standard"]);
+
+  assert.equal(task.reviewPolicy, "confirm");
+  assert.equal(task.attempts[0]?.reviewConvergence, undefined);
+  assert.equal(task.attempts[0]?.logFile, "review.jsonl");
 });
 
 test("changing the brief or tier resets the reviewer rejection counter", () => {
@@ -412,6 +500,38 @@ test("saveBoard/loadBoard round-trips and increments revisions", () => {
     assert.equal(loaded.tasks[0]?.tier, "complex");
     assert.equal(loaded.nextTaskNumber, 2);
     assert.equal(loaded.revision, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("saveBoard/loadBoard preserves a bounded reviewer log reference", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-review-log-test-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, { title: "A", brief: "do a", tier: "standard" });
+    task.attempts.push({
+      index: 1,
+      logFile: "executor.log",
+      thinking: "low",
+      startedAt: 1,
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      reviewLaunches: [
+        {
+          startedAt: 2,
+          logFile: "reviewer.log",
+          usage: { input: 0, output: 0, cost: 0, turns: 0 },
+        },
+      ],
+      touchedFiles: [],
+    });
+
+    saveBoard(cwd, board);
+
+    assert.equal(
+      loadBoard(cwd).tasks[0]?.attempts[0]?.reviewLaunches?.[0]?.logFile,
+      "reviewer.log"
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -593,6 +713,26 @@ test("restoreArchivedBoard rejects invalid optional Attempt fields without repla
       assert.throws(() => restoreArchivedBoard(cwd, file), /not a valid maestro board/, field);
       assert.equal(loadBoard(cwd).tasks[0]?.title, "Current", field);
     }
+
+    const invalidReviewLog = structuredClone(archived);
+    const invalidAttempt = invalidReviewLog.tasks[0]?.attempts[0];
+    assert.ok(invalidAttempt);
+    Object.assign(invalidAttempt, {
+      reviewLaunches: [
+        {
+          startedAt: 1,
+          usage: { input: 0, output: 0, cost: 0, turns: 0 },
+          logFile: 1,
+        },
+      ],
+    });
+    const invalidReviewLogFile = join(directory, "review-log-board.json");
+    writeFileSync(invalidReviewLogFile, JSON.stringify(invalidReviewLog));
+    assert.throws(
+      () => restoreArchivedBoard(cwd, invalidReviewLogFile),
+      /not a valid maestro board/
+    );
+    assert.equal(loadBoard(cwd).tasks[0]?.title, "Current");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -602,6 +742,32 @@ test("loadBoard returns an empty board when the file is missing", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
     assert.deepEqual(loadBoard(cwd), emptyBoard());
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("approved provenance round-trips a SHA-1 Git tree and kind-aware report dependency", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, { title: "Proof", brief: "proof", tier: "standard" });
+    task.approvedProvenance = {
+      version: 1,
+      fingerprint: "a".repeat(64),
+      componentHashes: {
+        contract: "b".repeat(64),
+        execution: "c".repeat(64),
+        verification: "d".repeat(64),
+        dependencies: "e".repeat(64),
+      },
+      artifact: { kind: "git-tree", identity: "f".repeat(40) },
+      dependencyIdentities: [{ taskId: "T0", kind: "report", identity: "1".repeat(64) }],
+      approvedAt: 1,
+    };
+    saveBoard(cwd, board);
+
+    assert.deepEqual(loadBoard(cwd).tasks[0]?.approvedProvenance, task.approvedProvenance);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

@@ -5,10 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { type Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { humanRetryEligibility } from "../src/board.js";
 import {
   Dashboard,
   type DashboardActions,
   DEFAULT_DASHBOARD_BODY_HEIGHT,
+  taskLaunches,
 } from "../src/dashboard.js";
 import { type Board, type Task } from "../src/types.js";
 
@@ -36,12 +38,15 @@ function makeActions(board: Board, overrides: Partial<DashboardActions> = {}): D
   return {
     getBoard: () => board,
     isLive: () => false,
+    liveKind: () => undefined,
     liveActivity: () => undefined,
     steer: () => {},
     abort: () => {},
     setTaskStatus: () => {},
     hasExecutorSession: () => false,
     hasReviewerSession: () => false,
+    retryEligibility: (taskId) =>
+      humanRetryEligibility(board, taskId, { maxAttempts: 3, isLive: () => false }),
     selectTaskAction: () => {},
     close: () => {},
     requestRender: () => {},
@@ -343,6 +348,28 @@ test("dashboard only applies task actions valid for the selected state", () => {
   }
 });
 
+test("dashboard routes approved retries through the centralized action without reopening status", () => {
+  const task = makeTask({ status: "approved", approvalKind: "manual" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const changes: string[] = [];
+  const actions: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      setTaskStatus: (_taskId, status) => changes.push(status),
+      selectTaskAction: (taskId, action) => actions.push(`${taskId}:${action}`),
+    })
+  );
+  try {
+    dashboard.handleInput("r");
+    assert.deepEqual(actions, ["T1:retry"]);
+    assert.deepEqual(changes, []);
+    assert.equal(task.status, "approved");
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard makes complete and filtered boards clear while preserving the done filter", () => {
   const board: Board = {
     version: 1,
@@ -550,9 +577,9 @@ test("dashboard makes blockers and failure retry details prominent", () => {
     const output = dashboard.render(140).join("\n");
     assert.match(output, /Blocked by: T2 \(running\), missing \(missing\)/);
     assert.match(output, /Failure: provider failure · provider quota exhausted · retryable/);
-    assert.match(output, /r retry/);
+    assert.doesNotMatch(output, /r retry/);
     dashboard.handleInput("r");
-    assert.deepEqual(actions, ["T1:retry"]);
+    assert.deepEqual(actions, []);
   } finally {
     dashboard.dispose();
   }
@@ -676,12 +703,200 @@ test("dashboard is width-safe in its narrow single-pane layout", () => {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
   const dashboard = new Dashboard(fakeTheme, makeActions(board));
   try {
-    for (const width of [1, 20, 47]) {
-      const lines = dashboard.render(width);
-      assert.equal(lines.length, DEFAULT_DASHBOARD_BODY_HEIGHT + 3);
-      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    for (const width of [1, 20, 47, 48, 80, 140]) {
+      for (const bodyHeight of [2, 7, 22]) {
+        const sized = new Dashboard(fakeTheme, makeActions(board), { bodyHeight });
+        try {
+          const lines = sized.render(width);
+          assert.equal(lines.length, bodyHeight + 3);
+          assert.ok(lines.every((line) => visibleWidth(line) <= width));
+        } finally {
+          sized.dispose();
+        }
+      }
     }
     assert.match(dashboard.render(20).join("\n"), /T1 · running/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard derives legacy launches and drills down through phase, task, and launch", () => {
+  const task = makeTask({
+    attempts: [
+      {
+        index: 1,
+        logFile: "attempt.log",
+        thinking: "low",
+        startedAt: 1,
+        usage: { input: 2, output: 1, cost: 0.01, turns: 1 },
+        finalReport: "implemented",
+        reviewReport: "VERDICT: APPROVE",
+        reviewModel: "review/model",
+        reviewProvider: "review",
+        reviewUsage: { input: 1, output: 1, cost: 0.02, turns: 1 },
+        touchedFiles: [],
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  assert.deepEqual(
+    taskLaunches(task).map((launch) => launch.kind),
+    ["execute", "review"]
+  );
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    dashboard.handleInput("\x1b[D");
+    assert.match(dashboard.render(100).join("\n"), /Run › execution/);
+    dashboard.handleInput("\x1b[C");
+    assert.match(dashboard.render(100).join("\n"), /Run › execution › T1/);
+    dashboard.handleInput("\x1b[C");
+    assert.match(dashboard.render(100).join("\n"), /Run › execution › T1 › execute #1/);
+    dashboard.handleInput("\x1b[B");
+    assert.match(dashboard.render(100).join("\n"), /review #1 · single/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("constrained phase and launch panes keep later selections visible", () => {
+  const attempts = [1, 2, 3].map((index) => ({
+    index,
+    logFile: `attempt-${index}.log`,
+    thinking: "low",
+    startedAt: index,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    finalReport: `result ${index}`,
+    touchedFiles: [],
+  }));
+  const task = makeTask({ status: "approved", attempts });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { bodyHeight: 2 });
+  try {
+    dashboard.handleInput("\x1b[D");
+    for (let index = 0; index < 7; index += 1) dashboard.handleInput("\x1b[B");
+    assert.match(dashboard.render(80).slice(1, 3).join("\n"), /complete/);
+
+    dashboard.handleInput("\x1b[C");
+    dashboard.handleInput("\x1b[C");
+    dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\x1b[B");
+    assert.match(dashboard.render(80).slice(1, 3).join("\n"), /execute #3/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard evidence view exposes persisted execution, review, artifact, verification, and recovery data", () => {
+  const task = makeTask({
+    brief: "Implement the durable dashboard projection",
+    successCriteria: ["Evidence is visible"],
+    verificationProfile: "required",
+    verificationSummary: "all checks passed",
+    integratedCommit: "legacy-commit",
+    findings: [
+      {
+        fingerprint: "finding-1",
+        message: "inspect retained evidence",
+        status: "verified",
+        firstAttempt: 1,
+        lastAttempt: 1,
+      },
+    ],
+    provenance: {
+      candidateTree: "candidate-tree",
+      capturedAt: 1,
+      integratedCommit: "integrated-commit",
+      integratedTree: "integrated-tree",
+      verifiedAt: 2,
+      verificationProfile: "required",
+    },
+    attempts: [
+      {
+        index: 1,
+        logFile: "missing.log",
+        sessionFile: "executor-session.jsonl",
+        model: "provider/executor",
+        provider: "provider",
+        thinking: "low",
+        startedAt: 1,
+        usage: { input: 15, output: 7, cost: 0.3, turns: 3 },
+        reviewUsage: { input: 5, output: 2, cost: 0.1, turns: 1 },
+        promptCharacters: 500,
+        promptApproximateTokens: 125,
+        finalReport: "implemented successfully",
+        worktreePath: "/tmp/worktree",
+        branch: "maestro/t1",
+        touchedFiles: ["src/dashboard.ts"],
+        reviewLaunches: [
+          {
+            id: "review-1",
+            reviewerIndex: 1,
+            role: "confirmer",
+            verdict: "approve",
+            model: "provider/reviewer",
+            provider: "provider",
+            sessionFile: "review-session.jsonl",
+            startedAt: 2,
+            usage: { input: 5, output: 2, cost: 0.1, turns: 1 },
+            promptCharacters: 200,
+            promptApproximateTokens: 50,
+            finalReport: "VERDICT: APPROVE",
+            criterionEvidence: [{ criterion: 1, passed: true, evidence: "observed" }],
+          },
+        ],
+        reviewConvergence: {
+          policy: "confirm",
+          status: "approved",
+          requiredApprovals: 1,
+          actualApprovals: 1,
+          reviewerCount: 1,
+          summary: "converged",
+          decidedAt: 3,
+        },
+      },
+    ],
+  });
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 2,
+    pausedDrive: { ownerSession: "owner.jsonl", taskIds: ["T1"] },
+    activeDecision: {
+      id: "decision-1",
+      ownerSession: "owner.jsonl",
+      kind: "review",
+      taskIds: ["T1"],
+      evidence: "human input required",
+      allowedInterventions: ["steer"],
+      createdAt: 4,
+    },
+    tasks: [task],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { bodyHeight: 40 });
+  try {
+    dashboard.handleInput("e");
+    const output = dashboard.render(140).join("\n");
+    for (const expected of [
+      "Prompt source:",
+      "Executor identity:",
+      "Executor usage: 2 turns · $0.2000 · 10 input · 5 output",
+      "Executor prompt:",
+      "Final result:",
+      "Reviewer: confirmer · approve",
+      "Review usage:",
+      "Criterion evidence:",
+      "Convergence:",
+      "Findings:",
+      "Candidate tree: candidate-tree",
+      "Integrated tree: integrated-tree",
+      "Integration commit: integrated-commit",
+      "Verification: passed",
+      "Recovery refs:",
+      "Paused drive:",
+      "Decision: decision-1",
+    ]) {
+      assert.match(output, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    }
   } finally {
     dashboard.dispose();
   }

@@ -147,6 +147,8 @@ test("settings changes preserve existing values and persist provider-qualified s
     config = applySettingsChange(config, "maxCostPerTask", "$5");
     config = applySettingsChange(config, "statusWaitSeconds", "30");
     config = applySettingsChange(config, "cleanupCompletedTasks", "off");
+    config = applySettingsChange(config, "reviewRequiredApprovals", "4");
+    config = applySettingsChange(config, "maxReviewerLaunches", "3");
     config = applySettingsChange(config, "model:complex", "anthropic/claude-sonnet-5");
     saveConfig("project", cwd, config);
 
@@ -156,6 +158,8 @@ test("settings changes preserve existing values and persist provider-qualified s
     assert.equal(persisted.maxCostPerTask, 5);
     assert.equal(persisted.statusWaitSeconds, 30);
     assert.equal(persisted.cleanupCompletedTasks, false);
+    assert.equal(persisted.reviewRequiredApprovals, 3);
+    assert.equal(persisted.maxReviewerLaunches, 3);
     assert.equal(persisted.autoCommit, DEFAULT_CONFIG.autoCommit);
     assert.equal(persisted.tiers.complex.model, "anthropic/claude-sonnet-5");
     assert.equal(persisted.tiers.review.tools, DEFAULT_CONFIG.tiers.review?.tools);

@@ -4,10 +4,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { taskFingerprint } from "../src/artifact-policy.js";
 import { createTask, findTask, forceStatus, loadBoard, saveBoard } from "../src/board.js";
+import { loadConfig } from "../src/config.js";
 import { MAX_INJECTED_CONTEXT_LENGTH } from "../src/prompts.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
-import { type Attempt, type Board, type Task } from "../src/types.js";
+import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/types.js";
 import { reviewTask, type StartExecutor } from "../src/workflow.js";
 import {
   captureDiff,
@@ -24,18 +26,30 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
 }
 
+function gitBytes(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd }).toString("hex");
+}
+
+function assertNoPreparedIntegration(cwd: string): void {
+  assert.equal(git(cwd, "branch", "--list", "maestro-integration/*"), "");
+  assert.doesNotMatch(git(cwd, "worktree", "list", "--porcelain"), /maestro-integration-/);
+}
+
 function repository(): string {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-worktree-test-"));
   git(cwd, "init", "-q");
   git(cwd, "config", "user.name", "Test");
   git(cwd, "config", "user.email", "test@example.com");
   writeFileSync(join(cwd, "shared.txt"), "base\n");
+  writeFileSync(join(cwd, "staged.txt"), "base staged\n");
+  writeFileSync(join(cwd, "unstaged.txt"), "base unstaged\n");
+  writeFileSync(join(cwd, ".gitignore"), ".pi/maestro/\ndist/\n");
   git(cwd, "add", ".");
   git(cwd, "commit", "-qm", "initial");
   return cwd;
 }
 
-function attempt(worktreePath: string, branch: string): Attempt {
+function attempt(worktreePath: string, branch: string, touchedFile = "shared.txt"): Attempt {
   return {
     index: 1,
     logFile: "executor.jsonl",
@@ -43,7 +57,7 @@ function attempt(worktreePath: string, branch: string): Attempt {
     startedAt: Date.now(),
     usage: { input: 0, output: 0, cost: 0, turns: 1 },
     finalReport: "Implemented the requested change",
-    touchedFiles: ["shared.txt"],
+    touchedFiles: [touchedFile],
     worktreePath,
     branch,
   };
@@ -51,10 +65,29 @@ function attempt(worktreePath: string, branch: string): Attempt {
 
 function readyTask(cwd: string): Task {
   const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
-  const task = createTask(board, { title: "Change file", brief: "Change it", tier: "standard" });
+  const task = createTask(board, {
+    title: "Change file",
+    brief: "Change it",
+    tier: "standard",
+    writePaths: ["shared.txt"],
+    successCriteria: ["shared.txt contains the requested change"],
+  });
   forceStatus(task, "ready_for_review");
   saveBoard(cwd, board);
   return task;
+}
+
+function recordExecutionFingerprint(
+  cwd: string,
+  board: Board,
+  task: Task,
+  config: MaestroConfig = loadConfig(cwd)
+): void {
+  const latestAttempt = task.attempts.at(-1);
+  assert.ok(latestAttempt);
+  const fingerprint = taskFingerprint(board, task, config);
+  assert.ok(fingerprint);
+  latestAttempt.executionFingerprint = fingerprint.fingerprint;
 }
 
 function approvingReviewer(cwdSeen: string[]): StartExecutor {
@@ -163,7 +196,11 @@ test("trusted verifier mutation invalidates the candidate before review", async 
       trackRun: () => () => {},
     });
 
-    assert.equal(result.status, "changes_requested");
+    assert.equal(result.status, "ready_for_review");
+    assert.equal(
+      findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewConvergence?.status,
+      "operational_failure"
+    );
     assert.equal(reviewerStarts, 0);
     assert.match(result.note ?? "", /changed during trusted verification/);
     assert.equal(existsSync(ref.worktreePath), true);
@@ -443,7 +480,15 @@ test("approved review uses its worktree, merges it, then removes worktree and br
     const ref = createWorktree(cwd, task.id, 1);
     writeFileSync(join(ref.worktreePath, "shared.txt"), "executor change\n");
     task.attempts.push(attempt(ref.worktreePath, ref.branch));
-    saveBoard(cwd, { ...loadBoard(cwd), tasks: [task] });
+    const board = { ...loadBoard(cwd), tasks: [task] };
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
+    writeFileSync(join(cwd, "staged.txt"), "user staged\n");
+    git(cwd, "add", "staged.txt");
+    writeFileSync(join(cwd, "unstaged.txt"), "user unstaged\n");
+    writeFileSync(join(cwd, "untracked.txt"), "user untracked\n");
+    const stagedDiff = gitBytes(cwd, "diff", "--cached", "--", "staged.txt");
+    const unstagedDiff = gitBytes(cwd, "diff", "--", "unstaged.txt");
 
     const cwdSeen: string[] = [];
     await review(cwd, task, cwdSeen);
@@ -455,8 +500,49 @@ test("approved review uses its worktree, merges it, then removes worktree and br
     assert.ok(persisted?.provenance?.reviewedAt);
     assert.equal(persisted?.provenance?.integratedCommit, git(cwd, "rev-parse", "HEAD"));
     assert.equal(readFileSync(join(cwd, "shared.txt"), "utf-8"), "executor change\n");
+    assert.equal(gitBytes(cwd, "diff", "--cached", "--", "staged.txt"), stagedDiff);
+    assert.equal(gitBytes(cwd, "diff", "--", "unstaged.txt"), unstagedDiff);
+    assert.equal(readFileSync(join(cwd, "untracked.txt"), "utf-8"), "user untracked\n");
     assert.equal(existsSync(ref.worktreePath), false);
     assert.equal(git(cwd, "branch", "--list", ref.branch), "");
+    assertNoPreparedIntegration(cwd);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("post-integration verification may create ignored disposable output", async () => {
+  const cwd = repository();
+  try {
+    const task = readyTask(cwd);
+    const ref = createWorktree(cwd, task.id, 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "executor change\n");
+    task.verificationProfile = "build";
+    task.attempts.push(attempt(ref.worktreePath, ref.branch));
+    const board = { ...loadBoard(cwd), tasks: [task] };
+    const verificationProfiles = {
+      build: {
+        command: `${process.execPath} -e "require('fs').mkdirSync('dist',{recursive:true});require('fs').writeFileSync('dist/result.txt','generated')"`,
+        timeoutSeconds: 5,
+      },
+    };
+    recordExecutionFingerprint(cwd, board, task, { ...loadConfig(cwd), verificationProfiles });
+    saveBoard(cwd, board);
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "high" },
+      verificationProfiles,
+      startExecutor: approvingReviewer([]),
+      onUpdate: () => {},
+      trackRun: () => () => {},
+    });
+
+    assert.equal(result.status, "approved", result.note);
+    assert.equal(readFileSync(join(cwd, "shared.txt"), "utf-8"), "executor change\n");
+    assert.equal(existsSync(join(cwd, "dist", "result.txt")), false);
+    assertNoPreparedIntegration(cwd);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -466,33 +552,57 @@ test("failed post-integration verification retains the recovery worktree", async
   const cwd = repository();
   try {
     const task = readyTask(cwd);
+    const originalHead = git(cwd, "rev-parse", "HEAD");
     const ref = createWorktree(cwd, task.id, 1);
     writeFileSync(join(ref.worktreePath, "shared.txt"), "executor change\n");
-    writeFileSync(join(cwd, ".integration-fail"), "fail\n");
     task.verificationProfile = "required";
     task.attempts.push(attempt(ref.worktreePath, ref.branch));
-    saveBoard(cwd, { ...loadBoard(cwd), tasks: [task] });
+    const board = { ...loadBoard(cwd), tasks: [task] };
+    const verificationProfiles = {
+      required: {
+        command: `${process.execPath} -e "process.exit(2)"`,
+        timeoutSeconds: 5,
+      },
+    };
+    recordExecutionFingerprint(cwd, board, task, { ...loadConfig(cwd), verificationProfiles });
+    saveBoard(cwd, board);
+    writeFileSync(join(cwd, "staged.txt"), "user staged\n");
+    git(cwd, "add", "staged.txt");
+    writeFileSync(join(cwd, "unstaged.txt"), "user unstaged\n");
+    writeFileSync(join(cwd, "untracked.txt"), "user untracked\n");
+    const originalIndex = git(cwd, "write-tree");
+    const originalStatus = gitBytes(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all");
+    const stagedBytes = readFileSync(join(cwd, "staged.txt"));
+    const unstagedBytes = readFileSync(join(cwd, "unstaged.txt"));
+    const untrackedBytes = readFileSync(join(cwd, "untracked.txt"));
 
     const result = await reviewTask({
       cwd,
       task,
       tier: { thinking: "high" },
-      verificationProfiles: {
-        required: {
-          command: `${process.execPath} -e "process.exit(require('fs').existsSync('.integration-fail') ? 2 : 0)"`,
-          timeoutSeconds: 5,
-        },
-      },
+      verificationProfiles,
       startExecutor: approvingReviewer([]),
       onUpdate: () => {},
       trackRun: () => () => {},
     });
 
     const persisted = findTask(loadBoard(cwd), task.id);
-    assert.equal(result.status, "changes_requested");
-    assert.ok(persisted?.provenance?.integratedCommit);
+    assert.equal(result.status, "ready_for_review");
+    assert.equal(persisted?.attempts.at(-1)?.reviewConvergence?.status, "operational_failure");
+    assert.equal(persisted?.provenance?.integratedCommit, undefined);
+    assert.equal(persisted?.integratedCommit, undefined);
+    assert.equal(git(cwd, "rev-parse", "HEAD"), originalHead);
+    assert.equal(git(cwd, "write-tree"), originalIndex);
+    assert.equal(
+      gitBytes(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+      originalStatus
+    );
+    assert.deepEqual(readFileSync(join(cwd, "staged.txt")), stagedBytes);
+    assert.deepEqual(readFileSync(join(cwd, "unstaged.txt")), unstagedBytes);
+    assert.deepEqual(readFileSync(join(cwd, "untracked.txt")), untrackedBytes);
     assert.equal(existsSync(ref.worktreePath), true);
     assert.notEqual(git(cwd, "branch", "--list", ref.branch), "");
+    assertNoPreparedIntegration(cwd);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -506,11 +616,15 @@ test("concurrent approved reviews serialize merges and clean up both worktrees",
       title: "Add first file",
       brief: "Add first.txt",
       tier: "standard",
+      writePaths: ["first.txt"],
+      successCriteria: ["first.txt is added"],
     });
     const second = createTask(board, {
       title: "Add second file",
       brief: "Add second.txt",
       tier: "standard",
+      writePaths: ["second.txt"],
+      successCriteria: ["second.txt is added"],
     });
     forceStatus(first, "ready_for_review");
     forceStatus(second, "ready_for_review");
@@ -519,8 +633,10 @@ test("concurrent approved reviews serialize merges and clean up both worktrees",
     const secondRef = createWorktree(cwd, second.id, 1);
     writeFileSync(join(firstRef.worktreePath, "first.txt"), "first\n");
     writeFileSync(join(secondRef.worktreePath, "second.txt"), "second\n");
-    first.attempts.push(attempt(firstRef.worktreePath, firstRef.branch));
-    second.attempts.push(attempt(secondRef.worktreePath, secondRef.branch));
+    first.attempts.push(attempt(firstRef.worktreePath, firstRef.branch, "first.txt"));
+    second.attempts.push(attempt(secondRef.worktreePath, secondRef.branch, "second.txt"));
+    recordExecutionFingerprint(cwd, board, first);
+    recordExecutionFingerprint(cwd, board, second);
     saveBoard(cwd, board);
 
     const cwdSeen: string[] = [];
@@ -548,18 +664,28 @@ test("merge conflict aborts and retains recoverable worktree metadata and notes"
     const ref = createWorktree(cwd, task.id, 1);
     writeFileSync(join(ref.worktreePath, "shared.txt"), "executor change\n");
     task.attempts.push(attempt(ref.worktreePath, ref.branch));
-    saveBoard(cwd, { ...loadBoard(cwd), tasks: [task] });
+    const board = { ...loadBoard(cwd), tasks: [task] };
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
 
     writeFileSync(join(cwd, "shared.txt"), "main change\n");
     git(cwd, "add", "shared.txt");
     git(cwd, "commit", "-qm", "main change");
+    writeFileSync(join(cwd, "unstaged.txt"), "user dirt\n");
+    writeFileSync(join(cwd, "untracked.txt"), "untracked dirt\n");
+    const originalHead = git(cwd, "rev-parse", "HEAD");
+    const originalIndex = git(cwd, "write-tree");
+    const originalStatus = gitBytes(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all");
+    const unstagedBytes = readFileSync(join(cwd, "unstaged.txt"));
+    const untrackedBytes = readFileSync(join(cwd, "untracked.txt"));
 
     const cwdSeen: string[] = [];
     await review(cwd, task, cwdSeen);
 
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.deepEqual(cwdSeen, [ref.worktreePath]);
-    assert.equal(persisted?.status, "changes_requested");
+    assert.equal(persisted?.status, "ready_for_review");
+    assert.equal(persisted?.attempts.at(-1)?.reviewConvergence?.status, "operational_failure");
     assert.match(persisted?.reviewNotes ?? "", /git conflict/i);
     assert.match(
       persisted?.reviewNotes ?? "",
@@ -569,6 +695,15 @@ test("merge conflict aborts and retains recoverable worktree metadata and notes"
     assert.equal(git(cwd, "branch", "--list", ref.branch).trim(), `+ ${ref.branch}`);
     assert.equal(existsSync(join(cwd, ".git", "MERGE_HEAD")), false);
     assert.equal(readFileSync(join(cwd, "shared.txt"), "utf-8"), "main change\n");
+    assert.equal(git(cwd, "rev-parse", "HEAD"), originalHead);
+    assert.equal(git(cwd, "write-tree"), originalIndex);
+    assert.equal(
+      gitBytes(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+      originalStatus
+    );
+    assert.deepEqual(readFileSync(join(cwd, "unstaged.txt")), unstagedBytes);
+    assert.deepEqual(readFileSync(join(cwd, "untracked.txt")), untrackedBytes);
+    assertNoPreparedIntegration(cwd);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

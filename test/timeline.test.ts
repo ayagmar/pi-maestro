@@ -19,6 +19,14 @@ test("timeline derivation is deterministic, filterable, and bounded", () => {
     exitCode: 1,
     failureReason: { kind: "executor_failure", message: "failed", retryable: true },
     usage: { input: 1, output: 1, cost: 0.25, turns: 2 },
+    reviewLaunches: [
+      {
+        role: "refuter",
+        verdict: "request_changes",
+        startedAt: 31,
+        usage: { input: 1, output: 1, cost: 0.1, turns: 1 },
+      },
+    ],
     touchedFiles: [],
   });
   forceStatus(first, "approved");
@@ -28,7 +36,11 @@ test("timeline derivation is deterministic, filterable, and bounded", () => {
   const timeline = deriveRunTimeline(board);
   assert.deepEqual(
     timeline.map((event) => `${event.taskId}:${event.kind}`),
-    ["T1:planned", "T2:planned", "T1:dispatch", "T1:execute", "T1:approval"]
+    ["T1:planned", "T2:planned", "T1:dispatch", "T1:execute", "T1:review", "T1:approval"]
+  );
+  assert.match(
+    timeline.find((event) => event.kind === "review")?.summary ?? "",
+    /refuter.*request_changes/
   );
   assert.deepEqual(
     deriveRunTimeline(board, "t2").map((event) => event.taskId),

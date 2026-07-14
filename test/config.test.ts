@@ -60,6 +60,13 @@ test("default config has the documented tiers and no model overrides", () => {
   assert.equal(DEFAULT_CONFIG.maxCostPerTask, 5);
   assert.equal(DEFAULT_CONFIG.maxRunCost, 25);
   assert.equal(DEFAULT_CONFIG.statusWaitSeconds, 60);
+  assert.equal(DEFAULT_CONFIG.reviewRequiredApprovals, 2);
+  assert.equal(DEFAULT_CONFIG.maxReviewerLaunches, 4);
+  assert.equal(DEFAULT_CONFIG.maxPlanTasks, 64);
+  assert.equal(DEFAULT_CONFIG.maxDiscoveryGeneratedTasks, 32);
+  assert.equal(DEFAULT_CONFIG.maxTotalLaunchesPerRun, 128);
+  assert.equal(DEFAULT_CONFIG.confirmationPlanTasks, 24);
+  assert.equal(DEFAULT_CONFIG.confirmationTotalLaunches, 64);
   assert.equal(DEFAULT_CONFIG.watchdogWarningTurns, 12);
   assert.equal(DEFAULT_CONFIG.watchdogTerminationTurns, 4);
   for (const tier of Object.values(DEFAULT_CONFIG.tiers)) {
@@ -78,6 +85,8 @@ test("every preset defines all four tiers and keeps review read-only", () => {
     assert.equal(preset.config.useWorktrees, false, `preset ${preset.name}`);
     assert.equal(preset.config.maxRunCost, 25, `preset ${preset.name}`);
     assert.equal(preset.config.statusWaitSeconds, 60, `preset ${preset.name}`);
+    assert.equal(preset.config.reviewRequiredApprovals, 2, `preset ${preset.name}`);
+    assert.equal(preset.config.maxReviewerLaunches, 4, `preset ${preset.name}`);
     assert.equal(preset.config.tiers.review?.tools, REVIEW_TOOLS, `preset ${preset.name}`);
     assert.ok(preset.description.length > 0, `preset ${preset.name} needs a description`);
   }
@@ -253,6 +262,24 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
   assert.match(validateConfig({ maxParallel: -1 }) ?? "", /maxParallel/);
   assert.match(validateConfig({ logEvents: "verbose" }) ?? "", /logEvents/);
   assert.match(validateConfig({ cleanupCompletedTasks: "yes" }) ?? "", /boolean/);
+  assert.match(validateConfig({ reviewRequiredApprovals: 1 }) ?? "", /reviewRequiredApprovals/);
+  assert.match(validateConfig({ maxReviewerLaunches: 2.5 }) ?? "", /integer/);
+  assert.match(
+    validateConfig({ reviewRequiredApprovals: 4, maxReviewerLaunches: 3 }) ?? "",
+    /cannot exceed/
+  );
+  assert.match(
+    validateConfig({ maxPlanTasks: 8, maxDiscoveryGeneratedTasks: 9 }) ?? "",
+    /maxDiscoveryGeneratedTasks cannot exceed/
+  );
+  assert.match(
+    validateConfig({ maxTotalLaunchesPerRun: 3, maxReviewerLaunches: 4 }) ?? "",
+    /maxReviewerLaunches cannot exceed/
+  );
+  assert.match(
+    validateConfig({ maxPlanTasks: 8, confirmationPlanTasks: 9 }) ?? "",
+    /confirmationPlanTasks cannot exceed/
+  );
   assert.match(validateConfig({ tiers: { "": { thinking: "low" } } }) ?? "", /tier names/);
   assert.match(
     validateConfig({ tiers: { bad: { thinking: "extreme", fallbacks: [3] } } }) ?? "",
