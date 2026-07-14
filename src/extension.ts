@@ -1763,73 +1763,81 @@ export default function maestro(
 
     const selection = await ctx.ui.custom<{ taskId: string; action: DashboardTaskAction } | null>(
       (tui, theme, _keybindings, done) => {
-        const dashboard = new Dashboard(theme, {
-          getBoard: () => loadBoard(ctx.cwd),
-          getConfig: () => loadConfig(ctx.cwd),
-          isLive: (taskId) => liveRuns.has(taskId),
-          liveKind: (taskId) => liveRuns.get(taskId)?.kind,
-          liveActivity: (taskId) => {
-            const live = liveRuns.get(taskId);
-            if (!live) return undefined;
-            const label = live.kind === "review" ? "reviewing" : "running";
-            return `${label} · ${live.turns} turns · ${live.lastActivity}`;
-          },
-          steer: (taskId, message) => {
-            liveRuns.get(taskId)?.handle.steer(message);
-          },
-          abort: (taskId) => {
-            liveRuns.get(taskId)?.handle.abort();
-          },
-          setTaskStatus: (taskId, status) => {
-            try {
-              if (status === "approved") manuallyApproveTask(ctx, taskId);
-              else {
-                updateTask(ctx.cwd, taskId, (fresh) => {
-                  assertTaskNotDispatched(fresh);
-                  forceStatus(fresh, status);
-                });
+        const dashboard = new Dashboard(
+          theme,
+          {
+            getBoard: () => loadBoard(ctx.cwd),
+            getConfig: () => loadConfig(ctx.cwd),
+            isLive: (taskId) => liveRuns.has(taskId),
+            liveKind: (taskId) => liveRuns.get(taskId)?.kind,
+            liveActivity: (taskId) => {
+              const live = liveRuns.get(taskId);
+              if (!live) return undefined;
+              const label = live.kind === "review" ? "reviewing" : "running";
+              return `${label} · ${live.turns} turns · ${live.lastActivity}`;
+            },
+            steer: (taskId, message) => {
+              liveRuns.get(taskId)?.handle.steer(message);
+            },
+            abort: (taskId) => {
+              liveRuns.get(taskId)?.handle.abort();
+            },
+            setTaskStatus: (taskId, status) => {
+              try {
+                if (status === "approved") manuallyApproveTask(ctx, taskId);
+                else {
+                  updateTask(ctx.cwd, taskId, (fresh) => {
+                    assertTaskNotDispatched(fresh);
+                    forceStatus(fresh, status);
+                  });
+                }
+              } catch (error) {
+                notify(ctx, error instanceof Error ? error.message : String(error), "warning");
+                return;
               }
-            } catch (error) {
-              notify(ctx, error instanceof Error ? error.message : String(error), "warning");
-              return;
-            }
-            if (status === "approved") {
-              const cleanup = pruneTaskLogs(
-                ctx.cwd,
-                taskId,
-                () => loadBoard(ctx.cwd),
-                (id) => liveRuns.has(id)
+              if (status === "approved") {
+                const cleanup = pruneTaskLogs(
+                  ctx.cwd,
+                  taskId,
+                  () => loadBoard(ctx.cwd),
+                  (id) => liveRuns.has(id)
+                );
+                for (const warning of cleanup.warnings) {
+                  notify(ctx, `Log cleanup warning: ${warning}`, "warning");
+                }
+              }
+              refreshUI(ctx);
+            },
+            hasExecutorSession: (taskId) => {
+              const task = findTask(loadBoard(ctx.cwd), taskId);
+              const attempt = task?.attempts.at(-1);
+              return isCommandContext(ctx) && attempt
+                ? findSessionFile(attempt) !== undefined
+                : false;
+            },
+            hasReviewerSession: (taskId) => {
+              const task = findTask(loadBoard(ctx.cwd), taskId);
+              return (
+                isCommandContext(ctx) && task?.attempts.at(-1)?.reviewSessionFile !== undefined
               );
-              for (const warning of cleanup.warnings) {
-                notify(ctx, `Log cleanup warning: ${warning}`, "warning");
-              }
-            }
-            refreshUI(ctx);
+            },
+            retryEligibility: (taskId) =>
+              humanRetryEligibility(loadBoard(ctx.cwd), taskId, {
+                maxAttempts: loadConfig(ctx.cwd).maxAttempts,
+                config: loadConfig(ctx.cwd),
+                isLive: (id) => liveRuns.has(id),
+                ...(ctx.sessionManager.getSessionFile()
+                  ? { ownerSession: ctx.sessionManager.getSessionFile() }
+                  : {}),
+              }),
+            selectTaskAction: (taskId, action) => done({ taskId, action }),
+            close: () => done(null),
+            requestRender: () => tui.requestRender(),
           },
-          hasExecutorSession: (taskId) => {
-            const task = findTask(loadBoard(ctx.cwd), taskId);
-            const attempt = task?.attempts.at(-1);
-            return isCommandContext(ctx) && attempt
-              ? findSessionFile(attempt) !== undefined
-              : false;
-          },
-          hasReviewerSession: (taskId) => {
-            const task = findTask(loadBoard(ctx.cwd), taskId);
-            return isCommandContext(ctx) && task?.attempts.at(-1)?.reviewSessionFile !== undefined;
-          },
-          retryEligibility: (taskId) =>
-            humanRetryEligibility(loadBoard(ctx.cwd), taskId, {
-              maxAttempts: loadConfig(ctx.cwd).maxAttempts,
-              config: loadConfig(ctx.cwd),
-              isLive: (id) => liveRuns.has(id),
-              ...(ctx.sessionManager.getSessionFile()
-                ? { ownerSession: ctx.sessionManager.getSessionFile() }
-                : {}),
-            }),
-          selectTaskAction: (taskId, action) => done({ taskId, action }),
-          close: () => done(null),
-          requestRender: () => tui.requestRender(),
-        });
+          {
+            getRows: () => tui.terminal.rows,
+          }
+        );
         return {
           render: (width: number) => dashboard.render(width),
           invalidate: () => dashboard.invalidate(),

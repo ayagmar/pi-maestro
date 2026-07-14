@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   type DashboardActions,
   DEFAULT_DASHBOARD_BODY_HEIGHT,
   taskLaunches,
+  wrapText,
 } from "../src/dashboard.js";
 import { type Board, type Task } from "../src/types.js";
 
@@ -899,6 +900,126 @@ test("dashboard evidence view exposes persisted execution, review, artifact, ver
     ]) {
       assert.match(output, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard snapshots the board once per render", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  let reads = 0;
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      getBoard: () => {
+        reads += 1;
+        return board;
+      },
+    })
+  );
+  try {
+    reads = 0;
+    dashboard.render(100);
+    assert.equal(reads, 1);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard uses live terminal rows for its body height", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 40 });
+  try {
+    assert.equal(dashboard.render(100).length, 40);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard counts only done tasks removed by the active filters", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [makeTask(), makeTask({ id: "T2", status: "approved" })],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    dashboard.handleInput("f");
+    dashboard.handleInput("g");
+    dashboard.handleInput("g");
+    dashboard.handleInput("g");
+    assert.match(dashboard.render(160)[0] ?? "", /filter: running · hiding 0 done/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("wrapText respects display width and prefers word boundaries", () => {
+  const wide = wrapText("界".repeat(10), 10);
+  assert.equal(wide.length, 2);
+  assert.ok(wide.every((line) => visibleWidth(line) <= 10));
+  assert.deepEqual(wrapText("hello world", 7), ["hello", "world"]);
+});
+
+test("dashboard keeps transcript scrollback fixed while output appends", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-dashboard-scroll-"));
+  const logFile = join(directory, "executor.jsonl");
+  const event = (text: string) =>
+    `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`;
+  writeFileSync(
+    logFile,
+    event(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"))
+  );
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 2,
+    tasks: [
+      makeTask({
+        attempts: [
+          {
+            index: 1,
+            logFile,
+            thinking: "low",
+            startedAt: 0,
+            usage: { input: 0, output: 0, cost: 0, turns: 0 },
+            touchedFiles: [],
+          },
+        ],
+      }),
+    ],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { bodyHeight: 10 });
+  try {
+    dashboard.render(100);
+    dashboard.handleInput("\x1b[5~");
+    const before = dashboard.render(100).filter((line) => line.includes("line "));
+    appendFileSync(logFile, event("line 21\nline 22"));
+    const after = dashboard.render(100).filter((line) => line.includes("line "));
+    assert.deepEqual(after, before);
+  } finally {
+    dashboard.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("changes requested uses an error color distinct from running", () => {
+  const colors: Array<[string, string]> = [];
+  const theme = {
+    fg: (color: string, text: string) => {
+      colors.push([color, text]);
+      return text;
+    },
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 2,
+    tasks: [makeTask({ status: "changes_requested" })],
+  };
+  const dashboard = new Dashboard(theme, makeActions(board));
+  try {
+    dashboard.render(100);
+    assert.ok(colors.some(([color, text]) => color === "error" && text === "↻"));
   } finally {
     dashboard.dispose();
   }

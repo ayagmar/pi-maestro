@@ -132,12 +132,22 @@ const STEER_OPTIONS = [
 export interface DashboardOptions {
   /** Number of rows shared by the task list and transcript panes. */
   bodyHeight?: number;
+  /** Live terminal row count. */
+  getRows?: () => number;
 }
+
+type DashboardFrame = {
+  board: Board;
+  config: MaestroConfig | undefined;
+  grouped: ReturnType<typeof groupTasks>;
+  phases: ReturnType<typeof projectRunPhases>;
+};
 
 function statusColor(status: TaskStatus): "success" | "error" | "warning" | "accent" | "muted" {
   if (status === "approved") return "success";
-  if (status === "failed" || status === "cancelled") return "error";
-  if (status === "running" || status === "changes_requested") return "warning";
+  if (status === "failed" || status === "cancelled" || status === "changes_requested")
+    return "error";
+  if (status === "running") return "warning";
   if (status === "ready_for_review") return "accent";
   return "muted";
 }
@@ -165,16 +175,19 @@ export class Dashboard {
   private tails = new Map<string, TranscriptTail>();
   private timer: ReturnType<typeof setInterval>;
   private bodyHeight: number;
+  private frame: DashboardFrame;
+  private transcriptLinesAtScroll: number | undefined;
 
   constructor(
     private theme: Theme,
     private actions: DashboardActions,
-    options: DashboardOptions = {}
+    private options: DashboardOptions = {}
   ) {
     this.bodyHeight = Math.max(
       MIN_DASHBOARD_BODY_HEIGHT,
       Math.floor(options.bodyHeight ?? DEFAULT_DASHBOARD_BODY_HEIGHT)
     );
+    this.frame = this.buildFrame();
     this.steerInput.onSubmit = (value) => this.submitSteer(value);
     this.steerInput.onEscape = () => {
       this.mode = "browse";
@@ -188,16 +201,37 @@ export class Dashboard {
 
   invalidate(): void {}
 
-  /** Tasks currently shown, ordered by their workflow group. */
-  private visibleTasks(): Task[] {
+  private buildFrame(): DashboardFrame {
     const board = this.actions.getBoard();
-    const grouped = groupTasks(board);
+    const config = this.actions.getConfig?.();
+    const liveKinds = new Map<string, "execute" | "review">();
+    for (const task of board.tasks) {
+      const kind = this.actions.liveKind(task.id);
+      if (kind) liveKinds.set(task.id, kind);
+    }
+    return {
+      board,
+      config,
+      grouped: groupTasks(board),
+      phases: projectRunPhases(board, liveKinds, config),
+    };
+  }
+
+  private tasksBeforeDoneFilter(): Task[] {
     let tasks =
-      this.filter === "all" ? GROUPS.flatMap((group) => grouped[group]) : grouped[this.filter];
+      this.filter === "all"
+        ? GROUPS.flatMap((group) => this.frame.grouped[group])
+        : this.frame.grouped[this.filter];
     if (this.phaseScoped) {
       const taskIds = new Set(this.phases()[this.phaseIndex]?.taskIds ?? []);
       tasks = tasks.filter((task) => taskIds.has(task.id));
     }
+    return tasks;
+  }
+
+  /** Tasks currently shown, ordered by their workflow group. */
+  private visibleTasks(): Task[] {
+    const tasks = this.tasksBeforeDoneFilter();
     if (!this.hideDone) return tasks;
     return tasks.filter((task) => task.status !== "approved" && task.status !== "cancelled");
   }
@@ -216,13 +250,7 @@ export class Dashboard {
   }
 
   private phases() {
-    const board = this.actions.getBoard();
-    const liveKinds = new Map<string, "execute" | "review">();
-    for (const task of board.tasks) {
-      const kind = this.actions.liveKind(task.id);
-      if (kind) liveKinds.set(task.id, kind);
-    }
-    return projectRunPhases(board, liveKinds, this.actions.getConfig?.());
+    return this.frame.phases;
   }
 
   private selectedLaunch(): DashboardLaunch | undefined {
@@ -263,6 +291,7 @@ export class Dashboard {
   }
 
   handleInput(data: string): void {
+    this.frame = this.buildFrame();
     if (this.mode === "steer_templates") {
       this.handleSteerTemplateInput(data);
       this.actions.requestRender();
@@ -445,16 +474,21 @@ export class Dashboard {
   }
 
   render(width: number): string[] {
+    this.frame = this.buildFrame();
     width = Math.max(1, Math.floor(width));
     const theme = this.theme;
-    const board = this.actions.getBoard();
+    const board = this.frame.board;
     const visible = this.visibleTasks();
     if (this.selected >= visible.length) this.selected = Math.max(0, visible.length - 1);
 
     const narrow = width < 48;
     const listWidth = narrow ? 0 : Math.min(44, Math.max(24, Math.floor(width * 0.35)));
     const transcriptWidth = narrow ? width : Math.max(1, width - listWidth - 3);
-    const bodyHeight = this.bodyHeight;
+    const rows = this.options.getRows?.();
+    const bodyHeight =
+      rows && rows > 0
+        ? Math.max(MIN_DASHBOARD_BODY_HEIGHT, Math.floor(rows) - 3)
+        : this.bodyHeight;
 
     const left = narrow ? [] : this.renderNavigation(visible, board, listWidth, bodyHeight);
     const right =
@@ -467,10 +501,12 @@ export class Dashboard {
     const status = projectStatus(
       board,
       board.tasks.filter((task) => this.actions.isLive(task.id)).map((task) => task.id),
-      this.actions.getConfig?.()
+      this.frame.config
     );
     const running = status.running;
-    const hiddenCount = board.tasks.length - visible.length;
+    const hiddenCount = this.tasksBeforeDoneFilter().filter(
+      (task) => task.status === "approved" || task.status === "cancelled"
+    ).length;
     const doneFilterPart = this.hideDone ? ` · hiding ${hiddenCount} done` : "";
     const statusFilterPart = this.filter === "all" ? "" : ` · filter: ${GROUP_LABELS[this.filter]}`;
     const completed = status.code === "complete" ? " · board complete" : "";
@@ -531,7 +567,7 @@ export class Dashboard {
   private renderSelectedPhase(width: number, height: number): string[] {
     const phase = this.phases()[this.phaseIndex];
     if (!phase) return [];
-    const board = this.actions.getBoard();
+    const board = this.frame.board;
     const lines = [
       this.theme.bold(truncateToWidth(`Run › ${phase.label}`, width)),
       this.theme.fg(
@@ -604,7 +640,7 @@ export class Dashboard {
 
       const usage = taskUsage(task);
       const activity = live ? ` · ${this.actions.liveActivity(task.id) ?? "…"}` : "";
-      const group = GROUP_LABELS[taskGroup(this.actions.getBoard(), task)];
+      const group = GROUP_LABELS[taskGroup(this.frame.board, task)];
       const status =
         group === STATUS_LABELS[task.status] ? group : `${group} · ${STATUS_LABELS[task.status]}`;
       const detail = `${status} [${task.tier}] · $${usage.cost.toFixed(4)}${activity}`;
@@ -633,7 +669,7 @@ export class Dashboard {
 
     const wrapped: string[] = [];
     if (this.detailView === "timeline") {
-      const timeline = formatRunTimeline(deriveRunTimeline(this.actions.getBoard(), task.id));
+      const timeline = formatRunTimeline(deriveRunTimeline(this.frame.board, task.id));
       for (const raw of timeline.split("\n")) {
         for (const line of wrapText(raw, width)) wrapped.push(theme.fg("toolOutput", line));
       }
@@ -664,6 +700,14 @@ export class Dashboard {
 
     const steerLines = this.renderSteerControls(width, transcriptHeight);
     const visible = Math.max(0, transcriptHeight - steerLines.length);
+    if (this.scrollUp > 0) {
+      if (this.transcriptLinesAtScroll !== undefined) {
+        this.scrollUp += Math.max(0, wrapped.length - this.transcriptLinesAtScroll);
+      }
+      this.transcriptLinesAtScroll = wrapped.length;
+    } else {
+      this.transcriptLinesAtScroll = undefined;
+    }
     const maxScroll = Math.max(0, wrapped.length - visible);
     if (this.scrollUp > maxScroll) this.scrollUp = maxScroll;
     const end = wrapped.length - this.scrollUp;
@@ -674,7 +718,7 @@ export class Dashboard {
   }
 
   private renderSelectedTask(task: Task, width: number): string[] {
-    const board = this.actions.getBoard();
+    const board = this.frame.board;
     const usage = taskUsage(task);
     const dependencies = task.dependsOn.length > 0 ? task.dependsOn.join(", ") : "none";
     const attempts = `${task.attempts.length} attempt${task.attempts.length === 1 ? "" : "s"}`;
@@ -765,7 +809,7 @@ export class Dashboard {
   }
 
   private renderEvidence(task: Task, width: number, height: number): string[] {
-    const board = this.actions.getBoard();
+    const board = this.frame.board;
     const selectedLaunch = this.navigationLevel === "launch" ? this.selectedLaunch() : undefined;
     const attempt = selectedLaunch?.attempt ?? task.attempts.at(-1);
     const review = selectedLaunch?.review;
@@ -935,7 +979,7 @@ export class Dashboard {
     }
     if (task.status === "failed") return "Reopen the task to retry it.";
     if (task.status === "cancelled") return "Reopen the task if it should run.";
-    const reason = blockedReason(this.actions.getBoard(), task);
+    const reason = blockedReason(this.frame.board, task);
     if (reason) return `Waiting for ${reason.slice("blocked by ".length)} to complete.`;
     return "Ready to run when the orchestrator dispatches it.";
   }
@@ -986,7 +1030,7 @@ export class Dashboard {
     }
     const live = task ? this.actions.isLive(task.id) : false;
     const parts = [
-      ...(this.actions.getBoard().planPending ? ["plan gated · /maestro plan to review"] : []),
+      ...(this.frame.board.planPending ? ["plan gated · /maestro plan to review"] : []),
       this.navigationLevel === "launch" ? "↑↓ launches" : "↑↓ tasks",
       "esc close",
       "PgUp/PgDn scroll",
@@ -1084,14 +1128,29 @@ function padToWidth(line: string, width: number): string {
   return w >= width ? truncateToWidth(line, width) : line + " ".repeat(width - w);
 }
 
-function wrapText(text: string, width: number): string[] {
-  if (text.length <= width) return [text];
+export function wrapText(text: string, width: number): string[] {
+  if (visibleWidth(text) <= width) return [text];
   const lines: string[] = [];
-  let rest = text;
-  while (rest.length > width) {
-    lines.push(rest.slice(0, width));
-    rest = rest.slice(width);
+  let characters = Array.from(text);
+  while (characters.length > 0) {
+    let usedWidth = 0;
+    let end = 0;
+    let whitespace = -1;
+    while (end < characters.length) {
+      const characterWidth = visibleWidth(characters[end] ?? "");
+      if (usedWidth + characterWidth > width) break;
+      usedWidth += characterWidth;
+      if (/\s/.test(characters[end] ?? "")) whitespace = end;
+      end += 1;
+    }
+    if (end === characters.length) {
+      lines.push(characters.join(""));
+      break;
+    }
+    const cut = whitespace > 0 ? whitespace : Math.max(1, end);
+    lines.push(characters.slice(0, cut).join("").trimEnd());
+    characters = characters.slice(cut);
+    while (/\s/.test(characters[0] ?? "")) characters.shift();
   }
-  if (rest) lines.push(rest);
   return lines;
 }
