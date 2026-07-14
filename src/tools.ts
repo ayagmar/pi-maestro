@@ -534,6 +534,16 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       if (liveRuns.has(taskId.trim().toUpperCase())) {
         throw new Error(`${taskId} is running. Abort it first or wait for it to finish.`);
       }
+      const beforeTask = findTask(loadBoard(ctx.cwd), taskId);
+      const wasInFlight =
+        beforeTask?.status === "running" || beforeTask?.status === "ready_for_review";
+      const editsContractField =
+        brief !== undefined ||
+        successCriteria !== undefined ||
+        tier !== undefined ||
+        writePaths !== undefined ||
+        verificationProfile !== undefined ||
+        reviewPolicy !== undefined;
       const updated = updateTask(ctx.cwd, taskId, (fresh, board) => {
         assertPlanTaskLimit(board.tasks.length, config);
         assertTaskNotDispatched(fresh);
@@ -562,8 +572,12 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       });
       if (!updated) throw new Error(`Unknown task: ${taskId}`);
       refreshUI(ctx);
+      const text =
+        wasInFlight && editsContractField
+          ? `Updated: ${taskLine(updated)}\nNote: ${updated.id} has an in-flight attempt/review; this edit invalidates it and the task will need re-execution under the new contract.`
+          : `Updated: ${taskLine(updated)}`;
       return {
-        content: [{ type: "text", text: `Updated: ${taskLine(updated)}` }],
+        content: [{ type: "text", text }],
         details: { action: "update", tasks: [snapshot(updated)] },
       };
     },

@@ -311,6 +311,7 @@ test("orchestrator briefing embeds the goal, tier guidance, and workflow tools",
   assert.doesNotMatch(briefing, /maestro_(?:run|review|status)/);
   assert.match(briefing, /You do not implement tasks yourself/);
   assert.match(briefing, /fails twice with the same root cause/);
+  assert.match(briefing, /in-flight attempt.*settle/);
 
   const gated = buildOrchestratorBriefing("Goal", tierGuidance, true);
   assert.match(gated, /planGate is enabled/);

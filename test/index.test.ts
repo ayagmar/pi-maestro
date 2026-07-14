@@ -1512,6 +1512,67 @@ test("maestro_update cannot mutate a task owned by a persisted dispatch", async 
   );
 });
 
+test("maestro_update warns when editing a contract field on a ready_for_review task", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Reviewing",
+        brief: "work under review",
+        tier: "standard",
+        writePaths: ["src/reviewed.ts"],
+        successCriteria: ["Reviewed behavior works"],
+      });
+      task.status = "ready_for_review";
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const update = tools.get("maestro_update");
+      assert.ok(update);
+
+      const result = await update.execute(
+        "edit-in-flight-task",
+        { taskId: "T1", brief: "revised brief" },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(result?.content[0]?.text ?? "", /in-flight/);
+    }
+  );
+});
+
+test("maestro_update does not warn when editing a todo task", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Not started",
+        brief: "work not started",
+        tier: "standard",
+        writePaths: ["src/todo.ts"],
+        successCriteria: ["Todo behavior works"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const update = tools.get("maestro_update");
+      assert.ok(update);
+
+      const result = await update.execute(
+        "edit-todo-task",
+        { taskId: "T1", brief: "revised brief" },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.doesNotMatch(result?.content[0]?.text ?? "", /in-flight/);
+    }
+  );
+});
+
 test("maestro_plan requires bounded write scope except explicit no-file work", async () => {
   await withBoard(
     () => {},

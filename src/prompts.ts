@@ -286,6 +286,7 @@ export function buildOrchestratorBriefing(
       "- Reference file paths in briefs; paste file contents only when an executor cannot discover them itself.",
       "- At a provider block: switch to a configured fallback then `/maestro resume`, or ask the user if it is a quota/cost decision. Never blindly retry the same blocked provider.",
       "- At a review escalation or a task that fails twice with the same root cause: `maestro_update` its brief or tier, split it with `maestro_plan`, or cancel it. Never raise the project `maxAttempts` to force another attempt.",
+      "- Prefer letting an in-flight attempt (running or ready_for_review) settle before using `maestro_update` to edit its contract fields; editing mid-flight discards that attempt's work.",
       "- At an attempt cap, create one narrowly scoped successor with `maestro_plan` and set `supersedesTaskId` to the capped task. Maestro atomically keeps the predecessor visible as cancelled and rewires every downstream dependency. Then call `maestro_drive` action=start for the successor and rewired dependents. Never perform cancellation and rewiring as separate calls.",
       "- Ask the user before expanding scope beyond the stated goal or making a cost tradeoff.",
       "- After changing a brief/tier, `/maestro resume` to continue the drive.",
