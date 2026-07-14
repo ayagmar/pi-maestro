@@ -116,11 +116,17 @@ export function resolveDriveDecision(
     if (decision.ownerSession && decision.ownerSession !== currentSession) {
       throw new Error("Only the decision owner may resolve it");
     }
-    if (!decision.allowedInterventions.includes(intervention)) {
+    const resumesCorrectedBoard =
+      intervention === "steer" &&
+      (decision.kind === "escalation_required" || decision.kind === "stale_completion");
+    if (!decision.allowedInterventions.includes(intervention) && !resumesCorrectedBoard) {
       throw new Error(`${intervention} is not allowed for this decision`);
     }
 
-    decision.resolution = { intervention, resolvedAt: Date.now() };
+    decision.resolution = {
+      intervention: resumesCorrectedBoard ? "resume" : intervention,
+      resolvedAt: Date.now(),
+    };
     delete decision.deliveryClaim;
     return decision;
   });
@@ -188,13 +194,12 @@ export function persistActiveDrive(cwd: string, activeDrive: ActiveDriveState): 
     if (board.pausedDrive && board.pausedDrive.ownerSession !== activeDrive.ownerSession) {
       return false;
     }
-    if (
-      board.activeDecision &&
-      !board.activeDecision.resolution &&
-      board.activeDecision.kind !== "stale_completion"
-    ) {
-      board.activeDecision.resolution = { intervention: "resume", resolvedAt: Date.now() };
-      delete board.activeDecision.deliveryClaim;
+    if (board.activeDecision && !board.activeDecision.resolution) {
+      if (board.activeDecision.ownerSession !== activeDrive.ownerSession) return false;
+      if (board.activeDecision.kind !== "stale_completion") {
+        board.activeDecision.resolution = { intervention: "resume", resolvedAt: Date.now() };
+        delete board.activeDecision.deliveryClaim;
+      }
     }
     delete board.pausedDrive;
     board.activeDrive = activeDrive;

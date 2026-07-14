@@ -215,17 +215,26 @@ export function captureDiff(cwd: string, paths?: string[]): string {
 /** Commit staged-and-unstaged changes in a tree. Returns false when there was nothing to commit. */
 export function commitAll(cwd: string, message: string, paths?: string[]): boolean {
   if (paths?.length === 0) return false;
-  if (paths) git(cwd, ["add", "--", ...paths]);
-  else git(cwd, ["add", "-A"]);
-  const status = git(cwd, ["status", "--porcelain"]);
-  if (!status) return false;
-  if (paths && paths.length > 0) {
-    // Only commit what this task touched; other tasks' files stay staged-free.
+  if (paths) {
+    git(cwd, ["add", "--", ...paths]);
+    try {
+      git(cwd, ["diff", "--cached", "--quiet", "--", ...paths]);
+      return false;
+    } catch {
+      // At least one task-scoped path is staged; unrelated staged files are ignored.
+    }
+    // Only commit what this task touched; unrelated files remain untouched.
     git(cwd, ["commit", "-m", message, "--", ...paths]);
-  } else {
-    git(cwd, ["commit", "-m", message]);
+    return true;
   }
-  return true;
+  git(cwd, ["add", "-A"]);
+  try {
+    git(cwd, ["diff", "--cached", "--quiet"]);
+    return false;
+  } catch {
+    git(cwd, ["commit", "-m", message]);
+    return true;
+  }
 }
 
 /** Commit executor edits so the reviewed branch can be merged into the main tree. */

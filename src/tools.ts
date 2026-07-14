@@ -16,17 +16,20 @@ import {
   normalizeTaskContract,
   normalizeWritePaths,
   planValidationMessage,
-  saveBoard,
   updateBoard,
   updateTask,
   validatePlan,
 } from "./board.js";
 import { loadConfig } from "./config.js";
 import { COMMAND } from "./constants.js";
-import { type BackgroundDrive, type DriveRuntimeController } from "./drive-controller.js";
+import {
+  resolveDriveDecision,
+  type BackgroundDrive,
+  type DriveRuntimeController,
+} from "./drive-controller.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
 import { assertPlanTaskLimit, preflightWorkflow } from "./preflight.js";
-import { canonicalTaskIds, sessionCanControlDrive } from "./session-control.js";
+import { canonicalTaskIds } from "./session-control.js";
 import { formatStatusProjection, projectStatus } from "./status.js";
 import { type Task, type TaskStatus } from "./types.js";
 import {
@@ -339,37 +342,25 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         const intervention = input.intervention;
         if (!intervention) throw new Error("intervention is required");
         if (input.decisionId) {
-          const board = loadBoard(ctx.cwd);
-          const decision = board.activeDecision;
-          if (!decision || decision.id !== input.decisionId || decision.resolution) {
-            throw new Error("Decision is stale or already resolved");
-          }
           const current = ctx.sessionManager.getSessionFile();
-          if (!sessionCanControlDrive(decision.ownerSession, current)) {
-            throw new Error("Only the decision owner may resolve it");
-          }
+          const resolved = resolveDriveDecision(ctx.cwd, input.decisionId, current, intervention);
           if (intervention === "steer") {
             startBackgroundDrive(ctx, taskIds, signal);
             return {
               content: [
                 {
                   type: "text",
-                  text: `Decision ${decision.id} addressed; drive resumed for ${taskIds?.join(", ") ?? "the whole board"}.`,
+                  text: `Decision ${resolved.id} addressed; drive resumed for ${taskIds?.join(", ") ?? "the whole board"}.`,
                 },
               ],
               details: { action: "drive", tasks: [] },
             };
           }
-          if (!decision.allowedInterventions.includes(intervention)) {
-            throw new Error(`${intervention} is not allowed for this decision`);
-          }
-          decision.resolution = { intervention, resolvedAt: Date.now() };
-          saveBoard(ctx.cwd, board);
           if (input.intervention === "handoff") {
             pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
           }
           return {
-            content: [{ type: "text", text: `Decision ${decision.id} resolved.` }],
+            content: [{ type: "text", text: `Decision ${resolved.id} resolved.` }],
             details: { action: "drive", tasks: [] },
           };
         }

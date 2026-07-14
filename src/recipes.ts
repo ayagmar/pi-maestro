@@ -75,18 +75,37 @@ export function parseRecipe(text: string): WorkflowRecipe {
   };
 }
 
+export interface RecipeListing {
+  name: string;
+  scope: RecipeScope;
+  file: string;
+  recipe?: WorkflowRecipe;
+  error?: string;
+}
+
+/** List effective recipes, retaining malformed files as visible non-executable entries. */
+export function loadRecipeListings(cwd: string): RecipeListing[] {
+  return [...effectiveRecipeFiles(cwd).values()]
+    .map((stored) => {
+      try {
+        return { ...stored, recipe: parseStoredRecipe(stored).recipe };
+      } catch (error) {
+        return {
+          name: stored.name,
+          scope: stored.scope,
+          file: stored.file,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
 /** List valid effective recipes. Project files shadow same-name user files before parsing. */
 export function loadRecipes(cwd: string): ResolvedRecipe[] {
-  const effective = effectiveRecipeFiles(cwd);
-  const recipes: ResolvedRecipe[] = [];
-  for (const stored of effective.values()) {
-    try {
-      recipes.push(parseStoredRecipe(stored));
-    } catch {
-      // A malformed effective file is reported when explicitly inspected or run.
-    }
-  }
-  return recipes.sort((left, right) => left.recipe.name.localeCompare(right.recipe.name));
+  return loadRecipeListings(cwd).flatMap((entry) =>
+    entry.recipe ? [{ recipe: entry.recipe, scope: entry.scope, file: entry.file }] : []
+  );
 }
 
 export function resolveRecipe(cwd: string, name: string): ResolvedRecipe {

@@ -93,7 +93,7 @@ import { formatWorkflowPreflight, preflightWorkflow } from "./preflight.js";
 import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
 import {
   expandRecipe,
-  loadRecipes,
+  loadRecipeListings,
   parseRecipeInput,
   removeRecipe,
   resolveRecipe,
@@ -296,40 +296,60 @@ export default function maestro(
   }
 
   function manuallyApproveTask(ctx: ExtensionContext, taskId: string): Task {
+    const initialBoard = loadBoard(ctx.cwd);
+    const initialTask = findTask(initialBoard, taskId);
+    if (!initialTask) throw new Error(`Unknown task id: ${taskId}`);
+    assertTaskNotDispatched(initialTask);
+    if (initialTask.status !== "ready_for_review") {
+      throw new Error("Manual approval requires a task that is ready for review.");
+    }
+    const attempt = initialTask.attempts.at(-1);
+    if (!attempt?.finalReport?.trim() || attempt.endedAt === undefined) {
+      throw new Error("Manual approval requires a completed attempt with a final report.");
+    }
+    const findings = artifactFindings(initialTask, attempt);
+    if (findings && findings.length > 0) {
+      throw new Error(`Manual approval refused: ${findings[0]?.message ?? "artifact is unsafe"}`);
+    }
+    const candidateTree =
+      (initialTask.writePaths?.length ?? 0) > 0
+        ? (() => {
+            if (attempt.touchedFiles.length === 0) {
+              throw new Error("Manual approval requires nonempty attributable Git changes.");
+            }
+            const outsideScope = pathsOutsideWriteScope(initialTask, attempt);
+            if (outsideScope.length > 0) {
+              throw new Error(
+                `Manual approval refused changes outside write scope: ${outsideScope.join(", ")}`
+              );
+            }
+            const artifact = snapshotArtifact(
+              attempt.worktreePath ?? ctx.cwd,
+              attempt.touchedFiles
+            );
+            if (!artifact) throw new Error("Manual approval requires a scoped Git artifact.");
+            return artifact;
+          })()
+        : undefined;
+    const attemptIdentity = `${attempt.index}:${attempt.logFile}:${attempt.startedAt}`;
+
     return updateBoard(ctx.cwd, (board) => {
       const task = findTask(board, taskId);
-      if (!task) throw new Error(`Unknown task id: ${taskId}`);
+      const freshAttempt = task?.attempts.at(-1);
+      if (
+        !task ||
+        task.updatedAt !== initialTask.updatedAt ||
+        !freshAttempt ||
+        `${freshAttempt.index}:${freshAttempt.logFile}:${freshAttempt.startedAt}` !==
+          attemptIdentity
+      ) {
+        throw new Error("Manual approval became stale while inspecting Git; retry it.");
+      }
       assertTaskNotDispatched(task);
-      if (task.status !== "ready_for_review") {
-        throw new Error("Manual approval requires a task that is ready for review.");
-      }
-      const attempt = task.attempts.at(-1);
-      if (!attempt?.finalReport?.trim() || attempt.endedAt === undefined) {
-        throw new Error("Manual approval requires a completed attempt with a final report.");
-      }
-      const findings = artifactFindings(task, attempt);
-      if (findings && findings.length > 0) {
-        throw new Error(`Manual approval refused: ${findings[0]?.message ?? "artifact is unsafe"}`);
-      }
-      if ((task.writePaths?.length ?? 0) > 0) {
-        if (attempt.touchedFiles.length === 0) {
-          throw new Error("Manual approval requires nonempty attributable Git changes.");
-        }
-        const outsideScope = pathsOutsideWriteScope(task, attempt);
-        if (outsideScope.length > 0) {
-          throw new Error(
-            `Manual approval refused changes outside write scope: ${outsideScope.join(", ")}`
-          );
-        }
-        const artifactCwd = attempt?.worktreePath ?? ctx.cwd;
-        const candidateTree = snapshotArtifact(artifactCwd, attempt.touchedFiles);
-        if (!candidateTree) throw new Error("Manual approval requires a scoped Git artifact.");
-        task.provenance = { candidateTree, capturedAt: Date.now() };
-      }
+      if (candidateTree) task.provenance = { candidateTree, capturedAt: Date.now() };
       const proof = captureApprovedProvenance(board, task, loadConfig(ctx.cwd));
-      if (!proof) {
+      if (!proof)
         throw new Error("Manual approval requires an authoritative artifact or final report.");
-      }
       forceStatus(task, "approved");
       task.approvalKind = "manual";
       task.verificationSummary = "accepted manually with versioned artifact proof";
@@ -1095,15 +1115,16 @@ export default function maestro(
 
         try {
           if (action === "list") {
-            const recipes = loadRecipes(ctx.cwd);
+            const recipes = loadRecipeListings(ctx.cwd);
             notify(
               ctx,
               recipes.length === 0
-                ? "No valid workflow recipes found."
+                ? "No workflow recipes found."
                 : recipes
-                    .map(
-                      ({ recipe, scope }) =>
-                        `${recipe.name} [${scope}] — ${recipe.description ?? `${recipe.tasks.length} task(s)`}`
+                    .map((entry) =>
+                      entry.error
+                        ? `${entry.name} [${entry.scope}] — INVALID ${entry.file}: ${truncateText(entry.error, 300)}`
+                        : `${entry.name} [${entry.scope}] — ${entry.recipe?.description ?? `${entry.recipe?.tasks.length ?? 0} task(s)`}`
                     )
                     .join("\n")
             );
@@ -1180,7 +1201,6 @@ export default function maestro(
               config.maxPlanTasks
             );
             const current = loadBoard(ctx.cwd);
-            let archive: string | undefined;
             if (current.tasks.length > 0) {
               const confirmed =
                 ctx.hasUI &&
@@ -1192,13 +1212,8 @@ export default function maestro(
                 notify(ctx, "Recipe run cancelled; current board was not changed.", "warning");
                 return;
               }
-              archive = archiveBoard(ctx.cwd);
-              if (!archive) {
-                notify(ctx, "Could not archive the current board; recipe run cancelled.", "error");
-                return;
-              }
             }
-            replaceBoard(ctx.cwd, expanded, current.revision ?? 0);
+            const archive = replaceBoardWithArchive(ctx.cwd, () => structuredClone(expanded));
             refreshUI(ctx);
             notify(
               ctx,
@@ -1220,7 +1235,13 @@ export default function maestro(
               notify(ctx, "Recipe scope must be user or project.", "warning");
               return;
             }
-            const scope = requestedScope ?? resolveRecipe(ctx.cwd, name).scope;
+            const scope =
+              requestedScope ??
+              loadRecipeListings(ctx.cwd).find((entry) => entry.name === name)?.scope;
+            if (!scope) {
+              notify(ctx, `${name} was not found.`, "warning");
+              return;
+            }
             const confirmed =
               ctx.hasUI &&
               (await ctx.ui.confirm(

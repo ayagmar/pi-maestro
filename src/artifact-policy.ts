@@ -239,10 +239,17 @@ export function artifactFindings(task: Task, attempt: Attempt): Task["findings"]
       add("empty-artifact", "Expected file work produced no attributable Git changes.");
     }
   }
-  const deletedTests = paths.some(
+  const deletedPaths = diff
+    .split(/^diff --git /m)
+    .slice(1)
+    .filter((block) => /(^|\n)deleted file mode/m.test(block))
+    .map((block) => block.split("\n", 1)[0] ?? "")
+    .map((header) => header.match(/^a\/(.+?) b\//)?.[1]?.replaceAll("\\", "/"))
+    .filter((path): path is string => path !== undefined);
+  const deletedTests = deletedPaths.some(
     (path) => /(^|\/)(test|tests)(\/|\.|$)/.test(path) || /\.test\.[cm]?[jt]sx?$/.test(path)
   );
-  if (/deleted file mode/.test(diff) && deletedTests && !/delete|remove/i.test(task.brief)) {
+  if (deletedTests && !/delete|remove/i.test(task.brief)) {
     add("deleted-tests", "Existing tests were deleted without explicit task scope.");
   }
   if (/^[+-].*(testMatch|testRegex|include|exclude).*(narrow|ignore|exclude)/im.test(diff)) {

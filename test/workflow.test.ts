@@ -120,6 +120,7 @@ test("artifact gates reject empty work, test deletion, config narrowing, and con
   candidate.index = 2;
   candidate.touchedFiles = ["outside.ts", "root.test.ts"];
   candidate.diff = [
+    "diff --git a/root.test.ts b/root.test.ts",
     "deleted file mode 100644",
     "- testMatch: all",
     "+ testMatch: narrow exclude",
@@ -139,6 +140,24 @@ test("artifact gates reject empty work, test deletion, config narrowing, and con
     artifactFindings(task, candidate)?.map((finding) => finding.fingerprint),
     ["empty-artifact"]
   );
+});
+
+test("deleted-tests gate ignores deletion of a non-test file while a test file is only touched", () => {
+  const { task } = boardWithTask("ready_for_review");
+  task.writePaths = ["src/**"];
+  const candidate = attempt("done");
+  candidate.index = 2;
+  candidate.touchedFiles = ["src/feature.ts", "src/feature.test.ts"];
+  candidate.diff = [
+    "diff --git a/src/legacy.ts b/src/legacy.ts",
+    "deleted file mode 100644",
+    "diff --git a/src/feature.test.ts b/src/feature.test.ts",
+    "+ added coverage",
+  ].join("\n");
+
+  const fingerprints =
+    artifactFindings(task, candidate)?.map((finding) => finding.fingerprint) ?? [];
+  assert.ok(!fingerprints.includes("deleted-tests"));
 });
 
 function reviewPolicyTask(cwd: string, policy: NonNullable<Task["reviewPolicy"]>): Task {
@@ -2326,6 +2345,63 @@ test("approval auto-commits the task's touched files as one conventional commit"
     assert.match(committed, /widget\.txt/);
     assert.doesNotMatch(committed, /unrelated\.txt/);
     assert.match(git("status", "--porcelain"), /unrelated\.txt/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("failed pre-commit verification leaves no auto-commit on the main tree", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-precommit-verify-test-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "chore: base");
+    const baseHead = git("rev-parse", "HEAD");
+
+    const { board, task } = boardWithTask("ready_for_review");
+    task.commitMessage = "fix: adjust the widget";
+    task.writePaths = ["widget.txt"];
+    task.successCriteria = ["The widget is adjusted"];
+    task.verificationProfile = "required";
+    const done = attempt("Executor completed the task");
+    done.touchedFiles = ["widget.txt"];
+    done.diff = "+fixed";
+    task.attempts.push(done);
+    writeFileSync(join(cwd, "widget.txt"), "fixed\n");
+
+    // Verification passes the candidate gate (first run) but fails at pre-commit
+    // time (second run), so the fix must skip the commit rather than orphan it.
+    const script = join(cwd, "verify.cjs");
+    writeFileSync(
+      script,
+      `const fs = require("node:fs");\nconst countFile = ${JSON.stringify(join(cwd, "count"))};\nconst count = Number(fs.existsSync(countFile) ? fs.readFileSync(countFile, "utf8") : 0) + 1;\nfs.writeFileSync(countFile, String(count));\nprocess.exit(count >= 2 ? 1 : 0);\n`
+    );
+    const verificationProfiles = {
+      required: { command: `${process.execPath} ${script}`, timeoutSeconds: 5 },
+    };
+    saveConfig("project", cwd, { ...config, autoCommit: true, verificationProfiles });
+    recordExecutionFingerprint(cwd, board, task, { ...loadConfig(cwd), verificationProfiles });
+    saveBoard(cwd, board);
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: executor({ finalReport: "Verified.\nVERDICT: APPROVE" }),
+      autoCommit: true,
+      verificationProfiles,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.notEqual(result.status, "approved");
+    assert.equal(git("rev-parse", "HEAD"), baseHead);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.integratedCommit, undefined);
+    assert.match(git("status", "--porcelain"), /widget\.txt/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

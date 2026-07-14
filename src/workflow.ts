@@ -715,6 +715,22 @@ export async function driveBoard(options: {
       if (blockedAfterRuns.length > 0) {
         return finish(providerBlockedReason(blockedAfterRuns));
       }
+      const currentBudgetWarning = runBudgetWarning(afterRuns.tasks, config.maxRunCost);
+      if (currentBudgetWarning) {
+        const reviewable = afterRuns.tasks.filter(
+          (task) =>
+            task.status === "ready_for_review" &&
+            isSelected(task) &&
+            (!terminalReviewConvergence(task) || task.id.toUpperCase() === humanRetryId)
+        );
+        if (reviewable.length > 0) {
+          return finish({
+            code: "budget_blocked",
+            message: `${currentBudgetWarning}; reviewer launches are blocked until the budget is addressed`,
+            taskIds: reviewable.map((task) => task.id),
+          });
+        }
+      }
       const reviewable = afterRuns.tasks.filter(
         (task) =>
           task.status === "ready_for_review" &&
@@ -1919,6 +1935,25 @@ export async function reviewTask(options: {
     } else if (verdict?.approved && autoCommit) {
       const files = reviewedAttempt?.touchedFiles ?? [];
       try {
+        if (configuredProfile) {
+          const verificationStateDir = mkdtempSync(join(tmpdir(), "maestro-verification-"));
+          try {
+            integrationVerification = await runVerification({
+              cwd,
+              stateDir: verificationStateDir,
+              name: `${task.id}-candidate`,
+              command: configuredProfile.command,
+              timeoutSeconds: configuredProfile.timeoutSeconds,
+              ...(signal ? { signal } : {}),
+            });
+          } finally {
+            rmSync(verificationStateDir, { recursive: true, force: true });
+          }
+          if (!integrationVerification.ok) {
+            mechanicalFailure = `Pre-commit verification ${task.verificationProfile} failed; no integration commit was created.`;
+          }
+        }
+        if (mechanicalFailure) throw new Error(mechanicalFailure);
         const committed = await serializeMainTreeOperation(cwd, () =>
           commitAll(cwd, taskCommitMessage(task), files)
         );
@@ -1944,20 +1979,6 @@ export async function reviewTask(options: {
       }
     }
 
-    if (verdict?.approved && integratedCommit && configuredProfile && !worktree) {
-      integrationVerification = await runVerification({
-        cwd,
-        stateDir: stateDir(cwd),
-        name: `${task.id}-integrated`,
-        command: configuredProfile.command,
-        timeoutSeconds: configuredProfile.timeoutSeconds,
-        ...(signal ? { signal } : {}),
-      });
-      if (!integrationVerification.ok) {
-        mechanicalFailure = `Post-integration verification ${task.verificationProfile} failed; artifact remains recoverable.`;
-        verdict = { approved: false, notes: mechanicalFailure };
-      }
-    }
     if (verdict?.approved && requiresIntegration && (!candidateTree || !integratedCommit)) {
       mechanicalFailure =
         "Automated approval requires an authoritative Git artifact and proven integration.";

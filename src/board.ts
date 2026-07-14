@@ -147,9 +147,11 @@ export function loadBoard(cwd: string): Board {
   if (!existsSync(file)) return structuredClone(EMPTY_BOARD);
   const contents = readFileSync(file, "utf-8");
   try {
-    return JSON.parse(contents) as Board;
+    const value: unknown = JSON.parse(contents);
+    if (!isBoard(value)) throw new Error("board has an invalid structure");
+    return value;
   } catch {
-    renameSync(file, `${file}.corrupt-${Date.now()}`);
+    quarantineCorruptBoard(file);
     return structuredClone(EMPTY_BOARD);
   }
 }
@@ -433,6 +435,7 @@ function isBoard(value: unknown): value is Board {
   }
   if (value.activeDecision !== undefined && !isDriveDecision(value.activeDecision)) return false;
   if (value.activeDrive !== undefined && !isActiveDrive(value.activeDrive)) return false;
+  if (value.pausedDrive !== undefined && !isPausedDrive(value.pausedDrive)) return false;
   if (
     value.ownerSessions !== undefined &&
     (!Array.isArray(value.ownerSessions) ||
@@ -441,6 +444,17 @@ function isBoard(value: unknown): value is Board {
     return false;
   }
   return value.tasks.every(isTask);
+}
+
+function isPausedDrive(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
+    (value.taskIds === undefined ||
+      (Array.isArray(value.taskIds) &&
+        value.taskIds.length <= 64 &&
+        value.taskIds.every((id) => typeof id === "string")))
+  );
 }
 
 function isActiveDrive(value: unknown): boolean {
@@ -755,6 +769,7 @@ function isFailureReason(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const kinds = [
     "provider_failure",
+    "stalled",
     "executor_failure",
     "reviewer_rejection",
     "reviewer_failure",
@@ -784,6 +799,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function quarantineCorruptBoard(file: string): void {
+  const prefix = `${file}.corrupt-${Date.now()}`;
+  let destination = prefix;
+  for (let suffix = 1; existsSync(destination); suffix += 1) {
+    destination = `${prefix}-${suffix}`;
+  }
+  renameSync(file, destination);
 }
 
 export function loadStatusHistory(cwd: string): StatusHistoryEntry[] | undefined {
