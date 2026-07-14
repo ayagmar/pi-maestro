@@ -146,6 +146,7 @@ export {
 import { registerMaestroTools } from "./tools.js";
 import {
   type Board,
+  type MaestroConfig,
   type PausedDriveState,
   type Task,
   type TaskStatus,
@@ -182,6 +183,11 @@ interface LivePaneRuntime {
   closing: boolean;
 }
 
+interface PlanPaneRuntime {
+  done?: () => void;
+  closing: boolean;
+}
+
 export function scrollableTextOffset(
   offset: number,
   delta: number,
@@ -192,6 +198,37 @@ export function scrollableTextOffset(
 }
 
 const livePaneResponsiveVisibility = (width: number): boolean => width >= 100;
+
+/** Shared read-only plan projection for modal and beside-editor presentations. */
+export function formatPlanOverview(board: Board, config: MaestroConfig): string[] {
+  const tasks = board.tasks.filter((task) => task.status !== "cancelled");
+  const preflight = preflightWorkflow(board, config);
+  const tierCounts = Object.entries(
+    tasks.reduce<Record<string, number>>((counts, task) => {
+      counts[task.tier] = (counts[task.tier] ?? 0) + 1;
+      return counts;
+    }, {})
+  )
+    .map(([tier, count]) => `${tier}:${count}`)
+    .join(", ");
+  const lines = [
+    `${tasks.length} task(s) · tiers: ${tierCounts || "none"}`,
+    ...formatWorkflowPreflight(preflight).split("\n"),
+    "",
+  ];
+  for (const task of tasks) {
+    const briefLines = task.brief.split("\n");
+    lines.push(
+      `${task.id} ${task.title} [${task.tier}]  (deps: ${task.dependsOn.join(", ") || "none"})`,
+      `  brief: ${briefLines.slice(0, 3).join(" ")}${briefLines.length > 3 ? ` … (+${briefLines.length - 3} more lines)` : ""}`,
+      `  criteria: ${(task.successCriteria ?? []).map((criterion, index) => `${index + 1}. ${criterion}`).join(" ") || "none"}`,
+      `  writes: ${task.writePaths?.join(", ") || "none"}`,
+      `  verification: ${task.verificationProfile ?? "none"} · review: ${task.reviewPolicy ?? "single"} · commit: ${task.commitMessage ?? "auto"}`,
+      ""
+    );
+  }
+  return lines;
+}
 
 export default function maestro(
   pi: ExtensionAPI,
@@ -211,6 +248,7 @@ export default function maestro(
   let previousSession: string | undefined;
   let hiddenLivePaneDriveId: string | undefined;
   let livePane: LivePaneRuntime | undefined;
+  let planPane: PlanPaneRuntime | undefined;
 
   function sessionOwnsBoard(ctx: ExtensionContext, board: Board): boolean {
     if (!board.ownerSessions || board.ownerSessions.length === 0) return true; // legacy board
@@ -268,28 +306,26 @@ export default function maestro(
 
   function livePaneLaunches(ctx: ExtensionContext): LivePaneLaunch[] {
     const board = loadBoard(ctx.cwd);
-    return [...liveRuns.values()]
-      .filter((run) => run.kind === "execute")
-      .map((run) => {
-        const task = findTask(board, run.taskId);
-        const attempt = run.handle.attempt;
-        return {
-          key: `${run.kind}:${run.taskId}:${attempt.startedAt}:${attempt.logFile}`,
-          taskId: run.taskId,
-          title: task?.title ?? run.taskId,
-          kind: run.kind,
-          logFile: attempt.logFile,
-          ...(attempt.model ? { model: attempt.model } : {}),
-          ...(attempt.provider ? { provider: attempt.provider } : {}),
-          turns: run.turns,
-          cost: run.cost,
-          lastActivity: run.lastActivity,
-        };
-      });
+    return [...liveRuns.values()].map((run) => {
+      const task = findTask(board, run.taskId);
+      const attempt = run.handle.attempt;
+      return {
+        key: `${run.kind}:${run.taskId}:${attempt.startedAt}:${attempt.logFile}`,
+        taskId: run.taskId,
+        title: task?.title ?? run.taskId,
+        kind: run.kind,
+        logFile: attempt.logFile,
+        ...(attempt.model ? { model: attempt.model } : {}),
+        ...(attempt.provider ? { provider: attempt.provider } : {}),
+        turns: run.turns,
+        cost: run.cost,
+        lastActivity: run.lastActivity,
+      };
+    });
   }
 
   function watchedLiveRunCount(): number {
-    return [...liveRuns.values()].filter((run) => run.kind === "execute").length;
+    return liveRuns.size;
   }
 
   function canShowLivePane(ctx: ExtensionContext): boolean {
@@ -416,6 +452,7 @@ export default function maestro(
     const board = loadBoard(ctx.cwd);
     notifyQuarantine(ctx);
     syncLivePane(ctx);
+    if (!board.planPending) closePlanPane();
 
     // Sessions that never touched this board (fresh /maestro-less chats in
     // the same repo) don't get its status bar. Live runs always show:
@@ -2271,35 +2308,77 @@ export default function maestro(
     });
   }
 
-  async function showPlanOverview(ctx: ExtensionCommandContext, board: Board): Promise<void> {
-    const tasks = board.tasks.filter((task) => task.status !== "cancelled");
-    const config = loadConfig(ctx.cwd);
-    const preflight = preflightWorkflow(board, config);
-    const tierCounts = Object.entries(
-      tasks.reduce<Record<string, number>>((counts, task) => {
-        counts[task.tier] = (counts[task.tier] ?? 0) + 1;
-        return counts;
-      }, {})
-    )
-      .map(([tier, count]) => `${tier}:${count}`)
-      .join(", ");
-    const lines = [
-      `${tasks.length} task(s) · tiers: ${tierCounts || "none"}`,
-      ...formatWorkflowPreflight(preflight).split("\n"),
-      "",
-    ];
-    for (const task of tasks) {
-      const briefLines = task.brief.split("\n");
-      lines.push(
-        `${task.id} ${task.title} [${task.tier}]  (deps: ${task.dependsOn.join(", ") || "none"})`,
-        `  brief: ${briefLines.slice(0, 3).join(" ")}${briefLines.length > 3 ? ` … (+${briefLines.length - 3} more lines)` : ""}`,
-        `  criteria: ${(task.successCriteria ?? []).map((criterion, index) => `${index + 1}. ${criterion}`).join(" ") || "none"}`,
-        `  writes: ${task.writePaths?.join(", ") || "none"}`,
-        `  verification: ${task.verificationProfile ?? "none"} · review: ${task.reviewPolicy ?? "single"} · commit: ${task.commitMessage ?? "auto"}`,
-        ""
+  function closePlanPane(): void {
+    const pane = planPane;
+    if (!pane || pane.closing || !pane.done) return;
+    pane.closing = true;
+    pane.done();
+  }
+
+  function openPlanPane(ctx: ExtensionCommandContext, board: Board): void {
+    if (planPane || ctx.mode !== "tui") return;
+    const lines = formatPlanOverview(board, loadConfig(ctx.cwd));
+    const pane: PlanPaneRuntime = { closing: false };
+    planPane = pane;
+    let completion: Promise<void>;
+    try {
+      completion = ctx.ui.custom<void>(
+        (_tui, theme, _keybindings, done) => {
+          pane.done = () => done(undefined);
+          const heading = new Text(theme.fg("accent", theme.bold("Maestro Plan · review")), 1, 0);
+          const content = new Text(lines.join("\n"), 1, 0);
+          const footer = new Text(
+            theme.fg("dim", "Read-only · keep typing in the editor · /maestro plan to close"),
+            1,
+            0
+          );
+          return {
+            render: (width: number) => [
+              ...heading.render(width),
+              ...content.render(width),
+              ...footer.render(width),
+            ],
+            invalidate: () => {
+              heading.invalidate();
+              content.invalidate();
+              footer.invalidate();
+            },
+          };
+        },
+        {
+          overlay: true,
+          overlayOptions: {
+            anchor: "right-center",
+            width: "45%",
+            maxHeight: "80%",
+            visible: livePaneResponsiveVisibility,
+          },
+          onHandle: (handle) => {
+            if (!loadBoard(ctx.cwd).planPending) {
+              closePlanPane();
+              return;
+            }
+            handle.unfocus();
+          },
+        }
       );
+    } catch {
+      if (planPane === pane) planPane = undefined;
+      return;
     }
-    await showScrollableText(ctx, "Maestro Plan · review", lines);
+
+    const finish = () => {
+      if (planPane === pane) planPane = undefined;
+    };
+    void completion.then(finish, finish);
+  }
+
+  async function showPlanOverview(ctx: ExtensionCommandContext, board: Board): Promise<void> {
+    await showScrollableText(
+      ctx,
+      "Maestro Plan · review",
+      formatPlanOverview(board, loadConfig(ctx.cwd))
+    );
   }
 
   async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
@@ -2315,10 +2394,12 @@ export default function maestro(
     while (true) {
       const board = loadBoard(ctx.cwd);
       if (board.tasks.length === 0) {
+        closePlanPane();
         notify(ctx, "Board is empty. Plan tasks with maestro_plan.", "warning");
         return;
       }
       if (!board.planPending) {
+        closePlanPane();
         notify(ctx, "No plan is awaiting approval.");
         return;
       }
@@ -2348,6 +2429,11 @@ export default function maestro(
           value: "reject",
           label: "Reject plan",
           description: "Archive and clear this board",
+        },
+        {
+          value: "beside_editor",
+          label: planPane ? "Close review beside editor" : "Review beside editor",
+          description: "Read-only plan overview that leaves the editor focused",
         }
       );
 
@@ -2356,6 +2442,11 @@ export default function maestro(
       if (choice === "overview") {
         await showPlanOverview(ctx, board);
         continue;
+      }
+      if (choice === "beside_editor") {
+        if (planPane) closePlanPane();
+        else openPlanPane(ctx, board);
+        return;
       }
       if (choice.startsWith("task:")) {
         await editPlanTask(ctx, choice.slice("task:".length));
@@ -2422,6 +2513,7 @@ export default function maestro(
           );
           return;
         }
+        closePlanPane();
         refreshUI(ctx);
         notify(ctx, "Plan approved. Executors may now be started with maestro_drive.");
         labelCurrentEntry(ctx, "maestro: plan approved");
@@ -2442,6 +2534,7 @@ export default function maestro(
         notify(ctx, "Could not archive the board; rejection cancelled.", "error");
         return;
       }
+      closePlanPane();
       refreshUI(ctx);
       notify(ctx, `Plan rejected. Board archived at ${archivePath}`);
       return;
@@ -3035,6 +3128,7 @@ export default function maestro(
     activeCwd = ctx.cwd;
     runtimeActive = true;
     closeLivePane();
+    closePlanPane();
     hiddenLivePaneDriveId = undefined;
     liveRuns.clear();
     contextNudgeShown = false;
@@ -3123,6 +3217,7 @@ export default function maestro(
   pi.on("session_shutdown", () => {
     runtimeActive = false;
     closeLivePane();
+    closePlanPane();
     const active = driveController.activeOwner();
     if (active) {
       try {

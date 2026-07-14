@@ -22,6 +22,7 @@ import { deliverPendingDecision } from "../src/drive-controller.js";
 import { exportPlan } from "../src/plan-serialization.js";
 import maestro, {
   assertKnownTaskIds,
+  formatPlanOverview,
   maestroBoardCwd,
   previousBoardSession,
   scrollableTextOffset,
@@ -641,6 +642,85 @@ test("gated plan editor cancel discards draft changes", async () => {
   );
 });
 
+test("plan overview stays read-only beside the focused editor and closes through done", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+      createTask(board, {
+        title: "Side plan",
+        brief: "Read this plan while continuing to type",
+        tier: "standard",
+        writePaths: ["src/side.ts"],
+        successCriteria: ["Side view is readable"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = { steps: [{ keys: select(4) }, { keys: select(4) }] };
+      const runtime = loadMaestro(cwd, undefined, owner, script);
+      const before = loadBoard(cwd);
+
+      await runtime.command.handler("plan", runtime.ctx);
+      const pane = runtime.overlays[0];
+      assert.ok(pane);
+      assert.equal(pane.focused, false);
+      assert.equal(runtime.isEditorFocused(), true);
+      assert.deepEqual(pane.unfocusArgumentCounts, [0]);
+      assert.match(pane.component.render?.(80).join("\n") ?? "", /T1 Side plan/);
+      assert.deepEqual(loadBoard(cwd), before, "the beside-editor view must not mutate the board");
+
+      await runtime.command.handler("plan", runtime.ctx);
+      await waitFor(() => pane.closed, "closing the plan pane did not resolve through done");
+      assert.equal(pane.hideCalls, 0);
+      assert.equal(pane.disposeCalls, 1);
+      assert.deepEqual(loadBoard(cwd), before);
+    }
+  );
+});
+
+test("plan modal and side pane use one overview formatter", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+  createTask(board, { title: "Shared overview", brief: "one formatter", tier: "standard" });
+  assert.match(formatPlanOverview(board, DEFAULT_CONFIG).join("\n"), /T1 Shared overview/);
+
+  const source = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf-8");
+  assert.equal(
+    source.match(/formatWorkflowPreflight\(preflight\)\.split/g)?.length,
+    1,
+    "overview construction must live only in formatPlanOverview"
+  );
+  assert.match(source, /showPlanOverview[\s\S]*formatPlanOverview\(/);
+  assert.match(source, /openPlanPane[\s\S]*formatPlanOverview\(/);
+});
+
+test("approving a plan closes its beside-editor view without changing approval flow", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+      createTask(board, {
+        title: "Approve side plan",
+        brief: "valid plan",
+        tier: "standard",
+        writePaths: ["src/approve.ts"],
+        successCriteria: ["Plan remains valid"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = { steps: [{ keys: select(4) }, { keys: select(2) }] };
+      const runtime = loadMaestro(cwd, undefined, owner, script);
+      await runtime.command.handler("plan", runtime.ctx);
+      const pane = runtime.overlays[0];
+      assert.ok(pane);
+
+      await runtime.command.handler("plan", runtime.ctx);
+      assert.equal(loadBoard(cwd).planPending, false);
+      await waitFor(() => pane.closed, "approval did not close the plan pane");
+      assert.equal(pane.hideCalls, 0);
+    }
+  );
+});
+
 test("gated plan approval reports invalid references and cycles without changing the board", async () => {
   await withBoard(
     (cwd) => {
@@ -734,14 +814,22 @@ test("gated plan rejection confirmation archives and clears the board", async ()
       saveBoard(cwd, board);
     },
     async (cwd) => {
-      const script: UiScript = { steps: [{ keys: select(3) }], confirmations: [true] };
-      const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+      const script: UiScript = {
+        steps: [{ keys: select(4) }, { keys: select(3) }],
+        confirmations: [true],
+      };
+      const runtime = loadMaestro(cwd, undefined, owner, script);
 
-      await command.handler("plan", ctx);
+      await runtime.command.handler("plan", runtime.ctx);
+      const pane = runtime.overlays[0];
+      assert.ok(pane);
+      await runtime.command.handler("plan", runtime.ctx);
 
       assert.deepEqual(loadBoard(cwd).tasks, []);
       assert.equal(listArchivedBoards(cwd).length, 1);
-      assert.match(notices[0] ?? "", /Plan rejected\. Board archived at/);
+      assert.match(runtime.notices[0] ?? "", /Plan rejected\. Board archived at/);
+      await waitFor(() => pane.closed, "rejection did not close the plan pane");
+      assert.equal(pane.hideCalls, 0);
       assert.equal(script.steps.length, 0);
       assert.deepEqual(script.confirmations, []);
     }
@@ -3716,6 +3804,99 @@ test("ambient executor pane cycles through its real input path and resolves ever
       await waitFor(() => reopened.closed, "last settlement did not resolve the reopened pane");
       assert.equal(reopened.hideCalls, 0);
       assert.equal(reopened.disposeCalls, 1);
+    }
+  );
+});
+
+test("review launches reopen the ambient pane with transcript actions", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        cleanupCompletedTasks: false,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Review this",
+        brief: "produce a report",
+        tier: "standard",
+        writePaths: [],
+        successCriteria: ["Report is complete"],
+      });
+      board.ownerSessions = [owner];
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let finishExecutor: ((outcome: RunOutcome) => void) | undefined;
+      let finishReviewer: ((outcome: RunOutcome) => void) | undefined;
+      const steered: string[] = [];
+      const followedUp: string[] = [];
+      const runtime = loadMaestro(cwd, (options) => {
+        const review = options.runId.includes("-review-");
+        const logFile = join(cwd, `${options.runId}.jsonl`);
+        writeFileSync(
+          logFile,
+          `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: review ? "reviewer is checking" : "executor is working" }] } })}\n`
+        );
+        return {
+          attempt: {
+            ...executorAttempt(),
+            logFile,
+            model: review ? "review/model" : "exec/model",
+          },
+          outcome: new Promise<RunOutcome>((resolve) => {
+            if (review) finishReviewer = resolve;
+            else finishExecutor = resolve;
+          }),
+          steer: (message) => steered.push(`${review ? "review" : "execute"}:${message}`),
+          followUp: (message) => followedUp.push(`${review ? "review" : "execute"}:${message}`),
+          abort: () => {},
+        };
+      });
+      await runtime.tools
+        .get("maestro_drive")
+        ?.execute("watch-review", { action: "start" }, undefined, undefined, runtime.ctx);
+      await waitFor(
+        () => finishExecutor !== undefined && runtime.overlays.length === 1,
+        "executor pane did not open"
+      );
+      finishExecutor?.({
+        exitCode: 0,
+        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+        finalReport: "executor report",
+        touchedFiles: [],
+        aborted: false,
+      });
+      await waitFor(
+        () => finishReviewer !== undefined && runtime.overlays.length === 2,
+        "reviewer pane did not open"
+      );
+
+      const reviewerPane = runtime.overlays[1];
+      assert.ok(reviewerPane);
+      const output = reviewerPane.component.render?.(80).join("\n") ?? "";
+      assert.match(output, /T1 · review · \[review\/model\]/);
+      assert.match(output, /reviewer is checking/);
+      runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
+      reviewerPane.component.handleInput("s");
+      reviewerPane.component.handleInput("\r");
+      reviewerPane.component.handleInput("F");
+      for (const character of "summarize review") reviewerPane.component.handleInput(character);
+      reviewerPane.component.handleInput("\r");
+      assert.match(steered[0] ?? "", /^review:Stop - wrong approach/);
+      assert.deepEqual(followedUp, ["review:summarize review"]);
+      reviewerPane.component.handleInput("\x1b");
+
+      finishReviewer?.({
+        exitCode: 0,
+        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+        finalReport: "VERDICT: APPROVE\nReport is complete.",
+        touchedFiles: [],
+        aborted: false,
+      });
+      await waitFor(() => reviewerPane.closed, "reviewer settlement did not close the pane");
+      assert.equal(reviewerPane.hideCalls, 0);
     }
   );
 });

@@ -1873,6 +1873,82 @@ test("live pane steers and queues follow-up for the selected launch", () => {
   }
 });
 
+test("live pane watches mixed reviewer and executor logs without selection flapping", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-review-"));
+  const log = (name: string, text: string) => {
+    const file = join(directory, `${name}.jsonl`);
+    writeFileSync(
+      file,
+      `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`
+    );
+    return file;
+  };
+  const executor: LivePaneLaunch = {
+    key: "execute:T2",
+    taskId: "T2",
+    title: "Executor task",
+    kind: "execute",
+    logFile: log("executor", "executor transcript"),
+    model: "exec/model",
+    turns: 1,
+    cost: 0,
+    lastActivity: "working",
+  };
+  const reviewer: LivePaneLaunch = {
+    key: "review:T3",
+    taskId: "T3",
+    title: "Reviewed task",
+    kind: "review",
+    logFile: log("review", "reviewer transcript"),
+    model: "review/model",
+    turns: 1,
+    cost: 0,
+    lastActivity: "reviewing",
+  };
+  const later: LivePaneLaunch = {
+    ...executor,
+    key: "execute:T4",
+    taskId: "T4",
+    title: "Later executor",
+    logFile: log("later", "later transcript"),
+  };
+  let launches = [executor, reviewer];
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    height: 9,
+  });
+  try {
+    pane.focused = true;
+    pane.render(80);
+    pane.handleInput("\x1b[C");
+    let output = pane.render(80).join("\n");
+    assert.match(output, /T3 · review · \[review\/model\]/);
+    assert.match(output, /reviewer transcript/);
+
+    launches = [...launches, later];
+    assert.match(pane.render(80).join("\n"), /reviewer transcript/);
+    launches = [executor, later];
+    output = pane.render(80).join("\n");
+    assert.match(output, /✓ T3 settled · following T4/);
+    assert.match(output, /later transcript/);
+    assert.equal(
+      (
+        pane
+          .render(80)
+          .join("\n")
+          .match(/✓ T3 settled/g) ?? []
+      ).length,
+      1
+    );
+  } finally {
+    pane.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("live pane windows multiple agents without consuming every transcript row", () => {
   const launches: LivePaneLaunch[] = Array.from({ length: 8 }, (_, index) => ({
     key: `execute:T${index + 1}`,
