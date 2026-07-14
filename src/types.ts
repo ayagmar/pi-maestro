@@ -82,6 +82,13 @@ export interface Attempt {
   failureReason?: FailureReason;
   /** Configured task/dependency fingerprint captured when execution was claimed. */
   executionFingerprint?: string;
+  /** Per-component fingerprint hashes captured alongside executionFingerprint, used to name which contract component went stale. */
+  executionComponentHashes?: {
+    contract: string;
+    execution: string;
+    verification: string;
+    dependencies: string;
+  };
   /** Whether this raw executor launch consumes maxAttempts. Defaults to true for legacy boards. */
   consumesAttempt?: boolean;
   /** @deprecated Legacy marker for a non-consuming provider launch. */

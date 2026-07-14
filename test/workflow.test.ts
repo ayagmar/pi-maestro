@@ -444,6 +444,40 @@ test("review settlement refuses a task contract changed under the held claim", a
   }
 });
 
+test("stale execution inputs finding names the contract component that changed", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-stale-inputs-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    task.successCriteria = ["observable result"];
+    task.attempts.push(attempt("executor completed the work"));
+    const latestAttempt = task.attempts.at(-1);
+    assert.ok(latestAttempt);
+    const initialFingerprint = taskFingerprint(board, task, config);
+    assert.ok(initialFingerprint);
+    latestAttempt.executionFingerprint = initialFingerprint.fingerprint;
+    latestAttempt.executionComponentHashes = initialFingerprint.componentHashes;
+    saveBoard(cwd, board);
+
+    updateTask(cwd, task.id, (fresh) => {
+      fresh.brief = "Do the work, but differently now";
+    });
+
+    const result = await reviewTask({
+      cwd,
+      task: findTask(loadBoard(cwd), task.id) ?? task,
+      tier,
+      startExecutor: executor({}),
+      onUpdate,
+      trackRun,
+    });
+
+    assert.match(result.note ?? "", /contract/i);
+    assert.match(result.note ?? "", /Retry the task/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("candidate mutation between logical reviewers stops convergence", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-between-reviewers-"));
   try {

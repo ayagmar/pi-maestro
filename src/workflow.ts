@@ -1021,8 +1021,11 @@ export async function executeTask(options: {
       );
     }
     let executionFingerprint: string | undefined;
+    let executionComponentHashes: Attempt["executionComponentHashes"];
     const lifecycle = claimDispatchLifecycle(cwd, task.id, "execute", (freshBoard, freshTask) => {
-      executionFingerprint = taskFingerprint(freshBoard, freshTask, loadConfig(cwd))?.fingerprint;
+      const fp = taskFingerprint(freshBoard, freshTask, loadConfig(cwd));
+      executionFingerprint = fp?.fingerprint;
+      executionComponentHashes = fp?.componentHashes;
       if (!executionFingerprint) return false;
       if (!humanRetry) return isRunnableWithConfig(freshBoard, freshTask, loadConfig(cwd), true);
       const eligibility = humanRetryEligibility(freshBoard, freshTask.id, {
@@ -1052,6 +1055,9 @@ export async function executeTask(options: {
       if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
       const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
       if (attempt && executionFingerprint) attempt.executionFingerprint = executionFingerprint;
+      if (attempt && executionComponentHashes) {
+        attempt.executionComponentHashes = executionComponentHashes;
+      }
     });
     const attemptTier: TierConfig = { ...tier };
     delete attemptTier.fallbacks;
@@ -1117,6 +1123,7 @@ export async function executeTask(options: {
     }
     run.attempt.index = attemptIndex;
     if (executionFingerprint) run.attempt.executionFingerprint = executionFingerprint;
+    if (executionComponentHashes) run.attempt.executionComponentHashes = executionComponentHashes;
     run.attempt.promptCharacters = promptContext.characters;
     run.attempt.promptApproximateTokens = promptContext.approximateTokens;
     run.attempt.promptSections = promptContext.sections;
@@ -1305,6 +1312,31 @@ function convergenceRecord(
   };
 }
 
+const STALE_COMPONENT_LABELS: Record<keyof Attempt["executionComponentHashes"] & string, string> = {
+  contract: "Task contract (brief/criteria/policy)",
+  execution: "Execution configuration (tier/review policy)",
+  verification: "Verification profile",
+  dependencies: "Dependency artifacts",
+};
+
+function staleExecutionInputsMessage(
+  latestAttempt: Attempt,
+  currentFingerprint: ReturnType<typeof taskFingerprint>
+): string {
+  const before = latestAttempt.executionComponentHashes;
+  const after = currentFingerprint?.componentHashes;
+  const changedLabels = before
+    ? (Object.keys(STALE_COMPONENT_LABELS) as Array<keyof typeof STALE_COMPONENT_LABELS>)
+        .filter((component) => before[component] !== after?.[component])
+        .map((component) => STALE_COMPONENT_LABELS[component])
+    : [];
+  const subject =
+    changedLabels.length > 0
+      ? changedLabels.join(", ")
+      : "Task, configured execution, verification, or dependency inputs";
+  return `${subject} changed after execution — the attempt ran under the old contract. Retry the task to re-execute under the current one.`;
+}
+
 export async function reviewTask(options: {
   cwd: string;
   task: Task;
@@ -1485,7 +1517,7 @@ export async function reviewTask(options: {
       gateFindings.push({
         fingerprint: "execution-inputs-changed",
         message: latestAttempt?.executionFingerprint
-          ? "Task, configured execution, verification, or dependency inputs changed after execution."
+          ? staleExecutionInputsMessage(latestAttempt, currentExecutionFingerprint)
           : "Execution has no versioned input fingerprint; use explicit manual acceptance for migration.",
         status: "open",
         firstAttempt: latestAttempt?.index ?? task.attempts.length,

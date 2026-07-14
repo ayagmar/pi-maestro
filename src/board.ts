@@ -681,6 +681,14 @@ function isDispatchClaim(value: unknown): boolean {
   );
 }
 
+function isValidExecutionComponentHashes(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  return (["contract", "execution", "verification", "dependencies"] as const).every(
+    (key) => typeof value[key] === "string" && /^[a-f0-9]{64}$/.test(value[key] as string)
+  );
+}
+
 function isAttempt(value: unknown): boolean {
   if (!isRecord(value) || !isRecord(value.usage)) return false;
   return (
@@ -705,6 +713,7 @@ function isAttempt(value: unknown): boolean {
     (value.executionFingerprint === undefined ||
       (typeof value.executionFingerprint === "string" &&
         /^[a-f0-9]{64}$/.test(value.executionFingerprint))) &&
+    isValidExecutionComponentHashes(value.executionComponentHashes) &&
     (value.consumesAttempt === undefined || typeof value.consumesAttempt === "boolean") &&
     (value.providerFailure === undefined || typeof value.providerFailure === "boolean") &&
     (value.finalReport === undefined || typeof value.finalReport === "string") &&
