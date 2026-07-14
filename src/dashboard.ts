@@ -1,9 +1,20 @@
-import { type Theme } from "@earendil-works/pi-coding-agent";
+import { statSync } from "node:fs";
+import { type UserMessage } from "@earendil-works/pi-ai";
 import {
+  AssistantMessageComponent,
+  getMarkdownTheme,
+  SessionManager,
+  type Theme,
+  ToolExecutionComponent,
+  UserMessageComponent,
+} from "@earendil-works/pi-coding-agent";
+import {
+  Container,
   Input,
   Key,
   matchesKey,
   truncateToWidth,
+  type TUI,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -289,6 +300,7 @@ export interface LivePaneLaunch {
   title: string;
   kind: "execute" | "review";
   logFile: string;
+  sessionFile?: string;
   model?: string;
   provider?: string;
   turns: number;
@@ -305,10 +317,29 @@ export interface LivePaneOptions {
   onFollowUp?(launch: LivePaneLaunch, message: string): void;
   height?: number;
   getHeight?: () => number;
+  tui?: TUI;
+  cwd?: string;
 }
+
+type SessionTranscript = {
+  sessionFile: string;
+  fileSize: number;
+  container: Container | undefined;
+  cachedWidth: number | undefined;
+  cachedLines: string[] | undefined;
+};
 
 type LivePaneStatus = "thinking" | "streaming" | "tool" | "done";
 type LivePaneMode = "browse" | "steer_templates" | "steer" | "follow_up";
+
+const OSC133_PROMPT_MARKERS = ["\x1b]133;A\x07", "\x1b]133;B\x07", "\x1b]133;C\x07"] as const;
+
+function stripPromptMarkers(lines: string[]): string[] {
+  return lines.map((line) => {
+    for (const marker of OSC133_PROMPT_MARKERS) line = line.replaceAll(marker, "");
+    return line;
+  });
+}
 
 const LIVE_PANE_STATUS: Record<
   LivePaneStatus,
@@ -327,6 +358,7 @@ export class LivePaneComponent {
   private readonly launchOrder: string[] = [];
   private previousLaunches = new Map<string, LivePaneLaunch>();
   private readonly tails = new Map<string, TranscriptTail>();
+  private readonly sessionTranscripts = new Map<string, SessionTranscript>();
   private scrollOffset = Number.MAX_SAFE_INTEGER;
   private renderedScrollOffset = 0;
   private followMode = true;
@@ -370,7 +402,13 @@ export class LivePaneComponent {
     this.timer = undefined;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    for (const transcript of this.sessionTranscripts.values()) {
+      transcript.container?.invalidate();
+      transcript.cachedWidth = undefined;
+      transcript.cachedLines = undefined;
+    }
+  }
 
   handleInput(data: string): void {
     if (!this.focused) return;
@@ -465,7 +503,9 @@ export class LivePaneComponent {
 
     const tail = this.tailFor(selected);
     tail.poll();
-    const transcript = styledTranscriptLines(this.theme, tail.items, safeWidth);
+    const transcript =
+      this.renderSessionTranscript(selected, safeWidth) ??
+      styledTranscriptLines(this.theme, tail.items, safeWidth);
     if (transcript.length === 0) {
       transcript.push(
         this.theme.fg("muted", truncateToWidth("Waiting for agent output…", safeWidth))
@@ -500,6 +540,116 @@ export class LivePaneComponent {
         : []),
     ];
     return lines.slice(0, height).map((line) => truncateToWidth(line, safeWidth));
+  }
+
+  private renderSessionTranscript(launch: LivePaneLaunch, width: number): string[] | undefined {
+    const sessionFile = launch.sessionFile;
+    const tui = this.options.tui;
+    const cwd = this.options.cwd;
+    if (!sessionFile || !tui || !cwd) return undefined;
+
+    let transcript = this.sessionTranscripts.get(launch.key);
+    if (!transcript || transcript.sessionFile !== sessionFile) {
+      transcript = {
+        sessionFile,
+        fileSize: -1,
+        container: undefined,
+        cachedWidth: undefined,
+        cachedLines: undefined,
+      };
+      this.sessionTranscripts.set(launch.key, transcript);
+    }
+
+    let fileSize: number;
+    try {
+      fileSize = statSync(sessionFile).size;
+    } catch {
+      transcript.container = undefined;
+      transcript.fileSize = -1;
+      transcript.cachedWidth = undefined;
+      transcript.cachedLines = undefined;
+      return undefined;
+    }
+
+    if (fileSize !== transcript.fileSize) {
+      transcript.fileSize = fileSize;
+      transcript.container = this.loadSessionTranscript(sessionFile, tui, cwd);
+      transcript.cachedWidth = undefined;
+      transcript.cachedLines = undefined;
+    }
+    if (!transcript.container) return undefined;
+    if (transcript.cachedLines && transcript.cachedWidth === width) {
+      return transcript.cachedLines;
+    }
+
+    transcript.cachedLines = stripPromptMarkers(transcript.container.render(width));
+    transcript.cachedWidth = width;
+    return transcript.cachedLines;
+  }
+
+  private loadSessionTranscript(sessionFile: string, tui: TUI, cwd: string): Container | undefined {
+    try {
+      const session = SessionManager.open(sessionFile);
+      const container = new Container();
+      const pendingTools = new Map<string, ToolExecutionComponent>();
+
+      for (const message of session.buildSessionContext().messages) {
+        if (message.role === "user") {
+          const text = this.userMessageText(message);
+          if (text) container.addChild(new UserMessageComponent(text, getMarkdownTheme()));
+          continue;
+        }
+        if (message.role === "assistant") {
+          container.addChild(new AssistantMessageComponent(message, true, getMarkdownTheme()));
+          for (const content of message.content) {
+            if (content.type !== "toolCall") continue;
+            const component = new ToolExecutionComponent(
+              content.name,
+              content.id,
+              content.arguments,
+              {},
+              undefined,
+              tui,
+              cwd
+            );
+            container.addChild(component);
+            if (message.stopReason === "aborted" || message.stopReason === "error") {
+              component.updateResult({
+                content: [
+                  {
+                    type: "text",
+                    text:
+                      message.errorMessage ??
+                      (message.stopReason === "aborted" ? "Operation aborted" : "Error"),
+                  },
+                ],
+                isError: true,
+              });
+            } else {
+              pendingTools.set(content.id, component);
+            }
+          }
+          continue;
+        }
+        if (message.role === "toolResult") {
+          const component = pendingTools.get(message.toolCallId);
+          if (!component) continue;
+          component.updateResult(message);
+          pendingTools.delete(message.toolCallId);
+        }
+      }
+      return container;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private userMessageText(message: UserMessage): string {
+    if (typeof message.content === "string") return message.content;
+    return message.content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
   }
 
   private tailFor(launch: LivePaneLaunch): TranscriptTail {

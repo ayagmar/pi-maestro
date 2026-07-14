@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
+import { initTheme, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { taskFingerprint } from "../src/artifact-policy.js";
 import {
   consumeQuarantineNotice,
@@ -36,6 +36,8 @@ import { type StartExecutor } from "../src/workflow.js";
 const owner = "/sessions/orchestrator.jsonl";
 const executor = "/sessions/executor.jsonl";
 const other = "/sessions/other.jsonl";
+const livePaneSessionFixture = join(import.meta.dirname, "fixtures", "live-pane-session.jsonl");
+initTheme();
 
 test("restores owner → worktree executor → owner navigation", () => {
   const boardCwd = maestroBoardCwd("/repo/.pi/maestro/worktrees/t7-attempt-1");
@@ -490,13 +492,7 @@ test("dashboard opens in an overlay with an explicit terminal-sized budget", asy
   await withBoard(
     () => {},
     async (cwd) => {
-      const runtime = loadMaestro(
-        cwd,
-        undefined,
-        owner,
-        undefined,
-        { rows: 24, columns: 120 }
-      );
+      const runtime = loadMaestro(cwd, undefined, owner, undefined, { rows: 24, columns: 120 });
       const openDashboard = runtime.shortcuts.get("ctrl+alt+b");
       assert.ok(openDashboard);
 
@@ -3843,6 +3839,62 @@ test("ambient executor pane cycles through its real input path and resolves ever
       await waitFor(() => reopened.closed, "last settlement did not resolve the reopened pane");
       assert.equal(reopened.hideCalls, 0);
       assert.equal(reopened.disposeCalls, 1);
+    }
+  );
+});
+
+test("ambient executor pane renders its recorded session transcript", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        cleanupCompletedTasks: false,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Rich transcript", brief: "run", tier: "standard" });
+      board.ownerSessions = [owner];
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const sessionFile = join(cwd, "executor-session.jsonl");
+      const logFile = join(cwd, "executor-events.jsonl");
+      copyFileSync(livePaneSessionFixture, sessionFile);
+      writeFileSync(
+        logFile,
+        `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "raw event fallback" }] } })}\n`
+      );
+      let finish: ((outcome: RunOutcome) => void) | undefined;
+      const runtime = loadMaestro(cwd, () => ({
+        attempt: { ...executorAttempt(), logFile, sessionFile },
+        outcome: new Promise<RunOutcome>((resolve) => {
+          finish = resolve;
+        }),
+        steer: () => {},
+        followUp: () => {},
+        abort: () => {},
+      }));
+
+      await runtime.tools
+        .get("maestro_drive")
+        ?.execute("rich-pane", { action: "start" }, undefined, undefined, runtime.ctx);
+      await waitFor(() => runtime.overlays.length === 1, "live pane did not open");
+      const pane = runtime.overlays[0];
+      assert.ok(pane);
+      const output = pane.component.render?.(80).join("\n") ?? "";
+      assert.match(output, /Assistant fixture answer/);
+      assert.match(output, /read/);
+      assert.doesNotMatch(output, /raw event fallback/);
+
+      finish?.({
+        exitCode: 1,
+        usage: { input: 0, output: 0, cost: 0, turns: 1 },
+        finalReport: "cancelled",
+        touchedFiles: [],
+        aborted: true,
+        failureCause: "user_abort",
+      });
+      await waitFor(() => pane.closed, "live pane did not close after settlement");
     }
   );
 });

@@ -315,6 +315,7 @@ export default function maestro(
         title: task?.title ?? run.taskId,
         kind: run.kind,
         logFile: attempt.logFile,
+        ...(attempt.sessionFile ? { sessionFile: attempt.sessionFile } : {}),
         ...(attempt.model ? { model: attempt.model } : {}),
         ...(attempt.provider ? { provider: attempt.provider } : {}),
         turns: run.turns,
@@ -363,6 +364,8 @@ export default function maestro(
             getLaunches: () => livePaneLaunches(ctx),
             getHeight: () => Math.max(1, Math.floor(tui.terminal.rows * 0.8)),
             requestRender: () => tui.requestRender(),
+            tui,
+            cwd: ctx.cwd,
             onEscape: () => {
               pane.handle?.unfocus();
               refreshUI(ctx);

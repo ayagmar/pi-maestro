@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { type Theme } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
+import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { humanRetryEligibility } from "../src/board.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import {
@@ -24,6 +24,10 @@ const fakeTheme = {
   fg: (_color: string, text: string) => text,
   bold: (text: string) => text,
 } as unknown as Theme;
+
+const fakeTui = { requestRender: () => {} } as unknown as TUI;
+const livePaneSessionFixture = join(import.meta.dirname, "fixtures", "live-pane-session.jsonl");
+initTheme();
 
 function makeTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -1689,6 +1693,144 @@ test("changes requested uses an error color distinct from running", () => {
     assert.ok(colors.some(([color, text]) => color === "error" && text === "↻"));
   } finally {
     dashboard.dispose();
+  }
+});
+
+test("live pane renders session messages with pi chat components", () => {
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [
+      {
+        key: "execute:T1:session",
+        taskId: "T1",
+        title: "Session transcript",
+        kind: "execute",
+        logFile: "/missing/raw-log.jsonl",
+        sessionFile: livePaneSessionFixture,
+        turns: 1,
+        cost: 0,
+        lastActivity: "working",
+      },
+    ],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    tui: fakeTui,
+    cwd: "/tmp/live-pane-fixture",
+    height: 30,
+  });
+  try {
+    const output = pane.render(80).join("\n");
+    assert.match(output, /Inspect the fixture/);
+    assert.match(output, /Assistant fixture answer/);
+    assert.match(output, /read/);
+    assert.doesNotMatch(output, /\]133;A/);
+  } finally {
+    pane.dispose();
+  }
+});
+
+test("live pane falls back to raw rows for unavailable session transcripts", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-fallback-"));
+  const logFile = join(directory, "executor.jsonl");
+  const corruptSessionFile = join(directory, "corrupt-session.jsonl");
+  writeFileSync(
+    logFile,
+    `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "raw fallback line" }] } })}\n`
+  );
+  writeFileSync(corruptSessionFile, "not jsonl\n");
+
+  try {
+    for (const sessionFile of [join(directory, "missing-session.jsonl"), corruptSessionFile]) {
+      const pane = new LivePaneComponent(fakeTheme, {
+        getLaunches: () => [
+          {
+            key: `execute:T1:${sessionFile}`,
+            taskId: "T1",
+            title: "Fallback transcript",
+            kind: "execute",
+            logFile,
+            sessionFile,
+            turns: 1,
+            cost: 0,
+            lastActivity: "working",
+          },
+        ],
+        requestRender: () => {},
+        onEscape: () => {},
+        onCycleVisibility: () => {},
+        tui: fakeTui,
+        cwd: directory,
+        height: 8,
+      });
+      try {
+        assert.doesNotThrow(() => pane.render(80));
+        assert.match(pane.render(80).join("\n"), /raw fallback line/);
+      } finally {
+        pane.dispose();
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("live pane reloads a session transcript when its file grows", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-reload-"));
+  const sessionFile = join(directory, "session.jsonl");
+  copyFileSync(livePaneSessionFixture, sessionFile);
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [
+      {
+        key: "execute:T1:reload",
+        taskId: "T1",
+        title: "Reload transcript",
+        kind: "execute",
+        logFile: "/missing/raw-log.jsonl",
+        sessionFile,
+        turns: 1,
+        cost: 0,
+        lastActivity: "working",
+      },
+    ],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    tui: fakeTui,
+    cwd: directory,
+    height: 30,
+  });
+  try {
+    assert.doesNotMatch(pane.render(80).join("\n"), /Reloaded assistant line/);
+    appendFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        type: "message",
+        id: "assistant-2",
+        parentId: "tool-result-1",
+        timestamp: "2026-01-01T00:00:04.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Reloaded assistant line" }],
+          api: "openai-responses",
+          provider: "openai",
+          model: "fixture-model",
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "stop",
+          timestamp: 4,
+        },
+      })}\n`
+    );
+    assert.match(pane.render(80).join("\n"), /Reloaded assistant line/);
+  } finally {
+    pane.dispose();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
