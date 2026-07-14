@@ -79,8 +79,8 @@ test("dashboard renders header, tasks, and footer within width", () => {
   }
 });
 
-test("dashboard renders every task from the stuck five-task board in a tall terminal", () => {
-  // Contract/state shape from .pi/maestro/archive/2026-07-14T12-47-05.461Z-board.json.
+test("task list windowing renders every task when the pane is taller than the list", () => {
+  // Five dependent tasks with an active reviewer-failure decision, more rows than the terminal needs.
   const board: Board = {
     version: 1,
     nextTaskNumber: 6,
@@ -97,7 +97,7 @@ test("dashboard renders every task from the stuck five-task board in a tall term
       }),
     ],
     activeDecision: {
-      id: "stuck-review",
+      id: "decision-1",
       kind: "reviewer_failure",
       taskIds: ["T1"],
       evidence: "review operation failed",
