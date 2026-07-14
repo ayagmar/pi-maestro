@@ -903,133 +903,15 @@ export class Dashboard {
     const selectedLaunch = this.navigationLevel === "launch" ? this.selectedLaunch() : undefined;
     const attempt = selectedLaunch?.attempt ?? task.attempts.at(-1);
     const review = selectedLaunch?.review;
-    const phase = this.phases().find((candidate) => candidate.current)?.label ?? "execution";
-    const lines: string[] = [
-      `Run › ${phase} › ${task.id}${selectedLaunch ? ` › ${selectedLaunch.label}` : ""}`,
-      `Prompt source: ${singleLine(task.brief).slice(0, 500)}`,
-    ];
-    if (task.successCriteria?.length) {
-      lines.push(
-        `Success criteria: ${task.successCriteria.map(singleLine).join(" | ").slice(0, 800)}`
-      );
-    }
-    if (attempt) {
-      const executionUsage = executorUsage(attempt);
-      lines.push(
-        `Executor identity: model ${attempt.model ?? "unknown"} · provider ${attempt.provider ?? "unknown"}`,
-        `Executor usage: ${executionUsage.turns} turns · $${executionUsage.cost.toFixed(4)} · ${executionUsage.input} input · ${executionUsage.output} output`
-      );
-      if (attempt.promptCharacters !== undefined || attempt.promptApproximateTokens !== undefined) {
-        lines.push(
-          `Executor prompt: ${attempt.promptCharacters ?? 0} chars · ~${attempt.promptApproximateTokens ?? 0} tokens${formatPromptSections(attempt.promptSections)}`
-        );
-      }
-      if (attempt.finalReport)
-        lines.push(`Final result: ${singleLine(attempt.finalReport).slice(0, 1_000)}`);
-      if (attempt.touchedFiles.length > 0) {
-        lines.push(`Changed files: ${attempt.touchedFiles.join(", ").slice(0, 800)}`);
-      }
-    }
     const latestReview = selectedLaunch ? review : attempt?.reviewLaunches?.at(-1);
-    if (latestReview) {
-      lines.push(
-        `Reviewer: ${latestReview.role ?? "reviewer"} · ${latestReview.verdict ?? latestReview.failureReason?.kind ?? "pending"} · model ${latestReview.model ?? "unknown"} · provider ${latestReview.provider ?? "unknown"}`,
-        `Review usage: ${latestReview.usage.turns} turns · $${latestReview.usage.cost.toFixed(4)} · ${latestReview.usage.input} input · ${latestReview.usage.output} output`
-      );
-      if (
-        latestReview.promptCharacters !== undefined ||
-        latestReview.promptApproximateTokens !== undefined
-      ) {
-        lines.push(
-          `Review prompt: ${latestReview.promptCharacters ?? 0} chars · ~${latestReview.promptApproximateTokens ?? 0} tokens${formatPromptSections(latestReview.promptSections)}`
-        );
-      }
-      if (latestReview.finalReport) {
-        lines.push(`Review result: ${singleLine(latestReview.finalReport).slice(0, 1_000)}`);
-      }
-      if (latestReview.criterionEvidence?.length) {
-        lines.push(
-          `Criterion evidence: ${latestReview.criterionEvidence
-            .map(
-              (entry) =>
-                `${entry.criterion} ${entry.passed ? "PASS" : "FAIL"} ${singleLine(entry.evidence)}`
-            )
-            .join(" | ")
-            .slice(0, 1_000)}`
-        );
-      }
-    } else if (attempt?.reviewUsage) {
-      lines.push(
-        `Legacy review: model ${attempt.reviewModel ?? "unknown"} · provider ${attempt.reviewProvider ?? "unknown"} · ${attempt.reviewUsage.turns} turns · $${attempt.reviewUsage.cost.toFixed(4)}`
-      );
-    }
-    if (attempt?.reviewConvergence) {
-      lines.push(
-        `Convergence: ${attempt.reviewConvergence.policy} · ${attempt.reviewConvergence.status} · ${attempt.reviewConvergence.actualApprovals}/${attempt.reviewConvergence.requiredApprovals} approvals · ${singleLine(attempt.reviewConvergence.summary).slice(0, 500)}`
-      );
-    }
-    if (task.findings?.length) {
-      lines.push(
-        `Findings: ${task.findings
-          .map(
-            (finding) => `${finding.status} ${finding.fingerprint}: ${singleLine(finding.message)}`
-          )
-          .join(" | ")
-          .slice(0, 1_000)}`
-      );
-    }
-    if (task.provenance?.candidateTree) {
-      lines.push(`Candidate tree: ${task.provenance.candidateTree}`);
-    }
-    if (task.approvedProvenance) {
-      lines.push(
-        `Completion fingerprint: ${task.approvedProvenance.fingerprint.slice(0, 12)} · ${task.approvedProvenance.artifact.kind} ${task.approvedProvenance.artifact.identity.slice(0, 12)}`
-      );
-    } else if (task.status === "approved") {
-      lines.push("Completion fingerprint: legacy proof unavailable · retry or create a successor");
-    }
-    if (task.provenance?.integratedTree) {
-      lines.push(`Integrated tree: ${task.provenance.integratedTree}`);
-    }
-    const integratedCommit = task.provenance?.integratedCommit ?? task.integratedCommit;
-    if (integratedCommit) lines.push(`Integration commit: ${integratedCommit}`);
-    if (task.verificationProfile || task.verificationSummary || task.provenance?.verifiedAt) {
-      lines.push(
-        `Verification: ${task.provenance?.verifiedAt ? "passed" : "pending"} · profile ${task.provenance?.verificationProfile ?? task.verificationProfile ?? "none"} · ${singleLine(task.verificationSummary ?? "no summary")}`
-      );
-    }
-    if (attempt) {
-      lines.push(
-        `Recovery refs: worktree ${attempt.worktreePath ?? "none"} · branch ${attempt.branch ?? "none"} · log ${attempt.logFile} · session ${attempt.sessionFile ?? "none"}`
-      );
-      if (attempt.failureReason) {
-        lines.push(
-          `Failure: ${attempt.failureReason.kind} · ${singleLine(attempt.failureReason.message)} · ${attempt.failureReason.retryable ? "retryable" : "not retryable"}`
-        );
-      }
-    }
-    if (task.dispatchClaim || task.dispatchNote) {
-      lines.push(
-        `Dispatch: ${task.dispatchClaim?.kind ?? "none"} ${task.dispatchClaim?.id ?? ""} · ${singleLine(task.dispatchNote ?? "no note")}`
-      );
-    }
-    if (board.pausedDrive) {
-      lines.push(
-        `Paused drive: owner ${board.pausedDrive.ownerSession ?? "unknown"} · scope ${board.pausedDrive.taskIds?.join(", ") ?? "all"}`
-      );
-    }
-    const decision = board.activeDecision;
-    if (decision?.taskIds.includes(task.id)) {
-      lines.push(
-        `Decision: ${decision.id} · ${decision.kind} · owner ${decision.ownerSession ?? "unknown"} · ${singleLine(decision.evidence).slice(0, 500)}`
-      );
-    }
+    const phase = this.phases().find((candidate) => candidate.current)?.label ?? "execution";
 
     const logFile = selectedLaunch
       ? selectedLaunch.kind === "review"
         ? latestReview?.logFile
         : attempt?.logFile
       : attempt?.logFile;
+    let lastActivity: string | undefined;
     if (logFile) {
       let tail = this.tails.get(logFile);
       if (!tail) {
@@ -1037,23 +919,47 @@ export class Dashboard {
         this.tails.set(logFile, tail);
       }
       tail.poll();
-      const activity = tail.items
+      lastActivity = tail.items
         .slice(-3)
         .map((item) => singleLine(item.text))
         .filter(Boolean)
         .join(" | ");
-      if (activity) lines.push(`Recent activity: ${activity.slice(0, 800)}`);
     }
 
-    const wrapped = lines.flatMap((line) => wrapText(line, width));
+    const sections = projectEvidenceSections(task, selectedLaunch, {
+      phaseLabel: phase,
+      ...(lastActivity ? { lastActivity } : {}),
+      ...(board.pausedDrive ? { pausedDrive: board.pausedDrive } : {}),
+      ...(board.activeDecision ? { decision: board.activeDecision } : {}),
+    });
+
+    const roled: { kind: "banner" | "header" | "body"; text: string }[] = [
+      {
+        kind: "body",
+        text: `Run › ${phase} › ${task.id}${selectedLaunch ? ` › ${selectedLaunch.label}` : ""}`,
+      },
+    ];
+    const reason = latestFailure(task);
+    if (reason && (task.status === "failed" || task.status === "changes_requested")) {
+      roled.push({ kind: "banner", text: `Reason: ${reason}` });
+    }
+    for (const section of sections) {
+      roled.push({ kind: "header", text: section.title });
+      for (const line of section.lines) roled.push({ kind: "body", text: line });
+    }
+
+    const wrapped = roled.flatMap((entry) =>
+      wrapText(entry.text, width).map((text) => ({ kind: entry.kind, text }))
+    );
     const maxScroll = Math.max(0, wrapped.length - height);
     if (this.scrollUp > maxScroll) this.scrollUp = maxScroll;
     const end = wrapped.length - this.scrollUp;
-    return wrapped
-      .slice(Math.max(0, end - height), end)
-      .map((line, index) =>
-        index === 0 ? this.theme.bold(line) : this.theme.fg("toolOutput", line)
-      );
+    return wrapped.slice(Math.max(0, end - height), end).map((entry, index) => {
+      if (index === 0) return this.theme.bold(entry.text);
+      if (entry.kind === "banner") return this.theme.fg("error", entry.text);
+      if (entry.kind === "header") return this.theme.fg("accent", entry.text);
+      return this.theme.fg("toolOutput", entry.text);
+    });
   }
 
   private nextAction(task: Task): string {
@@ -1149,6 +1055,176 @@ export class Dashboard {
     );
     return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
   }
+}
+
+export interface EvidenceSection {
+  title: string;
+  lines: string[];
+}
+
+export interface EvidenceExtras {
+  phaseLabel: string;
+  lastActivity?: string;
+  pausedDrive?: Board["pausedDrive"];
+  decision?: Board["activeDecision"];
+}
+
+const EVIDENCE_SECTION_LINE_BUDGET = 12;
+
+/**
+ * Pure projection from a task's persisted evidence (plus caller-supplied live/board extras)
+ * into fixed, ordered, budgeted sections for the evidence view. Never invents data — a section
+ * with nothing to show is omitted entirely.
+ */
+export function projectEvidenceSections(
+  task: Task,
+  selectedLaunch: DashboardLaunch | undefined,
+  extras: EvidenceExtras
+): EvidenceSection[] {
+  const attempt = selectedLaunch?.attempt ?? task.attempts.at(-1);
+  const latestReview = selectedLaunch ? selectedLaunch.review : attempt?.reviewLaunches?.at(-1);
+
+  const contract: string[] = [`Prompt source: ${singleLine(task.brief).slice(0, 500)}`];
+  if (task.successCriteria?.length) {
+    contract.push(
+      `Success criteria: ${task.successCriteria.map(singleLine).join(" | ").slice(0, 800)}`
+    );
+  }
+
+  const review: string[] = [];
+  if (latestReview) {
+    review.push(
+      `Reviewer: ${latestReview.role ?? "reviewer"} · ${latestReview.verdict ?? latestReview.failureReason?.kind ?? "pending"} · model ${latestReview.model ?? "unknown"} · provider ${latestReview.provider ?? "unknown"}`,
+      `Review usage: ${latestReview.usage.turns} turns · $${latestReview.usage.cost.toFixed(4)} · ${latestReview.usage.input} input · ${latestReview.usage.output} output`
+    );
+    if (latestReview.finalReport) {
+      review.push(`Review result: ${singleLine(latestReview.finalReport).slice(0, 1_000)}`);
+    }
+    for (const entry of latestReview.criterionEvidence ?? []) {
+      review.push(
+        `Criterion evidence: ${entry.criterion} ${entry.passed ? "PASS" : "FAIL"} ${singleLine(entry.evidence).slice(0, 500)}`
+      );
+    }
+  } else if (attempt?.reviewUsage) {
+    review.push(
+      `Legacy review: model ${attempt.reviewModel ?? "unknown"} · provider ${attempt.reviewProvider ?? "unknown"} · ${attempt.reviewUsage.turns} turns · $${attempt.reviewUsage.cost.toFixed(4)}`
+    );
+  }
+  if (attempt?.reviewConvergence) {
+    review.push(
+      `Convergence: ${attempt.reviewConvergence.policy} · ${attempt.reviewConvergence.status} · ${attempt.reviewConvergence.actualApprovals}/${attempt.reviewConvergence.requiredApprovals} approvals · ${singleLine(attempt.reviewConvergence.summary).slice(0, 500)}`
+    );
+  }
+  for (const finding of task.findings ?? []) {
+    review.push(
+      `Finding: ${finding.status} ${finding.fingerprint}: ${singleLine(finding.message).slice(0, 500)}`
+    );
+  }
+
+  const execution: string[] = [];
+  if (attempt) {
+    const executionUsage = executorUsage(attempt);
+    execution.push(
+      `Executor identity: model ${attempt.model ?? "unknown"} · provider ${attempt.provider ?? "unknown"}`,
+      `Executor usage: ${executionUsage.turns} turns · $${executionUsage.cost.toFixed(4)} · ${executionUsage.input} input · ${executionUsage.output} output`
+    );
+    if (attempt.finalReport) {
+      execution.push(`Final result: ${singleLine(attempt.finalReport).slice(0, 1_000)}`);
+    }
+  }
+  if (extras.pausedDrive) {
+    execution.push(
+      `Paused drive: owner ${extras.pausedDrive.ownerSession ?? "unknown"} · scope ${extras.pausedDrive.taskIds?.join(", ") ?? "all"}`
+    );
+  }
+  if (extras.decision?.taskIds.includes(task.id)) {
+    execution.push(
+      `Decision: ${extras.decision.id} · ${extras.decision.kind} · owner ${extras.decision.ownerSession ?? "unknown"} · ${singleLine(extras.decision.evidence).slice(0, 500)}`
+    );
+  }
+  if (extras.lastActivity) execution.push(`Recent activity: ${extras.lastActivity.slice(0, 800)}`);
+
+  const artifact: string[] = [];
+  if (task.provenance?.candidateTree)
+    artifact.push(`Candidate tree: ${task.provenance.candidateTree}`);
+  if (task.approvedProvenance) {
+    artifact.push(
+      `Completion fingerprint: ${task.approvedProvenance.fingerprint.slice(0, 12)} · ${task.approvedProvenance.artifact.kind} ${task.approvedProvenance.artifact.identity.slice(0, 12)}`
+    );
+  } else if (task.status === "approved") {
+    artifact.push("Completion fingerprint: legacy proof unavailable · retry or create a successor");
+  }
+  if (task.provenance?.integratedTree)
+    artifact.push(`Integrated tree: ${task.provenance.integratedTree}`);
+  const integratedCommit = task.provenance?.integratedCommit ?? task.integratedCommit;
+  if (integratedCommit) artifact.push(`Integration commit: ${integratedCommit}`);
+  if (task.verificationProfile || task.verificationSummary || task.provenance?.verifiedAt) {
+    artifact.push(
+      `Verification: ${task.provenance?.verifiedAt ? "passed" : "pending"} · profile ${task.provenance?.verificationProfile ?? task.verificationProfile ?? "none"} · ${singleLine(task.verificationSummary ?? "no summary")}`
+    );
+  }
+
+  const recovery: string[] = [];
+  if (attempt) {
+    recovery.push(
+      `Recovery refs: worktree ${attempt.worktreePath ?? "none"} · branch ${attempt.branch ?? "none"} · log ${attempt.logFile} · session ${attempt.sessionFile ?? "none"}`
+    );
+    if (attempt.failureReason) {
+      recovery.push(
+        `Failure: ${attempt.failureReason.kind} · ${singleLine(attempt.failureReason.message)} · ${attempt.failureReason.retryable ? "retryable" : "not retryable"}`
+      );
+    }
+  }
+  if (task.dispatchClaim || task.dispatchNote) {
+    recovery.push(
+      `Dispatch: ${task.dispatchClaim?.kind ?? "none"} ${task.dispatchClaim?.id ?? ""} · ${singleLine(task.dispatchNote ?? "no note")}`
+    );
+  }
+
+  const accounting: string[] = [];
+  if (
+    attempt &&
+    (attempt.promptCharacters !== undefined || attempt.promptApproximateTokens !== undefined)
+  ) {
+    accounting.push(
+      `Executor prompt: ${attempt.promptCharacters ?? 0} chars · ~${attempt.promptApproximateTokens ?? 0} tokens${formatPromptSections(attempt.promptSections)}`
+    );
+  }
+  if (attempt && attempt.touchedFiles.length > 0) {
+    accounting.push(`Changed files: ${attempt.touchedFiles.join(", ").slice(0, 800)}`);
+  }
+  if (
+    latestReview &&
+    (latestReview.promptCharacters !== undefined ||
+      latestReview.promptApproximateTokens !== undefined)
+  ) {
+    accounting.push(
+      `Review prompt: ${latestReview.promptCharacters ?? 0} chars · ~${latestReview.promptApproximateTokens ?? 0} tokens${formatPromptSections(latestReview.promptSections)}`
+    );
+  }
+
+  return [
+    { title: "Contract", lines: contract },
+    { title: "Review", lines: review },
+    { title: "Execution", lines: execution },
+    { title: "Artifact & verification", lines: artifact },
+    { title: "Recovery", lines: recovery },
+    { title: "Accounting", lines: accounting },
+  ]
+    .filter((section) => section.lines.length > 0)
+    .map(applyEvidenceSectionBudget);
+}
+
+function applyEvidenceSectionBudget(section: EvidenceSection): EvidenceSection {
+  if (section.lines.length <= EVIDENCE_SECTION_LINE_BUDGET) return section;
+  const hidden = section.lines.length - EVIDENCE_SECTION_LINE_BUDGET;
+  return {
+    title: section.title,
+    lines: [
+      ...section.lines.slice(0, EVIDENCE_SECTION_LINE_BUDGET),
+      `… (+${hidden} more — open session for full detail)`,
+    ],
+  };
 }
 
 function bindingLabel(key: (typeof DASHBOARD_BINDINGS)[number]["key"]): string {

@@ -12,6 +12,7 @@ import {
   type DashboardActions,
   DASHBOARD_BINDINGS,
   DEFAULT_DASHBOARD_BODY_HEIGHT,
+  projectEvidenceSections,
   taskLaunches,
   wrapText,
 } from "../src/dashboard.js";
@@ -1008,7 +1009,7 @@ test("dashboard evidence view exposes persisted execution, review, artifact, ver
       "Review usage:",
       "Criterion evidence:",
       "Convergence:",
-      "Findings:",
+      "Finding:",
       "Candidate tree: candidate-tree",
       "Integrated tree: integrated-tree",
       "Integration commit: integrated-commit",
@@ -1019,6 +1020,127 @@ test("dashboard evidence view exposes persisted execution, review, artifact, ver
     ]) {
       assert.match(output, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("projectEvidenceSections omits empty sections and is deterministic for a task with no attempts", () => {
+  const task = makeTask({ brief: "Investigate the flaky retry path" });
+  const extras = { phaseLabel: "execution" };
+  const sections = projectEvidenceSections(task, undefined, extras);
+  assert.deepEqual(
+    sections.map((section) => section.title),
+    ["Contract"]
+  );
+  assert.deepEqual(sections, projectEvidenceSections(task, undefined, extras));
+});
+
+test("projectEvidenceSections truncates a section past its line budget with an explicit marker", () => {
+  const findings = Array.from({ length: 15 }, (_, index) => ({
+    fingerprint: `finding-${index}`,
+    message: `issue ${index}`,
+    status: "open" as const,
+    firstAttempt: 1,
+    lastAttempt: 1,
+  }));
+  const task = makeTask({ findings });
+  const sections = projectEvidenceSections(task, undefined, { phaseLabel: "execution" });
+  const review = sections.find((section) => section.title === "Review");
+  assert.ok(review);
+  assert.equal(review.lines.length, 13);
+  assert.equal(review.lines.at(-1), "… (+3 more — open session for full detail)");
+  assert.ok(review.lines.slice(0, 12).every((line) => line.startsWith("Finding: ")));
+});
+
+test("projectEvidenceSections reflects the selected launch's attempt, not just the latest one", () => {
+  const attempts = [1, 2].map((index) => ({
+    index,
+    logFile: `attempt-${index}.log`,
+    thinking: "low" as const,
+    startedAt: index,
+    usage: { input: 1, output: 1, cost: 0.01 * index, turns: index },
+    model: `model-${index}`,
+    finalReport: `result ${index}`,
+    touchedFiles: [],
+  }));
+  const task = makeTask({ attempts });
+  const [firstLaunch] = taskLaunches(task);
+  assert.ok(firstLaunch);
+  const sections = projectEvidenceSections(task, firstLaunch, { phaseLabel: "execution" });
+  const execution = sections.find((section) => section.title === "Execution");
+  assert.ok(execution);
+  assert.ok(execution.lines.some((line) => line.includes("model-1")));
+  assert.ok(!execution.lines.some((line) => line.includes("model-2")));
+});
+
+test("dashboard evidence view shows the failure banner first, section headers in order, and accounting last", () => {
+  const task = makeTask({
+    status: "changes_requested",
+    attempts: [
+      {
+        index: 1,
+        logFile: "missing.log",
+        thinking: "low",
+        startedAt: 1,
+        usage: { input: 10, output: 5, cost: 0.2, turns: 2 },
+        promptCharacters: 100,
+        promptApproximateTokens: 25,
+        touchedFiles: ["src/dashboard.ts"],
+        failureReason: {
+          kind: "reviewer_rejection",
+          message: "reviewer requested changes",
+          retryable: true,
+        },
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { bodyHeight: 40 });
+  try {
+    dashboard.handleInput("e");
+    const output = dashboard.render(140).join("\n");
+    const bannerIndex = output.indexOf("Reason: reviewer rejection");
+    const contractIndex = output.indexOf("Contract");
+    const executionIndex = output.indexOf("Execution");
+    const recoveryIndex = output.indexOf("Recovery");
+    const accountingIndex = output.indexOf("Accounting");
+    assert.ok(bannerIndex >= 0 && bannerIndex < contractIndex);
+    assert.ok(contractIndex < executionIndex);
+    assert.ok(executionIndex < recoveryIndex);
+    assert.ok(recoveryIndex < accountingIndex);
+    assert.ok(accountingIndex === output.lastIndexOf("Accounting"));
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard evidence view keeps the selected task fixed while switching launches", () => {
+  const attempts = [1, 2].map((index) => ({
+    index,
+    logFile: `attempt-${index}.log`,
+    thinking: "low" as const,
+    startedAt: index,
+    usage: { input: 1, output: 1, cost: 0.01 * index, turns: index },
+    model: `model-${index}`,
+    finalReport: `result ${index}`,
+    touchedFiles: [],
+  }));
+  const task = makeTask({ attempts });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { bodyHeight: 40 });
+  try {
+    dashboard.handleInput("\x1b[D");
+    dashboard.handleInput("\x1b[C");
+    dashboard.handleInput("\x1b[C");
+    let output = dashboard.render(140).join("\n");
+    assert.match(output, /Run › execution › T1 › execute #1/);
+    assert.match(output, /model-1/);
+
+    dashboard.handleInput("\x1b[B");
+    output = dashboard.render(140).join("\n");
+    assert.match(output, /Run › execution › T1 › execute #2/);
+    assert.match(output, /model-2/);
   } finally {
     dashboard.dispose();
   }
