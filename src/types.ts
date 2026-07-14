@@ -174,6 +174,10 @@ export interface Task {
   brief: string;
   /** Conventional commit message used when auto-committing this task's approved work. */
   commitMessage?: string;
+  /** Successor task that replaced this task. */
+  supersededBy?: string;
+  /** Predecessor task that this task replaced. */
+  supersedes?: string;
   tier: string;
   status: TaskStatus;
   dependsOn: string[];

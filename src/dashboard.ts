@@ -805,11 +805,11 @@ export class Dashboard {
     }
 
     const lines: string[] = [];
-    const visibleTaskCount = Math.max(1, Math.ceil(height / 2));
-    const maxStart = Math.max(0, tasks.length - visibleTaskCount);
-    const centeredStart = this.selected - Math.floor(visibleTaskCount / 2);
-    const start = Math.min(Math.max(0, centeredStart), maxStart);
-    for (let i = start; i < tasks.length && lines.length < height; i++) {
+    const window = taskListWindow(tasks.length, this.selected, height);
+    if (window.showTop) {
+      lines.push(theme.fg("dim", truncateToWidth(`↑ ${window.start} earlier tasks`, width)));
+    }
+    for (let i = window.start; i < window.end; i++) {
       const task = tasks[i];
       if (!task) continue;
       const isSelected = i === this.selected;
@@ -828,6 +828,9 @@ export class Dashboard {
       let status =
         group === STATUS_LABELS[task.status] ? group : `${group} · ${STATUS_LABELS[task.status]}`;
       if (this.frame.staleTaskIds.has(task.id)) status += " (stale)";
+      if (task.status === "cancelled" && task.supersededBy) {
+        status += ` · superseded by ${task.supersededBy}`;
+      }
       const reason = blockedReason(this.frame.board, task);
       if (reason) status += ` · ${reason}`;
       const usageDetail = liveRun
@@ -836,9 +839,15 @@ export class Dashboard {
       const detail = `${status} [${task.tier}] · ${usageDetail}${activity}`;
       const line2 = `     ${theme.fg("dim", truncateToWidth(detail, width - 5))}`;
 
-      lines.push(line1);
-      if (lines.length === height) break;
-      lines.push(line2);
+      const remainingTaskTitles = window.end - i - 1;
+      const reservedRows = remainingTaskTitles + (window.showBottom ? 1 : 0);
+      if (lines.length < height - reservedRows) lines.push(line1);
+      if (lines.length < height - reservedRows) lines.push(line2);
+    }
+    if (window.showBottom && lines.length < height) {
+      lines.push(
+        theme.fg("dim", truncateToWidth(`↓ ${tasks.length - window.end} more tasks`, width))
+      );
     }
     return lines;
   }
@@ -1227,6 +1236,7 @@ export function projectEvidenceSections(
   const latestReview = selectedLaunch ? selectedLaunch.review : attempt?.reviewLaunches?.at(-1);
 
   const contract: string[] = [`Prompt source: ${singleLine(task.brief).slice(0, 500)}`];
+  if (task.supersedes) contract.push(`Lineage: supersedes ${task.supersedes}`);
   if (task.successCriteria?.length) {
     contract.push(
       `Success criteria: ${task.successCriteria.map(singleLine).join(" | ").slice(0, 800)}`
@@ -1372,6 +1382,48 @@ function applyEvidenceSectionBudget(section: EvidenceSection): EvidenceSection {
 function bindingLabel(key: (typeof DASHBOARD_BINDINGS)[number]["key"]): string {
   const binding = DASHBOARD_BINDINGS.find((candidate) => candidate.key === key);
   return binding ? `${binding.key} ${binding.description}` : key;
+}
+
+interface TaskListWindow {
+  start: number;
+  end: number;
+  showTop: boolean;
+  showBottom: boolean;
+}
+
+function taskListWindow(taskCount: number, selected: number, height: number): TaskListWindow {
+  const selectedIndex = Math.min(Math.max(0, selected), taskCount - 1);
+  let bestStart = selectedIndex;
+  let bestEnd = selectedIndex + 1;
+  let bestTaskCount = 0;
+  let bestDistanceFromCenter = Number.POSITIVE_INFINITY;
+
+  for (let start = 0; start <= selectedIndex; start += 1) {
+    for (let end = selectedIndex + 1; end <= taskCount; end += 1) {
+      const markerRows = (start > 0 ? 1 : 0) + (end < taskCount ? 1 : 0);
+      const visibleTasks = end - start;
+      if (markerRows + visibleTasks * 2 > height + 1) continue;
+
+      const distanceFromCenter = Math.abs(selectedIndex - (start + end - 1) / 2);
+      if (
+        visibleTasks > bestTaskCount ||
+        (visibleTasks === bestTaskCount && distanceFromCenter < bestDistanceFromCenter)
+      ) {
+        bestStart = start;
+        bestEnd = end;
+        bestTaskCount = visibleTasks;
+        bestDistanceFromCenter = distanceFromCenter;
+      }
+    }
+  }
+
+  let showTop = bestStart > 0;
+  let showBottom = bestEnd < taskCount;
+  while (Number(showTop) + Number(showBottom) + 1 > height) {
+    if (showBottom) showBottom = false;
+    else showTop = false;
+  }
+  return { start: bestStart, end: bestEnd, showTop, showBottom };
 }
 
 function visibleWindow<T>(items: readonly T[], selected: number, height: number) {

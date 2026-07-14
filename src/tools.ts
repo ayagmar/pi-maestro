@@ -653,6 +653,8 @@ function applyTaskSupersession(
     throw new Error(`${successor.id} cannot depend on the predecessor it supersedes.`);
   }
 
+  predecessor.supersededBy = successor.id;
+  successor.supersedes = predecessor.id;
   forceStatus(predecessor, "cancelled");
   for (const dependent of board.tasks) {
     if (dependent === successor) continue;

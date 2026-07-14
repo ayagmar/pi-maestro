@@ -579,6 +579,8 @@ function isTask(value: unknown): value is Task {
     isNumber(value.createdAt) &&
     isNumber(value.updatedAt) &&
     (value.commitMessage === undefined || typeof value.commitMessage === "string") &&
+    (value.supersededBy === undefined || typeof value.supersededBy === "string") &&
+    (value.supersedes === undefined || typeof value.supersedes === "string") &&
     (value.reviewNotes === undefined || typeof value.reviewNotes === "string") &&
     (value.approvalKind === undefined ||
       value.approvalKind === "reviewed" ||

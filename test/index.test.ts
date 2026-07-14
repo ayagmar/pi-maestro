@@ -1830,8 +1830,10 @@ test("maestro_plan atomically supersedes a stopped task and rewires its dependen
       assert.match(result?.content[0]?.text ?? "", /Superseded atomically: T1 → T3/);
       const board = loadBoard(cwd);
       assert.equal(findTask(board, "T1")?.status, "cancelled");
+      assert.equal(findTask(board, "T1")?.supersededBy, "T3");
       assert.deepEqual(findTask(board, "T2")?.dependsOn, ["T3"]);
       assert.equal(findTask(board, "T3")?.status, "todo");
+      assert.equal(findTask(board, "T3")?.supersedes, "T1");
     }
   );
 });

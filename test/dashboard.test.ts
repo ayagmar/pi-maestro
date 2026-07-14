@@ -115,6 +115,27 @@ test("task list windowing renders every task when the pane is taller than the li
   }
 });
 
+test("dashboard task window shows correct earlier and later task counts", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 9,
+    tasks: Array.from({ length: 8 }, (_, index) =>
+      makeTask({ id: `T${index + 1}`, title: `Task ${index + 1}`, status: "todo" })
+    ),
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 8 });
+  try {
+    for (let index = 0; index < 4; index += 1) dashboard.handleInput("\x1b[B");
+    const rendered = dashboard.render(120).join("\n");
+
+    assert.match(rendered, /↑ 3 earlier tasks/);
+    assert.match(rendered, /↓ 3 more tasks/);
+    assert.match(rendered, /T5 Task 5/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard task window keeps the selected task visible in a short terminal", () => {
   const board: Board = {
     version: 1,
@@ -129,6 +150,32 @@ test("dashboard task window keeps the selected task visible in a short terminal"
     const rendered = dashboard.render(120).join("\n");
     assert.match(rendered, /T5 Task 5/);
     assert.doesNotMatch(rendered, /T1 Task 1/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard shows supersession lineage in task status and contract evidence", () => {
+  const predecessor = makeTask({
+    id: "T1",
+    title: "Original",
+    status: "cancelled",
+    supersededBy: "T2",
+  });
+  const successor = makeTask({
+    id: "T2",
+    title: "Replacement",
+    status: "todo",
+    supersedes: "T1",
+  });
+  const board: Board = { version: 1, nextTaskNumber: 3, tasks: [predecessor, successor] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    assert.match(dashboard.render(120).join("\n"), /cancelled · superseded by T2/);
+    const contract = projectEvidenceSections(successor, undefined, {
+      phaseLabel: "execution",
+    }).find((section) => section.title === "Contract");
+    assert.ok(contract?.lines.includes("Lineage: supersedes T1"));
   } finally {
     dashboard.dispose();
   }
