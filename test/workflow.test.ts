@@ -2480,7 +2480,132 @@ test("failed pre-commit verification leaves no auto-commit on the main tree", as
   }
 });
 
-test("single-model 429 stops drive without consuming maxAttempts or hot-looping", async () => {
+test("drive retries one transient provider failure and completes without intervention", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-transient-success-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let executionCalls = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({ finalReport: "Verified.\nVERDICT: APPROVE" })(options);
+      }
+      executionCalls += 1;
+      if (executionCalls === 1) {
+        return executor({
+          exitCode: 1,
+          usage: { input: 1, output: 0, cost: 0, turns: 1 },
+          errorMessage: "connection reset by peer",
+          failureCause: "provider",
+          model: "provider-a/model-a",
+        })(options);
+      }
+      return executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "implemented after retry",
+        model: "provider-a/model-a",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", { thinking: "low", model: "provider-a/model-a" }],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.equal(executionCalls, 2);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.attempts.length, 2);
+    assert.equal(persisted?.attempts[0]?.failureReason?.kind, "provider_failure");
+    assert.equal(persisted?.attempts[1]?.finalReport, "implemented after retry");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("drive stops after one transient provider retry also fails", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-transient-failed-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let calls = 0;
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", { thinking: "low", model: "provider-a/model-a" }],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        calls += 1;
+        return executor({
+          exitCode: 1,
+          usage: { input: 1, output: 0, cost: 0, turns: 1 },
+          errorMessage: "HTTP 503 service overloaded",
+          failureCause: "provider",
+          model: "provider-a/model-a",
+        })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "provider_blocked");
+    assert.equal(calls, 2);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.length, 2);
+    assert.match(result.stoppedBecause.message, /transient/i);
+    assert.match(result.stoppedBecause.message, /retried once/i);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("drive stops immediately for a persistent provider authentication failure", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-persistent-auth-"));
+  try {
+    const { board } = boardWithTask();
+    saveBoard(cwd, board);
+    let calls = 0;
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", { thinking: "low", model: "provider-a/model-a" }],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        calls += 1;
+        return executor({
+          exitCode: 1,
+          usage: { input: 1, output: 0, cost: 0, turns: 1 },
+          errorMessage: "authentication failed: invalid API key",
+          failureCause: "provider",
+          model: "provider-a/model-a",
+        })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "provider_blocked");
+    assert.equal(calls, 1);
+    assert.match(result.stoppedBecause.message, /persistent/i);
+    assert.doesNotMatch(result.stoppedBecause.message, /retried once/i);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("persistent quota failures stop drive without consuming maxAttempts or hot-looping", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-blocked-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -2616,7 +2741,7 @@ test("provider blocking waits for active peer executors and starts no review bat
   }
 });
 
-test("exhausted provider fallback chain stops once and preserves every launch", async () => {
+test("transient fallback exhaustion auto-retries once and preserves every launch", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-fallback-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -2652,20 +2777,26 @@ test("exhausted provider fallback chain stops once and preserves every launch", 
       trackRun,
     });
 
-    assert.deepEqual(models, ["provider-a/model-a", "provider-b/model-b"]);
+    assert.deepEqual(models, [
+      "provider-a/model-a",
+      "provider-b/model-b",
+      "provider-a/model-a",
+      "provider-b/model-b",
+    ]);
     assert.equal(result.stoppedBecause.code, "provider_blocked");
     assert.equal(result.tasks[0]?.attempts, 0);
-    assert.equal(result.tasks[0]?.launches, 2);
+    assert.equal(result.tasks[0]?.launches, 4);
     const persisted = findTask(loadBoard(cwd), task.id);
-    assert.equal(persisted?.attempts.length, 2);
+    assert.equal(persisted?.attempts.length, 4);
     assert.ok(persisted?.attempts.every((item) => item.consumesAttempt === false));
     assert.match(result.stoppedBecause.message, /provider-b\/model-b \(provider-b\)/);
+    assert.match(result.stoppedBecause.message, /retried once/i);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test("reviewer provider failures use fallbacks, block drive, and resume explicitly", async () => {
+test("reviewer provider failures use fallbacks and auto-retry once before blocking", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-provider-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -2716,10 +2847,20 @@ test("reviewer provider failures use fallbacks, block drive, and resume explicit
 
     const blocked = await driveBoard(options);
     assert.equal(blocked.stoppedBecause.code, "provider_blocked");
-    assert.deepEqual(reviewModels, ["review-a/model", "review-b/model"]);
+    assert.deepEqual(reviewModels, [
+      "review-a/model",
+      "review-b/model",
+      "review-a/model",
+      "review-b/model",
+    ]);
+    assert.match(blocked.stoppedBecause.message, /retried once/i);
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "ready_for_review");
-    assert.equal(persisted?.attempts[0]?.reviewLaunches?.length, 2);
+    assert.equal(persisted?.attempts[0]?.reviewLaunches?.length, 4);
+    assert.equal(
+      new Set(persisted?.attempts[0]?.reviewLaunches?.map((launch) => launch.id)).size,
+      4
+    );
     assert.ok(
       persisted?.attempts[0]?.reviewLaunches?.every(
         (launch) => launch.failureReason?.kind === "provider_failure"
@@ -2729,7 +2870,7 @@ test("reviewer provider failures use fallbacks, block drive, and resume explicit
     reviewBlocked = false;
     const resumed = await driveBoard(options);
     assert.equal(resumed.stoppedBecause.code, "completed");
-    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts[0]?.reviewLaunches?.length, 3);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts[0]?.reviewLaunches?.length, 5);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

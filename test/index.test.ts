@@ -2196,7 +2196,7 @@ test("slash drive can pause live work without aborting it, persist ownership, an
   );
 });
 
-test("provider-blocked slash drive persists resumable state without hot-looping", async () => {
+test("provider-blocked slash drive retries transient failures once and persists resumable state", async () => {
   await withBoard(
     (cwd) => {
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
@@ -2251,7 +2251,7 @@ test("provider-blocked slash drive persists resumable state without hot-looping"
 
       await command.handler("drive T1", ctx);
       await waitFor(() => loadBoard(cwd).pausedDrive !== undefined, "provider block was not saved");
-      assert.equal(starts, 1, "blocked provider must not be retried in the background");
+      assert.equal(starts, 2, "transient provider failure must be retried exactly once");
       assert.equal(findTask(loadBoard(cwd), "T1")?.status, "failed");
 
       blocked = false;
@@ -2261,7 +2261,7 @@ test("provider-blocked slash drive persists resumable state without hot-looping"
         "provider-blocked drive did not resume and clean the completed board"
       );
       assert.equal(loadBoard(cwd).pausedDrive, undefined);
-      assert.equal(starts, 3);
+      assert.equal(starts, 4);
     }
   );
 });

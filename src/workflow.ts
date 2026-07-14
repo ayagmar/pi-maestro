@@ -467,6 +467,7 @@ export async function driveBoard(options: {
   let rounds = 0;
   let rawLaunches = 0;
   let humanExecuteDispatched = false;
+  const transientProviderRetries = new Set<string>();
   const currentFingerprintConfig = (): MaestroConfig => loadConfig(cwd);
   const humanRetryId = humanRetryTaskId?.trim().toUpperCase();
   const boundedStartExecutor: StartExecutor = (startOptions) => {
@@ -729,7 +730,10 @@ export async function driveBoard(options: {
         (task) => isSelected(task) && task.status === "failed" && providerBlockedTask(task)
       );
       if (blockedAfterRuns.length > 0) {
-        return finish(providerBlockedReason(blockedAfterRuns));
+        if (scheduleTransientProviderRetry(cwd, blockedAfterRuns, transientProviderRetries)) {
+          continue;
+        }
+        return finish(providerBlockedReason(blockedAfterRuns, transientProviderRetries));
       }
       const currentBudgetWarning = runBudgetWarning(afterRuns.tasks, config.maxRunCost);
       if (currentBudgetWarning) {
@@ -832,7 +836,10 @@ export async function driveBoard(options: {
       }
       const providerBlocked = freshTasks.filter(providerBlockedTask);
       if (providerBlocked.length > 0) {
-        return finish(providerBlockedReason(providerBlocked));
+        if (scheduleTransientProviderRetry(cwd, providerBlocked, transientProviderRetries)) {
+          continue;
+        }
+        return finish(providerBlockedReason(providerBlocked, transientProviderRetries));
       }
       const disagreements = freshTasks.filter(
         (task) => terminalReviewConvergence(task) === "disagreement"
@@ -969,6 +976,68 @@ function escalationReason(tasks: Task[], config: MaestroConfig): DriveStopReason
   };
 }
 
+export type ProviderFailureClass = "transient" | "persistent";
+
+const PROVIDER_FAILURE_PATTERNS: Record<ProviderFailureClass, readonly RegExp[]> = {
+  persistent: [
+    /\b(?:auth(?:entication|orization)?|unauthenticated|unauthorized)\b/i,
+    /\b(?:invalid|missing|expired|revoked)\s+(?:api[ -]?)?key\b/i,
+    /\b(?:quota|billing|payment|credit|usage limit)\b/i,
+    /\bmodel(?:[-_ ]not[-_ ]found|\s+does not exist|\s+unavailable for)\b/i,
+    /\b(?:permission|forbidden)\b/i,
+    /\b(?:401|403)\b/,
+  ],
+  transient: [
+    /\b(?:timeout|timed out|etimedout)\b/i,
+    /\b(?:econnreset|econnrefused|connection resets?|connection refused|network error)\b/i,
+    /\b(?:http\s*)?429\b/i,
+    /\b(?:http\s*)?5\d\d\b/i,
+    /\b(?:overloaded|rate limit|service unavailable|temporarily unavailable)\b/i,
+  ],
+};
+
+export function classifyProviderFailure(message: string | undefined): ProviderFailureClass {
+  const evidence = message ?? "";
+  for (const pattern of PROVIDER_FAILURE_PATTERNS.persistent) {
+    if (pattern.test(evidence)) return "persistent";
+  }
+  for (const pattern of PROVIDER_FAILURE_PATTERNS.transient) {
+    if (pattern.test(evidence)) return "transient";
+  }
+  return "persistent";
+}
+
+function providerFailureMessage(task: Task): string | undefined {
+  const attempt = task.attempts.at(-1);
+  return attempt?.reviewLaunches?.at(-1)?.failureReason?.message ?? attempt?.failureReason?.message;
+}
+
+function scheduleTransientProviderRetry(
+  cwd: string,
+  tasks: Task[],
+  retriedTaskIds: Set<string>
+): boolean {
+  if (
+    tasks.some((task) => classifyProviderFailure(providerFailureMessage(task)) === "persistent")
+  ) {
+    return false;
+  }
+
+  const retryable = tasks.filter((task) => !retriedTaskIds.has(task.id));
+  if (retryable.length === 0) return false;
+  for (const task of retryable) {
+    retriedTaskIds.add(task.id);
+    if (task.status !== "ready_for_review") continue;
+    updateTask(cwd, task.id, (fresh) => {
+      const attempt = fresh.attempts.at(-1);
+      if (attempt?.reviewConvergence?.status === "operational_failure") {
+        delete attempt.reviewConvergence;
+      }
+    });
+  }
+  return true;
+}
+
 function providerBlockedTask(task: Task): boolean {
   const latest = task.attempts.at(-1);
   if (!latest) return false;
@@ -977,7 +1046,10 @@ function providerBlockedTask(task: Task): boolean {
   return latest.reviewLaunches?.at(-1)?.failureReason?.kind === "provider_failure";
 }
 
-function providerBlockedReason(tasks: Task[]): DriveStopReason {
+function providerBlockedReason(
+  tasks: Task[],
+  transientProviderRetries: ReadonlySet<string>
+): DriveStopReason {
   const details = tasks.map((task) => {
     const attempt = task.attempts.at(-1);
     const reviewFailure = attempt?.reviewLaunches?.at(-1);
@@ -985,11 +1057,16 @@ function providerBlockedReason(tasks: Task[]): DriveStopReason {
     const provider = reviewFailure?.provider ?? attempt?.provider;
     const identity = provider ? `${model} (${provider})` : model;
     const message = reviewFailure?.failureReason?.message ?? attempt?.failureReason?.message;
-    return `${task.id}: ${identity}${message ? ` — ${redactFailureMessage(message)}` : ""}`;
+    const failureClass = classifyProviderFailure(message);
+    const retry =
+      failureClass === "transient" && transientProviderRetries.has(task.id)
+        ? "; auto-retried once and failed again"
+        : "";
+    return `${task.id} [${failureClass}${retry}]: ${identity}${message ? ` — ${redactFailureMessage(message)}` : ""}`;
   });
   return {
     code: "provider_blocked",
-    message: `Provider access blocked; autonomous retries stopped. ${details.join("; ")}\nCheck provider quota/authentication, configure another fallback in /maestro config, then use /maestro resume (or explicitly retry the task).`,
+    message: `Provider access blocked; autonomous retries stopped. ${details.join("; ")}\nPersistent failures require provider configuration; transient failures reach this decision only after one automatic retry. Check provider quota/authentication or configure another fallback in /maestro config, then use /maestro resume (or explicitly retry the task).`,
     taskIds: tasks.map((task) => task.id),
   };
 }
@@ -1634,6 +1711,7 @@ export async function reviewTask(options: {
         : undefined;
     const models = [tier.model, ...(tier.fallbacks ?? [])];
     const reviewLaunches: ReviewLaunch[] = [];
+    const priorReviewLaunchCount = reviewedAttempt?.reviewLaunches?.length ?? 0;
     let rawLaunchCount = 0;
     let lastRun: ExecutorHandle | undefined;
     let outcome: RunOutcome = {
@@ -1668,7 +1746,7 @@ export async function reviewTask(options: {
         else launchTier.model = model;
         const reviewPrompt = policyReviewPrompt(task, report, reviewPolicy, role, finderReport);
         const promptContext = accountPromptContext(reviewPrompt);
-        const launchId = `${task.id}-review-${task.attempts.length}-${reviewerIndex}-${rawLaunchCount}`;
+        const launchId = `${task.id}-review-${task.attempts.length}-${reviewerIndex}-${priorReviewLaunchCount + rawLaunchCount}`;
         const placeholder: ReviewLaunch = {
           id: launchId,
           reviewerIndex,
