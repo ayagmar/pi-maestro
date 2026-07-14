@@ -1601,6 +1601,11 @@ export function applyPlanTaskEdits(
     task.dependsOn = edits.dependsOn.map((id) => id.trim().toUpperCase()).filter(Boolean);
   }
   if (edits.writePaths !== undefined) task.writePaths = normalizeWritePaths(edits.writePaths);
+  if (edits.commitMessage !== undefined) {
+    const commitMessage = edits.commitMessage.trim();
+    if (commitMessage) task.commitMessage = commitMessage;
+    else delete task.commitMessage;
+  }
   if (edits.successCriteria !== undefined) {
     task.successCriteria = normalizeSuccessCriteria(edits.successCriteria);
   }

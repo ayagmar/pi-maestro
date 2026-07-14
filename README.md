@@ -130,10 +130,13 @@ pause and wait (or abort) before switching.
 
 With `planGate` enabled, use an explicit plan-approve-drive flow. The gate validates dependency
 references, dependency cycles, and configured tiers before any executor or reviewer starts.
-`/maestro plan` opens each pending task's title, full brief, tier, dependencies, success criteria,
-verification profile, and cancellation state for draft editing. Choose **Save changes** to validate and persist the draft, or **Cancel
-editing**/Esc to discard it. Invalid plans remain pending and unchanged until the listed task ids,
-references, cycles, or tiers are fixed. The same fields remain available through `maestro_update`.
+`/maestro plan` starts with a read-only overview of every pending task, including criteria, write
+scope, verification, review policy, commit message, and workflow preflight. Each task offers a
+read-only full-brief viewer plus editing for its title, brief, tier, dependencies, criteria, write
+scope, commit message, verification profile, and cancellation state. Choose **Save changes** to
+validate and persist the draft, or **Cancel editing**/Esc to discard it. Invalid plans remain
+pending and unchanged until the listed task ids, references, cycles, or tiers are fixed. The same
+fields remain available through `maestro_update`.
 
 
 ```

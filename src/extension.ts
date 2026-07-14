@@ -1867,6 +1867,71 @@ export default function maestro(
     return "switchSession" in ctx;
   }
 
+  async function showScrollableText(
+    ctx: ExtensionCommandContext,
+    title: string,
+    lines: string[]
+  ): Promise<void> {
+    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+      let offset = 0;
+      const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
+      return {
+        render: (width: number) => {
+          const content = new Text(lines.slice(offset, offset + 18).join("\n"), 1, 0);
+          return [
+            ...heading.render(width),
+            ...content.render(width),
+            "",
+            theme.fg("dim", "↑↓/PgUp/PgDn scroll · enter/esc close"),
+          ];
+        },
+        invalidate: () => heading.invalidate(),
+        handleInput: (data: string) => {
+          if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
+            done();
+            return;
+          }
+          if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp))
+            offset = Math.max(0, offset - 10);
+          if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown))
+            offset = Math.min(Math.max(0, lines.length - 1), offset + 10);
+          tui.requestRender();
+        },
+      };
+    });
+  }
+
+  async function showPlanOverview(ctx: ExtensionCommandContext, board: Board): Promise<void> {
+    const tasks = board.tasks.filter((task) => task.status !== "cancelled");
+    const config = loadConfig(ctx.cwd);
+    const preflight = preflightWorkflow(board, config);
+    const tierCounts = Object.entries(
+      tasks.reduce<Record<string, number>>((counts, task) => {
+        counts[task.tier] = (counts[task.tier] ?? 0) + 1;
+        return counts;
+      }, {})
+    )
+      .map(([tier, count]) => `${tier}:${count}`)
+      .join(", ");
+    const lines = [
+      `${tasks.length} task(s) · tiers: ${tierCounts || "none"}`,
+      ...formatWorkflowPreflight(preflight).split("\n"),
+      "",
+    ];
+    for (const task of tasks) {
+      const briefLines = task.brief.split("\n");
+      lines.push(
+        `${task.id} ${task.title} [${task.tier}]  (deps: ${task.dependsOn.join(", ") || "none"})`,
+        `  brief: ${briefLines.slice(0, 3).join(" ")}${briefLines.length > 3 ? ` … (+${briefLines.length - 3} more lines)` : ""}`,
+        `  criteria: ${(task.successCriteria ?? []).map((criterion, index) => `${index + 1}. ${criterion}`).join(" ") || "none"}`,
+        `  writes: ${task.writePaths?.join(", ") || "none"}`,
+        `  verification: ${task.verificationProfile ?? "none"} · review: ${task.reviewPolicy ?? "single"} · commit: ${task.commitMessage ?? "auto"}`,
+        ""
+      );
+    }
+    await showScrollableText(ctx, "Maestro Plan · review", lines);
+  }
+
   async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
     if (liveRuns.size > 0) {
       notify(
@@ -1891,11 +1956,18 @@ export default function maestro(
       const editable = board.tasks.filter(
         (task) => task.status === "todo" || task.status === "cancelled"
       );
-      const items: SelectItem[] = editable.map((task) => ({
-        value: `task:${task.id}`,
-        label: `${task.id} ${task.title} [${task.tier}]${task.status === "cancelled" ? " · CANCELLED" : ""}`,
-        description: `dependsOn: ${task.dependsOn.join(", ") || "none"} · ${truncateText(task.brief, 1)}`,
-      }));
+      const items: SelectItem[] = [
+        {
+          value: "overview",
+          label: "Review plan …",
+          description: "Read-only overview of every task",
+        },
+        ...editable.map((task) => ({
+          value: `task:${task.id}`,
+          label: `${task.id} ${task.title} [${task.tier}]${task.status === "cancelled" ? " · CANCELLED" : ""}`,
+          description: `deps: ${task.dependsOn.join(", ") || "none"} · ${task.successCriteria?.length ?? 0} criteria · writes: ${task.writePaths?.join(", ") || "none"} · ${truncateText(task.brief, 1)}`,
+        })),
+      ];
       items.push(
         {
           value: "approve",
@@ -1911,6 +1983,10 @@ export default function maestro(
 
       const choice = await pickFromList(ctx, "Maestro Plan · awaiting approval", items);
       if (!choice) return;
+      if (choice === "overview") {
+        await showPlanOverview(ctx, board);
+        continue;
+      }
       if (choice.startsWith("task:")) {
         await editPlanTask(ctx, choice.slice("task:".length));
         continue;
@@ -2015,8 +2091,9 @@ export default function maestro(
 
     while (true) {
       const action = await pickFromList(ctx, `${draft.id} · edit planned task`, [
+        { value: "viewBrief", label: "View brief (read-only)" },
         { value: "title", label: `Title · ${draft.title}` },
-        { value: "brief", label: "Brief", description: truncateText(draft.brief, 3) },
+        { value: "brief", label: `Edit brief · ${truncateText(draft.brief, 3)}` },
         { value: "tier", label: `Tier · ${draft.tier}` },
         {
           value: "dependencies",
@@ -2024,27 +2101,31 @@ export default function maestro(
           description: "Comma- or space-separated task ids",
         },
         {
-          value: "cancellation",
-          label: `Cancellation · ${draft.status === "cancelled" ? "cancelled" : "active"}`,
-        },
-        { value: "save", label: "Save changes", description: "Validate and update the board" },
-        { value: "cancel", label: "Cancel editing", description: "Discard all draft changes" },
-        {
           value: "criteria",
           label: `Success criteria · ${draft.successCriteria?.length ?? 0}`,
           description: (draft.successCriteria ?? []).join(" · "),
         },
         {
-          value: "verification",
-          label: `Verification · ${draft.verificationProfile ?? "none"}`,
+          value: "writePaths",
+          label: `Write scope · ${draft.writePaths?.length ?? 0} path(s)`,
+          description: (draft.writePaths ?? []).join(" · "),
         },
+        { value: "commitMessage", label: `Commit message · ${draft.commitMessage ?? "auto"}` },
+        { value: "verification", label: `Verification · ${draft.verificationProfile ?? "none"}` },
+        { value: "reviewPolicy", label: `Review policy · ${draft.reviewPolicy ?? "single"}` },
         {
-          value: "reviewPolicy",
-          label: `Review policy · ${draft.reviewPolicy ?? "single"}`,
+          value: "cancellation",
+          label: `Cancellation · ${draft.status === "cancelled" ? "cancelled" : "active"}`,
         },
+        { value: "save", label: "Save changes", description: "Validate and update the board" },
+        { value: "cancel", label: "Cancel editing", description: "Discard all draft changes" },
       ]);
       if (!action || action === "cancel") return;
 
+      if (action === "viewBrief") {
+        await showScrollableText(ctx, `${draft.id} · brief`, draft.brief.split("\n"));
+        continue;
+      }
       if (action === "title") {
         const value = await editPlanText(ctx, "Task title", draft.title, false);
         if (value !== null) {
@@ -2065,6 +2146,31 @@ export default function maestro(
             notify(ctx, error instanceof Error ? error.message : String(error), "error");
           }
         }
+        continue;
+      }
+      if (action === "writePaths") {
+        const value = await editPlanText(
+          ctx,
+          "Write scope (one path per line)",
+          (draft.writePaths ?? []).join("\n"),
+          true
+        );
+        if (value !== null)
+          applyPlanTaskEdits(
+            draft,
+            {
+              writePaths: value
+                .split("\n")
+                .map((item) => item.trim())
+                .filter(Boolean),
+            },
+            tiers
+          );
+        continue;
+      }
+      if (action === "commitMessage") {
+        const value = await editPlanText(ctx, "Commit message", draft.commitMessage ?? "", false);
+        if (value !== null) applyPlanTaskEdits(draft, { commitMessage: value }, tiers);
         continue;
       }
       if (action === "tier") {
@@ -2156,7 +2262,8 @@ export default function maestro(
           brief: draft.brief,
           tier: draft.tier,
           dependsOn: draft.dependsOn,
-          ...(draft.writePaths ? { writePaths: draft.writePaths } : {}),
+          ...(draft.writePaths !== undefined ? { writePaths: draft.writePaths } : {}),
+          ...(draft.commitMessage !== undefined ? { commitMessage: draft.commitMessage } : {}),
           ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
           verificationProfile: draft.verificationProfile ?? "",
           reviewPolicy: draft.reviewPolicy ?? "single",
@@ -2186,7 +2293,8 @@ export default function maestro(
               brief: draft.brief,
               tier: draft.tier,
               dependsOn: draft.dependsOn,
-              ...(draft.writePaths ? { writePaths: draft.writePaths } : {}),
+              ...(draft.writePaths !== undefined ? { writePaths: draft.writePaths } : {}),
+              ...(draft.commitMessage !== undefined ? { commitMessage: draft.commitMessage } : {}),
               ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
               verificationProfile: draft.verificationProfile ?? "",
               reviewPolicy: draft.reviewPolicy ?? "single",

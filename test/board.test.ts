@@ -337,6 +337,8 @@ test("plan edits update every editable field and can cancel or reactivate a task
       tier: "complex",
       dependsOn: [" t2 ", "T3"],
       reviewPolicy: "confirm",
+      writePaths: [" src/one.ts "],
+      commitMessage: " fix: update task ",
       cancelled: true,
     },
     ["trivial", "standard", "complex"]
@@ -347,7 +349,13 @@ test("plan edits update every editable field and can cancel or reactivate a task
   assert.equal(task.tier, "complex");
   assert.deepEqual(task.dependsOn, ["T2", "T3"]);
   assert.equal(task.reviewPolicy, "confirm");
+  assert.deepEqual(task.writePaths, ["src/one.ts"]);
+  assert.equal(task.commitMessage, "fix: update task");
   assert.equal(task.status, "cancelled");
+
+  applyPlanTaskEdits(task, { writePaths: [], commitMessage: "" }, ["standard"]);
+  assert.deepEqual(task.writePaths, []);
+  assert.equal(task.commitMessage, undefined);
 
   applyPlanTaskEdits(task, { cancelled: false }, ["trivial", "standard", "complex"]);
   assert.equal(task.status, "todo");

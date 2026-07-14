@@ -232,6 +232,7 @@ export interface PlanTaskEdits {
   tier?: string;
   dependsOn?: string[];
   writePaths?: string[];
+  commitMessage?: string;
   successCriteria?: string[];
   verificationProfile?: string;
   reviewPolicy?: ReviewPolicy;

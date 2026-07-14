@@ -17,7 +17,7 @@ Ordered for release value and file-region conflicts (numbers are file names, not
 | Order | Plan | Title | Priority | Effort | Depends on | Status |
 |-------|------|-------|----------|--------|------------|--------|
 | 1 | 002  | Close unconfirmed-destructive-action gaps around approvals | P1 | S | — | DONE |
-| 2 | 001  | Make the plan-approval gate a real review surface | P1 | M | 002 | TODO |
+| 2 | 001  | Make the plan-approval gate a real review surface | P1 | M | 002 | DONE |
 | 3 | 003  | Fix dashboard frame cost, sizing, scrollback, display bugs | P1 | M | — | TODO |
 | 4 | 005  | First-run preflight + failure-path visibility + release metadata | P1 | S | — | TODO |
 | 5 | 006  | Help overlay + scannable CLI text outputs | P2 | S | 002, 003 | TODO |

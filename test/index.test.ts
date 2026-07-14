@@ -353,8 +353,8 @@ test("gated plan editor saves title, brief, tier, dependencies, and cancellation
     async (cwd) => {
       const script: UiScript = {
         steps: [
-          { keys: [enter] },
-          { keys: [enter] },
+          { keys: select(1) },
+          { keys: select(1) },
           {
             keys: [
               ...Array.from({ length: "Old title".length }, () => deleteForward),
@@ -362,18 +362,18 @@ test("gated plan editor saves title, brief, tier, dependencies, and cancellation
               enter,
             ],
           },
-          { keys: select(1) },
+          { keys: select(2) },
           { keys: [clearLine, "New self-contained brief", enter] },
-          { keys: select(2) },
-          { keys: select(2) },
           { keys: select(3) },
-          { keys: [clearLine, "t2", enter] },
+          { keys: select(2) },
           { keys: select(4) },
+          { keys: [clearLine, "t2", enter] },
+          { keys: select(10) },
           { keys: select(1) },
           { keys: select(9) },
           { keys: select(1) },
           {
-            keys: select(5),
+            keys: select(11),
             before: () => {
               const unsaved = findTask(loadBoard(cwd), "T1");
               assert.equal(unsaved?.title, "Old title");
@@ -414,10 +414,10 @@ test("gated plan editor cancel discards draft changes", async () => {
     async (cwd) => {
       const script: UiScript = {
         steps: [
-          { keys: [enter] },
-          { keys: [enter] },
+          { keys: select(1) },
+          { keys: select(1) },
           { keys: [clearLine, "Discarded title", enter] },
-          { keys: select(6) },
+          { keys: select(12) },
           { keys: [escapeKey] },
         ],
       };
@@ -455,7 +455,7 @@ test("gated plan approval reports invalid references and cycles without changing
       saveBoard(cwd, board);
     },
     async (cwd) => {
-      const script: UiScript = { steps: [{ keys: select(2) }, { keys: [escapeKey] }] };
+      const script: UiScript = { steps: [{ keys: select(3) }, { keys: [escapeKey] }] };
       const before = loadBoard(cwd);
       const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
 
@@ -497,7 +497,7 @@ test("gated plan approval refuses a board changed during scale confirmation", as
     },
     async (cwd) => {
       const script: UiScript = {
-        steps: [{ keys: select(2) }],
+        steps: [{ keys: select(3) }],
         confirmations: [true],
         beforeConfirm: () => {
           updateBoard(cwd, (board) => {
@@ -529,7 +529,7 @@ test("gated plan rejection confirmation archives and clears the board", async ()
       saveBoard(cwd, board);
     },
     async (cwd) => {
-      const script: UiScript = { steps: [{ keys: select(2) }], confirmations: [true] };
+      const script: UiScript = { steps: [{ keys: select(3) }], confirmations: [true] };
       const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
 
       await command.handler("plan", ctx);
