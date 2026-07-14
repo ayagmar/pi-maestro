@@ -17,6 +17,7 @@ import {
   archiveBoard,
   attemptFailureCause,
   blockedReason,
+  consumeQuarantineNotice,
   createTask,
   filterTasksByGroup,
   findTask,
@@ -587,10 +588,28 @@ test("loadStatusHistory returns recorded status changes and distinguishes a miss
     updateTask(cwd, "T1", (task) => transition(task, "running"));
 
     const history = loadStatusHistory(cwd);
-    assert.equal(history?.length, 1);
-    assert.equal(history?.[0]?.taskId, "T1");
-    assert.equal(history?.[0]?.from, "todo");
-    assert.equal(history?.[0]?.to, "running");
+    assert.equal(history?.entries.length, 1);
+    assert.equal(history?.entries[0]?.taskId, "T1");
+    assert.equal(history?.entries[0]?.from, "todo");
+    assert.equal(history?.entries[0]?.to, "running");
+    assert.equal(history?.skipped, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loadStatusHistory skips unreadable lines", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const directory = join(cwd, ".pi", "maestro");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(
+      join(directory, "history.jsonl"),
+      `${JSON.stringify({ ts: "now", taskId: "T1", from: "todo", to: "running", revision: 1 })}\n{`
+    );
+    const history = loadStatusHistory(cwd);
+    assert.equal(history?.entries.length, 1);
+    assert.equal(history?.skipped, 1);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -831,6 +850,8 @@ test("loadBoard archives a corrupt board before returning an empty board", () =>
 
     assert.deepEqual(loadBoard(cwd), emptyBoard());
     assert.equal(existsSync(file), false);
+    assert.match(consumeQuarantineNotice() ?? "", /board\.json\.corrupt-/);
+    assert.equal(consumeQuarantineNotice(), undefined);
 
     const archives = readdirSync(directory).filter((name) =>
       /^board\.json\.corrupt-\d+$/.test(name)

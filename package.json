@@ -2,6 +2,12 @@
   "name": "pi-maestro",
   "version": "0.1.0",
   "description": "Orchestrator/executor workflows for pi: plan tasks, run cheap fresh-context executors in parallel, adversarially review, and track everything on a live board",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ayagmar/pi-maestro.git"
+  },
+  "homepage": "https://github.com/ayagmar/pi-maestro#readme",
+  "bugs": "https://github.com/ayagmar/pi-maestro/issues",
   "keywords": [
     "pi-package",
     "pi-extension",

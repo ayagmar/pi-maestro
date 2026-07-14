@@ -56,10 +56,11 @@ pi install /path/to/pi-maestro
 ## Five-minute start
 
 1. Install the extension with the command above.
-2. Run `/maestro start <goal>` in the repository.
-3. Let the orchestrator create tasks with explicit success criteria and write scopes.
-4. If `planGate` is enabled, inspect and approve with `/maestro plan`.
-5. Start or resume with `/maestro drive`; use `/maestro timeline` for model-free history.
+2. Run `/maestro doctor` to confirm config, model auth, and git are ready.
+3. Run `/maestro start <goal>` in the repository.
+4. Let the orchestrator create tasks with explicit success criteria and write scopes.
+5. If `planGate` is enabled, inspect and approve with `/maestro plan`.
+6. Start or resume with `/maestro drive`; use `/maestro timeline` for model-free history.
 
 ### Start an orchestrated run
 

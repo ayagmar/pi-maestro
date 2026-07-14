@@ -33,6 +33,7 @@ export const BOARD_FILE = "board.json";
 const HISTORY_FILE = "history.jsonl";
 const RECIPE_DIRECTORY = "maestro-recipes";
 const BOARD_LOCK_STALE_MS = 30_000;
+let quarantineNotice: string | undefined;
 const BOARD_LOCK_RETRIES = 500;
 export const DISPATCH_LEASE_MS = 30_000;
 
@@ -151,9 +152,21 @@ export function loadBoard(cwd: string): Board {
     if (!isBoard(value)) throw new Error("board has an invalid structure");
     return value;
   } catch {
-    quarantineCorruptBoard(file);
+    quarantineNotice = quarantineCorruptBoard(file);
     return structuredClone(EMPTY_BOARD);
   }
+}
+
+export function listCorruptBoardFiles(cwd: string): string[] {
+  const directory = stateDir(cwd);
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory).filter((name) => name.startsWith(`${BOARD_FILE}.corrupt-`));
+}
+
+export function consumeQuarantineNotice(): string | undefined {
+  const notice = quarantineNotice;
+  quarantineNotice = undefined;
+  return notice;
 }
 
 export function saveBoard(cwd: string, board: Board): void {
@@ -801,23 +814,32 @@ function isNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function quarantineCorruptBoard(file: string): void {
+function quarantineCorruptBoard(file: string): string {
   const prefix = `${file}.corrupt-${Date.now()}`;
   let destination = prefix;
   for (let suffix = 1; existsSync(destination); suffix += 1) {
     destination = `${prefix}-${suffix}`;
   }
   renameSync(file, destination);
+  return destination;
 }
 
-export function loadStatusHistory(cwd: string): StatusHistoryEntry[] | undefined {
+export function loadStatusHistory(
+  cwd: string
+): { entries: StatusHistoryEntry[]; skipped: number } | undefined {
   const file = join(stateDir(cwd), HISTORY_FILE);
   if (!existsSync(file)) return undefined;
 
-  return readFileSync(file, "utf-8")
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as StatusHistoryEntry);
+  const entries: StatusHistoryEntry[] = [];
+  let skipped = 0;
+  for (const line of readFileSync(file, "utf-8").split("\n").filter(Boolean)) {
+    try {
+      entries.push(JSON.parse(line) as StatusHistoryEntry);
+    } catch {
+      skipped += 1;
+    }
+  }
+  return { entries, skipped };
 }
 
 export function createTask(

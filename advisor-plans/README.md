@@ -19,7 +19,7 @@ Ordered for release value and file-region conflicts (numbers are file names, not
 | 1 | 002  | Close unconfirmed-destructive-action gaps around approvals | P1 | S | — | DONE |
 | 2 | 001  | Make the plan-approval gate a real review surface | P1 | M | 002 | DONE |
 | 3 | 003  | Fix dashboard frame cost, sizing, scrollback, display bugs | P1 | M | — | DONE |
-| 4 | 005  | First-run preflight + failure-path visibility + release metadata | P1 | S | — | TODO |
+| 4 | 005  | First-run preflight + failure-path visibility + release metadata | P1 | S | — | DONE |
 | 5 | 006  | Help overlay + scannable CLI text outputs | P2 | S | 002, 003 | TODO |
 | 6 | 004  | Adopt pi-native UI features (markdown, autocomplete, hints, working msg, labels) | P2 | M | 001, 002 | TODO |
 | 7 | 008  | Structure the task evidence view into navigable sections | P2 | M | 003 | TODO |

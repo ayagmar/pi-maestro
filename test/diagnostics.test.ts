@@ -41,6 +41,20 @@ test("doctor reports config, effective settings, inherited models, and git guida
   }
 });
 
+test("doctor reports quarantined corrupt boards", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-doctor-"));
+  try {
+    const directory = join(cwd, ".pi", "maestro");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "board.json.corrupt-123"), "{");
+    const report = buildDoctorReport(cwd, fakeRegistry([]));
+    assert.match(report, /board\.json\.corrupt-123/);
+    assert.match(report, /Restore an archive with \/maestro replay/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("doctor reports the user config's attempt cap when no project file overrides it", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-doctor-"));
   const agentDir = mkdtempSync(join(tmpdir(), "maestro-doctor-agent-"));

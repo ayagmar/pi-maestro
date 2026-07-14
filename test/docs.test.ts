@@ -102,8 +102,17 @@ test("configuration docs match runtime defaults and commands remain documented",
 });
 
 test("declared package shape contains runtime and required documentation", () => {
-  const pkg = JSON.parse(read("package.json")) as { files: string[]; main: string };
+  const pkg = JSON.parse(read("package.json")) as {
+    files: string[];
+    main: string;
+    repository: { url: string };
+    homepage: string;
+    bugs: string;
+  };
   assert.equal(pkg.main, "./src/index.ts");
+  assert.equal(pkg.repository.url, "git+https://github.com/ayagmar/pi-maestro.git");
+  assert.equal(pkg.homepage, "https://github.com/ayagmar/pi-maestro#readme");
+  assert.equal(pkg.bugs, "https://github.com/ayagmar/pi-maestro/issues");
   for (const entry of ["src/", "docs/", "README.md", "CONTRIBUTING.md"]) {
     assert.ok(pkg.files.includes(entry));
   }

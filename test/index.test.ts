@@ -331,6 +331,19 @@ async function withBoard(
   }
 }
 
+test("start warns when git is required but not ready", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-command-test-"));
+  try {
+    saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: true });
+    const loaded = loadMaestro(cwd);
+    await loaded.command.handler("start test goal", loaded.ctx);
+    assert.ok(loaded.notices.some((notice) => notice.includes("Git repo not ready")));
+    assert.ok(loaded.notices.some((notice) => notice.includes("/maestro doctor")));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("unknown maestro subcommands identify the requested command", async () => {
   await withBoard(
     () => {},

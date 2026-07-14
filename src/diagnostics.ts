@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { type ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { loadBoard } from "./board.js";
+import { listCorruptBoardFiles, loadBoard } from "./board.js";
 import {
   configFile,
   describeTier,
@@ -38,6 +38,7 @@ export function buildDoctorReport(
   const config = loadConfig(cwd);
   const board = loadBoard(cwd);
   const git = inspectGit(cwd);
+  const corruptBoards = listCorruptBoardFiles(cwd);
   const lines = [
     "Maestro doctor",
     "",
@@ -50,6 +51,12 @@ export function buildDoctorReport(
     `  progress pulse: ${config.statusWaitSeconds}s`,
     `  task cost cap: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`} · run cost cap: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,
     `  worktrees: ${config.useWorktrees ? "on" : "off"} · automatic commits: ${config.autoCommit ? "on" : "off"}`,
+    ...(corruptBoards.length > 0
+      ? [
+          `  corrupt board quarantine: ${corruptBoards.join(", ")}`,
+          "  Restore an archive with /maestro replay.",
+        ]
+      : []),
     "",
     "Models:",
   ];

@@ -27,6 +27,7 @@ import {
   approvePlan,
   archiveBoard,
   assertTaskNotDispatched,
+  consumeQuarantineNotice,
   findTask,
   forceStatus,
   humanRetryEligibility,
@@ -151,6 +152,7 @@ import {
 } from "./workflow.js";
 import {
   cleanupManagedWorktrees,
+  inspectGit,
   inspectManagedWorktrees,
   snapshotArtifact,
   sweepWorktrees,
@@ -215,6 +217,14 @@ export default function maestro(
       return;
     }
     const board = loadBoard(ctx.cwd);
+    const quarantined = consumeQuarantineNotice();
+    if (quarantined) {
+      notify(
+        ctx,
+        `Board was corrupt and quarantined to ${quarantined}. Restore an archive with /maestro replay.`,
+        "warning"
+      );
+    }
 
     // Sessions that never touched this board (fresh /maestro-less chats in
     // the same repo) don't get its status bar. Live runs always show:
@@ -835,6 +845,14 @@ export default function maestro(
   }
 
   registerMaestroCommand(pi, async (args, ctx) => {
+    const quarantined = consumeQuarantineNotice();
+    if (quarantined) {
+      notify(
+        ctx,
+        `Board was corrupt and quarantined to ${quarantined}. Restore an archive with /maestro replay.`,
+        "warning"
+      );
+    }
     const { subcommand, rest, restParts } = parseCommand(args);
 
     switch (subcommand) {
@@ -850,6 +868,15 @@ export default function maestro(
             "warning"
           );
           return;
+        }
+        const config = loadConfig(ctx.cwd);
+        const git = inspectGit(ctx.cwd);
+        if (!git.ok && (config.autoCommit || config.useWorktrees)) {
+          notify(
+            ctx,
+            `Git repo not ready: ${git.summary}. Commits will fail — run /maestro doctor, or disable autoCommit/useWorktrees in /maestro config.`,
+            "warning"
+          );
         }
         let board = loadBoard(ctx.cwd);
         // A new goal is a new run: archive the previous board instead of
@@ -1556,9 +1583,12 @@ export default function maestro(
         }
         const requestedCount = Number.parseInt(rest, 10);
         const count = Number.isInteger(requestedCount) && requestedCount > 0 ? requestedCount : 20;
-        const lines = history
+        const lines = history.entries
           .slice(-count)
           .map((entry) => `${entry.ts} ${entry.taskId} ${entry.from} → ${entry.to}`);
+        if (history.skipped > 0) {
+          lines.push(`(${history.skipped} unreadable line(s) skipped)`);
+        }
         notify(ctx, lines.join("\n"));
         return;
       }
