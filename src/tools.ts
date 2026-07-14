@@ -551,6 +551,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       const wasInFlight =
         beforeTask?.status === "running" || beforeTask?.status === "ready_for_review";
       const editsContractField =
+        title !== undefined ||
         brief !== undefined ||
         successCriteria !== undefined ||
         tier !== undefined ||

@@ -1501,7 +1501,7 @@ test("maestro_update cannot mutate a task owned by a persisted dispatch", async 
       await assert.rejects(
         update.execute(
           "mutate-reviewing-task",
-          { taskId: "T1", title: "Raced title" },
+          { taskId: "T1", title: "Raced title", invalidateInFlight: true },
           undefined,
           undefined,
           ctx
@@ -1548,6 +1548,55 @@ test("maestro_update rejects contract edits on an in-flight task without acknowl
         /\$1\.7600.*invalidateInFlight/
       );
       assert.equal(readFileSync(boardFile, "utf-8"), before);
+    }
+  );
+});
+
+test("maestro_update gates in-flight retitles behind invalidation consent", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Original Title",
+        brief: "work under review",
+        tier: "standard",
+        writePaths: ["src/reviewed.ts"],
+        successCriteria: ["Reviewed behavior works"],
+      });
+      task.status = "ready_for_review";
+      const attempt = executorAttempt();
+      attempt.usage.cost = 1.76;
+      task.attempts.push(attempt);
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const boardFile = join(cwd, ".pi", "maestro", "board.json");
+      const before = readFileSync(boardFile, "utf-8");
+      const { ctx, tools } = loadMaestro(cwd);
+      const update = tools.get("maestro_update");
+      assert.ok(update);
+
+      await assert.rejects(
+        update.execute(
+          "retitle-in-flight-task",
+          { taskId: "T1", title: "New Title" },
+          undefined,
+          undefined,
+          ctx
+        ),
+        /invalidateInFlight/
+      );
+      assert.equal(readFileSync(boardFile, "utf-8"), before);
+
+      await update.execute(
+        "retitle-in-flight-task-ack",
+        { taskId: "T1", title: "New Title", invalidateInFlight: true },
+        undefined,
+        undefined,
+        ctx
+      );
+
+      assert.equal(findTask(loadBoard(cwd), "T1")?.title, "New Title");
     }
   );
 });

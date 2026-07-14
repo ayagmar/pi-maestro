@@ -137,7 +137,7 @@ read-only full-brief viewer plus editing for its title, brief, tier, dependencie
 scope, commit message, verification profile, and cancellation state. Choose **Save changes** to
 validate and persist the draft, or **Cancel editing**/Esc to discard it. Invalid plans remain
 pending and unchanged until the listed task ids, references, cycles, or tiers are fixed. The same
-fields remain available through `maestro_update`. Contract edits (`brief`, `successCriteria`,
+fields remain available through `maestro_update`. Contract edits (`title`, `brief`, `successCriteria`,
 `tier`, `writePaths`, `verificationProfile`, `reviewPolicy`, `dependsOn`, or `commitMessage`) are
 rejected while a task is `running` or `ready_for_review`, because they invalidate paid work. If
 that invalidation is intentional, pass `invalidateInFlight: true`; Maestro applies the edit and
