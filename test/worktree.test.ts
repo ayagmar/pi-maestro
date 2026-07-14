@@ -134,6 +134,24 @@ test("worktree refs sanitize task ids deterministically", () => {
   assert.equal(ref.branch, "maestro/feature-a-attempt-2");
 });
 
+test("worktree creation chooses a free name when the base branch already exists", () => {
+  const cwd = repository();
+  try {
+    const existingBranch = "maestro/t1-attempt-1";
+    const existingCommit = git(cwd, "rev-parse", "HEAD");
+    git(cwd, "branch", existingBranch);
+
+    const ref = createWorktree(cwd, "T1", 1);
+
+    assert.equal(ref.branch, "maestro/t1-attempt-1-2");
+    assert.equal(ref.worktreePath, join(cwd, ".pi", "maestro", "worktrees", "t1-attempt-1-2"));
+    assert.equal(existsSync(ref.worktreePath), true);
+    assert.equal(git(cwd, "rev-parse", existingBranch), existingCommit);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("changed paths preserve the first character for unstaged tracked files", () => {
   const cwd = repository();
   try {

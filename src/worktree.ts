@@ -111,7 +111,18 @@ export function worktreeRef(mainCwd: string, taskId: string, attempt: number): W
 }
 
 export function createWorktree(mainCwd: string, taskId: string, attempt: number): WorktreeRef {
-  const ref = worktreeRef(mainCwd, taskId, attempt);
+  const base = worktreeRef(mainCwd, taskId, attempt);
+  let ref = base;
+  let suffix = 2;
+
+  while (existsSync(ref.worktreePath) || git(mainCwd, ["branch", "--list", ref.branch])) {
+    ref = {
+      worktreePath: `${base.worktreePath}-${suffix}`,
+      branch: `${base.branch}-${suffix}`,
+    };
+    suffix += 1;
+  }
+
   git(mainCwd, ["worktree", "add", "-b", ref.branch, ref.worktreePath, "HEAD"]);
   return ref;
 }
