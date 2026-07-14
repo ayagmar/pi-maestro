@@ -79,6 +79,61 @@ test("dashboard renders header, tasks, and footer within width", () => {
   }
 });
 
+test("dashboard renders every task from the stuck five-task board in a tall terminal", () => {
+  // Contract/state shape from .pi/maestro/archive/2026-07-14T12-47-05.461Z-board.json.
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 6,
+    tasks: [
+      makeTask({ id: "T1", status: "ready_for_review", title: "Board parity" }),
+      makeTask({ id: "T2", status: "todo", title: "Remove list", dependsOn: ["T1"] }),
+      makeTask({ id: "T3", status: "todo", title: "Merge compare", dependsOn: ["T2"] }),
+      makeTask({ id: "T4", status: "todo", title: "Run summary", dependsOn: ["T3"] }),
+      makeTask({
+        id: "T5",
+        status: "todo",
+        title: "Group help",
+        dependsOn: ["T2", "T3", "T4"],
+      }),
+    ],
+    activeDecision: {
+      id: "stuck-review",
+      kind: "reviewer_failure",
+      taskIds: ["T1"],
+      evidence: "review operation failed",
+      allowedInterventions: ["handoff", "abort"],
+      createdAt: 0,
+    },
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 60 });
+  try {
+    for (let index = 0; index < 4; index += 1) dashboard.handleInput("\x1b[B");
+    const rendered = dashboard.render(120).join("\n");
+    for (const task of board.tasks) assert.match(rendered, new RegExp(`${task.id} ${task.title}`));
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard task window keeps the selected task visible in a short terminal", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 6,
+    tasks: Array.from({ length: 5 }, (_, index) =>
+      makeTask({ id: `T${index + 1}`, title: `Task ${index + 1}`, status: "todo" })
+    ),
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 8 });
+  try {
+    for (let index = 0; index < 4; index += 1) dashboard.handleInput("\x1b[B");
+    const rendered = dashboard.render(120).join("\n");
+    assert.match(rendered, /T5 Task 5/);
+    assert.doesNotMatch(rendered, /T1 Task 1/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard clamps both panes to its configured body height", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-maestro-dashboard-"));
   const logFile = join(directory, "executor.jsonl");

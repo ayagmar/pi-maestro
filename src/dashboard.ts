@@ -798,11 +798,11 @@ export class Dashboard {
     }
 
     const lines: string[] = [];
-    const start = Math.max(
-      0,
-      Math.min(this.selected - Math.floor(height / 4), tasks.length - height / 2)
-    );
-    for (let i = Math.floor(start); i < tasks.length && lines.length < height; i++) {
+    const visibleTaskCount = Math.max(1, Math.ceil(height / 2));
+    const maxStart = Math.max(0, tasks.length - visibleTaskCount);
+    const centeredStart = this.selected - Math.floor(visibleTaskCount / 2);
+    const start = Math.min(Math.max(0, centeredStart), maxStart);
+    for (let i = start; i < tasks.length && lines.length < height; i++) {
       const task = tasks[i];
       if (!task) continue;
       const isSelected = i === this.selected;
