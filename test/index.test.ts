@@ -2414,6 +2414,7 @@ test("slash drive can pause live work without aborting it, persist ownership, an
               aborted: false,
             }),
             steer: () => {},
+            followUp: () => {},
             abort: () => {
               abortCalls += 1;
             },
@@ -2424,6 +2425,7 @@ test("slash drive can pause live work without aborting it, persist ownership, an
           attempt: executorAttempt(),
           outcome: executorOutcome,
           steer: () => {},
+          followUp: () => {},
           abort: () => {
             abortCalls += 1;
           },
@@ -2487,6 +2489,7 @@ test("provider-blocked slash drive retries transient failures once and persists 
               aborted: false,
             }),
             steer: () => {},
+            followUp: () => {},
             abort: () => {},
           };
         }
@@ -2512,6 +2515,7 @@ test("provider-blocked slash drive retries transient failures once and persists 
                 }
           ),
           steer: () => {},
+          followUp: () => {},
           abort: () => {},
         };
       };
@@ -2587,7 +2591,13 @@ test("slash abort cancels an active drive and its executor", async () => {
             });
           });
         });
-        return { attempt: executorAttempt(), outcome, steer: () => {}, abort: () => {} };
+        return {
+          attempt: executorAttempt(),
+          outcome,
+          steer: () => {},
+          followUp: () => {},
+          abort: () => {},
+        };
       };
       const { ctx, command } = loadMaestro(cwd, startExecutor);
 
@@ -2808,6 +2818,7 @@ test("handoff refuses an empty board or live executors", async () => {
             );
           }),
           steer: () => {},
+          followUp: () => {},
           abort: () => {},
         };
       };
@@ -2846,7 +2857,13 @@ test("session switches are cancelled while a slash drive owns active work", asyn
             });
           });
         });
-        return { attempt: executorAttempt(), outcome, steer: () => {}, abort: () => {} };
+        return {
+          attempt: executorAttempt(),
+          outcome,
+          steer: () => {},
+          followUp: () => {},
+          abort: () => {},
+        };
       };
       const { ctx, command, events } = loadMaestro(cwd, startExecutor);
 
@@ -2941,6 +2958,7 @@ test("completed drives archive and clear tasks by default", async () => {
           aborted: false,
         }),
         steer: () => {},
+        followUp: () => {},
         abort: () => {},
       });
       const { ctx, tools, events, messages, notices } = loadMaestro(cwd, startExecutor);
@@ -2980,6 +2998,7 @@ test("post-persist completion UI failures do not replace the successful decision
           aborted: false,
         }),
         steer: () => {},
+        followUp: () => {},
         abort: () => {},
       });
       const { ctx, tools } = loadMaestro(cwd, startExecutor);
@@ -3052,6 +3071,7 @@ test("production recovery sequence supersedes, launches, clears stale status, an
             aborted: false,
           }),
           steer: () => {},
+          followUp: () => {},
           abort: () => {},
         };
       };
@@ -3177,6 +3197,7 @@ test("review disagreement wakes only its owner once and is not redispatched", as
             aborted: false,
           }),
           steer: () => {},
+          followUp: () => {},
           abort: () => {},
         };
       };
@@ -3231,6 +3252,7 @@ test("active drive shutdown persists owner-scoped internal error for reload deli
         attempt: executorAttempt(),
         outcome,
         steer: () => {},
+        followUp: () => {},
         abort: () =>
           finish({
             exitCode: 1,
@@ -3576,10 +3598,13 @@ test("ambient executor pane cycles through its real input path and resolves ever
     },
     async (cwd) => {
       const finishes = new Map<string, (outcome: RunOutcome) => void>();
+      const steered: string[] = [];
+      const followedUp: string[] = [];
       const startExecutor: StartExecutor = (options) => ({
         attempt: { ...executorAttempt(), logFile: `${options.runId}.jsonl` },
         outcome: new Promise<RunOutcome>((resolve) => finishes.set(options.runId, resolve)),
-        steer: () => {},
+        steer: (message) => steered.push(`${options.runId}:${message}`),
+        followUp: (message) => followedUp.push(`${options.runId}:${message}`),
         abort: () => {},
       });
       const runtime = loadMaestro(cwd, startExecutor);
@@ -3666,6 +3691,17 @@ test("ambient executor pane cycles through its real input path and resolves ever
       assert.ok(reopened.unfocusArgumentCounts.every((count) => count === 0));
       assert.deepEqual(renderLatestWidget(runtime), []);
 
+      cycle(runtime.ctx);
+      reopened.component.handleInput("s");
+      reopened.component.handleInput("\r");
+      reopened.component.handleInput("F");
+      for (const character of "summarize later") reopened.component.handleInput(character);
+      reopened.component.handleInput("\r");
+      assert.match(steered[0] ?? "", /^T2-.*:Stop - wrong approach/);
+      assert.match(followedUp[0] ?? "", /^T2-.*:summarize later/);
+      assert.match(reopened.component.render?.(80).join("\n") ?? "", /Queued follow-up for T2/);
+      reopened.component.handleInput("\x1b");
+
       for (const [runId, finish] of finishes) {
         if (runId.startsWith("T1-")) continue;
         finish({
@@ -3708,6 +3744,7 @@ test("ambient pane shutdown resolves through done without stale handles", async 
           finish = resolve;
         }),
         steer: () => {},
+        followUp: () => {},
         abort: () => finish?.(aborted),
       }));
       await runtime.tools
@@ -3742,6 +3779,7 @@ test("disabled ambient panes leave the status widget available", async () => {
           finish = resolve;
         }),
         steer: () => {},
+        followUp: () => {},
         abort: () => {},
       }));
       await runtime.tools

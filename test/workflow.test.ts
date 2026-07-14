@@ -85,6 +85,7 @@ function executor(outcome: Partial<RunOutcome>): StartExecutor {
       attempt: attempt(),
       outcome: Promise.resolve(result),
       steer: () => {},
+      followUp: () => {},
       abort: () => {},
     };
     return handle;
@@ -186,6 +187,7 @@ function queuedReviewerReports(reports: Array<Partial<RunOutcome>>): StartExecut
         ...report,
       }),
       steer: () => {},
+      followUp: () => {},
       abort: () => {},
     };
   };
@@ -942,6 +944,7 @@ test("driveBoard pauses after active executors finish and resumes from fresh boa
         attempt: attempt(),
         outcome: activeOutcome,
         steer: () => {},
+        followUp: () => {},
         abort: () => {
           abortCalls += 1;
         },
@@ -1018,7 +1021,7 @@ test("driveBoard aborts active executors through the existing AbortSignal", asyn
           });
         });
       });
-      return { attempt: attempt(), outcome, steer: () => {}, abort: () => {} };
+      return { attempt: attempt(), outcome, steer: () => {}, followUp: () => {}, abort: () => {} };
     };
 
     const running = driveBoard({
@@ -1151,6 +1154,7 @@ test("rejected executor outcomes persist a redacted failure and return a retryab
           attempt: runAttempt,
           outcome: Promise.reject(new Error("executor promise failed token=top-secret")),
           steer: () => {},
+          followUp: () => {},
           abort: () => {},
         };
       },
@@ -1696,6 +1700,7 @@ test("executor session is persisted before the run settles", async () => {
           },
           outcome,
           steer: () => {},
+          followUp: () => {},
           abort: () => {},
         };
       },
@@ -1991,6 +1996,7 @@ test("zero-turn provider failure is persisted and retries on fallback without co
           ...(failed ? { errorMessage: "primary provider unavailable" } : {}),
         }),
         steer: () => {},
+        followUp: () => {},
         abort: () => {},
       };
     };
@@ -2183,6 +2189,7 @@ test("rejected reviewer outcomes persist a redacted failure and return a retryab
           attempt: reviewAttempt,
           outcome: Promise.reject(new Error("review promise failed secret=hunter2")),
           steer: () => {},
+          followUp: () => {},
           abort: () => {},
         };
       },
@@ -2705,6 +2712,7 @@ test("provider blocking waits for active peer executors and starts no review bat
             })
           : peerOutcome,
         steer: () => {},
+        followUp: () => {},
         abort: () => {
           aborts += 1;
         },
@@ -2907,6 +2915,7 @@ test("mid-run quota exhaustion falls back to the next model without consuming at
         attempt: { ...attempt(), model: options.tier.model ?? "" },
         outcome: Promise.resolve(result),
         steer: () => {},
+        followUp: () => {},
         abort: () => {},
       };
     };

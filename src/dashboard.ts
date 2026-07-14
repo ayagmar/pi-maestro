@@ -52,6 +52,7 @@ export interface DashboardActions {
   liveActivity(taskId: string): string | undefined;
   getLiveRun?(taskId: string): { cost: number; turns: number; lastActivity: string } | undefined;
   steer(taskId: string, message: string): void;
+  followUp(taskId: string, message: string): void;
   abort(taskId: string): void;
   setTaskStatus(taskId: string, status: TaskStatus): void;
   hasExecutorSession(taskId: string): boolean;
@@ -78,6 +79,7 @@ type Mode =
   | "browse"
   | "steer_templates"
   | "steer"
+  | "follow_up"
   | "manual_status"
   | "confirm_abort"
   | "confirm_accept"
@@ -160,6 +162,7 @@ export const DASHBOARD_BINDINGS = [
   { key: "PgUp/PgDn", context: "Navigation", description: "scroll" },
   { key: "esc", context: "Navigation", description: "close" },
   { key: "s", context: "Task", description: "steer" },
+  { key: "F", context: "Task", description: "follow-up" },
   { key: "x", context: "Task", description: "abort" },
   { key: "a", context: "Task", description: "approve (review bypass)" },
   { key: "m", context: "Task", description: "manual status" },
@@ -182,6 +185,29 @@ const STEER_OPTIONS = [
   "Stay strictly within the task brief scope",
   "Custom message...",
 ] as const;
+
+function steerTemplateLines(
+  theme: Theme,
+  selected: number,
+  width: number,
+  height: number
+): string[] {
+  const optionRows = Math.min(STEER_OPTIONS.length, height);
+  const firstOption = Math.min(
+    Math.max(0, selected - optionRows + 1),
+    STEER_OPTIONS.length - optionRows
+  );
+  const lines = STEER_OPTIONS.slice(firstOption, firstOption + optionRows).map((option, offset) => {
+    const index = firstOption + offset;
+    const marker = index === selected ? "▶ " : "  ";
+    const text = truncateToWidth(`${marker}${option}`, width);
+    return index === selected ? theme.fg("accent", text) : text;
+  });
+  if (height > STEER_OPTIONS.length) {
+    lines.push(theme.fg("dim", "↑↓ select · enter choose · esc cancel"));
+  }
+  return lines;
+}
 
 const MANUAL_STATUS_OPTIONS: readonly TaskStatus[] = [
   "todo",
@@ -275,11 +301,14 @@ export interface LivePaneOptions {
   requestRender(): void;
   onEscape(): void;
   onCycleVisibility(): void;
+  onSteer?(launch: LivePaneLaunch, message: string): void;
+  onFollowUp?(launch: LivePaneLaunch, message: string): void;
   height?: number;
   getHeight?: () => number;
 }
 
 type LivePaneStatus = "thinking" | "streaming" | "tool" | "done";
+type LivePaneMode = "browse" | "steer_templates" | "steer" | "follow_up";
 
 const LIVE_PANE_STATUS: Record<
   LivePaneStatus,
@@ -293,7 +322,7 @@ const LIVE_PANE_STATUS: Record<
 
 /** Ambient, bounded transcript follower for active executor and reviewer launches. */
 export class LivePaneComponent {
-  focused = false;
+  private _focused = false;
   private selectedKey: string | undefined;
   private readonly launchOrder: string[] = [];
   private previousLaunches = new Map<string, LivePaneLaunch>();
@@ -302,14 +331,37 @@ export class LivePaneComponent {
   private renderedScrollOffset = 0;
   private followMode = true;
   private settledNotice: string | undefined;
+  private queuedNotice: string | undefined;
+  private mode: LivePaneMode = "browse";
+  private steerOption = 0;
+  private readonly steerInput = new Input();
+  private readonly followUpInput = new Input();
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     private readonly theme: Theme,
     private readonly options: LivePaneOptions
   ) {
+    this.steerInput.onSubmit = (value) => this.submitMessage("steer", value);
+    this.steerInput.onEscape = () => {
+      this.mode = "browse";
+    };
+    this.followUpInput.onSubmit = (value) => this.submitMessage("follow_up", value);
+    this.followUpInput.onEscape = () => {
+      this.mode = "browse";
+    };
     this.timer = setInterval(() => options.requestRender(), REFRESH_MS);
     this.timer.unref();
+  }
+
+  get focused(): boolean {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    this._focused = value;
+    this.steerInput.focused = value;
+    this.followUpInput.focused = value;
   }
 
   dispose(): void {
@@ -326,12 +378,38 @@ export class LivePaneComponent {
       this.options.onCycleVisibility();
       return;
     }
+    if (this.mode === "steer_templates") {
+      this.handleSteerTemplateInput(data);
+      this.options.requestRender();
+      return;
+    }
+    if (this.mode === "steer") {
+      this.steerInput.handleInput(data);
+      this.options.requestRender();
+      return;
+    }
+    if (this.mode === "follow_up") {
+      this.followUpInput.handleInput(data);
+      this.options.requestRender();
+      return;
+    }
     if (matchesKey(data, Key.escape)) {
       this.options.onEscape();
       return;
     }
 
     const launches = this.syncLaunches();
+    if (data === "s" && this.options.onSteer) {
+      this.steerOption = 0;
+      this.mode = "steer_templates";
+      this.options.requestRender();
+      return;
+    }
+    if (data === "F" && this.options.onFollowUp) {
+      this.mode = "follow_up";
+      this.options.requestRender();
+      return;
+    }
     if (matchesKey(data, Key.left)) {
       this.selectOffset(launches, -1);
       return;
@@ -398,7 +476,9 @@ export class LivePaneComponent {
     const footerRows = height >= 3 ? 1 : 0;
     const stripRows = launches.length > 1 && height >= 4 ? 1 : 0;
     const noticeRows = this.settledNotice && height >= 5 ? 1 : 0;
-    const bodyHeight = Math.max(0, height - 1 - footerRows - stripRows - noticeRows);
+    const fixedRows = 1 + footerRows + stripRows + noticeRows;
+    const actionLines = this.renderActionControls(safeWidth, Math.max(0, height - fixedRows));
+    const bodyHeight = Math.max(0, height - fixedRows - actionLines.length);
     const maxScroll = Math.max(0, transcript.length - bodyHeight);
     const requestedOffset = this.followMode ? Number.MAX_SAFE_INTEGER : this.scrollOffset;
     this.renderedScrollOffset = Math.min(requestedOffset, maxScroll);
@@ -414,6 +494,7 @@ export class LivePaneComponent {
         ? [this.theme.fg("success", truncateToWidth(this.settledNotice ?? "", safeWidth))]
         : []),
       ...body,
+      ...actionLines,
       ...(footerRows
         ? [this.renderFooter(transcript.length, bodyHeight, this.renderedScrollOffset, safeWidth)]
         : []),
@@ -496,8 +577,72 @@ export class LivePaneComponent {
     const follow = this.followMode
       ? this.theme.fg("success", "● follow")
       : this.theme.fg("dim", "○ paused");
-    const hints = "←/→ agent · j/k scroll · PgUp/PgDn · g/G top/end · esc editor · ctrl+alt+w hide";
+    const actions = `${bindingLabel("s")} · ${bindingLabel("F")}`;
+    const hints = `←/→ agent · j/k scroll · g/G top/end · ${actions} · esc editor · ctrl+alt+w hide`;
     return this.theme.fg("dim", truncateToWidth(`${position} ${follow} · ${hints}`, width));
+  }
+
+  private renderActionControls(width: number, height: number): string[] {
+    if (this.mode === "steer") {
+      return [
+        this.theme.fg("accent", "steer ▸ ") +
+          (this.steerInput.render(Math.max(1, width - 8))[0] ?? ""),
+        this.theme.fg("dim", "enter send · esc cancel"),
+      ].slice(0, height);
+    }
+    if (this.mode === "follow_up") {
+      return [
+        this.theme.fg("accent", "follow-up ▸ ") +
+          (this.followUpInput.render(Math.max(1, width - 12))[0] ?? ""),
+        this.theme.fg("dim", "enter queue · esc cancel"),
+      ].slice(0, height);
+    }
+    if (this.mode === "browse" && this.queuedNotice) {
+      return [this.theme.fg("success", truncateToWidth(`✓ ${this.queuedNotice}`, width))].slice(
+        0,
+        height
+      );
+    }
+    if (this.mode !== "steer_templates") return [];
+
+    return steerTemplateLines(this.theme, this.steerOption, width, height);
+  }
+
+  private handleSteerTemplateInput(data: string): void {
+    if (matchesKey(data, Key.escape)) {
+      this.mode = "browse";
+      return;
+    }
+    if (matchesKey(data, Key.up)) {
+      this.steerOption = Math.max(0, this.steerOption - 1);
+      return;
+    }
+    if (matchesKey(data, Key.down)) {
+      this.steerOption = Math.min(STEER_OPTIONS.length - 1, this.steerOption + 1);
+      return;
+    }
+    if (!matchesKey(data, Key.enter)) return;
+
+    const message = STEER_OPTIONS[this.steerOption];
+    if (!message) return;
+    if (message === "Custom message...") {
+      this.mode = "steer";
+      return;
+    }
+    this.submitMessage("steer", message);
+  }
+
+  private submitMessage(kind: "steer" | "follow_up", value: string): void {
+    const launches = this.syncLaunches();
+    const selected = launches.find((launch) => launch.key === this.selectedKey);
+    this.mode = "browse";
+    this.steerInput.setValue("");
+    this.followUpInput.setValue("");
+    if (!selected || !value.trim()) return;
+
+    if (kind === "steer") this.options.onSteer?.(selected, value.trim());
+    else this.options.onFollowUp?.(selected, value.trim());
+    this.queuedNotice = `Queued ${kind === "steer" ? "steer" : "follow-up"} for ${selected.taskId}`;
   }
 
   private renderSettled(width: number, height: number): string[] {
@@ -521,6 +666,8 @@ export class LivePaneComponent {
     this.followMode = true;
     this.scrollOffset = Number.MAX_SAFE_INTEGER;
     this.settledNotice = undefined;
+    this.queuedNotice = undefined;
+    this.mode = "browse";
     this.options.requestRender();
   }
 
@@ -549,6 +696,8 @@ export class LivePaneComponent {
         : undefined;
       this.followMode = true;
       this.scrollOffset = Number.MAX_SAFE_INTEGER;
+      this.queuedNotice = undefined;
+      this.mode = "browse";
     }
 
     this.previousLaunches = new Map(launches.map((launch) => [launch.key, launch]));
@@ -580,6 +729,8 @@ export class Dashboard {
   private detailView: DetailView = "transcript";
   private steerOption = 0;
   private steerInput = new Input();
+  private followUpInput = new Input();
+  private queuedNotice: string | undefined;
   private tails = new Map<string, TranscriptTail>();
   private timer: ReturnType<typeof setInterval>;
   private bodyHeight: number;
@@ -599,6 +750,10 @@ export class Dashboard {
     this.frame = this.buildFrame();
     this.steerInput.onSubmit = (value) => this.submitSteer(value);
     this.steerInput.onEscape = () => {
+      this.mode = "browse";
+    };
+    this.followUpInput.onSubmit = (value) => this.submitFollowUp(value);
+    this.followUpInput.onEscape = () => {
       this.mode = "browse";
     };
     this.timer = setInterval(() => actions.requestRender(), REFRESH_MS);
@@ -714,7 +869,18 @@ export class Dashboard {
     const task = this.selectedTask();
     this.mode = "browse";
     this.steerInput.setValue("");
-    if (task && value.trim()) this.actions.steer(task.id, value.trim());
+    if (!task || !value.trim()) return;
+    this.actions.steer(task.id, value.trim());
+    this.queuedNotice = `Queued steer for ${task.id}`;
+  }
+
+  private submitFollowUp(value: string): void {
+    const task = this.selectedTask();
+    this.mode = "browse";
+    this.followUpInput.setValue("");
+    if (!task || !value.trim()) return;
+    this.actions.followUp(task.id, value.trim());
+    this.queuedNotice = `Queued follow-up for ${task.id}`;
   }
 
   handleInput(data: string): void {
@@ -728,6 +894,12 @@ export class Dashboard {
 
     if (this.mode === "steer") {
       this.steerInput.handleInput(data);
+      this.actions.requestRender();
+      return;
+    }
+
+    if (this.mode === "follow_up") {
+      this.followUpInput.handleInput(data);
       this.actions.requestRender();
       return;
     }
@@ -858,6 +1030,8 @@ export class Dashboard {
     } else if (data === "s" && task && this.actions.isLive(task.id)) {
       this.steerOption = 0;
       this.mode = "steer_templates";
+    } else if (data === "F" && task && this.actions.isLive(task.id)) {
+      this.mode = "follow_up";
     } else if (data === "x" && task && this.actions.isLive(task.id)) {
       this.pendingConfirm = { taskId: task.id, action: "abort" };
       this.mode = "confirm_abort";
@@ -1029,15 +1203,10 @@ export class Dashboard {
 
   private renderHelp(width: number, height: number): string[] {
     const lines = [this.theme.bold("Dashboard help")];
-    for (const context of ["Navigation", "Task", "View"] as const) {
-      lines.push(this.theme.bold(context));
-      for (const binding of DASHBOARD_BINDINGS.filter(
-        (candidate) => candidate.context === context
-      )) {
-        lines.push(`  ${binding.key.padEnd(12)} ${binding.description}`);
-      }
+    for (const binding of DASHBOARD_BINDINGS) {
+      lines.push(`${binding.context.padEnd(12)} ${binding.key.padEnd(12)} ${binding.description}`);
     }
-    lines.push("", this.theme.fg("dim", "Press any key to close help"));
+    lines.push(this.theme.fg("dim", "Press any key to close help"));
     return lines.map((line) => truncateToWidth(line, width)).slice(0, height);
   }
 
@@ -1459,25 +1628,22 @@ export class Dashboard {
         this.theme.fg("dim", "enter send · esc cancel"),
       ].slice(0, height);
     }
+    if (this.mode === "follow_up") {
+      return [
+        this.theme.fg("accent", "follow-up ▸ ") +
+          (this.followUpInput.render(Math.max(1, width - 12))[0] ?? ""),
+        this.theme.fg("dim", "enter queue · esc cancel"),
+      ].slice(0, height);
+    }
+    if (this.mode === "browse" && this.queuedNotice) {
+      return [this.theme.fg("success", truncateToWidth(`✓ ${this.queuedNotice}`, width))].slice(
+        0,
+        height
+      );
+    }
     if (this.mode !== "steer_templates") return [];
 
-    const optionRows = Math.min(STEER_OPTIONS.length, height);
-    const firstOption = Math.min(
-      Math.max(0, this.steerOption - optionRows + 1),
-      STEER_OPTIONS.length - optionRows
-    );
-    const lines = STEER_OPTIONS.slice(firstOption, firstOption + optionRows).map(
-      (option, offset) => {
-        const index = firstOption + offset;
-        const marker = index === this.steerOption ? "▶ " : "  ";
-        const text = truncateToWidth(`${marker}${option}`, width);
-        return index === this.steerOption ? this.theme.fg("accent", text) : text;
-      }
-    );
-    if (height > STEER_OPTIONS.length) {
-      lines.push(this.theme.fg("dim", "↑↓ select · enter choose · esc cancel"));
-    }
-    return lines;
+    return steerTemplateLines(this.theme, this.steerOption, width, height);
   }
 
   private renderFooter(width: number): string {
@@ -1507,7 +1673,7 @@ export class Dashboard {
       bindingLabel("esc"),
       bindingLabel("PgUp/PgDn"),
     ];
-    if (live) parts.push(bindingLabel("s"), bindingLabel("x"));
+    if (live) parts.push(bindingLabel("s"), bindingLabel("F"), bindingLabel("x"));
     else if (task) {
       if (lastAttemptReport(task)) parts.push(bindingLabel("p"));
       if (task.attempts.at(-1)?.reviewReport) parts.push(bindingLabel("v"));

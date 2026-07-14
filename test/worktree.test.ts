@@ -111,6 +111,7 @@ function approvingReviewer(cwdSeen: string[]): StartExecutor {
       },
       outcome: Promise.resolve(outcome),
       steer: () => {},
+      followUp: () => {},
       abort: () => {},
     };
     return handle;

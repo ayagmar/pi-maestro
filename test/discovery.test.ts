@@ -233,6 +233,7 @@ test("discovery executors use the narrow read-only tool list without changing re
           aborted: false,
         }),
         steer: () => {},
+        followUp: () => {},
         abort: () => {},
       };
     };

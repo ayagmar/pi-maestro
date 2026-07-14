@@ -1814,6 +1814,7 @@ export async function reviewTask(options: {
               failureCause: "process",
             }),
             steer: () => {},
+            followUp: () => {},
             abort: () => {},
           };
         }

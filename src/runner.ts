@@ -197,6 +197,8 @@ export interface ExecutorHandle {
   outcome: Promise<RunOutcome>;
   /** Queue a steering message into the running executor (delivered before its next LLM call). */
   steer(message: string): void;
+  /** Queue a follow-up message until the executor has finished its current work. */
+  followUp(message: string): void;
   /** Abort the executor. The outcome resolves with aborted: true. */
   abort(): void;
 }
@@ -598,6 +600,7 @@ export function startExecutor(options: {
     attempt,
     outcome,
     steer: (message: string) => send({ type: "steer", message }),
+    followUp: (message: string) => send({ type: "follow_up", message }),
     abort,
   };
 }

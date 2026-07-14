@@ -332,6 +332,12 @@ export default function maestro(
               refreshUI(ctx);
             },
             onCycleVisibility: () => cycleLivePane(ctx),
+            onSteer: (launch, message) => {
+              liveRuns.get(launch.taskId)?.handle.steer(message);
+            },
+            onFollowUp: (launch, message) => {
+              liveRuns.get(launch.taskId)?.handle.followUp(message);
+            },
           });
           return pane.component;
         },
@@ -2123,6 +2129,9 @@ export default function maestro(
             },
             steer: (taskId, message) => {
               liveRuns.get(taskId)?.handle.steer(message);
+            },
+            followUp: (taskId, message) => {
+              liveRuns.get(taskId)?.handle.followUp(message);
             },
             abort: (taskId) => {
               liveRuns.get(taskId)?.handle.abort();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -112,6 +112,61 @@ process.stdin.on("end", () => process.exit(0));
     assert.equal(outcome.exitCode, 0);
   } finally {
     process.argv[1] = originalScript;
+  }
+});
+
+test("executor steering and follow-up send exact RPC payloads", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-messages-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  const commandsFile = join(root, "commands.jsonl");
+  writeFileSync(
+    fakePi,
+    `import { appendFileSync } from "node:fs";
+let buffer = "";
+let finishTimer;
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    appendFileSync(${JSON.stringify(commandsFile)}, JSON.stringify(command) + "\\n");
+    if (command.type === "prompt" && !finishTimer) {
+      finishTimer = setTimeout(() => console.log(JSON.stringify({ type: "agent_end" })), 40);
+    }
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "messages",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+    });
+    run.steer("change direction");
+    run.followUp("then summarize");
+    await run.outcome;
+
+    const messages = readFileSync(commandsFile, "utf-8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((command) => command.type === "steer" || command.type === "follow_up");
+    assert.deepEqual(messages, [
+      { type: "steer", message: "change direction" },
+      { type: "follow_up", message: "then summarize" },
+    ]);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

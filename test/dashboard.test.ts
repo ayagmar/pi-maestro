@@ -47,6 +47,7 @@ function makeActions(board: Board, overrides: Partial<DashboardActions> = {}): D
     liveKind: () => undefined,
     liveActivity: () => undefined,
     steer: () => {},
+    followUp: () => {},
     abort: () => {},
     setTaskStatus: () => {},
     hasExecutorSession: () => false,
@@ -258,6 +259,31 @@ test("dashboard steer mode routes submitted text to the live run", () => {
     for (const ch of "focus on tests") dashboard.handleInput(ch);
     dashboard.handleInput("\r"); // submit
     assert.deepEqual(steered, ["T1:focus on tests"]);
+    assert.match(dashboard.render(100).join("\n"), /Queued steer for T1/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard queues a follow-up for the selected live run", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const followedUp: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => true,
+      followUp: (taskId, message) => followedUp.push(`${taskId}:${message}`),
+    })
+  );
+  try {
+    dashboard.handleInput("F");
+    for (const character of "summarize after checks") dashboard.handleInput(character);
+    dashboard.handleInput("\r");
+
+    assert.deepEqual(followedUp, ["T1:summarize after checks"]);
+    const output = dashboard.render(100).join("\n");
+    assert.match(output, /Queued follow-up for T1/);
+    assert.match(output, /F follow-up/);
   } finally {
     dashboard.dispose();
   }
@@ -1807,6 +1833,46 @@ test("live pane keeps selection stable and advances once when the selected launc
   }
 });
 
+test("live pane steers and queues follow-up for the selected launch", () => {
+  const launches: LivePaneLaunch[] = ["T1", "T2"].map((taskId) => ({
+    key: `execute:${taskId}`,
+    taskId,
+    title: `Task ${taskId}`,
+    kind: "execute",
+    logFile: `/missing/${taskId}.jsonl`,
+    turns: 0,
+    cost: 0,
+    lastActivity: "starting",
+  }));
+  const steered: string[] = [];
+  const followedUp: string[] = [];
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    onSteer: (launch, message) => steered.push(`${launch.taskId}:${message}`),
+    onFollowUp: (launch, message) => followedUp.push(`${launch.taskId}:${message}`),
+    height: 10,
+  });
+  try {
+    pane.focused = true;
+    pane.handleInput("\x1b[C");
+    pane.handleInput("s");
+    pane.handleInput("\r");
+    assert.deepEqual(steered, ["T2:Stop - wrong approach, report current state"]);
+    assert.match(pane.render(80).join("\n"), /Queued steer for T2/);
+
+    pane.handleInput("F");
+    for (const character of "summarize later") pane.handleInput(character);
+    pane.handleInput("\r");
+    assert.deepEqual(followedUp, ["T2:summarize later"]);
+    assert.match(pane.render(80).join("\n"), /Queued follow-up for T2/);
+  } finally {
+    pane.dispose();
+  }
+});
+
 test("live pane windows multiple agents without consuming every transcript row", () => {
   const launches: LivePaneLaunch[] = Array.from({ length: 8 }, (_, index) => ({
     key: `execute:T${index + 1}`,
@@ -1868,7 +1934,7 @@ test("dashboard hides unavailable actions and ignores their keys while live", ()
   );
   try {
     const footer = dashboard.render(120).at(-1) ?? "";
-    assert.match(footer, /s steer · x abort/);
+    assert.match(footer, /s steer · F follow-up · x abort/);
     assert.doesNotMatch(footer, /report|verdict|executor|reviewer|approve|reopen/);
 
     dashboard.handleInput("p");
