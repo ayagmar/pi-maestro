@@ -20,6 +20,7 @@
   "files": [
     "src/",
     "docs/",
+    "examples/",
     "README.md",
     "CONTRIBUTING.md"
   ],

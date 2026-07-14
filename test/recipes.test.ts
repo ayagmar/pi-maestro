@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { createTask, loadBoard, saveBoard, saveStoredRecipe } from "../src/board.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
@@ -72,6 +72,30 @@ function recipe(name: string, title = "Work"): WorkflowRecipe {
     ],
   };
 }
+
+test("shipped example recipes parse and expand", () => {
+  const directory = join(dirname(new URL(import.meta.url).pathname), "..", "examples", "recipes");
+  const files = readdirSync(directory)
+    .filter((file) => file.endsWith(".json"))
+    .sort();
+  assert.deepEqual(files, [
+    "add-characterization-tests.json",
+    "dependency-bump.json",
+    "docs-refresh.json",
+  ]);
+  for (const file of files) {
+    const parsed = parseRecipe(readFileSync(join(directory, file), "utf8"));
+    const inputs =
+      parsed.name === "add-characterization-tests"
+        ? { module: "src/example.ts" }
+        : parsed.name === "dependency-bump"
+          ? { package: "example-package" }
+          : { area: "the dashboard" };
+    assert.doesNotThrow(() =>
+      expandRecipe(parsed, inputs, Object.keys(DEFAULT_CONFIG.tiers), [], 64)
+    );
+  }
+});
 
 test("recipe schema rejects executable fields", () => {
   for (const field of ["javascript", "shell", "hooks", "command"]) {

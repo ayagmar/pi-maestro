@@ -1,0 +1,28 @@
+{
+  "kind": "pi-maestro-recipe",
+  "version": 1,
+  "name": "docs-refresh",
+  "description": "Refresh documentation for a bounded product area.",
+  "inputs": {
+    "area": {
+      "description": "Behavior or feature area to document",
+      "required": true
+    }
+  },
+  "tasks": [
+    {
+      "id": "refresh",
+      "title": "Refresh {{input.area}} documentation",
+      "brief": "Inspect the current implementation and refresh the README and docs for {{input.area}}. Keep examples accurate and describe operational limitations.",
+      "tier": "standard",
+      "dependsOn": [],
+      "writePaths": ["README.md", "docs/**"],
+      "successCriteria": [
+        "Documentation matches current behavior",
+        "The quick-start path remains runnable",
+        "No unrelated files are changed"
+      ],
+      "commitMessage": "docs: refresh {{input.area}} guidance"
+    }
+  ]
+}

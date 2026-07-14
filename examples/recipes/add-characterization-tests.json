@@ -1,0 +1,40 @@
+{
+  "kind": "pi-maestro-recipe",
+  "version": 1,
+  "name": "add-characterization-tests",
+  "description": "Investigate a module, then add stable characterization coverage.",
+  "inputs": {
+    "module": {
+      "description": "Repository-relative module path",
+      "required": true
+    }
+  },
+  "tasks": [
+    {
+      "id": "investigate",
+      "title": "Investigate {{input.module}}",
+      "brief": "Investigate {{input.module}} and its callers. Record observable behavior and propose characterization cases without changing files.",
+      "tier": "trivial",
+      "dependsOn": [],
+      "writePaths": [],
+      "successCriteria": [],
+      "discovery": {
+        "allowedWritePaths": ["{{input.module}}"]
+      },
+      "commitMessage": "docs: record characterization cases"
+    },
+    {
+      "id": "tests",
+      "title": "Add characterization tests for {{input.module}}",
+      "brief": "Use the approved investigation report to add characterization tests for {{input.module}}. Change only the new test coverage and fix flakiness introduced there.",
+      "tier": "standard",
+      "dependsOn": ["investigate"],
+      "writePaths": ["test/**"],
+      "successCriteria": [
+        "The new tests capture the documented behavior",
+        "The focused test command passes"
+      ],
+      "commitMessage": "test: add characterization coverage"
+    }
+  ]
+}

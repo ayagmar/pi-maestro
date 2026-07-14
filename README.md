@@ -387,6 +387,9 @@ failures count as attempts but are excluded from the meaningful average.
 
 ## Limitations and trust boundaries
 
+Ship-ready examples live in `examples/recipes/` — copy one into `.pi/maestro-recipes/` and run
+`/maestro recipe run <name>`.
+
 Recipes are versioned JSON stored in `~/.pi/agent/maestro-recipes/` (user scope) or
 `.pi/maestro-recipes/` (project scope). A project file overrides a same-name user file before
 parsing. Recipes contain only declarative task and input fields; scripts, hooks, commands, and

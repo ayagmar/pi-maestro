@@ -1,0 +1,38 @@
+{
+  "kind": "pi-maestro-recipe",
+  "version": 1,
+  "name": "dependency-bump",
+  "description": "Update one dependency and verify the repository.",
+  "inputs": {
+    "package": {
+      "description": "Package name to update",
+      "required": true
+    }
+  },
+  "tasks": [
+    {
+      "id": "bump",
+      "title": "Bump {{input.package}}",
+      "brief": "Update {{input.package}} to the requested compatible version. Review the lockfile and changelog conventions without changing unrelated dependencies.",
+      "tier": "standard",
+      "dependsOn": [],
+      "writePaths": ["package.json", "pnpm-lock.yaml", "CHANGELOG.md"],
+      "successCriteria": [
+        "{{input.package}} is updated in package metadata",
+        "The lockfile is consistent",
+        "The changelog check is complete"
+      ],
+      "commitMessage": "fix: bump {{input.package}}"
+    },
+    {
+      "id": "verify",
+      "title": "Verify the {{input.package}} bump",
+      "brief": "Run the repository checks after the {{input.package}} update and fix only regressions caused by this bump.",
+      "tier": "standard",
+      "dependsOn": ["bump"],
+      "writePaths": ["package.json", "pnpm-lock.yaml", "CHANGELOG.md"],
+      "successCriteria": ["pnpm run check passes"],
+      "commitMessage": "test: verify dependency bump"
+    }
+  ]
+}
