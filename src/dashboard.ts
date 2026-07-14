@@ -199,6 +199,7 @@ export class Dashboard {
   private timer: ReturnType<typeof setInterval>;
   private bodyHeight: number;
   private frame: DashboardFrame;
+  private frameFresh = false;
   private transcriptLinesAtScroll: number | undefined;
 
   constructor(
@@ -234,10 +235,11 @@ export class Dashboard {
     }
     const staleTaskIds = new Set<string>();
     if (config) {
+      const freshnessCache = new Map();
       for (const task of board.tasks) {
         if (
           task.status === "approved" &&
-          completionFreshness(board, task, config).state !== "fresh"
+          completionFreshness(board, task, config, freshnessCache).state !== "fresh"
         ) {
           staleTaskIds.add(task.id);
         }
@@ -327,6 +329,7 @@ export class Dashboard {
 
   handleInput(data: string): void {
     this.frame = this.buildFrame();
+    this.frameFresh = true;
     if (this.mode === "steer_templates") {
       this.handleSteerTemplateInput(data);
       this.actions.requestRender();
@@ -527,7 +530,8 @@ export class Dashboard {
   }
 
   render(width: number): string[] {
-    this.frame = this.buildFrame();
+    if (this.frameFresh) this.frameFresh = false;
+    else this.frame = this.buildFrame();
     width = Math.max(1, Math.floor(width));
     const theme = this.theme;
     const board = this.frame.board;
@@ -1199,6 +1203,7 @@ function attemptHistory(attempt: Attempt): string {
 }
 
 function relativeTime(timestamp: number): string {
+  if (!Number.isFinite(timestamp)) return "recently";
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);

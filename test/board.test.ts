@@ -25,6 +25,7 @@ import {
   groupTasks,
   humanRetryEligibility,
   isRunnable,
+  latestArchiveFile,
   loadBoard,
   loadStatusHistory,
   rejectPlan,
@@ -642,6 +643,24 @@ test("archiveBoard copies the current board and returns its path", () => {
     assert.ok(archive);
     assert.match(archive, /archive[/\\].+-board\.json$/);
     assert.equal(readFileSync(archive, "utf-8"), boardContents);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("latestArchiveFile reads only the newest suffixed archive name", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const directory = join(cwd, ".pi", "maestro", "archive");
+    mkdirSync(directory, { recursive: true });
+    const name = "2026-07-14T12:00:00.000Z-1-board.json";
+    writeFileSync(join(directory, name), "not readable JSON");
+
+    const latest = latestArchiveFile(cwd);
+
+    assert.equal(latest?.file, join(directory, name));
+    assert.equal(latest?.timestamp, "2026-07-14T12:00:00.000Z");
+    assert.equal(Number.isFinite(Date.parse(latest?.timestamp ?? "")), true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

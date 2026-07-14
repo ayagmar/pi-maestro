@@ -369,6 +369,18 @@ export interface ArchivedBoard {
   taskCount: number;
 }
 
+export function latestArchiveFile(cwd: string): { file: string; timestamp: string } | undefined {
+  const directory = join(stateDir(cwd), "archive");
+  if (!existsSync(directory)) return undefined;
+  const name = readdirSync(directory)
+    .filter((candidate) => candidate.endsWith("-board.json"))
+    .sort((left, right) => right.localeCompare(left))[0];
+  if (!name) return undefined;
+  const isoEnd = name.indexOf("Z");
+  if (isoEnd < 0) return undefined;
+  return { file: join(directory, name), timestamp: name.slice(0, isoEnd + 1) };
+}
+
 export function loadArchivedBoard(cwd: string, selectedFile: string): Board {
   const archiveDirectory = resolve(stateDir(cwd), "archive");
   const file = resolve(

@@ -122,9 +122,10 @@ export type CompletionFreshness =
 export function completionFreshness(
   board: Board,
   task: Task,
-  config: MaestroConfig
+  config: MaestroConfig,
+  cache: Map<string, CompletionFreshness> = new Map()
 ): CompletionFreshness {
-  return freshness(board, task, config, new Set(), new Map());
+  return freshness(board, task, config, new Set(), cache);
 }
 
 function freshness(

@@ -466,6 +466,19 @@ test("dashboard points archived empty boards to replay", () => {
   }
 });
 
+test("dashboard describes an invalid archive timestamp as recent", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, { getLatestArchive: () => ({ name: "run.json", at: Number.NaN }) })
+  );
+  try {
+    assert.match(dashboard.render(160).join("\n"), /archived recently/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard marks stale approvals and names blockers in task rows", () => {
   const board: Board = {
     version: 1,
@@ -1016,6 +1029,28 @@ test("dashboard help lists every key and closes on the next key", () => {
     }
     dashboard.handleInput("z");
     assert.doesNotMatch(dashboard.render(160).join("\n"), /Dashboard help/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard reuses the input frame for the following render", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  let reads = 0;
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      getBoard: () => {
+        reads += 1;
+        return board;
+      },
+    })
+  );
+  try {
+    reads = 0;
+    dashboard.handleInput("g");
+    dashboard.render(100);
+    assert.equal(reads, 1);
   } finally {
     dashboard.dispose();
   }

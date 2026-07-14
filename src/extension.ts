@@ -34,6 +34,7 @@ import {
   forceStatus,
   humanRetryEligibility,
   humanRetryRiskToken,
+  latestArchiveFile,
   listArchivedBoards,
   loadArchivedBoard,
   loadBoard,
@@ -868,6 +869,44 @@ export default function maestro(
     const report = task ? lastReport(task) : undefined;
     if (!report) return "";
     return `\nReport:\n${truncateText(report, REPORT_PREVIEW_LINES)}`;
+  }
+
+  const COMPLETION_CACHE_MS = 2_000;
+  let boardCompletionCache: { cwd: string; expiresAt: number; board: Board } | undefined;
+  let recipeCompletionCache:
+    | { cwd: string; expiresAt: number; recipes: ReturnType<typeof loadRecipeListings> }
+    | undefined;
+
+  function completionBoard(): Board {
+    const now = Date.now();
+    if (
+      !boardCompletionCache ||
+      boardCompletionCache.cwd !== activeCwd ||
+      boardCompletionCache.expiresAt <= now
+    ) {
+      boardCompletionCache = {
+        cwd: activeCwd,
+        expiresAt: now + COMPLETION_CACHE_MS,
+        board: loadBoard(activeCwd),
+      };
+    }
+    return boardCompletionCache.board;
+  }
+
+  function completionRecipes(): ReturnType<typeof loadRecipeListings> {
+    const now = Date.now();
+    if (
+      !recipeCompletionCache ||
+      recipeCompletionCache.cwd !== activeCwd ||
+      recipeCompletionCache.expiresAt <= now
+    ) {
+      recipeCompletionCache = {
+        cwd: activeCwd,
+        expiresAt: now + COMPLETION_CACHE_MS,
+        recipes: loadRecipeListings(activeCwd),
+      };
+    }
+    return recipeCompletionCache.recipes;
   }
 
   registerMaestroCommand(
@@ -1825,7 +1864,7 @@ export default function maestro(
       );
       if (taskCommand) {
         const query = prefix.trim().split(/\s+/).at(-1)?.toLowerCase() ?? "";
-        return loadBoard(activeCwd)
+        return completionBoard()
           .tasks.filter((task) => task.id.toLowerCase().startsWith(query))
           .map((task) => ({
             value: `${taskCommand} ${task.id}`,
@@ -1837,7 +1876,7 @@ export default function maestro(
       if (!recipeMatch) return [];
       const action = recipeMatch[1]?.toLowerCase();
       const query = recipeMatch[2]?.toLowerCase() ?? "";
-      return loadRecipeListings(activeCwd)
+      return completionRecipes()
         .filter((recipe) => recipe.name.toLowerCase().startsWith(query))
         .map((recipe) => ({
           value: `recipe ${action} ${recipe.name}`,
@@ -1938,7 +1977,7 @@ export default function maestro(
             close: () => done(null),
             requestRender: () => tui.requestRender(),
             getLatestArchive: () => {
-              const archive = listArchivedBoards(ctx.cwd)[0];
+              const archive = latestArchiveFile(ctx.cwd);
               if (!archive) return undefined;
               return { name: basename(archive.file), at: Date.parse(archive.timestamp) };
             },
