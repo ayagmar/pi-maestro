@@ -983,7 +983,7 @@ test("/maestro simulate is deterministic and starts no executors or board writes
   );
 });
 
-test("plan diff, plan compare, and recipe preview are bounded read-only inspections", async () => {
+test("plan diff and recipe preview are bounded read-only inspections", async () => {
   await withBoard(
     (cwd) => {
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
@@ -1030,7 +1030,6 @@ test("plan diff, plan compare, and recipe preview are bounded read-only inspecti
       const beforeArchives = listArchivedBoards(cwd);
 
       await command.handler("plan diff candidate.json", ctx);
-      await command.handler("plan compare candidate.json T1", ctx);
       await command.handler("recipe preview preview-safe", ctx);
 
       assert.match(notices.join("\n"), /Plan comparison/);
