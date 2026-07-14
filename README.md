@@ -173,8 +173,9 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
     The chooser scrolls to keep the selected template visible in short terminals.
   - `x` abort a running executor (task becomes `cancelled`)
   - `a` explicitly accepts eligible `ready_for_review` work after artifact checks (a manual
-    review bypass); `r` invokes the same centralized retry eligibility and confirmation path as
-    `/maestro retry`, preserving prior attempts and recovery references
+    review bypass); `m` opens the manual-status selector for any non-live, nonterminal task; `r`
+    invokes the same centralized retry eligibility and confirmation path as `/maestro retry`,
+    preserving prior attempts and recovery references
   - `g` cycle compact workflow-group filters: blocked, ready, running, review needed, approved,
     failed, and cancelled. The selected-task pane lists unresolved blockers, failure/review notes,
     recent attempts, model/provider, turns, cost, and changed files.
@@ -193,7 +194,6 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   before any model turn — is a launch but not an attempt, so it never counts against
   `maxAttempts`; only launches that produced real work count.
 - **`/maestro simulate [taskIds]`**: deterministic, read-only preview of dependency waves, concurrency, caps, and blockers. It assumes every run/review succeeds; it does not predict quality, cost, or spawn children.
-- **`/maestro list`**: compact task picker (report view, status overrides, open session).
 - **`/maestro open T3`**: switches your TUI into that executor's persisted session so you can
   inspect exactly what it did — or continue working in it by hand. `/maestro back` returns to the
   previous session. Persisted session names identify the task and always number the run, for
@@ -345,7 +345,6 @@ and recoverable worktrees remain untouched. In non-interactive mode, add `confir
 /maestro plan export <file>  write a versioned plan-only JSON file; never overwrites
 /maestro plan import <file>  validate before replacing; non-empty boards require archive confirmation
 /maestro plan diff <file> [taskId]  compare an export with the live board without mutation
-/maestro plan compare <file> [taskId]  detailed pure comparison with fingerprint/preflight effects
 /maestro recipe list      list effective user and project recipes
 /maestro recipe inspect <name>  show the effective validated recipe
 /maestro recipe preview <name> [JSON]  expand and compare without changing board or archives
@@ -354,7 +353,6 @@ and recoverable worktrees remain untouched. In non-interactive mode, add `confir
 /maestro recipe remove <name> [user|project]  remove only after confirmation
 /maestro discover <taskId> [append|replace]  preview and approve bounded discovery output
 /maestro board            full-screen live dashboard (aliases: dash, dashboard; also ctrl+alt+b)
-/maestro list             compact task picker
 /maestro open <taskId>    switch into an executor's session
 /maestro back             switch back to the previous session (after open/reviewer open)
 /maestro config           interactive settings editor (user scope)
@@ -410,7 +408,6 @@ approvals remain visible but are never silently reused; changed inputs show a co
 stale reason and require retry, manual migration acceptance, or a successor. Plan edits, recipes,
 discovery output, retry, status, and dashboard projections all use this same freshness policy.
 
-`/maestro plan diff` and `/maestro plan compare` validate a versioned export before comparing it
 with the current board. `/maestro recipe preview` uses the exact recipe resolver and expansion path.
 All three report added, removed, and changed task contracts plus fingerprint, dependency-wave,
 concurrency, launch-bound, and verification-profile effects. They never write the board or archive;

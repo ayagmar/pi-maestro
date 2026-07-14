@@ -93,12 +93,13 @@ test("configuration docs match runtime defaults and commands remain documented",
     "timeline",
     "reconcile",
     "plan diff",
-    "plan compare",
     "recipe preview",
   ] as const) {
     assert.ok(MAESTRO_COMMANDS.includes(command));
     assert.ok(read("README.md").includes(`/maestro ${command}`));
   }
+  assert.equal(MAESTRO_COMMANDS.includes("plan compare" as never), false);
+  assert.doesNotMatch(read("README.md"), /\/maestro list\b|plan compare/);
 });
 
 test("declared package shape contains runtime and required documentation", () => {
