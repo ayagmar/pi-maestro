@@ -11,6 +11,8 @@ export const MAESTRO_COMMANDS = [
   "resume",
   "abort",
   "board",
+  "dash",
+  "dashboard",
   "plan",
   "plan export",
   "plan import",

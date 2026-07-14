@@ -51,7 +51,7 @@ const REFRESH_MS = 500;
 export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
 const MIN_DASHBOARD_BODY_HEIGHT = 2;
 
-type Mode = "browse" | "steer_templates" | "steer" | "confirm_abort";
+type Mode = "browse" | "steer_templates" | "steer" | "confirm_abort" | "confirm_accept";
 type DashboardFilter = "all" | TaskGroup;
 type NavigationLevel = "phase" | "task" | "launch";
 
@@ -283,6 +283,14 @@ export class Dashboard {
       return;
     }
 
+    if (this.mode === "confirm_accept") {
+      const task = this.selectedTask();
+      if ((data === "y" || data === "Y") && task) this.actions.setTaskStatus(task.id, "approved");
+      this.mode = "browse";
+      this.actions.requestRender();
+      return;
+    }
+
     const visible = this.visibleTasks();
     const task = this.selectedTask();
 
@@ -372,7 +380,7 @@ export class Dashboard {
       task?.status === "ready_for_review" &&
       !this.actions.isLive(task.id)
     ) {
-      this.actions.setTaskStatus(task.id, "approved");
+      this.mode = "confirm_accept";
     } else if (
       data === "r" &&
       task &&
@@ -967,11 +975,18 @@ export class Dashboard {
     if (this.mode === "confirm_abort" && task) {
       return theme.fg("error", ` Abort ${task.id}? Press y to confirm, any other key to cancel `);
     }
+    if (this.mode === "confirm_accept" && task) {
+      return theme.fg(
+        "warning",
+        ` Approve ${task.id} without review? Press y to confirm, any other key to cancel `
+      );
+    }
     if (this.navigationLevel === "phase") {
       return theme.fg("dim", truncateToWidth(" ↑↓ phases · → tasks · esc close ", width));
     }
     const live = task ? this.actions.isLive(task.id) : false;
     const parts = [
+      ...(this.actions.getBoard().planPending ? ["plan gated · /maestro plan to review"] : []),
       this.navigationLevel === "launch" ? "↑↓ launches" : "↑↓ tasks",
       "esc close",
       "PgUp/PgDn scroll",

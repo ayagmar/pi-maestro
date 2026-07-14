@@ -331,6 +331,17 @@ async function withBoard(
   }
 }
 
+test("unknown maestro subcommands identify the requested command", async () => {
+  await withBoard(
+    () => {},
+    async (cwd) => {
+      const loaded = loadMaestro(cwd);
+      await loaded.command.handler("wat", loaded.ctx);
+      assert.match(loaded.notices.at(-1) ?? "", /^Unknown subcommand "wat"\. Available commands:/);
+    }
+  );
+});
+
 test("gated plan editor saves title, brief, tier, dependencies, and cancellation explicitly", async () => {
   await withBoard(
     (cwd) => {

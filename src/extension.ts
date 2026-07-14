@@ -234,11 +234,12 @@ export default function maestro(
     const reviewPart = status.reviewable > 0 ? ` · ${status.reviewable} review` : "";
     const blockedPart = status.blocked > 0 ? ` · ${status.blocked} blocked` : "";
     const pausedPart = board.pausedDrive ? " · paused" : "";
+    const planPart = board.planPending ? " · plan awaiting approval" : "";
     ctx.ui.setStatus(
       COMMAND,
       ctx.ui.theme.fg(
         running > 0 || board.pausedDrive ? "warning" : "muted",
-        `⚡ maestro ${status.code} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart} · $${usage.cost.toFixed(4)}`
+        `⚡ maestro ${status.code} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart}${planPart} · $${usage.cost.toFixed(4)}`
       )
     );
 
@@ -889,7 +890,11 @@ export default function maestro(
         pi.sendMessage(
           {
             customType: MESSAGE_TYPE,
-            content: buildOrchestratorBriefing(rest, describeTiersForPlanning(loadConfig(ctx.cwd))),
+            content: buildOrchestratorBriefing(
+              rest,
+              describeTiersForPlanning(loadConfig(ctx.cwd)),
+              loadConfig(ctx.cwd).planGate
+            ),
             display: true,
           },
           { triggerTurn: true }
@@ -1698,6 +1703,7 @@ export default function maestro(
         notify(
           ctx,
           [
+            ...(subcommand ? [`Unknown subcommand "${subcommand}". Available commands:`] : []),
             `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
             `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
             `/${COMMAND} drive [ids]    autonomously run, review, and retry tasks`,
@@ -1975,12 +1981,14 @@ export default function maestro(
         return;
       }
 
-      const ok =
-        !ctx.hasUI ||
-        (await ctx.ui.confirm(
-          "Reject plan?",
-          `Archive and clear all ${board.tasks.length} task(s)?`
-        ));
+      if (!ctx.hasUI) {
+        notify(ctx, "Plan rejection requires the interactive UI.", "warning");
+        continue;
+      }
+      const ok = await ctx.ui.confirm(
+        "Reject plan?",
+        `Archive and clear all ${board.tasks.length} task(s)?`
+      );
       if (!ok) continue;
       const archivePath = rejectPlan(ctx.cwd);
       if (!archivePath) {

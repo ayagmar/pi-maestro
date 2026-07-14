@@ -337,6 +337,8 @@ test("dashboard only applies task actions valid for the selected state", () => {
   );
   try {
     dashboard.handleInput("a");
+    assert.deepEqual(changes, []);
+    dashboard.handleInput("y");
     dashboard.handleInput("r");
     task.status = "failed";
     dashboard.handleInput("a");

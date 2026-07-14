@@ -311,4 +311,9 @@ test("orchestrator briefing embeds the goal, tier guidance, and workflow tools",
   assert.doesNotMatch(briefing, /maestro_(?:run|review|status)/);
   assert.match(briefing, /You do not implement tasks yourself/);
   assert.match(briefing, /fails twice with the same root cause/);
+
+  const gated = buildOrchestratorBriefing("Goal", tierGuidance, true);
+  assert.match(gated, /planGate is enabled/);
+  assert.match(gated, /\/maestro plan/);
+  assert.doesNotMatch(briefing, /planGate is enabled/);
 });

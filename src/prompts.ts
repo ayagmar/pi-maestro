@@ -257,7 +257,11 @@ export function buildSupervisorBriefing(
 }
 
 /** Injected into the orchestrator conversation by /maestro start. */
-export function buildOrchestratorBriefing(goal: string, tierGuidance: string): string {
+export function buildOrchestratorBriefing(
+  goal: string,
+  tierGuidance: string,
+  planGate = false
+): string {
   return [
     "Role: orchestrator. Plan the work, delegate execution to fresh-context executors, keep your own context clean. You do not implement tasks yourself.",
     `## Goal\n${goal}`,
@@ -269,7 +273,7 @@ export function buildOrchestratorBriefing(goal: string, tierGuidance: string): s
       "## Workflow",
       "1. Investigate just enough to split the goal into small, independently verifiable tasks. Tasks that would edit the same files must not run in parallel: chain them with dependsOn even when logically independent.",
       "2. `maestro_plan`: each brief must be self-contained (executors see only the brief plus approved dependency reports) and include goal, relevant file paths, constraints, acceptance criteria, and a verification command. Give each task a conventional commitMessage (fix:/feat:/refactor:/test:/docs:) describing its change.",
-      "3. `maestro_drive`: starts the mechanical run/review/retry loop in the background. It runs independent tasks in parallel, waits for approved dependencies, and carries review feedback into retries.",
+      `3. \`maestro_drive\`: starts the mechanical run/review/retry loop in the background. It runs independent tasks in parallel, waits for approved dependencies, and carries review feedback into retries.${planGate ? " When planGate is enabled, it refuses with plan_gate until the user approves via /maestro plan; announce the pending plan and wait instead of retrying." : ""}`,
       "4. Wait while routine progress stays in the dashboard. A compact completion or decision message wakes you exactly when judgment is needed.",
       "5. Resolve decisions by changing the board with `maestro_update`/`maestro_plan`, then call `maestro_drive` with action=start. Use action=intervene only to steer/abort a live executor or request handoff.",
       "6. When all tasks are approved, summarize.",
