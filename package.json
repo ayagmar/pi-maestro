@@ -30,9 +30,9 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "smoke-test": "node --import=tsx ./scripts/smoke-test.mjs",
-    "test": "node --import=tsx --test ./test/*.test.ts",
-    "check": "tsc --noEmit -p tsconfig.json && node --import=tsx ./scripts/smoke-test.mjs && node --import=tsx --test ./test/*.test.ts && pnpm run lint && pnpm run format:check"
+    "smoke-test": "node ./scripts/run-isolated.mjs node --import=tsx ./scripts/smoke-test.mjs",
+    "test": "node ./scripts/run-isolated.mjs node --import=tsx --test ./test/*.test.ts",
+    "check": "pnpm run typecheck && pnpm run smoke-test && pnpm test && pnpm run lint && pnpm run format:check"
   },
   "pi": {
     "extensions": [
