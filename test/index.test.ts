@@ -486,6 +486,39 @@ async function withBoard(
   }
 }
 
+test("dashboard opens in an overlay with an explicit terminal-sized budget", async () => {
+  await withBoard(
+    () => {},
+    async (cwd) => {
+      const runtime = loadMaestro(
+        cwd,
+        undefined,
+        owner,
+        undefined,
+        { rows: 24, columns: 120 }
+      );
+      const openDashboard = runtime.shortcuts.get("ctrl+alt+b");
+      assert.ok(openDashboard);
+
+      const completion = Promise.resolve(openDashboard(runtime.ctx));
+      const overlay = runtime.overlays[0];
+      assert.ok(overlay);
+      assert.deepEqual(overlay.options.overlayOptions, {
+        anchor: "center",
+        width: "100%",
+        maxHeight: "100%",
+      });
+      const lines = overlay.component.render?.(runtime.tui.terminal.columns) ?? [];
+      assert.ok(lines.length <= runtime.tui.terminal.rows);
+      assert.match(lines[0] ?? "", /maestro dashboard/);
+      assert.match(lines.at(-1) ?? "", /esc close/);
+
+      overlay.component.handleInput(escapeKey);
+      await completion;
+    }
+  );
+});
+
 test("start warns when git is required but not ready", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-command-test-"));
   try {
@@ -1170,11 +1203,14 @@ test("manual acceptance rejects out-of-scope artifacts before recording versione
       saveBoard(cwd, board);
     },
     async (cwd) => {
-      const refusalScript: UiScript = {
-        steps: [{ keys: ["m", down, down, enter, "q"] }],
-      };
-      const refused = loadMaestro(cwd, undefined, owner, refusalScript);
-      await refused.command.handler("board", refused.ctx);
+      const refused = loadMaestro(cwd);
+      const refusedCompletion = refused.command.handler("board", refused.ctx);
+      const refusedDashboard = refused.overlays[0];
+      assert.ok(refusedDashboard);
+      for (const key of ["m", down, down, enter, "q"]) {
+        refusedDashboard.component.handleInput(key);
+      }
+      await refusedCompletion;
       assert.match(refused.notices.at(-1) ?? "", /outside write scope/);
       assert.equal(findTask(loadBoard(cwd), "T1")?.status, "ready_for_review");
 
@@ -1185,11 +1221,14 @@ test("manual acceptance rejects out-of-scope artifacts before recording versione
         assert.ok(completed);
         completed.touchedFiles = ["src/allowed.ts"];
       });
-      const approvalScript: UiScript = {
-        steps: [{ keys: ["m", down, down, enter, "q"] }],
-      };
-      const accepted = loadMaestro(cwd, undefined, owner, approvalScript);
-      await accepted.command.handler("board", accepted.ctx);
+      const accepted = loadMaestro(cwd);
+      const acceptedCompletion = accepted.command.handler("board", accepted.ctx);
+      const acceptedDashboard = accepted.overlays[0];
+      assert.ok(acceptedDashboard);
+      for (const key of ["m", down, down, enter, "q"]) {
+        acceptedDashboard.component.handleInput(key);
+      }
+      await acceptedCompletion;
       const approved = findTask(loadBoard(cwd), "T1");
       assert.equal(approved?.status, "approved");
       assert.equal(approved?.approvalKind, "manual");

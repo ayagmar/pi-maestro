@@ -82,6 +82,33 @@ test("dashboard renders header, tasks, and footer within width", () => {
   }
 });
 
+test("dashboard keeps task visibility and controls within its row budget", () => {
+  const rowBudget = 12;
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 9,
+    tasks: Array.from({ length: 8 }, (_, index) =>
+      makeTask({ id: `T${index + 1}`, title: `Task ${index + 1}`, status: "todo" })
+    ),
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => rowBudget });
+  try {
+    const lines = dashboard.render(120);
+    const joined = lines.join("\n");
+    const everyTaskIsVisible = board.tasks.every((task) =>
+      joined.includes(`${task.id} ${task.title}`)
+    );
+    const hasWindowMarker = /[↑↓] \d+ (?:earlier|more) tasks/.test(joined);
+
+    assert.ok(lines.length <= rowBudget);
+    assert.match(lines[0] ?? "", /maestro dashboard/);
+    assert.ok(everyTaskIsVisible || hasWindowMarker);
+    assert.match(lines.at(-1) ?? "", /esc close/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("task list windowing renders every task when the pane is taller than the list", () => {
   // Five dependent tasks with an active reviewer-failure decision, more rows than the terminal needs.
   const board: Board = {

@@ -2241,6 +2241,14 @@ export default function maestro(
           handleInput: (data: string) => dashboard.handleInput(data),
           dispose: () => dashboard.dispose(),
         };
+      },
+      {
+        overlay: true,
+        overlayOptions: {
+          anchor: "center",
+          width: "100%",
+          maxHeight: "100%",
+        },
       }
     );
 
