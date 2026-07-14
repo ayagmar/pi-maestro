@@ -656,6 +656,45 @@ test("restoreArchivedBoard rejects malformed and non-Board files without replaci
   }
 });
 
+test("boards with a stalled attempt stay valid and survive archive/restore", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const selected = emptyBoard();
+    const task = createTask(selected, { title: "Stalled", brief: "work", tier: "standard" });
+    forceStatus(task, "failed");
+    task.attempts.push({
+      index: 1,
+      logFile: "executor.log",
+      thinking: "medium",
+      startedAt: 1,
+      endedAt: 2,
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      touchedFiles: [],
+      failureReason: {
+        kind: "stalled",
+        message: "no progress before watchdog termination",
+        retryable: true,
+      },
+    });
+    saveBoard(cwd, selected);
+    const selectedFile = archiveBoard(cwd);
+    assert.ok(selectedFile);
+
+    const current = emptyBoard();
+    createTask(current, { title: "Current", brief: "new work", tier: "complex" });
+    saveBoard(cwd, current);
+
+    const restored = restoreArchivedBoard(cwd, selectedFile);
+
+    assert.equal(restored.selectedFile, selectedFile);
+    const live = loadBoard(cwd);
+    assert.equal(live.tasks[0]?.title, "Stalled");
+    assert.equal(live.tasks[0]?.attempts[0]?.failureReason?.kind, "stalled");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("restoreArchivedBoard rejects invalid optional Attempt fields without replacing live board", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
