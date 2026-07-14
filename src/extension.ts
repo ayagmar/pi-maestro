@@ -84,7 +84,6 @@ import {
   formatCostSummary,
   formatStatusHistory,
   formatUsage,
-  padText,
   STATUS_LABELS,
   taskLine,
   truncateText,
