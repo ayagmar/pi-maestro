@@ -115,9 +115,9 @@ test("formatCostSummary stays compact and omits unavailable identities", () => {
   attempt.model = "openai/gpt-5-mini";
   assert.equal(
     formatCostSummary([makeTask({ attempts: [attempt] })]),
-    "1 attempt · $0.0200 total · $0.0200 avg billed attempt · models: openai/gpt-5-mini · providers: openai · other spend: $0.0200 · reconciled: $0.0200"
+    "run: 1 attempt · $0.0200 total · $0.0200 avg (billed)\nmodels: openai/gpt-5-mini\nproviders: openai\nspend: other $0.0200 · reconciled $0.0200"
   );
-  assert.equal(formatCostSummary([]), "0 attempts · $0.0000 total · $0.0000 avg billed attempt");
+  assert.equal(formatCostSummary([]), "run: 0 attempts · $0.0000 total · $0.0000 avg (billed)");
 });
 
 test("formatBoardProgress excludes cancelled tasks from active progress", () => {

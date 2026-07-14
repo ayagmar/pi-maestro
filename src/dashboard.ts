@@ -51,7 +51,7 @@ const REFRESH_MS = 500;
 export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
 const MIN_DASHBOARD_BODY_HEIGHT = 2;
 
-type Mode = "browse" | "steer_templates" | "steer" | "confirm_abort" | "confirm_accept";
+type Mode = "browse" | "steer_templates" | "steer" | "confirm_abort" | "confirm_accept" | "help";
 type DashboardFilter = "all" | TaskGroup;
 type NavigationLevel = "phase" | "task" | "launch";
 
@@ -121,6 +121,24 @@ const GROUP_LABELS: Record<TaskGroup, string> = {
   failed: "failed",
   cancelled: "cancelled",
 };
+
+const DASHBOARD_BINDINGS = [
+  { key: "↑↓", context: "Navigation", description: "tasks/phases" },
+  { key: "←→", context: "Navigation", description: "levels" },
+  { key: "PgUp/PgDn", context: "Navigation", description: "scroll" },
+  { key: "esc", context: "Navigation", description: "close" },
+  { key: "s", context: "Task", description: "steer" },
+  { key: "x", context: "Task", description: "abort" },
+  { key: "a", context: "Task", description: "approve (review bypass)" },
+  { key: "r", context: "Task", description: "retry" },
+  { key: "o/O", context: "Task", description: "open executor/reviewer session" },
+  { key: "e", context: "Task", description: "evidence" },
+  { key: "g", context: "View", description: "group filter" },
+  { key: "f", context: "View", description: "hide done" },
+  { key: "t", context: "View", description: "transcript/timeline" },
+  { key: "enter", context: "View", description: "open executor session" },
+  { key: "?", context: "View", description: "help" },
+] as const;
 
 const STEER_OPTIONS = [
   "Stop - wrong approach, report current state",
@@ -320,6 +338,17 @@ export class Dashboard {
       return;
     }
 
+    if (this.mode === "help") {
+      this.mode = "browse";
+      this.actions.requestRender();
+      return;
+    }
+    if (data === "?") {
+      this.mode = "help";
+      this.actions.requestRender();
+      return;
+    }
+
     const visible = this.visibleTasks();
     const task = this.selectedTask();
 
@@ -481,7 +510,7 @@ export class Dashboard {
     const visible = this.visibleTasks();
     if (this.selected >= visible.length) this.selected = Math.max(0, visible.length - 1);
 
-    const narrow = width < 48;
+    const narrow = width < 48 || this.mode === "help";
     const listWidth = narrow ? 0 : Math.min(44, Math.max(24, Math.floor(width * 0.35)));
     const transcriptWidth = narrow ? width : Math.max(1, width - listWidth - 3);
     const rows = this.options.getRows?.();
@@ -492,9 +521,11 @@ export class Dashboard {
 
     const left = narrow ? [] : this.renderNavigation(visible, board, listWidth, bodyHeight);
     const right =
-      this.navigationLevel === "phase"
-        ? this.renderSelectedPhase(transcriptWidth, bodyHeight)
-        : this.renderTranscript(transcriptWidth, bodyHeight);
+      this.mode === "help"
+        ? this.renderHelp(width, bodyHeight)
+        : this.navigationLevel === "phase"
+          ? this.renderSelectedPhase(transcriptWidth, bodyHeight)
+          : this.renderTranscript(transcriptWidth, bodyHeight);
 
     const lines: string[] = [];
     const usage = boardUsage(board.tasks);
@@ -526,6 +557,18 @@ export class Dashboard {
     lines.push(theme.fg("dim", "─".repeat(width)));
     lines.push(this.renderFooter(width));
     return lines.map((line) => truncateToWidth(line, width));
+  }
+
+  private renderHelp(width: number, height: number): string[] {
+    const lines = [this.theme.bold("Dashboard help")];
+    for (const context of ["Navigation", "Task", "View"] as const) {
+      const bindings = DASHBOARD_BINDINGS.filter((binding) => binding.context === context)
+        .map((binding) => `${binding.key} ${binding.description}`)
+        .join(" · ");
+      lines.push(`${context.padEnd(12)} ${bindings}`);
+    }
+    lines.push("", this.theme.fg("dim", "Press any key to close help"));
+    return lines.map((line) => truncateToWidth(line, width)).slice(0, height);
   }
 
   private renderNavigation(tasks: Task[], board: Board, width: number, height: number): string[] {
@@ -1029,7 +1072,9 @@ export class Dashboard {
       return theme.fg("dim", truncateToWidth(" ↑↓ phases · → tasks · esc close ", width));
     }
     const live = task ? this.actions.isLive(task.id) : false;
+    const help = DASHBOARD_BINDINGS.find((binding) => binding.key === "?");
     const parts = [
+      `${help?.key} ${help?.description}`,
       ...(this.frame.board.planPending ? ["plan gated · /maestro plan to review"] : []),
       this.navigationLevel === "launch" ? "↑↓ launches" : "↑↓ tasks",
       "esc close",

@@ -79,6 +79,7 @@ import {
   formatBoardProgress,
   formatCostSummary,
   formatUsage,
+  padText,
   STATUS_LABELS,
   taskLine,
   truncateText,
@@ -1583,9 +1584,16 @@ export default function maestro(
         }
         const requestedCount = Number.parseInt(rest, 10);
         const count = Number.isInteger(requestedCount) && requestedCount > 0 ? requestedCount : 20;
-        const lines = history.entries
-          .slice(-count)
-          .map((entry) => `${entry.ts} ${entry.taskId} ${entry.from} → ${entry.to}`);
+        const selected = history.entries.slice(-count);
+        const taskWidth = Math.max(4, ...selected.map((entry) => entry.taskId.length));
+        const fromWidth = Math.max(4, ...selected.map((entry) => entry.from.length));
+        const lines = [
+          `${padText("time", 8)}  ${padText("task", taskWidth)}  ${padText("from", fromWidth)} → to`,
+          ...selected.map(
+            (entry) =>
+              `${new Date(entry.ts).toISOString().slice(11, 19)}  ${padText(entry.taskId, taskWidth)}  ${padText(entry.from, fromWidth)} → ${entry.to}`
+          ),
+        ];
         if (history.skipped > 0) {
           lines.push(`(${history.skipped} unreadable line(s) skipped)`);
         }

@@ -164,7 +164,7 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   auto-refreshing twice a second). Its durable run view drills through the fixed phases
   **discovery → plan approval → execution → review → integration → verification → recovery →
   complete**, then task and launch evidence. Phase and status refreshes are mechanical and never
-  wake a model. From the dashboard you can:
+  wake a model. Press `?` for the complete dashboard keybinding guide. From the dashboard you can:
   - `↑↓` switch between executors, `PgUp/PgDn` scroll the transcript
   - `s` **steer a running executor** — choose **Stop - wrong approach, report current state**,
     **Run the project checks before finishing**, **Stay strictly within the task brief scope**, or

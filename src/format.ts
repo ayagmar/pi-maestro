@@ -96,12 +96,14 @@ export function boardUsageSummary(tasks: Task[]): BoardUsageSummary {
   };
 }
 
+export function padText(value: string, width: number): string {
+  return value.length >= width ? value : value + " ".repeat(width - value.length);
+}
+
 export function formatCostSummary(tasks: Task[]): string {
   const usage = boardUsageSummary(tasks);
   const parts = [
-    `${usage.totalAttempts} attempt${usage.totalAttempts === 1 ? "" : "s"}`,
-    `$${usage.totalCost.toFixed(4)} total`,
-    `$${usage.averageMeaningfulCost.toFixed(4)} avg billed attempt`,
+    `run: ${usage.totalAttempts} attempt${usage.totalAttempts === 1 ? "" : "s"} · $${usage.totalCost.toFixed(4)} total · $${usage.averageMeaningfulCost.toFixed(4)} avg (billed)`,
   ];
   if (usage.models.length > 0) parts.push(`models: ${usage.models.join(", ")}`);
   if (usage.providers.length > 0) parts.push(`providers: ${usage.providers.join(", ")}`);
@@ -148,10 +150,11 @@ export function formatCostSummary(tasks: Task[]): string {
       categorized.set(label, (categorized.get(label) ?? 0) + attempt.usage.cost);
     }
   }
-  for (const [label, cost] of categorized) parts.push(`${label} spend: $${cost.toFixed(4)}`);
+  const spend = [...categorized].map(([label, cost]) => `${label} $${cost.toFixed(4)}`);
   const reconciledCost = [...categorized.values()].reduce((sum, cost) => sum + cost, 0);
-  if (usage.totalAttempts > 0) parts.push(`reconciled: $${reconciledCost.toFixed(4)}`);
-  return parts.join(" · ");
+  if (usage.totalAttempts > 0) spend.push(`reconciled $${reconciledCost.toFixed(4)}`);
+  if (spend.length > 0) parts.push(`spend: ${spend.join(" · ")}`);
+  return parts.join("\n");
 }
 
 /**

@@ -905,6 +905,38 @@ test("dashboard evidence view exposes persisted execution, review, artifact, ver
   }
 });
 
+test("dashboard help lists every key and closes on the next key", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    dashboard.handleInput("?");
+    const help = dashboard.render(160).join("\n");
+    for (const key of [
+      "↑↓",
+      "←→",
+      "PgUp/PgDn",
+      "esc",
+      "s",
+      "x",
+      "a",
+      "r",
+      "o/O",
+      "e",
+      "g",
+      "f",
+      "t",
+      "enter",
+      "?",
+    ]) {
+      assert.ok(help.includes(key), `missing ${key}`);
+    }
+    dashboard.handleInput("z");
+    assert.doesNotMatch(dashboard.render(160).join("\n"), /Dashboard help/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard snapshots the board once per render", () => {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
   let reads = 0;

@@ -207,14 +207,20 @@ export function deriveRunTimeline(board: Board, taskId?: string): RunTimelineEve
 
 export function formatRunTimeline(events: RunTimelineEvent[], limit = 4_000): string {
   if (events.length === 0) return "No timeline events.";
-  const lines = events.map((event) => {
-    const usage =
-      event.cost !== undefined || event.turns !== undefined
-        ? ` · ${event.turns ?? 0} turns · $${(event.cost ?? 0).toFixed(4)}`
+  const date = new Date(events[0]?.timestamp ?? 0).toISOString().slice(0, 10);
+  const lines = [
+    `Timeline · ${date} · paths relative to .pi/maestro/`,
+    ...events.map((event) => {
+      const usage =
+        event.cost !== undefined || event.turns !== undefined
+          ? ` · ${event.turns ?? 0} turns · $${(event.cost ?? 0).toFixed(4)}`
+          : "";
+      const reference = event.reference
+        ? ` · ${event.reference.replace(/^.*[\\/]\.pi[\\/]maestro[\\/]/, "")}`
         : "";
-    const reference = event.reference ? ` · ${event.reference}` : "";
-    return `${new Date(event.timestamp).toISOString()} ${event.taskId ?? "run"} ${event.kind}: ${event.summary}${usage}${reference}`;
-  });
+      return `${new Date(event.timestamp).toISOString().slice(11, 19)} ${event.taskId ?? "run"} ${event.kind}: ${event.summary}${usage}${reference}`;
+    }),
+  ];
   const output = lines.join("\n");
   if (output.length <= limit) return output;
   return `${output.slice(0, limit - 80)}\n… timeline omitted; inspect task session/log references for detail`;
