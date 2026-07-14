@@ -834,7 +834,19 @@ export function loadStatusHistory(
   let skipped = 0;
   for (const line of readFileSync(file, "utf-8").split("\n").filter(Boolean)) {
     try {
-      entries.push(JSON.parse(line) as StatusHistoryEntry);
+      const value: unknown = JSON.parse(line);
+      if (
+        !isRecord(value) ||
+        typeof value.ts !== "string" ||
+        !Number.isFinite(Date.parse(value.ts)) ||
+        typeof value.taskId !== "string" ||
+        typeof value.from !== "string" ||
+        typeof value.to !== "string"
+      ) {
+        skipped += 1;
+        continue;
+      }
+      entries.push(value as unknown as StatusHistoryEntry);
     } catch {
       skipped += 1;
     }

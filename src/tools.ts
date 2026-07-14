@@ -345,7 +345,20 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           const current = ctx.sessionManager.getSessionFile();
           const resolved = resolveDriveDecision(ctx.cwd, input.decisionId, current, intervention);
           if (intervention === "steer") {
-            startBackgroundDrive(ctx, taskIds, signal);
+            try {
+              startBackgroundDrive(ctx, taskIds, signal);
+            } catch (error) {
+              updateBoard(ctx.cwd, (board) => {
+                const decision = board.activeDecision;
+                if (
+                  decision?.id === resolved.id &&
+                  decision.resolution?.resolvedAt === resolved.resolution?.resolvedAt
+                ) {
+                  delete decision.resolution;
+                }
+              });
+              throw error;
+            }
             return {
               content: [
                 {

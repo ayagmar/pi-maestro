@@ -54,6 +54,7 @@ export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
 const MIN_DASHBOARD_BODY_HEIGHT = 2;
 
 type Mode = "browse" | "steer_templates" | "steer" | "confirm_abort" | "confirm_accept" | "help";
+type ConfirmAction = "abort" | "accept";
 type DashboardFilter = "all" | TaskGroup;
 type NavigationLevel = "phase" | "task" | "launch";
 
@@ -187,6 +188,7 @@ export class Dashboard {
   private launchIndex = 0;
   private selectedLaunchKey: string | undefined;
   private mode: Mode = "browse";
+  private pendingConfirm: { taskId: string; action: ConfirmAction } | undefined;
   private scrollUp = 0;
   private hideDone = false;
   private filter: DashboardFilter = "all";
@@ -337,17 +339,22 @@ export class Dashboard {
       return;
     }
 
-    if (this.mode === "confirm_abort") {
-      const task = this.selectedTask();
-      if ((data === "y" || data === "Y") && task) this.actions.abort(task.id);
-      this.mode = "browse";
-      this.actions.requestRender();
-      return;
-    }
-
-    if (this.mode === "confirm_accept") {
-      const task = this.selectedTask();
-      if ((data === "y" || data === "Y") && task) this.actions.setTaskStatus(task.id, "approved");
+    if (this.mode === "confirm_abort" || this.mode === "confirm_accept") {
+      const pending = this.pendingConfirm;
+      const task = pending ? findTask(this.frame.board, pending.taskId) : undefined;
+      if (data === "y" || data === "Y") {
+        if (pending?.action === "abort" && task && this.actions.isLive(task.id)) {
+          this.actions.abort(task.id);
+        }
+        if (
+          pending?.action === "accept" &&
+          task?.status === "ready_for_review" &&
+          !this.actions.isLive(task.id)
+        ) {
+          this.actions.setTaskStatus(task.id, "approved");
+        }
+      }
+      this.pendingConfirm = undefined;
       this.mode = "browse";
       this.actions.requestRender();
       return;
@@ -447,12 +454,14 @@ export class Dashboard {
       this.steerOption = 0;
       this.mode = "steer_templates";
     } else if (data === "x" && task && this.actions.isLive(task.id)) {
+      this.pendingConfirm = { taskId: task.id, action: "abort" };
       this.mode = "confirm_abort";
     } else if (
       data === "a" &&
       task?.status === "ready_for_review" &&
       !this.actions.isLive(task.id)
     ) {
+      this.pendingConfirm = { taskId: task.id, action: "accept" };
       this.mode = "confirm_accept";
     } else if (
       data === "r" &&
@@ -1081,13 +1090,16 @@ export class Dashboard {
   private renderFooter(width: number): string {
     const theme = this.theme;
     const task = this.selectedTask();
-    if (this.mode === "confirm_abort" && task) {
-      return theme.fg("error", ` Abort ${task.id}? Press y to confirm, any other key to cancel `);
+    if (this.mode === "confirm_abort" && this.pendingConfirm) {
+      return theme.fg(
+        "error",
+        ` Abort ${this.pendingConfirm.taskId}? Press y to confirm, any other key to cancel `
+      );
     }
-    if (this.mode === "confirm_accept" && task) {
+    if (this.mode === "confirm_accept" && this.pendingConfirm) {
       return theme.fg(
         "warning",
-        ` Approve ${task.id} without review? Press y to confirm, any other key to cancel `
+        ` Approve ${this.pendingConfirm.taskId} without review? Press y to confirm, any other key to cancel `
       );
     }
     if (this.navigationLevel === "phase") {

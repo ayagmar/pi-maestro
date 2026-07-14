@@ -51,17 +51,16 @@ export function registerMaestroCommand(
   pi.registerCommand(COMMAND, {
     description: "Plan, delegate, review, and monitor work across fresh executor contexts",
     getArgumentCompletions: (prefix) => {
-      if (prefix.trim().includes(" ") || prefix.endsWith(" ")) {
-        try {
-          return dynamicCompletions?.(prefix) ?? [];
-        } catch {
-          return [];
-        }
-      }
       const matches = MAESTRO_COMMANDS.filter((command) =>
         command.startsWith(prefix.toLowerCase())
-      );
-      return matches.map((command) => ({ value: command, label: command }));
+      ).map((command) => ({ value: command, label: command }));
+      try {
+        const dynamic = dynamicCompletions?.(prefix) ?? [];
+        const values = new Set<string>(matches.map((item) => item.value));
+        return [...matches, ...dynamic.filter((item) => !values.has(item.value))];
+      } catch {
+        return matches;
+      }
     },
     handler,
   });

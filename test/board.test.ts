@@ -598,18 +598,31 @@ test("loadStatusHistory returns recorded status changes and distinguishes a miss
   }
 });
 
-test("loadStatusHistory skips unreadable lines", () => {
+test("loadStatusHistory skips malformed JSON and invalid entry shapes", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {
     const directory = join(cwd, ".pi", "maestro");
     mkdirSync(directory, { recursive: true });
+    const valid = {
+      ts: "2026-07-14T12:00:00.000Z",
+      taskId: "T1",
+      from: "todo",
+      to: "running",
+      revision: 1,
+    };
     writeFileSync(
       join(directory, "history.jsonl"),
-      `${JSON.stringify({ ts: "now", taskId: "T1", from: "todo", to: "running", revision: 1 })}\n{`
+      [
+        JSON.stringify(valid),
+        "null",
+        "{}",
+        JSON.stringify({ ts: "now", taskId: "T1", from: "todo", to: "done" }),
+        "{",
+      ].join("\n")
     );
     const history = loadStatusHistory(cwd);
-    assert.equal(history?.entries.length, 1);
-    assert.equal(history?.skipped, 1);
+    assert.deepEqual(history?.entries, [valid]);
+    assert.equal(history?.skipped, 4);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

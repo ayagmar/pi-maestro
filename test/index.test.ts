@@ -422,6 +422,42 @@ test("gated plan editor saves title, brief, tier, dependencies, and cancellation
   );
 });
 
+test("gated plan editor persists a cleared commit message", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+      createTask(board, {
+        title: "Task",
+        brief: "Do work",
+        tier: "standard",
+        commitMessage: "fix: old message",
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const script: UiScript = {
+        steps: [
+          { keys: select(1) },
+          { keys: select(7) },
+          {
+            keys: [
+              ...Array.from({ length: "fix: old message".length }, () => deleteForward),
+              enter,
+            ],
+          },
+          { keys: select(11) },
+          { keys: [escapeKey] },
+        ],
+      };
+      const { ctx, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("plan", ctx);
+
+      assert.equal(findTask(loadBoard(cwd), "T1")?.commitMessage, undefined);
+    }
+  );
+});
+
 test("gated plan editor cancel discards draft changes", async () => {
   await withBoard(
     (cwd) => {
@@ -591,6 +627,51 @@ test("/maestro costs summarizes attempts, cost, and identities", async () => {
   );
 });
 
+test("history command skips valid-JSON malformed rows and prints valid entries", async () => {
+  await withBoard(
+    (cwd) => {
+      const directory = join(cwd, ".pi", "maestro");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(
+        join(directory, "history.jsonl"),
+        [
+          JSON.stringify({
+            ts: "2026-07-14T12:00:00.000Z",
+            taskId: "T1",
+            from: "todo",
+            to: "running",
+            revision: 1,
+          }),
+          "null",
+          "{}",
+          JSON.stringify({ ts: "now", taskId: "T1", from: "todo", to: "done" }),
+        ].join("\n")
+      );
+    },
+    async (cwd) => {
+      const { command, ctx, notices } = loadMaestro(cwd);
+      await command.handler("history", ctx);
+      assert.match(notices[0] ?? "", /12:00:00.*T1.*todo.*running/);
+      assert.match(notices[0] ?? "", /3 unreadable line\(s\) skipped/);
+    }
+  );
+});
+
+test("a command that quarantines a corrupt board warns in the same invocation", async () => {
+  await withBoard(
+    (cwd) => {
+      const directory = join(cwd, ".pi", "maestro");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "board.json"), "{broken");
+    },
+    async (cwd) => {
+      const { command, ctx, notices } = loadMaestro(cwd);
+      await command.handler("costs", ctx);
+      assert.ok(notices.some((notice) => /corrupt and quarantined/.test(notice)));
+    }
+  );
+});
+
 test("/maestro costs is offered by argument completion and dispatches case-insensitively", async () => {
   await withBoard(
     () => {},
@@ -600,6 +681,21 @@ test("/maestro costs is offered by argument completion and dispatches case-insen
       assert.ok(completions?.some((item) => item.value === "costs"));
       await command.handler("COSTS", ctx);
       assert.deepEqual(notices, ["No recorded costs; the board is empty."]);
+    }
+  );
+});
+
+test("multi-word static and dynamic argument completions are combined", async () => {
+  await withBoard(
+    () => {},
+    async (cwd) => {
+      const { command } = loadMaestro(cwd);
+      assert.ok(
+        command.getArgumentCompletions?.("plan e")?.some((item) => item.value === "plan export")
+      );
+      assert.ok(
+        command.getArgumentCompletions?.("doctor ")?.some((item) => item.value === "doctor cleanup")
+      );
     }
   );
 });
@@ -2427,6 +2523,39 @@ test("completed drives archive and clear tasks by default", async () => {
   );
 });
 
+test("post-persist completion UI failures do not replace the successful decision", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Finish", brief: "complete work", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const startExecutor: StartExecutor = (options) => ({
+        attempt: executorAttempt(),
+        outcome: Promise.resolve({
+          exitCode: 0,
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: options.runId.includes("-review-") ? "VERDICT: APPROVE" : "done",
+          touchedFiles: [],
+          aborted: false,
+        }),
+        steer: () => {},
+        abort: () => {},
+      });
+      const { ctx, tools } = loadMaestro(cwd, startExecutor);
+      ctx.ui.notify = () => {
+        throw new Error("stale session context");
+      };
+      await tools
+        .get("maestro_drive")
+        ?.execute("drive", { action: "start" }, undefined, undefined, ctx);
+      await waitFor(() => loadBoard(cwd).activeDecision !== undefined, "drive decision");
+      assert.equal(loadBoard(cwd).activeDecision?.kind, "completed");
+    }
+  );
+});
+
 test("production recovery sequence supersedes, launches, clears stale status, and wakes once", async () => {
   await withBoard(
     (cwd) => {
@@ -2792,6 +2921,52 @@ test("settled decisions are owner-scoped, inspectable, and resolve exactly once"
         ),
         /stale or already resolved/
       );
+    }
+  );
+});
+
+test("a synchronous drive startup failure restores the decision resolution", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = {
+        version: 1,
+        nextTaskNumber: 1,
+        planPending: true,
+        tasks: [],
+        activeDecision: {
+          id: "decision-resume-fails",
+          ownerSession: owner,
+          kind: "escalation_required",
+          taskIds: [],
+          evidence: "Correct the plan",
+          allowedInterventions: ["handoff", "abort"],
+          createdAt: Date.now(),
+          deliveredAt: Date.now(),
+        },
+      };
+      createTask(board, { title: "Pending", brief: "work", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const drive = tools.get("maestro_drive");
+      assert.ok(drive);
+      await assert.rejects(
+        drive.execute(
+          "resume-fails",
+          {
+            action: "intervene",
+            intervention: "steer",
+            decisionId: "decision-resume-fails",
+            instruction: "The plan has been corrected.",
+          },
+          undefined,
+          undefined,
+          ctx
+        ),
+        /Plan approval is pending/
+      );
+      assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
     }
   );
 });

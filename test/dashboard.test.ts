@@ -240,6 +240,51 @@ test("dashboard abort requires y confirmation", () => {
   }
 });
 
+test("dashboard confirms the captured task after the list reorders", () => {
+  const first = makeTask({ status: "ready_for_review" });
+  const second = makeTask({ id: "T2", status: "ready_for_review" });
+  const board: Board = { version: 1, nextTaskNumber: 3, tasks: [first, second] };
+  const approved: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      setTaskStatus: (taskId) => approved.push(taskId),
+    })
+  );
+  try {
+    dashboard.handleInput("a");
+    board.tasks = [second, first];
+    assert.match(dashboard.render(100).at(-1) ?? "", /Approve T1/);
+    dashboard.handleInput("y");
+    assert.deepEqual(approved, ["T1"]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard ignores approval when the captured task becomes live", () => {
+  const task = makeTask({ status: "ready_for_review" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  let live = false;
+  const approved: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => live,
+      setTaskStatus: (taskId) => approved.push(taskId),
+    })
+  );
+  try {
+    dashboard.handleInput("a");
+    live = true;
+    task.status = "running";
+    dashboard.handleInput("y");
+    assert.deepEqual(approved, []);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard escape closes in browse mode", () => {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
   let closed = false;
