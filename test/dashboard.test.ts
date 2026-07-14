@@ -6,6 +6,7 @@ import test from "node:test";
 import { type Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { humanRetryEligibility } from "../src/board.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
 import {
   Dashboard,
   type DashboardActions,
@@ -395,11 +396,49 @@ test("dashboard keeps an empty board distinct when the done filter is toggled", 
   const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
   const dashboard = new Dashboard(fakeTheme, makeActions(board));
   try {
-    assert.match(dashboard.render(100).join("\n"), /Board is empty\./);
+    assert.match(dashboard.render(100).join("\n"), /No tasks yet/);
     dashboard.handleInput("f");
     const filtered = dashboard.render(100).join("\n");
-    assert.match(filtered, /Board is empty\./);
+    assert.match(filtered, /No tasks yet/);
     assert.doesNotMatch(filtered, /All tasks are done\./);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard points archived empty boards to replay", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, { getLatestArchive: () => ({ name: "run.json", at: Date.now() }) })
+  );
+  try {
+    const output = dashboard.render(160).join("\n");
+    assert.match(output, /last run archived/);
+    assert.match(output, /\/maestro replay to restore/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard marks stale approvals and names blockers in task rows", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [
+      makeTask({ status: "approved" }),
+      makeTask({ id: "T2", status: "todo", dependsOn: ["T3"] }),
+      makeTask({ id: "T3", status: "running" }),
+    ],
+  };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, { getConfig: () => DEFAULT_CONFIG })
+  );
+  try {
+    const output = dashboard.render(160).join("\n");
+    assert.match(output, /approved \(stale\)/);
+    assert.match(output, /blocked by T3/);
   } finally {
     dashboard.dispose();
   }

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import {
   type ExtensionAPI,
   type ExtensionCommandContext,
@@ -577,6 +577,13 @@ export default function maestro(
         const persisted = persistDriveDecision(ctx.cwd, ownerSession, summary, message, driveId);
         if (persisted && summary.stoppedBecause.code === "completed") {
           cleanupCompletedBoard(ctx.cwd);
+          const archive = listArchivedBoards(ctx.cwd)[0];
+          if (archive && loadBoard(ctx.cwd).tasks.length === 0) {
+            notify(
+              ctx,
+              `Run complete — board archived to ${basename(archive.file)}. /maestro replay to revisit, /maestro start <goal> for a new run.`
+            );
+          }
         }
         if (persisted && runtimeActive) {
           deliverPendingDecision(ctx.cwd, ownerSession, sendDecision);
@@ -1840,12 +1847,6 @@ export default function maestro(
       if (isCommandContext(ctx)) await showBoard(ctx);
       return;
     }
-    const board = loadBoard(ctx.cwd);
-    if (board.tasks.length === 0) {
-      notify(ctx, "Board is empty. Use /maestro start <goal> or ask the model to plan tasks.");
-      return;
-    }
-
     const selection = await ctx.ui.custom<{ taskId: string; action: DashboardTaskAction } | null>(
       (tui, theme, _keybindings, done) => {
         const dashboard = new Dashboard(
@@ -1918,6 +1919,11 @@ export default function maestro(
             selectTaskAction: (taskId, action) => done({ taskId, action }),
             close: () => done(null),
             requestRender: () => tui.requestRender(),
+            getLatestArchive: () => {
+              const archive = listArchivedBoards(ctx.cwd)[0];
+              if (!archive) return undefined;
+              return { name: basename(archive.file), at: Date.parse(archive.timestamp) };
+            },
           },
           {
             getRows: () => tui.terminal.rows,

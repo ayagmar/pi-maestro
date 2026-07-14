@@ -2408,7 +2408,7 @@ test("completed drives archive and clear tasks by default", async () => {
         steer: () => {},
         abort: () => {},
       });
-      const { ctx, tools, events, messages } = loadMaestro(cwd, startExecutor);
+      const { ctx, tools, events, messages, notices } = loadMaestro(cwd, startExecutor);
       const drive = tools.get("maestro_drive");
       assert.ok(drive);
       await drive.execute("drive", { action: "start" }, undefined, undefined, ctx);
@@ -2419,6 +2419,7 @@ test("completed drives archive and clear tasks by default", async () => {
       assert.ok(decision?.deliveredAt);
       assert.equal(messages.length, 1);
       assert.deepEqual(messages[0]?.options, { triggerTurn: true, deliverAs: "followUp" });
+      assert.ok(notices.some((notice) => notice.includes("Run complete — board archived to")));
 
       events.get("session_start")?.({ previousSessionFile: owner }, ctx);
       assert.equal(messages.length, 1, "a delivered decision must not wake the owner twice");

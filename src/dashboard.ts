@@ -1,5 +1,6 @@
 import { type Theme } from "@earendil-works/pi-coding-agent";
 import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { completionFreshness } from "./artifact-policy.js";
 import {
   blockedReason,
   findTask,
@@ -45,6 +46,7 @@ export interface DashboardActions {
   selectTaskAction(taskId: string, action: DashboardTaskAction): void;
   close(): void;
   requestRender(): void;
+  getLatestArchive?(): { name: string; at: number } | undefined;
 }
 
 const REFRESH_MS = 500;
@@ -159,6 +161,7 @@ type DashboardFrame = {
   config: MaestroConfig | undefined;
   grouped: ReturnType<typeof groupTasks>;
   phases: ReturnType<typeof projectRunPhases>;
+  staleTaskIds: Set<string>;
 };
 
 function statusColor(status: TaskStatus): "success" | "error" | "warning" | "accent" | "muted" {
@@ -227,11 +230,23 @@ export class Dashboard {
       const kind = this.actions.liveKind(task.id);
       if (kind) liveKinds.set(task.id, kind);
     }
+    const staleTaskIds = new Set<string>();
+    if (config) {
+      for (const task of board.tasks) {
+        if (
+          task.status === "approved" &&
+          completionFreshness(board, task, config).state !== "fresh"
+        ) {
+          staleTaskIds.add(task.id);
+        }
+      }
+    }
     return {
       board,
       config,
       grouped: groupTasks(board),
       phases: projectRunPhases(board, liveKinds, config),
+      staleTaskIds,
     };
   }
 
@@ -654,10 +669,14 @@ export class Dashboard {
     const theme = this.theme;
     if (tasks.length === 0) {
       if (boardTaskCount === 0) {
-        return [
-          theme.fg("muted", "Board is empty."),
-          theme.fg("dim", "Use /maestro start <goal>"),
-        ].slice(0, height);
+        const archive = this.actions.getLatestArchive?.();
+        if (archive) {
+          return [
+            theme.fg("muted", `Board empty — last run archived ${relativeTime(archive.at)}.`),
+            theme.fg("dim", "/maestro replay to restore · /maestro start <goal> to begin"),
+          ].slice(0, height);
+        }
+        return [theme.fg("muted", "No tasks yet — /maestro start <goal>")].slice(0, height);
       }
       if (this.hideDone && this.filter === "all") {
         return [theme.fg("muted", "All tasks are done."), theme.fg("dim", "f show them again")];
@@ -684,8 +703,11 @@ export class Dashboard {
       const usage = taskUsage(task);
       const activity = live ? ` · ${this.actions.liveActivity(task.id) ?? "…"}` : "";
       const group = GROUP_LABELS[taskGroup(this.frame.board, task)];
-      const status =
+      let status =
         group === STATUS_LABELS[task.status] ? group : `${group} · ${STATUS_LABELS[task.status]}`;
+      if (this.frame.staleTaskIds.has(task.id)) status += " (stale)";
+      const reason = blockedReason(this.frame.board, task);
+      if (reason) status += ` · ${reason}`;
       const detail = `${status} [${task.tier}] · $${usage.cost.toFixed(4)}${activity}`;
       const line2 = `     ${theme.fg("dim", truncateToWidth(detail, width - 5))}`;
 
@@ -1162,6 +1184,16 @@ function attemptHistory(attempt: Attempt): string {
   const model = attempt.model ?? "?";
   const identity = model.startsWith(`${provider}/`) ? model : `${provider}/${model}`;
   return `#${attempt.index} ${outcome} · ${identity} · ${attempt.usage.turns}t · $${attempt.usage.cost.toFixed(4)}`;
+}
+
+function relativeTime(timestamp: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function singleLine(text: string): string {
