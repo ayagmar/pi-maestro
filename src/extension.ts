@@ -82,6 +82,7 @@ import {
   boardUsage,
   formatBoardProgress,
   formatCostSummary,
+  formatStatusHistory,
   formatUsage,
   padText,
   STATUS_LABELS,
@@ -1190,9 +1191,9 @@ export default function maestro(
               notify(ctx, `Imported ${imported.tasks.length} task(s); plan approval is required.`);
               return;
             }
-            if (planAction === "diff" || planAction === "compare") {
+            if (planAction === "diff") {
               if (!planPath) {
-                notify(ctx, `Usage: /${COMMAND} plan ${planAction} <file> [taskId]`, "warning");
+                notify(ctx, `Usage: /${COMMAND} plan diff <file> [taskId]`, "warning");
                 return;
               }
               const config = loadConfig(ctx.cwd);
@@ -1206,11 +1207,7 @@ export default function maestro(
                 const comparison = comparePlans(loadBoard(ctx.cwd), candidate, config);
                 notify(
                   ctx,
-                  formatPlanComparison(
-                    comparison,
-                    `/${COMMAND} plan compare ${planPath}`,
-                    planTaskId
-                  )
+                  formatPlanComparison(comparison, `/${COMMAND} plan diff ${planPath}`, planTaskId)
                 );
               } catch (error) {
                 notify(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -1516,6 +1513,20 @@ export default function maestro(
             const warnings: string[] = [];
             const board = loadBoard(ctx.cwd);
             const config = loadConfig(ctx.cwd);
+            const decision = board.activeDecision;
+            if (decision && !decision.resolution) {
+              const matching = decision.taskIds.some((id) => {
+                const task = board.tasks.find((candidate) => candidate.id === id);
+                return decision.kind === "reviewer_failure"
+                  ? task?.status === "failed" || task?.status === "changes_requested"
+                  : task?.dispatchClaim !== undefined;
+              });
+              if (!matching) {
+                warnings.push(
+                  `${decision.id}: unresolved ${decision.kind} decision has no matching task or live dispatch state`
+                );
+              }
+            }
             for (const task of board.tasks) {
               if (task.status === "approved") {
                 const freshness = completionFreshness(board, task, config);
@@ -1676,31 +1687,7 @@ export default function maestro(
             const requestedCount = Number.parseInt(rest, 10);
             const count =
               Number.isInteger(requestedCount) && requestedCount > 0 ? requestedCount : 20;
-            const selected = history.entries.slice(-count);
-            const taskWidth = Math.max(4, ...selected.map((entry) => entry.taskId.length));
-            const fromWidth = Math.max(4, ...selected.map((entry) => entry.from.length));
-            const dates = new Set(
-              selected.map((entry) => new Date(entry.ts).toISOString().slice(0, 10))
-            );
-            const lines = [
-              `${padText("time", 8)}  ${padText("task", taskWidth)}  ${padText("from", fromWidth)} → to`,
-            ];
-            let currentDate: string | undefined;
-            for (const entry of selected) {
-              const timestamp = new Date(entry.ts).toISOString();
-              const date = timestamp.slice(0, 10);
-              if (dates.size > 1 && date !== currentDate) {
-                lines.push(date);
-                currentDate = date;
-              }
-              lines.push(
-                `${timestamp.slice(11, 19)}  ${padText(entry.taskId, taskWidth)}  ${padText(entry.from, fromWidth)} → ${entry.to}`
-              );
-            }
-            if (history.skipped > 0) {
-              lines.push(`(${history.skipped} unreadable line(s) skipped)`);
-            }
-            notify(ctx, lines.join("\n"));
+            notify(ctx, formatStatusHistory(history.entries, history.skipped, count));
             return;
           }
           case "timeline": {
@@ -1849,6 +1836,7 @@ export default function maestro(
               ctx,
               [
                 ...(subcommand ? [`Unknown subcommand "${subcommand}". Available commands:`] : []),
+                "start/plan/drive",
                 `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
                 `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
                 `/${COMMAND} drive [ids]    autonomously run, review, and retry tasks`,
@@ -1857,23 +1845,28 @@ export default function maestro(
                 `/${COMMAND} resume         continue a paused drive from fresh board state`,
                 `/${COMMAND} abort          abort a drive and its active executors`,
                 `/${COMMAND} plan           review, approve, or reject a gated plan`,
+                "",
+                "observe",
                 `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
-                `/${COMMAND} list           compact task picker`,
                 `/${COMMAND} open <taskId>  switch into an executor session`,
                 `/${COMMAND} back           switch back to the previous session`,
+                "",
+                "scripting",
                 `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
                 `/${COMMAND} costs          show attempts, total/average cost, models, and providers`,
                 `/${COMMAND} simulate [ids] preview deterministic dependency waves without running work`,
+                `/${COMMAND} plan export <file>  export a versioned plan without run evidence`,
+                `/${COMMAND} plan import <file>  validate, archive current work, and import`,
+                `/${COMMAND} plan diff <file> [taskId]  inspect plan changes without mutation`,
+                `/${COMMAND} recipe list|inspect|preview|save|run|remove  manage declarative recipes`,
+                "",
+                "recover",
                 `/${COMMAND} discover <taskId> [append|replace]  preview and approve generated tasks`,
                 `/${COMMAND} doctor         diagnose config, models, authentication, git, and managed worktrees`,
                 `/${COMMAND} doctor cleanup remove rechecked stale/orphaned worktrees after confirmation`,
                 `/${COMMAND} history [n]    show recent task status changes (default 20)`,
                 `/${COMMAND} timeline [id]  show derived run/task evidence chronologically`,
                 `/${COMMAND} timeline archive <file> [id]  show archived evidence`,
-                `/${COMMAND} plan export <file>  export a versioned plan without run evidence`,
-                `/${COMMAND} plan import <file>  validate, archive current work, and import`,
-                `/${COMMAND} plan diff|compare <file> [taskId]  inspect plan changes without mutation`,
-                `/${COMMAND} recipe list|inspect|preview|save|run|remove  manage declarative recipes`,
                 `/${COMMAND} reconcile      report artifact/provenance inconsistencies without mutation`,
                 `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
                 `/${COMMAND} reset          archive and clear the board`,
@@ -2017,6 +2010,7 @@ export default function maestro(
               if (!archive) return undefined;
               return { name: basename(archive.file), at: Date.parse(archive.timestamp) };
             },
+            getStatusHistory: () => loadStatusHistory(ctx.cwd) ?? undefined,
           },
           {
             getRows: () => tui.terminal.rows,

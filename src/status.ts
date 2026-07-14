@@ -210,13 +210,15 @@ export interface StatusProjection {
 
 export function projectStatus(
   board: Board,
-  liveTaskIds: Iterable<string> = [],
+  liveTaskIds: Iterable<string> | undefined = undefined,
   config?: MaestroConfig
 ): StatusProjection {
-  const liveIds = [...liveTaskIds];
+  const liveIds = liveTaskIds ? [...liveTaskIds] : [];
   const live = new Set(liveIds);
-  const running = board.tasks.filter(
-    (task) => live.has(task.id) || task.status === "running"
+  // An explicit liveness projection comes from the owning runtime. Persisted
+  // `running` is recovery evidence, not proof that a process is still alive.
+  const running = board.tasks.filter((task) =>
+    liveTaskIds !== undefined ? live.has(task.id) : task.status === "running"
   ).length;
   const runnable = board.tasks.filter((task) => taskGroup(board, task) === "ready").length;
   const reviewable = board.tasks.filter((task) => task.status === "ready_for_review").length;

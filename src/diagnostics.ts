@@ -12,6 +12,25 @@ import {
 import { formatStatusProjection, projectStatus } from "./status.js";
 import { inspectGit, inspectManagedWorktrees } from "./worktree.js";
 
+function unresolvedDecisionWarnings(
+  board: ReturnType<typeof loadBoard>,
+  liveTaskIds: ReadonlySet<string>
+): string[] {
+  const decision = board.activeDecision;
+  if (!decision || decision.resolution) return [];
+  const tasks = decision.taskIds
+    .map((id) => board.tasks.find((task) => task.id === id))
+    .filter(Boolean);
+  const matching = tasks.some((task) =>
+    decision.kind === "reviewer_failure"
+      ? task?.status === "failed" || task?.status === "changes_requested"
+      : liveTaskIds.has(task?.id ?? "") || task?.dispatchClaim !== undefined
+  );
+  return matching
+    ? []
+    : [`${decision.id}: unresolved ${decision.kind} decision has no matching live or task state`];
+}
+
 function inspectConfigFile(scope: "user" | "project", file: string): string {
   if (!existsSync(file)) return `${scope}: ${file} (not present)`;
   try {
@@ -39,10 +58,14 @@ export function buildDoctorReport(
   const board = loadBoard(cwd);
   const git = inspectGit(cwd);
   const corruptBoards = listCorruptBoardFiles(cwd);
+  const decisionWarnings = unresolvedDecisionWarnings(board, liveTaskIds);
   const lines = [
     "Maestro doctor",
     "",
     `Status: ${formatStatusProjection(projectStatus(board, liveTaskIds))}`,
+    ...(decisionWarnings.length > 0
+      ? ["", "Decision warnings:", ...decisionWarnings.map((warning) => `  ${warning}`)]
+      : []),
     "",
     "Config (defaults → user → project):",
     ...configFiles.map((file) => `  ${file}`),
