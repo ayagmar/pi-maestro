@@ -169,6 +169,10 @@ export function consumeQuarantineNotice(): string | undefined {
   return notice;
 }
 
+export function restoreQuarantineNotice(path: string): void {
+  quarantineNotice = path;
+}
+
 export function saveBoard(cwd: string, board: Board): void {
   const lock = acquireBoardLock(cwd);
   try {
@@ -369,12 +373,26 @@ export interface ArchivedBoard {
   taskCount: number;
 }
 
+function archiveSortKey(name: string): { iso: string; suffix: number } {
+  const isoEnd = name.indexOf("Z");
+  const iso = isoEnd < 0 ? name : name.slice(0, isoEnd + 1);
+  const match = name.slice(iso.length).match(/^-(\d+)-board\.json$/);
+  return { iso, suffix: match ? Number(match[1]) : 0 };
+}
+
 export function latestArchiveFile(cwd: string): { file: string; timestamp: string } | undefined {
   const directory = join(stateDir(cwd), "archive");
   if (!existsSync(directory)) return undefined;
+  // Sorting by name (not file contents) keeps this a cheap display hint; a
+  // corrupt-but-newer archive can still outrank an older valid one.
   const name = readdirSync(directory)
     .filter((candidate) => candidate.endsWith("-board.json"))
-    .sort((left, right) => right.localeCompare(left))[0];
+    .sort((left, right) => {
+      const a = archiveSortKey(left);
+      const b = archiveSortKey(right);
+      if (a.iso !== b.iso) return b.iso.localeCompare(a.iso);
+      return b.suffix - a.suffix;
+    })[0];
   if (!name) return undefined;
   const isoEnd = name.indexOf("Z");
   if (isoEnd < 0) return undefined;

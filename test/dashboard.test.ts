@@ -263,6 +263,27 @@ test("dashboard confirms the captured task after the list reorders", () => {
   }
 });
 
+test("dashboard renders the mutated status immediately after a confirmed approval", () => {
+  const task = makeTask({ status: "ready_for_review" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      setTaskStatus: (taskId) => {
+        const target = board.tasks.find((candidate) => candidate.id === taskId);
+        if (target) target.status = "approved";
+      },
+    })
+  );
+  try {
+    dashboard.handleInput("a");
+    dashboard.handleInput("y");
+    assert.match(dashboard.render(100).join("\n"), /approved/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("dashboard ignores approval when the captured task becomes live", () => {
   const task = makeTask({ status: "ready_for_review" });
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };

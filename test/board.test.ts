@@ -666,6 +666,41 @@ test("latestArchiveFile reads only the newest suffixed archive name", () => {
   }
 });
 
+test("latestArchiveFile picks the highest numeric suffix among same-timestamp archives", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const directory = join(cwd, ".pi", "maestro", "archive");
+    mkdirSync(directory, { recursive: true });
+    const prefix = "2026-07-14T12:00:00.000Z";
+    writeFileSync(join(directory, `${prefix}-board.json`), "oldest");
+    writeFileSync(join(directory, `${prefix}-1-board.json`), "middle");
+    writeFileSync(join(directory, `${prefix}-2-board.json`), "newest");
+
+    const latest = latestArchiveFile(cwd);
+
+    assert.equal(latest?.file, join(directory, `${prefix}-2-board.json`));
+    assert.equal(latest?.timestamp, prefix);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("latestArchiveFile prefers a newer ISO prefix over an older unsuffixed one", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
+  try {
+    const directory = join(cwd, ".pi", "maestro", "archive");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "2026-07-14T12:00:00.000Z-board.json"), "older");
+    writeFileSync(join(directory, "2026-07-14T13:00:00.000Z-board.json"), "newer");
+
+    const latest = latestArchiveFile(cwd);
+
+    assert.equal(latest?.file, join(directory, "2026-07-14T13:00:00.000Z-board.json"));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("restoreArchivedBoard makes the selected board live and archives the current board", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {

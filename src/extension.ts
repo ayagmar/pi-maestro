@@ -44,6 +44,7 @@ import {
   replaceBoard,
   replaceBoardWithArchive,
   restoreArchivedBoard,
+  restoreQuarantineNotice,
   saveBoard,
   scopedDependencyGapsWithConfig,
   sweepDispatchState,
@@ -230,11 +231,17 @@ export default function maestro(
   function notifyQuarantine(ctx: ExtensionContext): void {
     const quarantined = consumeQuarantineNotice();
     if (!quarantined) return;
-    notify(
-      ctx,
-      `Board was corrupt and quarantined to ${quarantined}. Restore an archive with /maestro replay.`,
-      "warning"
-    );
+    try {
+      notify(
+        ctx,
+        `Board was corrupt and quarantined to ${quarantined}. Restore an archive with /maestro replay.`,
+        "warning"
+      );
+    } catch {
+      // ctx went stale mid-command (e.g. a session-switching subcommand);
+      // re-stash the notice so the next live ctx can surface it.
+      restoreQuarantineNotice(quarantined);
+    }
   }
 
   function refreshUI(ctx: ExtensionContext): void {
@@ -1883,11 +1890,18 @@ export default function maestro(
         normalized.startsWith(`${command} `)
       );
       if (taskCommand) {
-        const parts = prefix.trim().split(/\s+/);
-        const query = parts.at(-1)?.toLowerCase() ?? "";
-        const precedingIds = taskCommand === "drive" ? parts.slice(1, -1) : [];
+        const trailingSeparator = /[\s,]$/.test(prefix);
+        const parts = prefix.split(/[\s,]+/).filter((part) => part.length > 0);
+        const query = trailingSeparator ? "" : (parts.at(-1)?.toLowerCase() ?? "");
+        const idParts = trailingSeparator ? parts.slice(1) : parts.slice(1, -1);
+        const precedingIds = taskCommand === "drive" ? idParts : [];
+        const precedingIdsLower = new Set(precedingIds.map((id) => id.toLowerCase()));
         return completionBoard()
-          .tasks.filter((task) => task.id.toLowerCase().startsWith(query))
+          .tasks.filter(
+            (task) =>
+              task.id.toLowerCase().startsWith(query) &&
+              !precedingIdsLower.has(task.id.toLowerCase())
+          )
           .map((task) => ({
             value: `${taskCommand} ${[...precedingIds, task.id].join(" ")}`,
             label: task.id,

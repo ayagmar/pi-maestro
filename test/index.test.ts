@@ -7,6 +7,7 @@ import test from "node:test";
 import { type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { taskFingerprint } from "../src/artifact-policy.js";
 import {
+  consumeQuarantineNotice,
   createTask,
   findTask,
   listArchivedBoards,
@@ -682,6 +683,26 @@ test("a command that quarantines a corrupt board warns in the same invocation", 
   );
 });
 
+test("a stale ctx during quarantine notify does not crash the command and re-stashes the notice", async () => {
+  await withBoard(
+    (cwd) => {
+      const directory = join(cwd, ".pi", "maestro");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "board.json"), "{broken");
+    },
+    async (cwd) => {
+      const { command, ctx } = loadMaestro(cwd);
+      const originalNotify = ctx.ui.notify;
+      ctx.ui.notify = (message: string, level?: string) => {
+        if (/corrupt and quarantined/.test(message)) throw new Error("stale ctx");
+        originalNotify(message, level);
+      };
+      await assert.doesNotReject(command.handler("costs", ctx));
+      assert.match(consumeQuarantineNotice() ?? "", /board\.json\.corrupt-/);
+    }
+  );
+});
+
 test("/maestro costs is offered by argument completion and dispatches case-insensitively", async () => {
   await withBoard(
     () => {},
@@ -729,6 +750,22 @@ test("task-id argument completion includes board tasks", async () => {
       assert.equal(
         command.getArgumentCompletions?.("drive T1 T")?.find((item) => item.label === "T2")?.value,
         "drive T1 T2"
+      );
+
+      const afterSpace = command.getArgumentCompletions?.("drive T1 ");
+      assert.ok(afterSpace?.some((item) => item.label === "T2"));
+      assert.ok(!afterSpace?.some((item) => item.label === "T1"));
+      assert.equal(afterSpace?.find((item) => item.label === "T2")?.value, "drive T1 T2");
+
+      const afterComma = command.getArgumentCompletions?.("drive T1,T");
+      assert.deepEqual(afterComma, [
+        { value: "drive T1 T2", label: "T2", description: "Second task" },
+      ]);
+
+      const bothIds = command.getArgumentCompletions?.("drive T");
+      assert.deepEqual(
+        bothIds?.map((item) => item.label),
+        ["T1", "T2"]
       );
     }
   );

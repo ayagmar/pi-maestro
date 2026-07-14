@@ -368,6 +368,7 @@ export class Dashboard {
       }
       this.pendingConfirm = undefined;
       this.mode = "browse";
+      this.frameFresh = false;
       this.actions.requestRender();
       return;
     }
