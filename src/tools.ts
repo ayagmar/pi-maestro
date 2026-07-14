@@ -304,6 +304,38 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         const selectedTasks = board.tasks.filter((task) => !taskIds || taskIds.includes(task.id));
         const tasks = selectedTasks.map((task) => snapshot(task));
         const selectedIds = new Set(selectedTasks.map((task) => task.id));
+        const evidence = selectedTasks.map((task) => ({
+          taskId: task.id,
+          attempts: task.attempts.length,
+          launches: task.attempts.reduce(
+            (count, attempt) => count + 1 + (attempt.reviewLaunches?.length ?? 0),
+            0
+          ),
+          failureReason: task.attempts.at(-1)?.failureReason
+            ? {
+                kind: task.attempts.at(-1)?.failureReason?.kind,
+                message: truncateText(task.attempts.at(-1)?.failureReason?.message ?? "", 500),
+              }
+            : undefined,
+          reviews: task.attempts.flatMap((attempt) =>
+            (attempt.reviewLaunches ?? []).map((launch) => ({
+              role: launch.role ?? "reviewer",
+              verdict: launch.verdict ?? "pending",
+            }))
+          ),
+          convergence: task.attempts.at(-1)?.reviewConvergence
+            ? {
+                policy: task.attempts.at(-1)?.reviewConvergence?.policy,
+                status: task.attempts.at(-1)?.reviewConvergence?.status,
+                summary: truncateText(task.attempts.at(-1)?.reviewConvergence?.summary ?? "", 500),
+              }
+            : undefined,
+          reviewNotes: task.reviewNotes
+            ? truncateText(task.reviewNotes, 500)
+            : task.attempts.at(-1)?.reviewNotes
+              ? truncateText(task.attempts.at(-1)?.reviewNotes ?? "", 500)
+              : undefined,
+        }));
         const selectedRuns = [...liveRuns.values()].filter((run) => selectedIds.has(run.taskId));
         const live = selectedRuns.map((run) => `${run.taskId}: ${run.lastActivity}`).join("\n");
         const decision =
@@ -330,7 +362,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             {
               type: "text",
               text: truncateText(
-                `${statusText}\n${live || "No live executors."}${decisionText}`,
+                `${statusText}\n${live || "No live executors."}${decisionText}\nReview evidence:\n${JSON.stringify(evidence)}`,
                 4000
               ),
             },
