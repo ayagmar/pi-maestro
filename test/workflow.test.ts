@@ -2795,7 +2795,7 @@ test("a merge conflict on an approved review does not count as a reviewer reject
   }
 });
 
-test("first reviewer rejection retries with notes and approval resets the counter", async () => {
+test("drive bookkeeping stays fingerprint-fresh across reject with notes, retry, and approval", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-first-rejection-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -2835,6 +2835,7 @@ test("first reviewer rejection retries with notes and approval resets the counte
     assert.equal(result.rounds, 2);
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "approved");
+    assert.equal(persisted?.attempts.at(-1)?.reviewConvergence?.status, "approved");
     assert.equal(persisted?.reviewRejections, undefined, "approval clears the rejection counter");
     assert.ok(
       retryPrompts.at(-1)?.includes("Handle the empty input"),
