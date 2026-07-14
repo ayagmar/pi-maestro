@@ -141,6 +141,7 @@ interface CommandCtx {
   modelRegistry: object;
   sessionManager: {
     getEntries?: () => unknown[];
+    getLeafId?: () => string | undefined;
     getSessionFile: () => string;
     getSessionName: () => string | undefined;
   };
@@ -151,6 +152,7 @@ interface CommandCtx {
     notify: (message: string, level?: string) => void;
     setStatus: () => void;
     setWidget: () => void;
+    setWorkingMessage: (message?: string) => void;
     custom?: <T>(
       factory: (
         tui: TestTui,
@@ -213,6 +215,7 @@ function loadMaestro(
     },
     setStatus: () => {},
     setWidget: () => {},
+    setWorkingMessage: () => {},
     custom: async <T>(
       factory: (
         tui: TestTui,
@@ -245,6 +248,7 @@ function loadMaestro(
     mode: "tui",
     modelRegistry: {},
     sessionManager: {
+      getLeafId: () => "leaf-1",
       getSessionFile: () => sessionFile,
       getSessionName: () => undefined,
     },
@@ -265,6 +269,7 @@ function loadMaestro(
     registerShortcut: () => {},
     registerMessageRenderer: () => {},
     setSessionName: () => {},
+    setLabel: () => {},
     sendMessage: (message: unknown, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
       messages.push({ message, ...(options ? { options } : {}) });
     },
@@ -595,6 +600,24 @@ test("/maestro costs is offered by argument completion and dispatches case-insen
       assert.ok(completions?.some((item) => item.value === "costs"));
       await command.handler("COSTS", ctx);
       assert.deepEqual(notices, ["No recorded costs; the board is empty."]);
+    }
+  );
+});
+
+test("task-id argument completion includes board tasks", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Accepted task", brief: "work", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { command, ctx, events } = loadMaestro(cwd);
+      events.get("session_start")?.({ reason: "startup" }, ctx);
+      const completions = command.getArgumentCompletions?.("retry T");
+      assert.deepEqual(completions, [
+        { value: "retry T1", label: "T1", description: "Accepted task" },
+      ]);
     }
   );
 });

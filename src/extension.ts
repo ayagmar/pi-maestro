@@ -4,6 +4,7 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
+  getMarkdownTheme,
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
@@ -11,6 +12,7 @@ import {
   type EditorTheme,
   Input,
   Key,
+  Markdown,
   matchesKey,
   type SelectItem,
   SelectList,
@@ -177,6 +179,7 @@ export default function maestro(
   const driveController = new DriveRuntimeController();
   let runtimeActive = true;
   let contextNudgeShown = false;
+  let activeCwd = process.cwd();
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
 
@@ -209,6 +212,11 @@ export default function maestro(
     });
   }
 
+  function labelCurrentEntry(ctx: ExtensionContext, label: string): void {
+    const entryId = ctx.sessionManager.getLeafId();
+    if (entryId) pi.setLabel(entryId, label);
+  }
+
   function refreshUI(ctx: ExtensionContext): void {
     // Executor stdout events outlive session switches; any access on a stale
     // ctx throws. Skip — the next session's events arrive with a live ctx.
@@ -234,6 +242,7 @@ export default function maestro(
     if (board.tasks.length === 0 || !showBoard) {
       ctx.ui.setStatus(COMMAND, undefined);
       ctx.ui.setWidget(COMMAND, undefined);
+      ctx.ui.setWorkingMessage();
       return;
     }
 
@@ -256,8 +265,10 @@ export default function maestro(
 
     if (running === 0) {
       ctx.ui.setWidget(COMMAND, undefined);
+      ctx.ui.setWorkingMessage();
       return;
     }
+    ctx.ui.setWorkingMessage(`maestro · ${running} executor(s) · $${usage.cost.toFixed(2)}`);
     ctx.ui.setWidget(COMMAND, (_tui, theme) => {
       const lines = [...liveRuns.values()].map((run) => {
         const task = findTask(board, run.taskId);
@@ -845,935 +856,971 @@ export default function maestro(
     return `\nReport:\n${truncateText(report, REPORT_PREVIEW_LINES)}`;
   }
 
-  registerMaestroCommand(pi, async (args, ctx) => {
-    const quarantined = consumeQuarantineNotice();
-    if (quarantined) {
-      notify(
-        ctx,
-        `Board was corrupt and quarantined to ${quarantined}. Restore an archive with /maestro replay.`,
-        "warning"
-      );
-    }
-    const { subcommand, rest, restParts } = parseCommand(args);
-
-    switch (subcommand) {
-      case "start": {
-        if (!rest) {
-          notify(ctx, "Usage: /maestro start <goal>", "warning");
-          return;
-        }
-        if (liveRuns.size > 0) {
-          notify(
-            ctx,
-            "Executors are still running. Abort them before starting a new goal.",
-            "warning"
-          );
-          return;
-        }
-        const config = loadConfig(ctx.cwd);
-        const git = inspectGit(ctx.cwd);
-        if (!git.ok && (config.autoCommit || config.useWorktrees)) {
-          notify(
-            ctx,
-            `Git repo not ready: ${git.summary}. Commits will fail — run /maestro doctor, or disable autoCommit/useWorktrees in /maestro config.`,
-            "warning"
-          );
-        }
-        let board = loadBoard(ctx.cwd);
-        // A new goal is a new run: archive the previous board instead of
-        // piling tasks from different goals onto one endless list.
-        if (board.tasks.length > 0) {
-          const previousRevision = board.revision ?? 0;
-          const archivedLogs = captureBoardLogs(ctx.cwd, board);
-          for (const warning of archivedLogs.warnings) {
-            notify(ctx, `Log cleanup warning: ${warning}`, "warning");
-          }
-          const archivePath = archiveBoard(ctx.cwd);
-          board = { version: 1, nextTaskNumber: 1, tasks: [], goal: rest };
-          replaceBoard(ctx.cwd, board, previousRevision);
-          if (archivePath) {
-            const cleanup = pruneStaleLogs(
-              ctx.cwd,
-              archivedLogs.entries,
-              () => loadBoard(ctx.cwd),
-              (id) => liveRuns.has(id),
-              archivedLogs.warnings
-            );
-            if (cleanup.warnings.length > 0) {
-              notify(
-                ctx,
-                `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
-                "warning"
-              );
-            }
-            notify(ctx, `Previous board archived: ${archivePath}`);
-          }
-        } else {
-          board.goal = rest;
-          saveBoard(ctx.cwd, board);
-        }
-        adoptBoard(ctx);
-        refreshUI(ctx);
-        nameSessionAfterGoal(ctx, rest, "maestro");
-        pi.sendMessage(
-          {
-            customType: MESSAGE_TYPE,
-            content: buildOrchestratorBriefing(
-              rest,
-              describeTiersForPlanning(loadConfig(ctx.cwd)),
-              loadConfig(ctx.cwd).planGate
-            ),
-            display: true,
-          },
-          { triggerTurn: true }
+  registerMaestroCommand(
+    pi,
+    async (args, ctx) => {
+      activeCwd = ctx.cwd;
+      const quarantined = consumeQuarantineNotice();
+      if (quarantined) {
+        notify(
+          ctx,
+          `Board was corrupt and quarantined to ${quarantined}. Restore an archive with /maestro replay.`,
+          "warning"
         );
-        return;
       }
-      case "back": {
-        if (!previousSession) {
-          notify(ctx, "No session to go back to. Use /resume to pick one.", "warning");
-          return;
-        }
-        const target = previousSession;
-        previousSession = ctx.sessionManager.getSessionFile();
-        await ctx.switchSession(target);
-        return;
-      }
-      case "drive": {
-        if (driveController.hasActive() || liveRuns.size > 0) {
-          notify(ctx, "An autonomous drive or executor batch is already running.", "warning");
-          return;
-        }
-        const requestedTaskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
-        let taskIds: string[] | undefined;
-        try {
-          taskIds = canonicalTaskIds(loadBoard(ctx.cwd), requestedTaskIds);
-          if (loadBoard(ctx.cwd).planPending) throw new Error("Plan approval is pending.");
-          if (!(await confirmDriveScale(ctx, taskIds))) {
-            notify(ctx, "Drive not started: workflow scale was not confirmed.", "warning");
+      const { subcommand, rest, restParts } = parseCommand(args);
+
+      switch (subcommand) {
+        case "start": {
+          if (!rest) {
+            notify(ctx, "Usage: /maestro start <goal>", "warning");
             return;
           }
-          validateDriveStart(ctx, taskIds);
-        } catch (error) {
-          notify(ctx, `Drive not started: ${String(error)}`, "warning");
-          return;
-        }
-        notify(ctx, `Driving ${taskIds?.join(", ") ?? "the whole board"}…`);
-        launchCommandDrive(ctx, taskIds);
-        return;
-      }
-      case "retry": {
-        if (!rest || restParts.length !== 1) {
-          notify(ctx, `Usage: /${COMMAND} retry <taskId>`, "warning");
-          return;
-        }
-        await requestHumanRetry(ctx, rest);
-        return;
-      }
-      case "pause": {
-        const currentSession = ctx.sessionManager.getSessionFile();
-        if (!driveController.hasActive()) {
-          const paused = loadBoard(ctx.cwd).pausedDrive;
-          notify(
-            ctx,
-            paused ? "Autonomous drive is already paused." : "No autonomous drive is active.",
-            "warning"
+          if (liveRuns.size > 0) {
+            notify(
+              ctx,
+              "Executors are still running. Abort them before starting a new goal.",
+              "warning"
+            );
+            return;
+          }
+          const config = loadConfig(ctx.cwd);
+          const git = inspectGit(ctx.cwd);
+          if (!git.ok && (config.autoCommit || config.useWorktrees)) {
+            notify(
+              ctx,
+              `Git repo not ready: ${git.summary}. Commits will fail — run /maestro doctor, or disable autoCommit/useWorktrees in /maestro config.`,
+              "warning"
+            );
+          }
+          let board = loadBoard(ctx.cwd);
+          // A new goal is a new run: archive the previous board instead of
+          // piling tasks from different goals onto one endless list.
+          if (board.tasks.length > 0) {
+            const previousRevision = board.revision ?? 0;
+            const archivedLogs = captureBoardLogs(ctx.cwd, board);
+            for (const warning of archivedLogs.warnings) {
+              notify(ctx, `Log cleanup warning: ${warning}`, "warning");
+            }
+            const archivePath = archiveBoard(ctx.cwd);
+            board = { version: 1, nextTaskNumber: 1, tasks: [], goal: rest };
+            replaceBoard(ctx.cwd, board, previousRevision);
+            if (archivePath) {
+              const cleanup = pruneStaleLogs(
+                ctx.cwd,
+                archivedLogs.entries,
+                () => loadBoard(ctx.cwd),
+                (id) => liveRuns.has(id),
+                archivedLogs.warnings
+              );
+              if (cleanup.warnings.length > 0) {
+                notify(
+                  ctx,
+                  `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
+                  "warning"
+                );
+              }
+              notify(ctx, `Previous board archived: ${archivePath}`);
+            }
+          } else {
+            board.goal = rest;
+            saveBoard(ctx.cwd, board);
+          }
+          adoptBoard(ctx);
+          refreshUI(ctx);
+          nameSessionAfterGoal(ctx, rest, "maestro");
+          pi.sendMessage(
+            {
+              customType: MESSAGE_TYPE,
+              content: buildOrchestratorBriefing(
+                rest,
+                describeTiersForPlanning(loadConfig(ctx.cwd)),
+                loadConfig(ctx.cwd).planGate
+              ),
+              display: true,
+            },
+            { triggerTurn: true }
           );
           return;
         }
-        const activeOwner = driveController.activeOwner();
-        if (
-          activeOwner?.cwd !== ctx.cwd ||
-          !sessionCanControlDrive(activeOwner.ownerSession, currentSession)
-        ) {
-          notify(ctx, "Only the session that started this drive may pause it.", "warning");
-          return;
-        }
-        driveController.requestPause();
-        notify(ctx, "Pause requested. Active executors will finish; no new batch will start.");
-        return;
-      }
-      case "resume": {
-        const board = loadBoard(ctx.cwd);
-        const paused = board.pausedDrive;
-        if (!paused) {
-          notify(ctx, "No paused autonomous drive to resume.", "warning");
-          return;
-        }
-        if (driveController.hasActive() || liveRuns.size > 0) {
-          notify(ctx, "Executors are already running.", "warning");
-          return;
-        }
-        if (!sessionCanControlDrive(paused.ownerSession, ctx.sessionManager.getSessionFile())) {
-          notify(ctx, "Only the session that paused this drive may resume it.", "warning");
-          return;
-        }
-        let taskIds: string[] | undefined;
-        try {
-          taskIds = canonicalTaskIds(board, paused.taskIds);
-          if (board.planPending) throw new Error("Plan approval is pending.");
-          if (!(await confirmDriveScale(ctx, taskIds))) {
-            notify(ctx, "Drive not resumed: workflow scale was not confirmed.", "warning");
+        case "back": {
+          if (!previousSession) {
+            notify(ctx, "No session to go back to. Use /resume to pick one.", "warning");
             return;
           }
-          validateDriveStart(ctx, taskIds);
-        } catch (error) {
-          notify(ctx, `Drive not resumed: ${String(error)}`, "warning");
+          const target = previousSession;
+          previousSession = ctx.sessionManager.getSessionFile();
+          await ctx.switchSession(target);
           return;
         }
-        notify(ctx, `Resuming ${taskIds?.join(", ") ?? "the whole board"}…`);
-        launchCommandDrive(ctx, taskIds);
-        return;
-      }
-      case "abort": {
-        const currentSession = ctx.sessionManager.getSessionFile();
-        if (driveController.hasActive()) {
+        case "drive": {
+          if (driveController.hasActive() || liveRuns.size > 0) {
+            notify(ctx, "An autonomous drive or executor batch is already running.", "warning");
+            return;
+          }
+          const requestedTaskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
+          let taskIds: string[] | undefined;
+          try {
+            taskIds = canonicalTaskIds(loadBoard(ctx.cwd), requestedTaskIds);
+            if (loadBoard(ctx.cwd).planPending) throw new Error("Plan approval is pending.");
+            if (!(await confirmDriveScale(ctx, taskIds))) {
+              notify(ctx, "Drive not started: workflow scale was not confirmed.", "warning");
+              return;
+            }
+            validateDriveStart(ctx, taskIds);
+          } catch (error) {
+            notify(ctx, `Drive not started: ${String(error)}`, "warning");
+            return;
+          }
+          notify(ctx, `Driving ${taskIds?.join(", ") ?? "the whole board"}…`);
+          launchCommandDrive(ctx, taskIds);
+          return;
+        }
+        case "retry": {
+          if (!rest || restParts.length !== 1) {
+            notify(ctx, `Usage: /${COMMAND} retry <taskId>`, "warning");
+            return;
+          }
+          await requestHumanRetry(ctx, rest);
+          return;
+        }
+        case "pause": {
+          const currentSession = ctx.sessionManager.getSessionFile();
+          if (!driveController.hasActive()) {
+            const paused = loadBoard(ctx.cwd).pausedDrive;
+            notify(
+              ctx,
+              paused ? "Autonomous drive is already paused." : "No autonomous drive is active.",
+              "warning"
+            );
+            return;
+          }
           const activeOwner = driveController.activeOwner();
           if (
             activeOwner?.cwd !== ctx.cwd ||
             !sessionCanControlDrive(activeOwner.ownerSession, currentSession)
           ) {
-            notify(ctx, "Only the session that started this drive may abort it.", "warning");
+            notify(ctx, "Only the session that started this drive may pause it.", "warning");
             return;
           }
-          driveController.abort();
-          notify(ctx, "Abort requested for the drive and its active executors.", "warning");
+          driveController.requestPause();
+          notify(ctx, "Pause requested. Active executors will finish; no new batch will start.");
           return;
         }
-        const paused = loadBoard(ctx.cwd).pausedDrive;
-        if (!paused) {
-          notify(ctx, "No active or paused autonomous drive to abort.", "warning");
-          return;
-        }
-        if (!sessionCanControlDrive(paused.ownerSession, currentSession)) {
-          notify(ctx, "Only the session that paused this drive may abort it.", "warning");
-          return;
-        }
-        savePausedDrive(ctx.cwd, undefined);
-        notify(ctx, "Paused autonomous drive aborted. No executors were running.", "warning");
-        return;
-      }
-      case "plan": {
-        const [planAction, planPath, planTaskId] = restParts;
-        if (planAction === "export") {
-          if (!planPath) {
-            notify(ctx, `Usage: /${COMMAND} plan export <file>`, "warning");
+        case "resume": {
+          const board = loadBoard(ctx.cwd);
+          const paused = board.pausedDrive;
+          if (!paused) {
+            notify(ctx, "No paused autonomous drive to resume.", "warning");
             return;
           }
-          const file = resolve(ctx.cwd, planPath);
-          if (existsSync(file)) {
-            notify(ctx, `Refusing to overwrite existing file: ${file}`, "error");
+          if (driveController.hasActive() || liveRuns.size > 0) {
+            notify(ctx, "Executors are already running.", "warning");
             return;
           }
-          writeFileSync(file, exportPlan(loadBoard(ctx.cwd)), { flag: "wx" });
-          notify(ctx, `Plan exported to ${file}`);
-          return;
-        }
-        if (planAction === "import") {
-          if (!planPath) {
-            notify(ctx, `Usage: /${COMMAND} plan import <file>`, "warning");
+          if (!sessionCanControlDrive(paused.ownerSession, ctx.sessionManager.getSessionFile())) {
+            notify(ctx, "Only the session that paused this drive may resume it.", "warning");
             return;
           }
-          if (liveRuns.size > 0) {
-            notify(ctx, "Executors are still running. Import cancelled.", "warning");
-            return;
-          }
-          const config = loadConfig(ctx.cwd);
-          let imported: Board;
+          let taskIds: string[] | undefined;
           try {
-            imported = importPlan(
-              readFileSync(resolve(ctx.cwd, planPath), "utf-8"),
-              Object.keys(config.tiers),
-              Object.keys(config.verificationProfiles ?? {}),
-              config.maxPlanTasks
-            );
+            taskIds = canonicalTaskIds(board, paused.taskIds);
+            if (board.planPending) throw new Error("Plan approval is pending.");
+            if (!(await confirmDriveScale(ctx, taskIds))) {
+              notify(ctx, "Drive not resumed: workflow scale was not confirmed.", "warning");
+              return;
+            }
+            validateDriveStart(ctx, taskIds);
           } catch (error) {
-            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+            notify(ctx, `Drive not resumed: ${String(error)}`, "warning");
             return;
           }
-          const current = loadBoard(ctx.cwd);
-          if (current.tasks.length > 0) {
-            const confirmed =
-              ctx.hasUI &&
-              (await ctx.ui.confirm(
-                "Replace current plan?",
-                `Archive ${current.tasks.length} current task(s), then import ${imported.tasks.length}?`
-              ));
-            if (!confirmed) {
-              notify(ctx, "Plan import cancelled; current board was not changed.", "warning");
-              return;
-            }
-            const archive = archiveBoard(ctx.cwd);
-            if (!archive) {
-              notify(ctx, "Could not archive the current board; import cancelled.", "error");
-              return;
-            }
-          }
-          replaceBoard(ctx.cwd, imported, current.revision ?? 0);
-          refreshUI(ctx);
-          notify(ctx, `Imported ${imported.tasks.length} task(s); plan approval is required.`);
+          notify(ctx, `Resuming ${taskIds?.join(", ") ?? "the whole board"}…`);
+          launchCommandDrive(ctx, taskIds);
           return;
         }
-        if (planAction === "diff" || planAction === "compare") {
-          if (!planPath) {
-            notify(ctx, `Usage: /${COMMAND} plan ${planAction} <file> [taskId]`, "warning");
+        case "abort": {
+          const currentSession = ctx.sessionManager.getSessionFile();
+          if (driveController.hasActive()) {
+            const activeOwner = driveController.activeOwner();
+            if (
+              activeOwner?.cwd !== ctx.cwd ||
+              !sessionCanControlDrive(activeOwner.ownerSession, currentSession)
+            ) {
+              notify(ctx, "Only the session that started this drive may abort it.", "warning");
+              return;
+            }
+            driveController.abort();
+            notify(ctx, "Abort requested for the drive and its active executors.", "warning");
             return;
           }
-          const config = loadConfig(ctx.cwd);
-          try {
-            const candidate = importPlan(
-              readFileSync(resolve(ctx.cwd, planPath), "utf-8"),
-              Object.keys(config.tiers),
-              Object.keys(config.verificationProfiles ?? {}),
-              config.maxPlanTasks
-            );
-            const comparison = comparePlans(loadBoard(ctx.cwd), candidate, config);
-            notify(
-              ctx,
-              formatPlanComparison(comparison, `/${COMMAND} plan compare ${planPath}`, planTaskId)
-            );
-          } catch (error) {
-            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          const paused = loadBoard(ctx.cwd).pausedDrive;
+          if (!paused) {
+            notify(ctx, "No active or paused autonomous drive to abort.", "warning");
+            return;
           }
+          if (!sessionCanControlDrive(paused.ownerSession, currentSession)) {
+            notify(ctx, "Only the session that paused this drive may abort it.", "warning");
+            return;
+          }
+          savePausedDrive(ctx.cwd, undefined);
+          notify(ctx, "Paused autonomous drive aborted. No executors were running.", "warning");
           return;
         }
-        await showPlan(ctx);
-        return;
-      }
-      case "recipe": {
-        const match = rest.match(/^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]+))?$/);
-        const action = match?.[1]?.toLowerCase() ?? "list";
-        const name = match?.[2];
-        const trailing = match?.[3];
-
-        try {
-          if (action === "list") {
-            const recipes = loadRecipeListings(ctx.cwd);
-            notify(
-              ctx,
-              recipes.length === 0
-                ? "No workflow recipes found."
-                : recipes
-                    .map((entry) =>
-                      entry.error
-                        ? `${entry.name} [${entry.scope}] — INVALID ${entry.file}: ${truncateText(entry.error, 300)}`
-                        : `${entry.name} [${entry.scope}] — ${entry.recipe?.description ?? `${entry.recipe?.tasks.length ?? 0} task(s)`}`
-                    )
-                    .join("\n")
-            );
-            return;
-          }
-          if (action === "inspect") {
-            if (!name) {
-              notify(ctx, `Usage: /${COMMAND} recipe inspect <name>`, "warning");
+        case "plan": {
+          const [planAction, planPath, planTaskId] = restParts;
+          if (planAction === "export") {
+            if (!planPath) {
+              notify(ctx, `Usage: /${COMMAND} plan export <file>`, "warning");
               return;
             }
-            const resolved = resolveRecipe(ctx.cwd, name);
-            notify(
-              ctx,
-              `[${resolved.scope}] ${resolved.file}\n${JSON.stringify(resolved.recipe, null, 2)}`
-            );
-            return;
-          }
-          if (action === "preview") {
-            if (!name) {
-              notify(ctx, `Usage: /${COMMAND} recipe preview <name> [JSON input]`, "warning");
+            const file = resolve(ctx.cwd, planPath);
+            if (existsSync(file)) {
+              notify(ctx, `Refusing to overwrite existing file: ${file}`, "error");
               return;
             }
-            const resolved = resolveRecipe(ctx.cwd, name);
-            const config = loadConfig(ctx.cwd);
-            const expanded = expandRecipe(
-              resolved.recipe,
-              parseRecipeInput(trailing),
-              Object.keys(config.tiers),
-              Object.keys(config.verificationProfiles ?? {}),
-              config.maxPlanTasks
-            );
-            notify(
-              ctx,
-              formatPlanComparison(
-                comparePlans(loadBoard(ctx.cwd), expanded, config),
-                `/${COMMAND} recipe preview ${name}`,
-                undefined,
-                4_000,
-                `/${COMMAND} recipe inspect ${name}`
-              )
-            );
+            writeFileSync(file, exportPlan(loadBoard(ctx.cwd)), { flag: "wx" });
+            notify(ctx, `Plan exported to ${file}`);
             return;
           }
-          if (action === "save") {
-            if (!name) {
-              notify(ctx, `Usage: /${COMMAND} recipe save <name> [user|project]`, "warning");
-              return;
-            }
-            const scope = trailing?.toLowerCase() ?? "user";
-            if (scope !== "user" && scope !== "project") {
-              notify(ctx, "Recipe scope must be user or project.", "warning");
-              return;
-            }
-            const file = saveRecipeFromBoard(scope, ctx.cwd, name, loadBoard(ctx.cwd));
-            notify(ctx, `Saved ${scope} recipe "${name}" to ${file}.`);
-            return;
-          }
-          if (action === "run") {
-            if (!name) {
-              notify(ctx, `Usage: /${COMMAND} recipe run <name> [JSON input]`, "warning");
+          if (planAction === "import") {
+            if (!planPath) {
+              notify(ctx, `Usage: /${COMMAND} plan import <file>`, "warning");
               return;
             }
             if (liveRuns.size > 0) {
-              notify(ctx, "Executors are still running. Recipe run cancelled.", "warning");
+              notify(ctx, "Executors are still running. Import cancelled.", "warning");
               return;
             }
-            const resolved = resolveRecipe(ctx.cwd, name);
             const config = loadConfig(ctx.cwd);
-            const expanded = expandRecipe(
-              resolved.recipe,
-              parseRecipeInput(trailing),
-              Object.keys(config.tiers),
-              Object.keys(config.verificationProfiles ?? {}),
-              config.maxPlanTasks
-            );
+            let imported: Board;
+            try {
+              imported = importPlan(
+                readFileSync(resolve(ctx.cwd, planPath), "utf-8"),
+                Object.keys(config.tiers),
+                Object.keys(config.verificationProfiles ?? {}),
+                config.maxPlanTasks
+              );
+            } catch (error) {
+              notify(ctx, error instanceof Error ? error.message : String(error), "error");
+              return;
+            }
             const current = loadBoard(ctx.cwd);
             if (current.tasks.length > 0) {
               const confirmed =
                 ctx.hasUI &&
                 (await ctx.ui.confirm(
-                  "Run workflow recipe?",
-                  `Archive ${current.tasks.length} current task(s), then run "${name}"?`
+                  "Replace current plan?",
+                  `Archive ${current.tasks.length} current task(s), then import ${imported.tasks.length}?`
                 ));
               if (!confirmed) {
-                notify(ctx, "Recipe run cancelled; current board was not changed.", "warning");
+                notify(ctx, "Plan import cancelled; current board was not changed.", "warning");
+                return;
+              }
+              const archive = archiveBoard(ctx.cwd);
+              if (!archive) {
+                notify(ctx, "Could not archive the current board; import cancelled.", "error");
                 return;
               }
             }
-            const archive = replaceBoardWithArchive(ctx.cwd, () => structuredClone(expanded));
+            replaceBoard(ctx.cwd, imported, current.revision ?? 0);
             refreshUI(ctx);
-            notify(
-              ctx,
-              `Expanded recipe "${name}" into ${expanded.tasks.length} task(s); plan approval is required.${archive ? ` Previous board archived at ${archive}.` : ""}`
-            );
+            notify(ctx, `Imported ${imported.tasks.length} task(s); plan approval is required.`);
             return;
           }
-          if (action === "remove") {
-            if (!name) {
-              notify(ctx, `Usage: /${COMMAND} recipe remove <name> [user|project]`, "warning");
+          if (planAction === "diff" || planAction === "compare") {
+            if (!planPath) {
+              notify(ctx, `Usage: /${COMMAND} plan ${planAction} <file> [taskId]`, "warning");
               return;
             }
-            const requestedScope = trailing?.toLowerCase();
-            if (
-              requestedScope !== undefined &&
-              requestedScope !== "user" &&
-              requestedScope !== "project"
-            ) {
-              notify(ctx, "Recipe scope must be user or project.", "warning");
+            const config = loadConfig(ctx.cwd);
+            try {
+              const candidate = importPlan(
+                readFileSync(resolve(ctx.cwd, planPath), "utf-8"),
+                Object.keys(config.tiers),
+                Object.keys(config.verificationProfiles ?? {}),
+                config.maxPlanTasks
+              );
+              const comparison = comparePlans(loadBoard(ctx.cwd), candidate, config);
+              notify(
+                ctx,
+                formatPlanComparison(comparison, `/${COMMAND} plan compare ${planPath}`, planTaskId)
+              );
+            } catch (error) {
+              notify(ctx, error instanceof Error ? error.message : String(error), "error");
+            }
+            return;
+          }
+          await showPlan(ctx);
+          return;
+        }
+        case "recipe": {
+          const match = rest.match(/^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]+))?$/);
+          const action = match?.[1]?.toLowerCase() ?? "list";
+          const name = match?.[2];
+          const trailing = match?.[3];
+
+          try {
+            if (action === "list") {
+              const recipes = loadRecipeListings(ctx.cwd);
+              notify(
+                ctx,
+                recipes.length === 0
+                  ? "No workflow recipes found."
+                  : recipes
+                      .map((entry) =>
+                        entry.error
+                          ? `${entry.name} [${entry.scope}] — INVALID ${entry.file}: ${truncateText(entry.error, 300)}`
+                          : `${entry.name} [${entry.scope}] — ${entry.recipe?.description ?? `${entry.recipe?.tasks.length ?? 0} task(s)`}`
+                      )
+                      .join("\n")
+              );
               return;
             }
-            const scope =
-              requestedScope ??
-              loadRecipeListings(ctx.cwd).find((entry) => entry.name === name)?.scope;
-            if (!scope) {
-              notify(ctx, `${name} was not found.`, "warning");
+            if (action === "inspect") {
+              if (!name) {
+                notify(ctx, `Usage: /${COMMAND} recipe inspect <name>`, "warning");
+                return;
+              }
+              const resolved = resolveRecipe(ctx.cwd, name);
+              notify(
+                ctx,
+                `[${resolved.scope}] ${resolved.file}\n${JSON.stringify(resolved.recipe, null, 2)}`
+              );
               return;
             }
+            if (action === "preview") {
+              if (!name) {
+                notify(ctx, `Usage: /${COMMAND} recipe preview <name> [JSON input]`, "warning");
+                return;
+              }
+              const resolved = resolveRecipe(ctx.cwd, name);
+              const config = loadConfig(ctx.cwd);
+              const expanded = expandRecipe(
+                resolved.recipe,
+                parseRecipeInput(trailing),
+                Object.keys(config.tiers),
+                Object.keys(config.verificationProfiles ?? {}),
+                config.maxPlanTasks
+              );
+              notify(
+                ctx,
+                formatPlanComparison(
+                  comparePlans(loadBoard(ctx.cwd), expanded, config),
+                  `/${COMMAND} recipe preview ${name}`,
+                  undefined,
+                  4_000,
+                  `/${COMMAND} recipe inspect ${name}`
+                )
+              );
+              return;
+            }
+            if (action === "save") {
+              if (!name) {
+                notify(ctx, `Usage: /${COMMAND} recipe save <name> [user|project]`, "warning");
+                return;
+              }
+              const scope = trailing?.toLowerCase() ?? "user";
+              if (scope !== "user" && scope !== "project") {
+                notify(ctx, "Recipe scope must be user or project.", "warning");
+                return;
+              }
+              const file = saveRecipeFromBoard(scope, ctx.cwd, name, loadBoard(ctx.cwd));
+              notify(ctx, `Saved ${scope} recipe "${name}" to ${file}.`);
+              return;
+            }
+            if (action === "run") {
+              if (!name) {
+                notify(ctx, `Usage: /${COMMAND} recipe run <name> [JSON input]`, "warning");
+                return;
+              }
+              if (liveRuns.size > 0) {
+                notify(ctx, "Executors are still running. Recipe run cancelled.", "warning");
+                return;
+              }
+              const resolved = resolveRecipe(ctx.cwd, name);
+              const config = loadConfig(ctx.cwd);
+              const expanded = expandRecipe(
+                resolved.recipe,
+                parseRecipeInput(trailing),
+                Object.keys(config.tiers),
+                Object.keys(config.verificationProfiles ?? {}),
+                config.maxPlanTasks
+              );
+              const current = loadBoard(ctx.cwd);
+              if (current.tasks.length > 0) {
+                const confirmed =
+                  ctx.hasUI &&
+                  (await ctx.ui.confirm(
+                    "Run workflow recipe?",
+                    `Archive ${current.tasks.length} current task(s), then run "${name}"?`
+                  ));
+                if (!confirmed) {
+                  notify(ctx, "Recipe run cancelled; current board was not changed.", "warning");
+                  return;
+                }
+              }
+              const archive = replaceBoardWithArchive(ctx.cwd, () => structuredClone(expanded));
+              refreshUI(ctx);
+              notify(
+                ctx,
+                `Expanded recipe "${name}" into ${expanded.tasks.length} task(s); plan approval is required.${archive ? ` Previous board archived at ${archive}.` : ""}`
+              );
+              return;
+            }
+            if (action === "remove") {
+              if (!name) {
+                notify(ctx, `Usage: /${COMMAND} recipe remove <name> [user|project]`, "warning");
+                return;
+              }
+              const requestedScope = trailing?.toLowerCase();
+              if (
+                requestedScope !== undefined &&
+                requestedScope !== "user" &&
+                requestedScope !== "project"
+              ) {
+                notify(ctx, "Recipe scope must be user or project.", "warning");
+                return;
+              }
+              const scope =
+                requestedScope ??
+                loadRecipeListings(ctx.cwd).find((entry) => entry.name === name)?.scope;
+              if (!scope) {
+                notify(ctx, `${name} was not found.`, "warning");
+                return;
+              }
+              const confirmed =
+                ctx.hasUI &&
+                (await ctx.ui.confirm(
+                  "Remove workflow recipe?",
+                  `Permanently remove ${scope} recipe "${name}"?`
+                ));
+              if (!confirmed) {
+                notify(ctx, "Recipe removal cancelled.", "warning");
+                return;
+              }
+              if (!removeRecipe(scope, ctx.cwd, name)) {
+                notify(ctx, `${scope} recipe "${name}" was not found.`, "warning");
+                return;
+              }
+              notify(ctx, `Removed ${scope} recipe "${name}".`);
+              return;
+            }
+            notify(ctx, `Unknown recipe action: ${action}`, "warning");
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          }
+          return;
+        }
+        case "board":
+        case "dash":
+        case "dashboard":
+          await showDashboard(ctx);
+          return;
+        case "list":
+          await showBoard(ctx);
+          return;
+        case "open": {
+          if (!rest) {
+            notify(ctx, "Usage: /maestro open <taskId>", "warning");
+            return;
+          }
+          await openTaskSession(ctx, rest);
+          return;
+        }
+        case "config": {
+          if (ctx.mode !== "tui" || rest === "show") {
+            notify(ctx, describeConfig(loadConfig(ctx.cwd)));
+            return;
+          }
+          const scope = rest === "project" ? "project" : "user";
+          await showSettings(ctx, scope);
+          refreshUI(ctx);
+          return;
+        }
+        case "simulate": {
+          const taskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
+          const board = loadBoard(ctx.cwd);
+          assertKnownTaskIds(board, taskIds);
+          const validationError = planValidationMessage(
+            validatePlan(board, Object.keys(loadConfig(ctx.cwd).tiers))
+          );
+          notify(ctx, validationError ?? simulatePlan(board, loadConfig(ctx.cwd), taskIds));
+          return;
+        }
+        case "discover": {
+          const [taskId, requestedMode, ...extra] = restParts;
+          const mode = requestedMode ?? "append";
+          if (!taskId || extra.length > 0 || (mode !== "append" && mode !== "replace")) {
+            notify(ctx, `Usage: /${COMMAND} discover <taskId> [append|replace]`, "warning");
+            return;
+          }
+
+          try {
+            const previewBoard = loadBoard(ctx.cwd);
+            const previewRevision = previewBoard.revision ?? 0;
+            const discoveryTask = findTask(previewBoard, taskId);
+            if (liveRuns.has(discoveryTask?.id ?? taskId)) {
+              throw new Error(`${taskId} discovery output is still live; wait for completion.`);
+            }
+            const report = completedDiscoveryReport(discoveryTask);
+            const config = loadConfig(ctx.cwd);
+            const output = parseDiscoveryOutput(report, config.maxDiscoveryGeneratedTasks);
+            buildDiscoveryBoard(previewBoard, taskId, report, mode, config);
+            notify(ctx, formatDiscoveryPreview(output, mode));
+
             const confirmed =
               ctx.hasUI &&
               (await ctx.ui.confirm(
-                "Remove workflow recipe?",
-                `Permanently remove ${scope} recipe "${name}"?`
+                "Apply discovery tasks?",
+                `${mode === "replace" ? "Replace the current board with" : "Append"} ${output.items.length} generated task(s)?`
               ));
             if (!confirmed) {
-              notify(ctx, "Recipe removal cancelled.", "warning");
-              return;
-            }
-            if (!removeRecipe(scope, ctx.cwd, name)) {
-              notify(ctx, `${scope} recipe "${name}" was not found.`, "warning");
-              return;
-            }
-            notify(ctx, `Removed ${scope} recipe "${name}".`);
-            return;
-          }
-          notify(ctx, `Unknown recipe action: ${action}`, "warning");
-        } catch (error) {
-          notify(ctx, error instanceof Error ? error.message : String(error), "error");
-        }
-        return;
-      }
-      case "board":
-      case "dash":
-      case "dashboard":
-        await showDashboard(ctx);
-        return;
-      case "list":
-        await showBoard(ctx);
-        return;
-      case "open": {
-        if (!rest) {
-          notify(ctx, "Usage: /maestro open <taskId>", "warning");
-          return;
-        }
-        await openTaskSession(ctx, rest);
-        return;
-      }
-      case "config": {
-        if (ctx.mode !== "tui" || rest === "show") {
-          notify(ctx, describeConfig(loadConfig(ctx.cwd)));
-          return;
-        }
-        const scope = rest === "project" ? "project" : "user";
-        await showSettings(ctx, scope);
-        refreshUI(ctx);
-        return;
-      }
-      case "simulate": {
-        const taskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
-        const board = loadBoard(ctx.cwd);
-        assertKnownTaskIds(board, taskIds);
-        const validationError = planValidationMessage(
-          validatePlan(board, Object.keys(loadConfig(ctx.cwd).tiers))
-        );
-        notify(ctx, validationError ?? simulatePlan(board, loadConfig(ctx.cwd), taskIds));
-        return;
-      }
-      case "discover": {
-        const [taskId, requestedMode, ...extra] = restParts;
-        const mode = requestedMode ?? "append";
-        if (!taskId || extra.length > 0 || (mode !== "append" && mode !== "replace")) {
-          notify(ctx, `Usage: /${COMMAND} discover <taskId> [append|replace]`, "warning");
-          return;
-        }
-
-        try {
-          const previewBoard = loadBoard(ctx.cwd);
-          const previewRevision = previewBoard.revision ?? 0;
-          const discoveryTask = findTask(previewBoard, taskId);
-          if (liveRuns.has(discoveryTask?.id ?? taskId)) {
-            throw new Error(`${taskId} discovery output is still live; wait for completion.`);
-          }
-          const report = completedDiscoveryReport(discoveryTask);
-          const config = loadConfig(ctx.cwd);
-          const output = parseDiscoveryOutput(report, config.maxDiscoveryGeneratedTasks);
-          buildDiscoveryBoard(previewBoard, taskId, report, mode, config);
-          notify(ctx, formatDiscoveryPreview(output, mode));
-
-          const confirmed =
-            ctx.hasUI &&
-            (await ctx.ui.confirm(
-              "Apply discovery tasks?",
-              `${mode === "replace" ? "Replace the current board with" : "Append"} ${output.items.length} generated task(s)?`
-            ));
-          if (!confirmed) {
-            notify(ctx, "Discovery tasks were not approved; the board was not changed.", "warning");
-            return;
-          }
-
-          let archive: string | undefined;
-          if (mode === "append") {
-            updateBoard(ctx.cwd, (board) => {
-              if ((board.revision ?? 0) !== previewRevision) {
-                throw new Error(
-                  "The board changed after preview; inspect and approve discovery again."
-                );
-              }
-              const freshReport = completedDiscoveryReport(findTask(board, taskId));
-              if (freshReport !== report) {
-                throw new Error(
-                  "Discovery result changed after preview; inspect and approve it again."
-                );
-              }
-              const candidate = buildDiscoveryBoard(
-                board,
-                taskId,
-                report,
-                mode,
-                loadConfig(ctx.cwd)
+              notify(
+                ctx,
+                "Discovery tasks were not approved; the board was not changed.",
+                "warning"
               );
-              board.nextTaskNumber = candidate.nextTaskNumber;
-              board.tasks = candidate.tasks;
-              board.planPending = true;
-              return true;
-            });
-          } else {
-            archive = replaceBoardWithArchive(ctx.cwd, (board) => {
-              if ((board.revision ?? 0) !== previewRevision) {
-                throw new Error(
-                  "The board changed after preview; inspect and approve discovery again."
+              return;
+            }
+
+            let archive: string | undefined;
+            if (mode === "append") {
+              updateBoard(ctx.cwd, (board) => {
+                if ((board.revision ?? 0) !== previewRevision) {
+                  throw new Error(
+                    "The board changed after preview; inspect and approve discovery again."
+                  );
+                }
+                const freshReport = completedDiscoveryReport(findTask(board, taskId));
+                if (freshReport !== report) {
+                  throw new Error(
+                    "Discovery result changed after preview; inspect and approve it again."
+                  );
+                }
+                const candidate = buildDiscoveryBoard(
+                  board,
+                  taskId,
+                  report,
+                  mode,
+                  loadConfig(ctx.cwd)
                 );
-              }
-              const freshReport = completedDiscoveryReport(findTask(board, taskId));
-              if (freshReport !== report) {
-                throw new Error(
-                  "Discovery result changed after preview; inspect and approve it again."
-                );
-              }
-              return buildDiscoveryBoard(board, taskId, report, mode, loadConfig(ctx.cwd));
-            });
+                board.nextTaskNumber = candidate.nextTaskNumber;
+                board.tasks = candidate.tasks;
+                board.planPending = true;
+                return true;
+              });
+            } else {
+              archive = replaceBoardWithArchive(ctx.cwd, (board) => {
+                if ((board.revision ?? 0) !== previewRevision) {
+                  throw new Error(
+                    "The board changed after preview; inspect and approve discovery again."
+                  );
+                }
+                const freshReport = completedDiscoveryReport(findTask(board, taskId));
+                if (freshReport !== report) {
+                  throw new Error(
+                    "Discovery result changed after preview; inspect and approve it again."
+                  );
+                }
+                return buildDiscoveryBoard(board, taskId, report, mode, loadConfig(ctx.cwd));
+              });
+            }
+            refreshUI(ctx);
+            notify(
+              ctx,
+              `Approved ${output.items.length} discovery task(s); plan approval is required.${archive ? ` Previous board archived at ${archive}.` : ""}`
+            );
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
           }
-          refreshUI(ctx);
+          return;
+        }
+        case "costs": {
+          const board = loadBoard(ctx.cwd);
           notify(
             ctx,
-            `Approved ${output.items.length} discovery task(s); plan approval is required.${archive ? ` Previous board archived at ${archive}.` : ""}`
+            board.tasks.length === 0
+              ? "No recorded costs; the board is empty."
+              : formatCostSummary(board.tasks)
           );
-        } catch (error) {
-          notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          return;
         }
-        return;
-      }
-      case "costs": {
-        const board = loadBoard(ctx.cwd);
-        notify(
-          ctx,
-          board.tasks.length === 0
-            ? "No recorded costs; the board is empty."
-            : formatCostSummary(board.tasks)
-        );
-        return;
-      }
-      case "reconcile": {
-        const warnings: string[] = [];
-        const board = loadBoard(ctx.cwd);
-        const config = loadConfig(ctx.cwd);
-        for (const task of board.tasks) {
-          if (task.status === "approved") {
-            const freshness = completionFreshness(board, task, config);
-            if (freshness.state !== "fresh") {
-              warnings.push(`${task.id}: ${freshness.state} completion — ${freshness.reason}`);
+        case "reconcile": {
+          const warnings: string[] = [];
+          const board = loadBoard(ctx.cwd);
+          const config = loadConfig(ctx.cwd);
+          for (const task of board.tasks) {
+            if (task.status === "approved") {
+              const freshness = completionFreshness(board, task, config);
+              if (freshness.state !== "fresh") {
+                warnings.push(`${task.id}: ${freshness.state} completion — ${freshness.reason}`);
+              }
+            }
+            if (task.approvalKind === "manual") warnings.push(`${task.id}: manually accepted`);
+            if (task.status === "approved" && task.approvalKind !== "reviewed") {
+              warnings.push(`${task.id}: approved without a reviewed artifact`);
+            }
+            if (task.approvalKind === "reviewed" && !task.provenance?.candidateTree) {
+              warnings.push(`${task.id}: reviewed approval is missing its authoritative Git tree`);
+            }
+            if (task.approvalKind === "reviewed" && !task.provenance?.reviewedAt) {
+              warnings.push(`${task.id}: artifact has no persisted review proof`);
+            }
+            if (task.approvalKind === "reviewed" && !task.integratedCommit) {
+              warnings.push(`${task.id}: reviewed approval is missing its integration commit`);
+            }
+            if (
+              task.verificationProfile &&
+              task.approvalKind === "reviewed" &&
+              !task.provenance?.verifiedAt
+            ) {
+              warnings.push(`${task.id}: reviewed artifact is missing trusted verification proof`);
+            }
+            const attempt = task.attempts.at(-1);
+            if (
+              attempt?.worktreePath &&
+              !worktreeExists({ worktreePath: attempt.worktreePath, branch: attempt.branch ?? "" })
+            ) {
+              warnings.push(`${task.id}: recorded recovery worktree is missing`);
             }
           }
-          if (task.approvalKind === "manual") warnings.push(`${task.id}: manually accepted`);
-          if (task.status === "approved" && task.approvalKind !== "reviewed") {
-            warnings.push(`${task.id}: approved without a reviewed artifact`);
-          }
-          if (task.approvalKind === "reviewed" && !task.provenance?.candidateTree) {
-            warnings.push(`${task.id}: reviewed approval is missing its authoritative Git tree`);
-          }
-          if (task.approvalKind === "reviewed" && !task.provenance?.reviewedAt) {
-            warnings.push(`${task.id}: artifact has no persisted review proof`);
-          }
-          if (task.approvalKind === "reviewed" && !task.integratedCommit) {
-            warnings.push(`${task.id}: reviewed approval is missing its integration commit`);
-          }
-          if (
-            task.verificationProfile &&
-            task.approvalKind === "reviewed" &&
-            !task.provenance?.verifiedAt
-          ) {
-            warnings.push(`${task.id}: reviewed artifact is missing trusted verification proof`);
-          }
-          const attempt = task.attempts.at(-1);
-          if (
-            attempt?.worktreePath &&
-            !worktreeExists({ worktreePath: attempt.worktreePath, branch: attempt.branch ?? "" })
-          ) {
-            warnings.push(`${task.id}: recorded recovery worktree is missing`);
-          }
-        }
-        notify(
-          ctx,
-          warnings.length > 0
-            ? `Reconciliation warnings:\n- ${warnings.join("\n- ")}`
-            : "Board artifacts are consistent."
-        );
-        return;
-      }
-      case "doctor": {
-        const liveTaskIds = new Set(liveRuns.keys());
-        if (restParts[0]?.toLowerCase() !== "cleanup") {
-          notify(ctx, buildDoctorReport(ctx.cwd, ctx.modelRegistry, ctx.model, liveTaskIds));
-          return;
-        }
-
-        const board = loadBoard(ctx.cwd);
-        const candidates = inspectManagedWorktrees(ctx.cwd, board, liveTaskIds).filter(
-          (entry) => entry.state === "orphaned" || entry.state === "stale"
-        );
-        const logCandidates = inspectLogRetention(ctx.cwd, board, liveTaskIds).filter(
-          (entry) => entry.state === "stale"
-        );
-        if (candidates.length === 0 && logCandidates.length === 0) {
-          notify(ctx, "No stale logs or stale/orphaned managed worktrees to clean.");
-          return;
-        }
-
-        let confirmed = restParts[1]?.toLowerCase() === "confirm";
-        if (ctx.hasUI && !confirmed) {
-          const logBytes = logCandidates.reduce((total, entry) => total + entry.size, 0);
-          confirmed = await ctx.ui.confirm(
-            "Clean stale maestro state?",
-            `Remove ${candidates.length} stale/orphaned checkout(s) and ${logCandidates.length} stale log(s) (${Math.ceil(logBytes / 1024)} KB)? Candidates will be rechecked; active and retained state is preserved.`
-          );
-        }
-        if (!ctx.hasUI && !confirmed) {
           notify(
             ctx,
-            `Cleanup cancelled. Run /${COMMAND} doctor cleanup confirm to explicitly confirm in non-interactive mode.`,
-            "warning"
+            warnings.length > 0
+              ? `Reconciliation warnings:\n- ${warnings.join("\n- ")}`
+              : "Board artifacts are consistent."
           );
           return;
         }
-        if (!confirmed) {
-          notify(ctx, "Worktree cleanup cancelled.");
-          return;
-        }
-
-        const confirmedPaths = new Set(candidates.map((entry) => entry.ref.worktreePath));
-        const result = cleanupManagedWorktrees(
-          ctx.cwd,
-          confirmedPaths,
-          () => loadBoard(ctx.cwd),
-          (taskId) => liveRuns.has(taskId)
-        );
-        const logResult = cleanupStaleLogs(
-          ctx.cwd,
-          new Set(logCandidates.map((entry) => resolve(entry.file))),
-          () => loadBoard(ctx.cwd),
-          (taskId) => liveRuns.has(taskId)
-        );
-        const preserved = result.preserved.filter(
-          (entry) =>
-            entry.state === "active" ||
-            entry.state === "recoverable" ||
-            entry.state === "retained-conflict"
-        ).length;
-        const warnings = logResult.warnings.length
-          ? ` Warnings: ${logResult.warnings.join("; ").slice(0, 500)}`
-          : "";
-        notify(
-          ctx,
-          `Removed ${result.removed.length} stale/orphaned worktree(s) and ${logResult.removed.length} stale log(s). Preserved ${preserved + logResult.preserved.length} active or retained item(s).${warnings}`
-        );
-        return;
-      }
-      case "handoff": {
-        const board = loadBoard(ctx.cwd);
-        if (board.tasks.length === 0) {
-          notify(ctx, "Nothing to hand off — the board is empty.", "warning");
-          return;
-        }
-        if (liveRuns.size > 0) {
-          notify(
-            ctx,
-            `${liveRuns.size} executor(s) still running — switching sessions would abort them. Wait or abort them first.`,
-            "warning"
-          );
-          return;
-        }
-        if (ctx.hasUI) {
-          const ok = await ctx.ui.confirm(
-            "Hand off to a fresh orchestrator?",
-            "Starts a new session where a supervisor drives run/review from the board alone, without this session's planning context. The current session stays on disk (/resume to revisit)."
-          );
-          if (!ok) return;
-        }
-        await runHandoff({
-          ctx,
-          briefing: buildSupervisorBriefing(
-            board.goal,
-            board.tasks,
-            describeTiersForPlanning(loadConfig(ctx.cwd))
-          ),
-          goal: board.goal ?? "maestro run",
-          adoptBoard,
-        });
-        return;
-      }
-      case "history": {
-        const history = loadStatusHistory(ctx.cwd);
-        if (!history) {
-          notify(ctx, "No history yet.");
-          return;
-        }
-        const requestedCount = Number.parseInt(rest, 10);
-        const count = Number.isInteger(requestedCount) && requestedCount > 0 ? requestedCount : 20;
-        const selected = history.entries.slice(-count);
-        const taskWidth = Math.max(4, ...selected.map((entry) => entry.taskId.length));
-        const fromWidth = Math.max(4, ...selected.map((entry) => entry.from.length));
-        const lines = [
-          `${padText("time", 8)}  ${padText("task", taskWidth)}  ${padText("from", fromWidth)} → to`,
-          ...selected.map(
-            (entry) =>
-              `${new Date(entry.ts).toISOString().slice(11, 19)}  ${padText(entry.taskId, taskWidth)}  ${padText(entry.from, fromWidth)} → ${entry.to}`
-          ),
-        ];
-        if (history.skipped > 0) {
-          lines.push(`(${history.skipped} unreadable line(s) skipped)`);
-        }
-        notify(ctx, lines.join("\n"));
-        return;
-      }
-      case "timeline": {
-        const [first, archiveName, archivedTaskId] = restParts;
-        const archived = first?.toLowerCase() === "archive";
-        let board: Board;
-        let taskId: string | undefined;
-        try {
-          board = archived ? loadArchivedBoard(ctx.cwd, archiveName ?? "") : loadBoard(ctx.cwd);
-          taskId = archived ? archivedTaskId : first;
-        } catch (error) {
-          notify(ctx, error instanceof Error ? error.message : String(error), "error");
-          return;
-        }
-        if (taskId && !findTask(board, taskId)) {
-          notify(ctx, `Unknown task: ${taskId}`, "warning");
-          return;
-        }
-        notify(ctx, formatRunTimeline(deriveRunTimeline(board, taskId)));
-        return;
-      }
-      case "replay": {
-        if (liveRuns.size > 0) {
-          notify(
-            ctx,
-            "Executors are still running. Abort them before replaying a board.",
-            "warning"
-          );
-          return;
-        }
-
-        let selectedFile = rest;
-        if (!selectedFile) {
-          const archives = listArchivedBoards(ctx.cwd);
-          if (archives.length === 0) {
-            notify(ctx, "No archived boards found.");
+        case "doctor": {
+          const liveTaskIds = new Set(liveRuns.keys());
+          if (restParts[0]?.toLowerCase() !== "cleanup") {
+            notify(ctx, buildDoctorReport(ctx.cwd, ctx.modelRegistry, ctx.model, liveTaskIds));
             return;
           }
-          const choice = await pickFromList(
-            ctx,
-            "Maestro Archives · newest first",
-            archives.map((archive) => ({
-              value: archive.file,
-              label: `${archive.timestamp} · ${archive.taskCount} task(s)`,
-              description: archive.file,
-            }))
-          );
-          if (!choice) return;
-          selectedFile = choice;
-        }
 
-        // Selection is asynchronous, so an executor may have started while
-        // the archive picker was open. Check again immediately before restore.
-        if (liveRuns.size > 0) {
+          const board = loadBoard(ctx.cwd);
+          const candidates = inspectManagedWorktrees(ctx.cwd, board, liveTaskIds).filter(
+            (entry) => entry.state === "orphaned" || entry.state === "stale"
+          );
+          const logCandidates = inspectLogRetention(ctx.cwd, board, liveTaskIds).filter(
+            (entry) => entry.state === "stale"
+          );
+          if (candidates.length === 0 && logCandidates.length === 0) {
+            notify(ctx, "No stale logs or stale/orphaned managed worktrees to clean.");
+            return;
+          }
+
+          let confirmed = restParts[1]?.toLowerCase() === "confirm";
+          if (ctx.hasUI && !confirmed) {
+            const logBytes = logCandidates.reduce((total, entry) => total + entry.size, 0);
+            confirmed = await ctx.ui.confirm(
+              "Clean stale maestro state?",
+              `Remove ${candidates.length} stale/orphaned checkout(s) and ${logCandidates.length} stale log(s) (${Math.ceil(logBytes / 1024)} KB)? Candidates will be rechecked; active and retained state is preserved.`
+            );
+          }
+          if (!ctx.hasUI && !confirmed) {
+            notify(
+              ctx,
+              `Cleanup cancelled. Run /${COMMAND} doctor cleanup confirm to explicitly confirm in non-interactive mode.`,
+              "warning"
+            );
+            return;
+          }
+          if (!confirmed) {
+            notify(ctx, "Worktree cleanup cancelled.");
+            return;
+          }
+
+          const confirmedPaths = new Set(candidates.map((entry) => entry.ref.worktreePath));
+          const result = cleanupManagedWorktrees(
+            ctx.cwd,
+            confirmedPaths,
+            () => loadBoard(ctx.cwd),
+            (taskId) => liveRuns.has(taskId)
+          );
+          const logResult = cleanupStaleLogs(
+            ctx.cwd,
+            new Set(logCandidates.map((entry) => resolve(entry.file))),
+            () => loadBoard(ctx.cwd),
+            (taskId) => liveRuns.has(taskId)
+          );
+          const preserved = result.preserved.filter(
+            (entry) =>
+              entry.state === "active" ||
+              entry.state === "recoverable" ||
+              entry.state === "retained-conflict"
+          ).length;
+          const warnings = logResult.warnings.length
+            ? ` Warnings: ${logResult.warnings.join("; ").slice(0, 500)}`
+            : "";
           notify(
             ctx,
-            "Executors are still running. Abort them before replaying a board.",
-            "warning"
+            `Removed ${result.removed.length} stale/orphaned worktree(s) and ${logResult.removed.length} stale log(s). Preserved ${preserved + logResult.preserved.length} active or retained item(s).${warnings}`
           );
           return;
         }
+        case "handoff": {
+          const board = loadBoard(ctx.cwd);
+          if (board.tasks.length === 0) {
+            notify(ctx, "Nothing to hand off — the board is empty.", "warning");
+            return;
+          }
+          if (liveRuns.size > 0) {
+            notify(
+              ctx,
+              `${liveRuns.size} executor(s) still running — switching sessions would abort them. Wait or abort them first.`,
+              "warning"
+            );
+            return;
+          }
+          if (ctx.hasUI) {
+            const ok = await ctx.ui.confirm(
+              "Hand off to a fresh orchestrator?",
+              "Starts a new session where a supervisor drives run/review from the board alone, without this session's planning context. The current session stays on disk (/resume to revisit)."
+            );
+            if (!ok) return;
+          }
+          await runHandoff({
+            ctx,
+            briefing: buildSupervisorBriefing(
+              board.goal,
+              board.tasks,
+              describeTiersForPlanning(loadConfig(ctx.cwd))
+            ),
+            goal: board.goal ?? "maestro run",
+            adoptBoard,
+          });
+          return;
+        }
+        case "history": {
+          const history = loadStatusHistory(ctx.cwd);
+          if (!history) {
+            notify(ctx, "No history yet.");
+            return;
+          }
+          const requestedCount = Number.parseInt(rest, 10);
+          const count =
+            Number.isInteger(requestedCount) && requestedCount > 0 ? requestedCount : 20;
+          const selected = history.entries.slice(-count);
+          const taskWidth = Math.max(4, ...selected.map((entry) => entry.taskId.length));
+          const fromWidth = Math.max(4, ...selected.map((entry) => entry.from.length));
+          const lines = [
+            `${padText("time", 8)}  ${padText("task", taskWidth)}  ${padText("from", fromWidth)} → to`,
+            ...selected.map(
+              (entry) =>
+                `${new Date(entry.ts).toISOString().slice(11, 19)}  ${padText(entry.taskId, taskWidth)}  ${padText(entry.from, fromWidth)} → ${entry.to}`
+            ),
+          ];
+          if (history.skipped > 0) {
+            lines.push(`(${history.skipped} unreadable line(s) skipped)`);
+          }
+          notify(ctx, lines.join("\n"));
+          return;
+        }
+        case "timeline": {
+          const [first, archiveName, archivedTaskId] = restParts;
+          const archived = first?.toLowerCase() === "archive";
+          let board: Board;
+          let taskId: string | undefined;
+          try {
+            board = archived ? loadArchivedBoard(ctx.cwd, archiveName ?? "") : loadBoard(ctx.cwd);
+            taskId = archived ? archivedTaskId : first;
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+            return;
+          }
+          if (taskId && !findTask(board, taskId)) {
+            notify(ctx, `Unknown task: ${taskId}`, "warning");
+            return;
+          }
+          notify(ctx, formatRunTimeline(deriveRunTimeline(board, taskId)));
+          return;
+        }
+        case "replay": {
+          if (liveRuns.size > 0) {
+            notify(
+              ctx,
+              "Executors are still running. Abort them before replaying a board.",
+              "warning"
+            );
+            return;
+          }
 
-        try {
-          const archivedLogs = captureBoardLogs(ctx.cwd, loadBoard(ctx.cwd));
+          let selectedFile = rest;
+          if (!selectedFile) {
+            const archives = listArchivedBoards(ctx.cwd);
+            if (archives.length === 0) {
+              notify(ctx, "No archived boards found.");
+              return;
+            }
+            const choice = await pickFromList(
+              ctx,
+              "Maestro Archives · newest first",
+              archives.map((archive) => ({
+                value: archive.file,
+                label: `${archive.timestamp} · ${archive.taskCount} task(s)`,
+                description: archive.file,
+              }))
+            );
+            if (!choice) return;
+            selectedFile = choice;
+          }
+
+          // Selection is asynchronous, so an executor may have started while
+          // the archive picker was open. Check again immediately before restore.
+          if (liveRuns.size > 0) {
+            notify(
+              ctx,
+              "Executors are still running. Abort them before replaying a board.",
+              "warning"
+            );
+            return;
+          }
+
+          try {
+            const archivedLogs = captureBoardLogs(ctx.cwd, loadBoard(ctx.cwd));
+            for (const warning of archivedLogs.warnings) {
+              notify(ctx, `Log cleanup warning: ${warning}`, "warning");
+            }
+            const restored = restoreArchivedBoard(ctx.cwd, selectedFile);
+            if (restored.archivedCurrent) {
+              const cleanup = pruneStaleLogs(
+                ctx.cwd,
+                archivedLogs.entries,
+                () => loadBoard(ctx.cwd),
+                (id) => liveRuns.has(id),
+                archivedLogs.warnings
+              );
+              if (cleanup.warnings.length > 0) {
+                notify(
+                  ctx,
+                  `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
+                  "warning"
+                );
+              }
+            }
+            refreshUI(ctx);
+            const previous = restored.archivedCurrent
+              ? ` Current board archived at ${restored.archivedCurrent}.`
+              : "";
+            notify(ctx, `Board restored from ${restored.selectedFile}.${previous}`);
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          }
+          return;
+        }
+        case "reset": {
+          const board = loadBoard(ctx.cwd);
+          if (board.tasks.length === 0) {
+            notify(ctx, "Board is already empty.");
+            return;
+          }
+          if (liveRuns.size > 0) {
+            notify(ctx, "Executors are still running. Abort them before resetting.", "warning");
+            return;
+          }
+          const archivedLogs = captureBoardLogs(ctx.cwd, board);
           for (const warning of archivedLogs.warnings) {
             notify(ctx, `Log cleanup warning: ${warning}`, "warning");
           }
-          const restored = restoreArchivedBoard(ctx.cwd, selectedFile);
-          if (restored.archivedCurrent) {
-            const cleanup = pruneStaleLogs(
-              ctx.cwd,
-              archivedLogs.entries,
-              () => loadBoard(ctx.cwd),
-              (id) => liveRuns.has(id),
-              archivedLogs.warnings
+          const archivePath = archiveBoard(ctx.cwd);
+          if (!archivePath) {
+            notify(ctx, "Could not archive the board; reset cancelled.", "error");
+            return;
+          }
+          if (ctx.hasUI) {
+            const ok = await ctx.ui.confirm(
+              "Reset board?",
+              `Delete all ${board.tasks.length} task(s) from the board? Archived at ${archivePath}`
             );
-            if (cleanup.warnings.length > 0) {
-              notify(
-                ctx,
-                `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
-                "warning"
-              );
-            }
+            if (!ok) return;
+          }
+          replaceBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] }, board.revision ?? 0); // also drops goal
+          const cleanup = pruneStaleLogs(
+            ctx.cwd,
+            archivedLogs.entries,
+            () => loadBoard(ctx.cwd),
+            (id) => liveRuns.has(id),
+            archivedLogs.warnings
+          );
+          if (cleanup.warnings.length > 0) {
+            notify(
+              ctx,
+              `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
+              "warning"
+            );
           }
           refreshUI(ctx);
-          const previous = restored.archivedCurrent
-            ? ` Current board archived at ${restored.archivedCurrent}.`
-            : "";
-          notify(ctx, `Board restored from ${restored.selectedFile}.${previous}`);
-        } catch (error) {
-          notify(ctx, error instanceof Error ? error.message : String(error), "error");
-        }
-        return;
-      }
-      case "reset": {
-        const board = loadBoard(ctx.cwd);
-        if (board.tasks.length === 0) {
-          notify(ctx, "Board is already empty.");
+          notify(ctx, `Board reset. Archived at ${archivePath}`);
           return;
         }
-        if (liveRuns.size > 0) {
-          notify(ctx, "Executors are still running. Abort them before resetting.", "warning");
-          return;
-        }
-        const archivedLogs = captureBoardLogs(ctx.cwd, board);
-        for (const warning of archivedLogs.warnings) {
-          notify(ctx, `Log cleanup warning: ${warning}`, "warning");
-        }
-        const archivePath = archiveBoard(ctx.cwd);
-        if (!archivePath) {
-          notify(ctx, "Could not archive the board; reset cancelled.", "error");
-          return;
-        }
-        if (ctx.hasUI) {
-          const ok = await ctx.ui.confirm(
-            "Reset board?",
-            `Delete all ${board.tasks.length} task(s) from the board? Archived at ${archivePath}`
-          );
-          if (!ok) return;
-        }
-        replaceBoard(ctx.cwd, { version: 1, nextTaskNumber: 1, tasks: [] }, board.revision ?? 0); // also drops goal
-        const cleanup = pruneStaleLogs(
-          ctx.cwd,
-          archivedLogs.entries,
-          () => loadBoard(ctx.cwd),
-          (id) => liveRuns.has(id),
-          archivedLogs.warnings
-        );
-        if (cleanup.warnings.length > 0) {
+        default:
           notify(
             ctx,
-            `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
-            "warning"
+            [
+              ...(subcommand ? [`Unknown subcommand "${subcommand}". Available commands:`] : []),
+              `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
+              `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
+              `/${COMMAND} drive [ids]    autonomously run, review, and retry tasks`,
+              `/${COMMAND} retry <taskId> retry failed work with isolated human-controlled safety`,
+              `/${COMMAND} pause          stop the drive after active executors finish`,
+              `/${COMMAND} resume         continue a paused drive from fresh board state`,
+              `/${COMMAND} abort          abort a drive and its active executors`,
+              `/${COMMAND} plan           review, approve, or reject a gated plan`,
+              `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
+              `/${COMMAND} list           compact task picker`,
+              `/${COMMAND} open <taskId>  switch into an executor session`,
+              `/${COMMAND} back           switch back to the previous session`,
+              `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
+              `/${COMMAND} costs          show attempts, total/average cost, models, and providers`,
+              `/${COMMAND} simulate [ids] preview deterministic dependency waves without running work`,
+              `/${COMMAND} discover <taskId> [append|replace]  preview and approve generated tasks`,
+              `/${COMMAND} doctor         diagnose config, models, authentication, git, and managed worktrees`,
+              `/${COMMAND} doctor cleanup remove rechecked stale/orphaned worktrees after confirmation`,
+              `/${COMMAND} history [n]    show recent task status changes (default 20)`,
+              `/${COMMAND} timeline [id]  show derived run/task evidence chronologically`,
+              `/${COMMAND} timeline archive <file> [id]  show archived evidence`,
+              `/${COMMAND} plan export <file>  export a versioned plan without run evidence`,
+              `/${COMMAND} plan import <file>  validate, archive current work, and import`,
+              `/${COMMAND} plan diff|compare <file> [taskId]  inspect plan changes without mutation`,
+              `/${COMMAND} recipe list|inspect|preview|save|run|remove  manage declarative recipes`,
+              `/${COMMAND} reconcile      report artifact/provenance inconsistencies without mutation`,
+              `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
+              `/${COMMAND} reset          archive and clear the board`,
+            ].join("\n")
           );
-        }
-        refreshUI(ctx);
-        notify(ctx, `Board reset. Archived at ${archivePath}`);
-        return;
       }
-      default:
-        notify(
-          ctx,
-          [
-            ...(subcommand ? [`Unknown subcommand "${subcommand}". Available commands:`] : []),
-            `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
-            `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
-            `/${COMMAND} drive [ids]    autonomously run, review, and retry tasks`,
-            `/${COMMAND} retry <taskId> retry failed work with isolated human-controlled safety`,
-            `/${COMMAND} pause          stop the drive after active executors finish`,
-            `/${COMMAND} resume         continue a paused drive from fresh board state`,
-            `/${COMMAND} abort          abort a drive and its active executors`,
-            `/${COMMAND} plan           review, approve, or reject a gated plan`,
-            `/${COMMAND} board          full-screen live dashboard (steer/abort/inspect executors)`,
-            `/${COMMAND} list           compact task picker`,
-            `/${COMMAND} open <taskId>  switch into an executor session`,
-            `/${COMMAND} back           switch back to the previous session`,
-            `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
-            `/${COMMAND} costs          show attempts, total/average cost, models, and providers`,
-            `/${COMMAND} simulate [ids] preview deterministic dependency waves without running work`,
-            `/${COMMAND} discover <taskId> [append|replace]  preview and approve generated tasks`,
-            `/${COMMAND} doctor         diagnose config, models, authentication, git, and managed worktrees`,
-            `/${COMMAND} doctor cleanup remove rechecked stale/orphaned worktrees after confirmation`,
-            `/${COMMAND} history [n]    show recent task status changes (default 20)`,
-            `/${COMMAND} timeline [id]  show derived run/task evidence chronologically`,
-            `/${COMMAND} timeline archive <file> [id]  show archived evidence`,
-            `/${COMMAND} plan export <file>  export a versioned plan without run evidence`,
-            `/${COMMAND} plan import <file>  validate, archive current work, and import`,
-            `/${COMMAND} plan diff|compare <file> [taskId]  inspect plan changes without mutation`,
-            `/${COMMAND} recipe list|inspect|preview|save|run|remove  manage declarative recipes`,
-            `/${COMMAND} reconcile      report artifact/provenance inconsistencies without mutation`,
-            `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
-            `/${COMMAND} reset          archive and clear the board`,
-          ].join("\n")
-        );
+    },
+    (prefix) => {
+      const normalized = prefix.toLowerCase();
+      const taskCommand = ["retry", "open", "drive", "discover", "timeline"].find((command) =>
+        normalized.startsWith(`${command} `)
+      );
+      if (taskCommand) {
+        const query = prefix.trim().split(/\s+/).at(-1)?.toLowerCase() ?? "";
+        return loadBoard(activeCwd)
+          .tasks.filter((task) => task.id.toLowerCase().startsWith(query))
+          .map((task) => ({
+            value: `${taskCommand} ${task.id}`,
+            label: task.id,
+            description: task.title,
+          }));
+      }
+      const recipeMatch = prefix.match(/^recipe\s+(run|inspect|preview|remove)\s+(.*)$/i);
+      if (!recipeMatch) return [];
+      const action = recipeMatch[1]?.toLowerCase();
+      const query = recipeMatch[2]?.toLowerCase() ?? "";
+      return loadRecipeListings(activeCwd)
+        .filter((recipe) => recipe.name.toLowerCase().startsWith(query))
+        .map((recipe) => ({
+          value: `recipe ${action} ${recipe.name}`,
+          label: recipe.name,
+          description: recipe.scope,
+        }));
     }
-  });
+  );
 
   pi.registerShortcut("ctrl+alt+b", {
     description: "Open the maestro dashboard",
@@ -2100,6 +2147,7 @@ export default function maestro(
         }
         refreshUI(ctx);
         notify(ctx, "Plan approved. Executors may now be started with maestro_drive.");
+        labelCurrentEntry(ctx, "maestro: plan approved");
         return;
       }
 
@@ -2540,6 +2588,7 @@ export default function maestro(
       }
       refreshUI(ctx);
       notify(ctx, `${task.id} → ${STATUS_LABELS[status]}`);
+      if (status === "approved") labelCurrentEntry(ctx, `maestro: ${task.id} approved`);
     }
   }
 
@@ -2654,7 +2703,11 @@ export default function maestro(
 
   pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, theme) => {
     const content = typeof message.content === "string" ? message.content : "";
-    return new Text(theme.fg("accent", "⚡ maestro\n") + content, 0, 0);
+    if (!content) return new Text(theme.fg("accent", "⚡ maestro"), 0, 0);
+    const container = new Container();
+    container.addChild(new Text(theme.fg("accent", "⚡ maestro"), 0, 0));
+    container.addChild(new Markdown(content, 0, 0, getMarkdownTheme()));
+    return container;
   });
 
   pi.on("turn_end", (_event, ctx) => {
@@ -2702,6 +2755,7 @@ export default function maestro(
   });
 
   pi.on("session_start", (event, ctx) => {
+    activeCwd = ctx.cwd;
     runtimeActive = true;
     liveRuns.clear();
     contextNudgeShown = false;

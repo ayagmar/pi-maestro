@@ -21,7 +21,7 @@ Ordered for release value and file-region conflicts (numbers are file names, not
 | 3 | 003  | Fix dashboard frame cost, sizing, scrollback, display bugs | P1 | M | — | DONE |
 | 4 | 005  | First-run preflight + failure-path visibility + release metadata | P1 | S | — | DONE |
 | 5 | 006  | Help overlay + scannable CLI text outputs | P2 | S | 002, 003 | DONE |
-| 6 | 004  | Adopt pi-native UI features (markdown, autocomplete, hints, working msg, labels) | P2 | M | 001, 002 | TODO |
+| 6 | 004  | Adopt pi-native UI features (markdown, autocomplete, hints, working msg, labels) | P2 | M | 001, 002 | DONE |
 | 7 | 008  | Structure the task evidence view into navigable sections | P2 | M | 003 | TODO |
 | 8 | 009  | Terminal states self-explanatory; archived runs discoverable | P2 | M | 002, 003 | TODO |
 | 9 | 007  | Ship runnable example recipes | P2 | S | — | TODO |

@@ -1,4 +1,5 @@
 import { type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { type AutocompleteItem } from "@earendil-works/pi-tui";
 import { COMMAND } from "./constants.js";
 
 export const MAESTRO_COMMANDS = [
@@ -44,11 +45,19 @@ export const MAESTRO_COMMANDS = [
 
 export function registerMaestroCommand(
   pi: ExtensionAPI,
-  handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>
+  handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>,
+  dynamicCompletions?: (prefix: string) => AutocompleteItem[]
 ): void {
   pi.registerCommand(COMMAND, {
     description: "Plan, delegate, review, and monitor work across fresh executor contexts",
     getArgumentCompletions: (prefix) => {
+      if (prefix.trim().includes(" ") || prefix.endsWith(" ")) {
+        try {
+          return dynamicCompletions?.(prefix) ?? [];
+        } catch {
+          return [];
+        }
+      }
       const matches = MAESTRO_COMMANDS.filter((command) =>
         command.startsWith(prefix.toLowerCase())
       );
