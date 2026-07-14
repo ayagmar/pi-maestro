@@ -207,21 +207,34 @@ export function deriveRunTimeline(board: Board, taskId?: string): RunTimelineEve
 
 export function formatRunTimeline(events: RunTimelineEvent[], limit = 4_000): string {
   if (events.length === 0) return "No timeline events.";
-  const date = new Date(events[0]?.timestamp ?? 0).toISOString().slice(0, 10);
-  const lines = [
-    `Timeline · ${date} · paths relative to .pi/maestro/`,
-    ...events.map((event) => {
-      const usage =
-        event.cost !== undefined || event.turns !== undefined
-          ? ` · ${event.turns ?? 0} turns · $${(event.cost ?? 0).toFixed(4)}`
-          : "";
-      const reference = event.reference
-        ? ` · ${event.reference.replace(/^.*[\\/]\.pi[\\/]maestro[\\/]/, "")}`
+  const dates = new Set(events.map((event) => eventDate(event)));
+  const lines =
+    dates.size === 1
+      ? [`Timeline · ${eventDate(events[0])} · paths relative to .pi/maestro/`]
+      : ["Timeline · paths relative to .pi/maestro/"];
+  let currentDate: string | undefined;
+  for (const event of events) {
+    const date = eventDate(event);
+    if (dates.size > 1 && date !== currentDate) {
+      lines.push(date);
+      currentDate = date;
+    }
+    const usage =
+      event.cost !== undefined || event.turns !== undefined
+        ? ` · ${event.turns ?? 0} turns · $${(event.cost ?? 0).toFixed(4)}`
         : "";
-      return `${new Date(event.timestamp).toISOString().slice(11, 19)} ${event.taskId ?? "run"} ${event.kind}: ${event.summary}${usage}${reference}`;
-    }),
-  ];
+    const reference = event.reference
+      ? ` · ${event.reference.replace(/^.*[\\/]\.pi[\\/]maestro[\\/]/, "")}`
+      : "";
+    lines.push(
+      `${new Date(event.timestamp).toISOString().slice(11, 19)} ${event.taskId ?? "run"} ${event.kind}: ${event.summary}${usage}${reference}`
+    );
+  }
   const output = lines.join("\n");
   if (output.length <= limit) return output;
   return `${output.slice(0, limit - 80)}\n… timeline omitted; inspect task session/log references for detail`;
+}
+
+function eventDate(event: RunTimelineEvent | undefined): string {
+  return new Date(event?.timestamp ?? 0).toISOString().slice(0, 10);
 }

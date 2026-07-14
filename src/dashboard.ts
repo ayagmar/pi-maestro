@@ -1,5 +1,11 @@
 import { type Theme } from "@earendil-works/pi-coding-agent";
-import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  Input,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { completionFreshness } from "./artifact-policy.js";
 import {
   blockedReason,
@@ -125,7 +131,7 @@ const GROUP_LABELS: Record<TaskGroup, string> = {
   cancelled: "cancelled",
 };
 
-const DASHBOARD_BINDINGS = [
+export const DASHBOARD_BINDINGS = [
   { key: "↑↓", context: "Navigation", description: "tasks/phases" },
   { key: "←→", context: "Navigation", description: "levels" },
   { key: "PgUp/PgDn", context: "Navigation", description: "scroll" },
@@ -134,12 +140,15 @@ const DASHBOARD_BINDINGS = [
   { key: "x", context: "Task", description: "abort" },
   { key: "a", context: "Task", description: "approve (review bypass)" },
   { key: "r", context: "Task", description: "retry" },
-  { key: "o/O", context: "Task", description: "open executor/reviewer session" },
+  { key: "p", context: "Task", description: "report" },
+  { key: "v", context: "Task", description: "verdict" },
+  { key: "o", context: "Task", description: "executor session" },
+  { key: "O", context: "Task", description: "reviewer session" },
   { key: "e", context: "Task", description: "evidence" },
   { key: "g", context: "View", description: "group filter" },
   { key: "f", context: "View", description: "hide done" },
   { key: "t", context: "View", description: "transcript/timeline" },
-  { key: "enter", context: "View", description: "open executor session" },
+  { key: "enter", context: "View", description: "executor session" },
   { key: "?", context: "View", description: "help" },
 ] as const;
 
@@ -590,10 +599,12 @@ export class Dashboard {
   private renderHelp(width: number, height: number): string[] {
     const lines = [this.theme.bold("Dashboard help")];
     for (const context of ["Navigation", "Task", "View"] as const) {
-      const bindings = DASHBOARD_BINDINGS.filter((binding) => binding.context === context)
-        .map((binding) => `${binding.key} ${binding.description}`)
-        .join(" · ");
-      lines.push(`${context.padEnd(12)} ${bindings}`);
+      lines.push(this.theme.bold(context));
+      for (const binding of DASHBOARD_BINDINGS.filter(
+        (candidate) => candidate.context === context
+      )) {
+        lines.push(`  ${binding.key.padEnd(12)} ${binding.description}`);
+      }
     }
     lines.push("", this.theme.fg("dim", "Press any key to close help"));
     return lines.map((line) => truncateToWidth(line, width)).slice(0, height);
@@ -1107,36 +1118,41 @@ export class Dashboard {
       );
     }
     if (this.navigationLevel === "phase") {
-      return theme.fg("dim", truncateToWidth(" ↑↓ phases · → tasks · esc close ", width));
+      const parts = [bindingLabel("↑↓"), bindingLabel("←→"), bindingLabel("esc")];
+      return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
     }
     const live = task ? this.actions.isLive(task.id) : false;
-    const help = DASHBOARD_BINDINGS.find((binding) => binding.key === "?");
     const parts = [
-      `${help?.key} ${help?.description}`,
+      bindingLabel("?"),
       ...(this.frame.board.planPending ? ["plan gated · /maestro plan to review"] : []),
-      this.navigationLevel === "launch" ? "↑↓ launches" : "↑↓ tasks",
-      "esc close",
-      "PgUp/PgDn scroll",
+      bindingLabel("↑↓"),
+      bindingLabel("esc"),
+      bindingLabel("PgUp/PgDn"),
     ];
-    if (live) parts.push("s steer", "x abort");
+    if (live) parts.push(bindingLabel("s"), bindingLabel("x"));
     else if (task) {
-      if (lastAttemptReport(task)) parts.push("p report");
-      if (task.attempts.at(-1)?.reviewReport) parts.push("v verdict");
-      if (this.actions.hasExecutorSession(task.id)) parts.push("enter executor");
-      if (this.actions.hasReviewerSession(task.id)) parts.push("O reviewer");
-      if (task.status === "ready_for_review") parts.push("a approve");
-      if (this.actions.retryEligibility(task.id).eligible) parts.push("r retry");
+      if (lastAttemptReport(task)) parts.push(bindingLabel("p"));
+      if (task.attempts.at(-1)?.reviewReport) parts.push(bindingLabel("v"));
+      if (this.actions.hasExecutorSession(task.id)) parts.push(bindingLabel("enter"));
+      if (this.actions.hasReviewerSession(task.id)) parts.push(bindingLabel("O"));
+      if (task.status === "ready_for_review") parts.push(bindingLabel("a"));
+      if (this.actions.retryEligibility(task.id).eligible) parts.push(bindingLabel("r"));
     }
     const groupFilter = this.filter === "all" ? "all" : GROUP_LABELS[this.filter];
     parts.push(
-      `g group:${groupFilter}`,
-      `t ${this.detailView === "transcript" ? "timeline" : "transcript"}`,
-      this.detailView === "evidence" ? "e transcript" : "e evidence",
-      this.hideDone ? "f show done" : "f hide done",
-      this.navigationLevel === "launch" ? "← task" : "← phases · → launches"
+      `${bindingLabel("g")} (${groupFilter})`,
+      bindingLabel("t"),
+      bindingLabel("e"),
+      bindingLabel("f"),
+      bindingLabel("←→")
     );
     return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
   }
+}
+
+function bindingLabel(key: (typeof DASHBOARD_BINDINGS)[number]["key"]): string {
+  const binding = DASHBOARD_BINDINGS.find((candidate) => candidate.key === key);
+  return binding ? `${binding.key} ${binding.description}` : key;
 }
 
 function visibleWindow<T>(items: readonly T[], selected: number, height: number) {
@@ -1223,28 +1239,5 @@ function padToWidth(line: string, width: number): string {
 }
 
 export function wrapText(text: string, width: number): string[] {
-  if (visibleWidth(text) <= width) return [text];
-  const lines: string[] = [];
-  let characters = Array.from(text);
-  while (characters.length > 0) {
-    let usedWidth = 0;
-    let end = 0;
-    let whitespace = -1;
-    while (end < characters.length) {
-      const characterWidth = visibleWidth(characters[end] ?? "");
-      if (usedWidth + characterWidth > width) break;
-      usedWidth += characterWidth;
-      if (/\s/.test(characters[end] ?? "")) whitespace = end;
-      end += 1;
-    }
-    if (end === characters.length) {
-      lines.push(characters.join(""));
-      break;
-    }
-    const cut = whitespace > 0 ? whitespace : Math.max(1, end);
-    lines.push(characters.slice(0, cut).join("").trimEnd());
-    characters = characters.slice(cut);
-    while (/\s/.test(characters[0] ?? "")) characters.shift();
-  }
-  return lines;
+  return wrapTextWithAnsi(text, width);
 }

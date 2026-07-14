@@ -1,3 +1,4 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { type BoardUsageSummary, type Task, type TaskStatus, type Usage } from "./types.js";
 
 export const STATUS_GLYPHS: Record<TaskStatus, string> = {
@@ -97,7 +98,8 @@ export function boardUsageSummary(tasks: Task[]): BoardUsageSummary {
 }
 
 export function padText(value: string, width: number): string {
-  return value.length >= width ? value : value + " ".repeat(width - value.length);
+  const currentWidth = visibleWidth(value);
+  return currentWidth >= width ? value : value + " ".repeat(width - currentWidth);
 }
 
 export function formatCostSummary(tasks: Task[]): string {

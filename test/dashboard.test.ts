@@ -10,6 +10,7 @@ import { DEFAULT_CONFIG } from "../src/config.js";
 import {
   Dashboard,
   type DashboardActions,
+  DASHBOARD_BINDINGS,
   DEFAULT_DASHBOARD_BODY_HEIGHT,
   taskLaunches,
   wrapText,
@@ -1002,33 +1003,31 @@ test("dashboard evidence view exposes persisted execution, review, artifact, ver
   }
 });
 
-test("dashboard help lists every key and closes on the next key", () => {
+test("dashboard help lists every shared binding at width 80 and closes on the next key", () => {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
   const dashboard = new Dashboard(fakeTheme, makeActions(board));
   try {
     dashboard.handleInput("?");
-    const help = dashboard.render(160).join("\n");
-    for (const key of [
-      "↑↓",
-      "←→",
-      "PgUp/PgDn",
-      "esc",
-      "s",
-      "x",
-      "a",
-      "r",
-      "o/O",
-      "e",
-      "g",
-      "f",
-      "t",
-      "enter",
-      "?",
-    ]) {
-      assert.ok(help.includes(key), `missing ${key}`);
+    const help = dashboard.render(80).join("\n");
+    for (const binding of DASHBOARD_BINDINGS) {
+      assert.ok(help.includes(binding.key), `missing ${binding.key}`);
     }
     dashboard.handleInput("z");
-    assert.doesNotMatch(dashboard.render(160).join("\n"), /Dashboard help/);
+    assert.doesNotMatch(dashboard.render(80).join("\n"), /Dashboard help/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard footer uses the shared help binding label", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    const binding = DASHBOARD_BINDINGS.find((candidate) => candidate.key === "?");
+    assert.ok(binding);
+    assert.ok(
+      (dashboard.render(100).at(-1) ?? "").includes(`${binding.key} ${binding.description}`)
+    );
   } finally {
     dashboard.dispose();
   }

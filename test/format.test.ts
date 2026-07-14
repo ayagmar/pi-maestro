@@ -8,6 +8,7 @@ import {
   formatCostSummary,
   formatTokens,
   formatUsage,
+  padText,
   runBudgetWarning,
   taskLine,
   taskUsage,
@@ -118,6 +119,11 @@ test("formatCostSummary stays compact and omits unavailable identities", () => {
     "run: 1 attempt · $0.0200 total · $0.0200 avg (billed)\nmodels: openai/gpt-5-mini\nproviders: openai\nspend: other $0.0200 · reconciled $0.0200"
   );
   assert.equal(formatCostSummary([]), "run: 0 attempts · $0.0000 total · $0.0000 avg (billed)");
+});
+
+test("padText aligns by visible terminal width", () => {
+  assert.equal(padText("界", 4), "界  ");
+  assert.equal(padText("wide", 4), "wide");
 });
 
 test("formatBoardProgress excludes cancelled tasks from active progress", () => {

@@ -22,6 +22,7 @@ import maestro, {
   assertKnownTaskIds,
   maestroBoardCwd,
   previousBoardSession,
+  scrollableTextOffset,
   sessionCanControlDrive,
   sessionSwitchBlocked,
 } from "../src/index.js";
@@ -636,11 +637,18 @@ test("history command skips valid-JSON malformed rows and prints valid entries",
         join(directory, "history.jsonl"),
         [
           JSON.stringify({
-            ts: "2026-07-14T12:00:00.000Z",
+            ts: "2026-07-13T23:59:00.000Z",
             taskId: "T1",
             from: "todo",
             to: "running",
             revision: 1,
+          }),
+          JSON.stringify({
+            ts: "2026-07-14T00:01:00.000Z",
+            taskId: "T1",
+            from: "running",
+            to: "ready_for_review",
+            revision: 2,
           }),
           "null",
           "{}",
@@ -651,7 +659,9 @@ test("history command skips valid-JSON malformed rows and prints valid entries",
     async (cwd) => {
       const { command, ctx, notices } = loadMaestro(cwd);
       await command.handler("history", ctx);
-      assert.match(notices[0] ?? "", /12:00:00.*T1.*todo.*running/);
+      assert.match(notices[0] ?? "", /23:59:00.*T1.*todo.*running/);
+      assert.match(notices[0] ?? "", /2026-07-13/);
+      assert.match(notices[0] ?? "", /2026-07-14/);
       assert.match(notices[0] ?? "", /3 unreadable line\(s\) skipped/);
     }
   );
@@ -705,6 +715,7 @@ test("task-id argument completion includes board tasks", async () => {
     (cwd) => {
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
       createTask(board, { title: "Accepted task", brief: "work", tier: "standard" });
+      createTask(board, { title: "Second task", brief: "work", tier: "standard" });
       saveBoard(cwd, board);
     },
     async (cwd) => {
@@ -713,9 +724,22 @@ test("task-id argument completion includes board tasks", async () => {
       const completions = command.getArgumentCompletions?.("retry T");
       assert.deepEqual(completions, [
         { value: "retry T1", label: "T1", description: "Accepted task" },
+        { value: "retry T2", label: "T2", description: "Second task" },
       ]);
+      assert.equal(
+        command.getArgumentCompletions?.("drive T1 T")?.find((item) => item.label === "T2")?.value,
+        "drive T1 T2"
+      );
     }
   );
+});
+
+test("scrollable text clamps to the last full page", () => {
+  let offset = 0;
+  for (let index = 0; index < 10; index += 1) {
+    offset = scrollableTextOffset(offset, 10, 60);
+  }
+  assert.equal(offset, 42);
 });
 
 test("retry command completion and risky confirmation preserve approved work on refusal or race", async () => {

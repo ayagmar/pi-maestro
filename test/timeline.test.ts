@@ -48,3 +48,23 @@ test("timeline derivation is deterministic, filterable, and bounded", () => {
   );
   assert.ok(formatRunTimeline(timeline, 180).length <= 180);
 });
+
+test("multi-day timelines render a header for each date", () => {
+  const output = formatRunTimeline([
+    {
+      timestamp: Date.parse("2026-07-13T23:59:00.000Z"),
+      kind: "planned",
+      summary: "first",
+      severity: "info",
+    },
+    {
+      timestamp: Date.parse("2026-07-14T00:01:00.000Z"),
+      kind: "execute",
+      summary: "second",
+      severity: "info",
+    },
+  ]);
+
+  assert.match(output, /2026-07-13/);
+  assert.match(output, /2026-07-14/);
+});

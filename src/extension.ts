@@ -167,6 +167,15 @@ export interface MaestroDependencies {
   startExecutor: typeof defaultStartExecutor;
 }
 
+export function scrollableTextOffset(
+  offset: number,
+  delta: number,
+  lineCount: number,
+  pageSize = 18
+): number {
+  return Math.max(0, Math.min(Math.max(0, lineCount - pageSize), offset + delta));
+}
+
 export default function maestro(
   pi: ExtensionAPI,
   dependencies: MaestroDependencies = { startExecutor: defaultStartExecutor }
@@ -1663,13 +1672,24 @@ export default function maestro(
             const selected = history.entries.slice(-count);
             const taskWidth = Math.max(4, ...selected.map((entry) => entry.taskId.length));
             const fromWidth = Math.max(4, ...selected.map((entry) => entry.from.length));
+            const dates = new Set(
+              selected.map((entry) => new Date(entry.ts).toISOString().slice(0, 10))
+            );
             const lines = [
               `${padText("time", 8)}  ${padText("task", taskWidth)}  ${padText("from", fromWidth)} → to`,
-              ...selected.map(
-                (entry) =>
-                  `${new Date(entry.ts).toISOString().slice(11, 19)}  ${padText(entry.taskId, taskWidth)}  ${padText(entry.from, fromWidth)} → ${entry.to}`
-              ),
             ];
+            let currentDate: string | undefined;
+            for (const entry of selected) {
+              const timestamp = new Date(entry.ts).toISOString();
+              const date = timestamp.slice(0, 10);
+              if (dates.size > 1 && date !== currentDate) {
+                lines.push(date);
+                currentDate = date;
+              }
+              lines.push(
+                `${timestamp.slice(11, 19)}  ${padText(entry.taskId, taskWidth)}  ${padText(entry.from, fromWidth)} → ${entry.to}`
+              );
+            }
             if (history.skipped > 0) {
               lines.push(`(${history.skipped} unreadable line(s) skipped)`);
             }
@@ -1863,11 +1883,13 @@ export default function maestro(
         normalized.startsWith(`${command} `)
       );
       if (taskCommand) {
-        const query = prefix.trim().split(/\s+/).at(-1)?.toLowerCase() ?? "";
+        const parts = prefix.trim().split(/\s+/);
+        const query = parts.at(-1)?.toLowerCase() ?? "";
+        const precedingIds = taskCommand === "drive" ? parts.slice(1, -1) : [];
         return completionBoard()
           .tasks.filter((task) => task.id.toLowerCase().startsWith(query))
           .map((task) => ({
-            value: `${taskCommand} ${task.id}`,
+            value: `${taskCommand} ${[...precedingIds, task.id].join(" ")}`,
             label: task.id,
             description: task.title,
           }));
@@ -2047,10 +2069,12 @@ export default function maestro(
             done();
             return;
           }
-          if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp))
-            offset = Math.max(0, offset - 10);
-          if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown))
-            offset = Math.min(Math.max(0, lines.length - 1), offset + 10);
+          if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) {
+            offset = scrollableTextOffset(offset, -10, lines.length);
+          }
+          if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) {
+            offset = scrollableTextOffset(offset, 10, lines.length);
+          }
           tui.requestRender();
         },
       };
