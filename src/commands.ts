@@ -6,6 +6,7 @@ export const MAESTRO_COMMANDS = [
   "handoff",
   "back",
   "drive",
+  "retry",
   "pause",
   "resume",
   "abort",
@@ -13,9 +14,18 @@ export const MAESTRO_COMMANDS = [
   "plan",
   "plan export",
   "plan import",
+  "plan diff",
+  "plan compare",
+  "recipe list",
+  "recipe inspect",
+  "recipe preview",
+  "recipe save",
+  "recipe run",
+  "recipe remove",
   "list",
   "costs",
   "simulate",
+  "discover",
   "open",
   "config",
   "config project",
@@ -25,6 +35,7 @@ export const MAESTRO_COMMANDS = [
   "doctor cleanup confirm",
   "history",
   "timeline",
+  "reconcile",
   "replay",
   "reset",
 ] as const;
@@ -50,6 +61,9 @@ export function parseCommand(args: string): {
   rest: string;
   restParts: string[];
 } {
-  const [subcommand = "", ...restParts] = args.trim().split(/\s+/);
-  return { subcommand: subcommand.toLowerCase(), rest: restParts.join(" "), restParts };
+  const match = args.trim().match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  const subcommand = match?.[1] ?? "";
+  const rest = match?.[2] ?? "";
+  const restParts = rest ? rest.split(/\s+/) : [];
+  return { subcommand: subcommand.toLowerCase(), rest, restParts };
 }

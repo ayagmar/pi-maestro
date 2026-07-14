@@ -14,6 +14,13 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `useWorktrees` | false | Isolate task checkouts |
 | `autoCommit` | true | Commit only attributed task paths |
 | `maxAttempts` | 3 | 1–100 consumed attempts |
+| `maxPlanTasks` | 64 | 1–512 tasks at plan mutation boundaries |
+| `maxDiscoveryGeneratedTasks` | 32 | 1–128 and no greater than `maxPlanTasks` |
+| `maxTotalLaunchesPerRun` | 128 | 1–4096 raw executor and reviewer launches |
+| `confirmationPlanTasks` | 24 | Explicit confirmation above this task count; no greater than `maxPlanTasks` |
+| `confirmationTotalLaunches` | 64 | Explicit confirmation above this raw-launch upper bound; no greater than `maxTotalLaunchesPerRun` |
+| `reviewRequiredApprovals` | 2 | Integer 2–8; cannot exceed `maxReviewerLaunches` |
+| `maxReviewerLaunches` | 4 | Integer 1–16; includes provider fallback launches |
 | `maxCostPerTask` | 5 | USD; 0 disables |
 | `maxRunCost` | 25 | USD; 0 disables |
 | `statusWaitSeconds` | 60 | 0–240; 0 disables waiting |
@@ -26,6 +33,19 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `cleanupCompletedTasks` | true | Archive then clear settled boards |
 
 `tiers` must define valid thinking levels. The built-in tiers are `trivial`, `standard`, `complex`, and read-only `review`.
+
+Tasks may select `reviewPolicy: "single" | "confirm" | "find-and-refute"`. `single` is the legacy default. `confirm` requires the configured number of fresh independent approvals. `find-and-refute` runs one finder and one independent confirmer/refuter.
+
+The task fingerprint includes the effective task tier, configured tier model patterns/fallbacks,
+review tier, review policy, confirmation count when relevant, and trusted verification profile.
+Changing one of those values deliberately makes an existing approved completion stale; it is not
+silently reused. Runtime-only limits such as concurrency and attempt caps affect preflight and
+dispatch, but do not invalidate an otherwise identical artifact fingerprint.
+
+Preflight classifies up to 8 tasks as small, 9–24 as medium, and larger plans as large. It reports
+dependency waves, configured/effective concurrency, executor and reviewer launch upper bounds,
+verification-profile usage, and confirmation thresholds. These are deterministic bounds, never
+price estimates.
 
 ## Trusted verification profiles
 

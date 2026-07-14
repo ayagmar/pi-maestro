@@ -94,15 +94,13 @@ function taskEvents(task: Task): RunTimelineEvent[] {
       reference: attempt.sessionFile ?? attempt.logFile,
     });
     for (const launch of attempt.reviewLaunches ?? []) {
+      const role = launch.role ?? "reviewer";
+      const result = launch.failureReason?.kind ?? launch.verdict ?? "completed";
       events.push({
         timestamp: launch.endedAt ?? launch.startedAt,
         taskId: task.id,
         kind: "review",
-        summary: launch.failureReason
-          ? `review failed: ${launch.failureReason.kind}`
-          : launch.finalReport?.includes("VERDICT: REQUEST_CHANGES")
-            ? "review requested changes"
-            : "review completed",
+        summary: `${role} review ${result}`,
         severity: launch.failureReason ? "error" : "info",
         cost: launch.usage.cost,
         turns: launch.usage.turns,

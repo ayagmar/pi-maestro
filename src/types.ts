@@ -30,9 +30,16 @@ export interface FailureReason {
 }
 
 export interface ReviewLaunch {
+  id?: string;
+  reviewerIndex?: number;
+  role?: "single" | "confirmer" | "finder" | "refuter";
+  verdict?: "approve" | "request_changes";
+  criterionEvidence?: Array<{ criterion: number; passed: boolean; evidence: string }>;
   model?: string;
   provider?: string;
   sessionFile?: string;
+  /** Executor event log for this reviewer launch, when retained. */
+  logFile?: string;
   startedAt: number;
   endedAt?: number;
   exitCode?: number;
@@ -43,6 +50,16 @@ export interface ReviewLaunch {
   promptCharacters?: number;
   promptApproximateTokens?: number;
   promptSections?: Array<{ name: string; characters: number; omitted: boolean }>;
+}
+
+export interface ReviewConvergence {
+  policy: ReviewPolicy;
+  status: "approved" | "changes_requested" | "disagreement" | "operational_failure";
+  requiredApprovals: number;
+  actualApprovals: number;
+  reviewerCount: number;
+  summary: string;
+  decidedAt: number;
 }
 
 export interface Attempt {
@@ -63,6 +80,8 @@ export interface Attempt {
   errorMessage?: string;
   /** Structured, redacted reason for the last failure or review rejection. */
   failureReason?: FailureReason;
+  /** Configured task/dependency fingerprint captured when execution was claimed. */
+  executionFingerprint?: string;
   /** Whether this raw executor launch consumes maxAttempts. Defaults to true for legacy boards. */
   consumesAttempt?: boolean;
   /** @deprecated Legacy marker for a non-consuming provider launch. */
@@ -88,6 +107,9 @@ export interface Attempt {
   reviewProvider?: string;
   /** Every reviewer launch, including failed fallback models. */
   reviewLaunches?: ReviewLaunch[];
+  reviewConvergence?: ReviewConvergence;
+  /** Superseded convergence decisions retained across explicit human review retries. */
+  reviewConvergenceHistory?: ReviewConvergence[];
   /** Aggregate review usage, also included in the attempt's aggregate usage. */
   reviewUsage?: Usage;
   /** Session file of the last review run, for post-hoc inspection. */
@@ -121,6 +143,24 @@ export interface ArtifactProvenance {
   verificationProfile?: string;
 }
 
+export interface ApprovedProvenance {
+  version: 1;
+  fingerprint: string;
+  componentHashes: {
+    contract: string;
+    execution: string;
+    verification: string;
+    dependencies: string;
+  };
+  artifact: { kind: "git-tree" | "report"; identity: string };
+  dependencyIdentities: Array<{
+    taskId: string;
+    kind: "git-tree" | "report";
+    identity: string;
+  }>;
+  approvedAt: number;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -136,6 +176,11 @@ export interface Task {
   successCriteria?: string[];
   /** Trusted configured verification profile selected for this task. */
   verificationProfile?: string;
+  reviewPolicy?: ReviewPolicy;
+  /** Read-only task that may propose ordinary tasks within these repository scopes. */
+  discovery?: {
+    allowedWritePaths: string[];
+  };
   findings?: ReviewFinding[];
   reviewNotes?: string;
   /** Provenance for acceptance; automated approval is recorded only after integration. */
@@ -145,6 +190,8 @@ export interface Task {
   integratedCommit?: string;
   verificationSummary?: string;
   provenance?: ArtifactProvenance;
+  /** Versioned proof used to decide whether an approved completion is still reusable. */
+  approvedProvenance?: ApprovedProvenance;
   /** Consecutive genuine reviewer rejections; the autonomous drive escalates at the limit. */
   reviewRejections?: number;
   /** Exclusive persisted ownership of an executor or reviewer dispatch. */
@@ -187,6 +234,7 @@ export interface PlanTaskEdits {
   writePaths?: string[];
   successCriteria?: string[];
   verificationProfile?: string;
+  reviewPolicy?: ReviewPolicy;
   cancelled?: boolean;
 }
 
@@ -215,7 +263,20 @@ export interface DriveDecision {
   allowedInterventions: Array<"handoff" | "abort" | "steer">;
   createdAt: number;
   deliveredAt?: number;
-  resolution?: { intervention: "handoff" | "abort" | "steer"; resolvedAt: number };
+  deliveryClaim?: {
+    id: string;
+    claimedAt: number;
+  };
+  resolution?: { intervention: "handoff" | "abort" | "steer" | "resume"; resolvedAt: number };
+}
+
+export interface ActiveDriveState {
+  id: string;
+  /** Session that started the drive. Only that session may receive its terminal notification. */
+  ownerSession?: string;
+  /** Selected task scope. Omitted when the whole board is driven. */
+  taskIds?: string[];
+  startedAt: number;
 }
 
 export interface Board {
@@ -228,10 +289,13 @@ export interface Board {
   ownerSessions?: string[];
   /** Planned tasks cannot start until the user approves them. */
   planPending?: boolean;
+  scaleApproval?: { signature: string; confirmedAt: number };
   /** A safely paused autonomous drive that can be resumed from fresh board state. */
   pausedDrive?: PausedDriveState;
   /** Current bounded drive completion or decision awaiting owner handling. */
   activeDecision?: DriveDecision;
+  /** Durable ownership record for a drive that has claimed it started. */
+  activeDrive?: ActiveDriveState;
   tasks: Task[];
 }
 
@@ -251,6 +315,49 @@ export interface VerificationProfile {
   timeoutSeconds: number;
 }
 
+export type RecipeScope = "user" | "project";
+
+export type RecipeInputValue = string | number | boolean;
+
+export interface RecipeInput {
+  description?: string;
+  required?: boolean;
+  default?: RecipeInputValue;
+}
+
+export interface RecipeTask {
+  id: string;
+  title: string;
+  brief: string;
+  tier: string;
+  dependsOn: string[];
+  writePaths: string[];
+  successCriteria: string[];
+  verificationProfile?: string;
+  commitMessage?: string;
+  discovery?: {
+    allowedWritePaths: string[];
+  };
+  reviewPolicy?: ReviewPolicy;
+}
+
+export type ReviewPolicy = "single" | "confirm" | "find-and-refute";
+
+export interface WorkflowRecipe {
+  kind: "pi-maestro-recipe";
+  version: 1;
+  name: string;
+  description?: string;
+  inputs?: Record<string, RecipeInput>;
+  tasks: RecipeTask[];
+}
+
+export interface ResolvedRecipe {
+  recipe: WorkflowRecipe;
+  scope: RecipeScope;
+  file: string;
+}
+
 export interface MaestroConfig {
   maxParallel: number;
   /** Require explicit user approval after planning before executors can start. */
@@ -259,6 +366,15 @@ export interface MaestroConfig {
   useWorktrees: boolean;
   /** Hard attempt cap per task; exceeded tasks need an explicit maestro-run or a brief rewrite. */
   maxAttempts: number;
+  maxPlanTasks: number;
+  maxDiscoveryGeneratedTasks: number;
+  maxTotalLaunchesPerRun: number;
+  confirmationPlanTasks: number;
+  confirmationTotalLaunches: number;
+  /** Independent approvals required by the confirm review policy. */
+  reviewRequiredApprovals: number;
+  /** Raw reviewer process cap, including provider fallbacks. */
+  maxReviewerLaunches: number;
   /** Abort an executor once its attempt cost (USD) exceeds this. 0 disables the cap. */
   maxCostPerTask: number;
   /** Stop starting executor batches once total board cost (USD) exceeds this. 0 disables the cap. */

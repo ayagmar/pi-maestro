@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
+import { join, resolve, sep } from "node:path";
 import { MAX_INJECTED_CONTEXT_LENGTH } from "./prompts.js";
 import { type Board, type Task } from "./types.js";
 
@@ -13,6 +14,21 @@ export interface WorktreeRef {
 export interface MergeResult {
   ok: boolean;
   error?: string;
+}
+
+export interface MainTreeIdentity {
+  head: string;
+  indexTree: string;
+  porcelainHash: string;
+  worktreeTree: string;
+}
+
+export interface PreparedIntegration {
+  baseCommit: string;
+  integratedCommit: string;
+  integratedTree: string;
+  mainIdentity: MainTreeIdentity;
+  tempRef: WorktreeRef;
 }
 
 export interface GitReadiness {
@@ -122,6 +138,28 @@ export function changedPaths(cwd: string): string[] {
   return [...new Set(paths.map((path) => path.replaceAll("\\", "/")))].sort();
 }
 
+/** Exact Git-visible main-tree identity used to fail closed before promotion. */
+export function mainTreeIdentity(cwd: string): MainTreeIdentity {
+  const porcelain = gitOutput(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const paths = changedPaths(cwd);
+  const worktreeTree = paths.length === 0 ? commitTree(cwd, "HEAD") : snapshotArtifact(cwd, paths);
+  if (!worktreeTree) throw new Error("could not snapshot the main checkout worktree");
+  return {
+    head: headCommit(cwd),
+    indexTree: git(cwd, ["write-tree"]),
+    porcelainHash: createHash("sha256").update(porcelain).digest("hex"),
+    worktreeTree,
+  };
+}
+
+export function mainTreeIdentityMatches(cwd: string, expected: MainTreeIdentity): boolean {
+  try {
+    return JSON.stringify(mainTreeIdentity(cwd)) === JSON.stringify(expected);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Snapshot task paths into an immutable Git tree without touching the checkout index.
  * The tree includes HEAD plus exactly the supplied staged, unstaged, deleted, and untracked paths.
@@ -195,6 +233,67 @@ function commitWorktreeChanges(ref: WorktreeRef, message?: string): void {
   commitAll(ref.worktreePath, message ?? `maestro: ${ref.branch}`);
 }
 
+function integrationWorktreeRef(): WorktreeRef {
+  const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const worktreePath = mkdtempSync(join(tmpdir(), "maestro-integration-"));
+  rmSync(worktreePath, { recursive: true });
+  return {
+    worktreePath,
+    branch: `maestro-integration/${nonce}`,
+  };
+}
+
+/** Prepare a reviewed task merge away from the integration checkout. */
+export function prepareWorktreeIntegration(
+  mainCwd: string,
+  taskRef: WorktreeRef,
+  message?: string
+): PreparedIntegration {
+  commitWorktreeChanges(taskRef, message);
+  const mainIdentity = mainTreeIdentity(mainCwd);
+  const baseCommit = mainIdentity.head;
+  const tempRef = integrationWorktreeRef();
+  try {
+    git(mainCwd, ["worktree", "add", "-b", tempRef.branch, tempRef.worktreePath, baseCommit]);
+    git(tempRef.worktreePath, ["merge", "--no-edit", taskRef.branch]);
+    if (changedPaths(tempRef.worktreePath).length > 0) {
+      throw new Error("prepared integration checkout is not Git-clean");
+    }
+    const integratedCommit = headCommit(tempRef.worktreePath);
+    return {
+      baseCommit,
+      integratedCommit,
+      integratedTree: commitTree(tempRef.worktreePath, integratedCommit),
+      mainIdentity,
+      tempRef,
+    };
+  } catch (error) {
+    removeWorktree(mainCwd, tempRef);
+    throw error;
+  }
+}
+
+/** Promote only the prepared descendant after proving the main checkout did not move. */
+export function promotePreparedIntegration(
+  mainCwd: string,
+  prepared: PreparedIntegration
+): MergeResult {
+  if (!mainTreeIdentityMatches(mainCwd, prepared.mainIdentity)) {
+    return { ok: false, error: "main checkout changed after integration preparation" };
+  }
+  try {
+    git(mainCwd, ["merge-base", "--is-ancestor", prepared.baseCommit, prepared.integratedCommit]);
+    git(mainCwd, ["merge", "--ff-only", prepared.integratedCommit]);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function removePreparedIntegration(mainCwd: string, prepared: PreparedIntegration): void {
+  removeWorktree(mainCwd, prepared.tempRef);
+}
+
 /** Merge in the main tree. A failed merge is aborted and recovery state is retained. */
 export function mergeWorktree(mainCwd: string, ref: WorktreeRef, message?: string): MergeResult {
   try {
@@ -223,6 +322,21 @@ export function removeWorktree(mainCwd: string, ref: WorktreeRef): void {
   } catch {
     // Already absent is the desired idempotent state.
   }
+}
+
+export function removeUnreferencedCleanWorktree(
+  mainCwd: string,
+  board: Board,
+  ref: WorktreeRef
+): boolean {
+  const referenced = board.tasks.some((task) =>
+    task.attempts.some(
+      (attempt) => attempt.worktreePath === ref.worktreePath || attempt.branch === ref.branch
+    )
+  );
+  if (referenced || !worktreeExists(ref) || changedPaths(ref.worktreePath).length > 0) return false;
+  removeWorktree(mainCwd, ref);
+  return true;
 }
 
 function managedWorktreeRoot(mainCwd: string): string {

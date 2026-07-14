@@ -6,21 +6,24 @@ import {
   linkSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { completionFreshness } from "./artifact-policy.js";
 import { STATE_DIR } from "./constants.js";
 import {
   type Attempt,
   type Board,
   type FailureKind,
+  type MaestroConfig,
   type PlanTaskEdits,
   type PlanValidation,
+  type RecipeScope,
   type Task,
   type TaskGroup,
   type TaskStatus,
@@ -28,6 +31,7 @@ import {
 
 export const BOARD_FILE = "board.json";
 const HISTORY_FILE = "history.jsonl";
+const RECIPE_DIRECTORY = "maestro-recipes";
 const BOARD_LOCK_STALE_MS = 30_000;
 const BOARD_LOCK_RETRIES = 500;
 export const DISPATCH_LEASE_MS = 30_000;
@@ -54,6 +58,77 @@ export function stateDir(cwd: string): string {
 
 function boardFile(cwd: string): string {
   return join(stateDir(cwd), BOARD_FILE);
+}
+
+export interface StoredRecipeFile {
+  name: string;
+  scope: RecipeScope;
+  file: string;
+  text: string;
+}
+
+export function recipeDirectory(scope: RecipeScope, cwd: string, userDirectory?: string): string {
+  if (scope === "user") {
+    if (!userDirectory) throw new Error("User recipe storage requires an agent directory.");
+    return join(userDirectory, RECIPE_DIRECTORY);
+  }
+  return join(cwd, ".pi", RECIPE_DIRECTORY);
+}
+
+export function listStoredRecipeFiles(
+  scope: RecipeScope,
+  cwd: string,
+  userDirectory?: string
+): StoredRecipeFile[] {
+  const directory = recipeDirectory(scope, cwd, userDirectory);
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory)
+    .filter((name) => name.endsWith(".json"))
+    .sort()
+    .map((name) => ({
+      name: name.slice(0, -".json".length),
+      scope,
+      file: join(directory, name),
+      text: readFileSync(join(directory, name), "utf-8"),
+    }));
+}
+
+export function saveStoredRecipe(
+  scope: RecipeScope,
+  cwd: string,
+  name: string,
+  text: string,
+  userDirectory?: string
+): string {
+  assertRecipeName(name);
+  const directory = recipeDirectory(scope, cwd, userDirectory);
+  mkdirSync(directory, { recursive: true });
+  const file = join(directory, `${name}.json`);
+  const temporary = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  writeFileSync(temporary, text, "utf-8");
+  renameSync(temporary, file);
+  return file;
+}
+
+export function removeStoredRecipe(
+  scope: RecipeScope,
+  cwd: string,
+  name: string,
+  userDirectory?: string
+): boolean {
+  assertRecipeName(name);
+  const file = join(recipeDirectory(scope, cwd, userDirectory), `${name}.json`);
+  if (!existsSync(file)) return false;
+  unlinkSync(file);
+  return true;
+}
+
+function assertRecipeName(name: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+    throw new Error(
+      "Recipe names must contain 1-64 letters, numbers, dots, dashes, or underscores."
+    );
+  }
 }
 
 export function inspectBoardStorage(cwd: string): { boardBytes: number; archiveCount: number } {
@@ -88,6 +163,22 @@ export function saveBoard(cwd: string, board: Board): void {
   }
 }
 
+/**
+ * Load-modify-save fresh board state while holding the board lock.
+ * A thrown mutation or literal false result is never persisted.
+ */
+export function updateBoard<T>(cwd: string, mutate: (board: Board) => T): T {
+  const lock = acquireBoardLock(cwd);
+  try {
+    const board = loadBoard(cwd);
+    const result = mutate(board);
+    if (result !== false) saveBoardUnlocked(cwd, board);
+    return result;
+  } finally {
+    releaseBoardLock(lock);
+  }
+}
+
 export function replaceBoard(cwd: string, board: Board, expectedRevision: number): void {
   const lock = acquireBoardLock(cwd);
   try {
@@ -97,6 +188,24 @@ export function replaceBoard(cwd: string, board: Board, expectedRevision: number
     }
     board.revision = currentRevision;
     saveBoardUnlocked(cwd, board);
+  } finally {
+    releaseBoardLock(lock);
+  }
+}
+
+export function replaceBoardWithArchive(
+  cwd: string,
+  replacement: (current: Board) => Board
+): string | undefined {
+  const lock = acquireBoardLock(cwd);
+  try {
+    const current = loadBoard(cwd);
+    const next = replacement(current);
+    const archive = archiveBoard(cwd);
+    if (current.revision === undefined) delete next.revision;
+    else next.revision = current.revision;
+    saveBoardUnlocked(cwd, next);
+    return archive;
   } finally {
     releaseBoardLock(lock);
   }
@@ -314,7 +423,16 @@ function isBoard(value: unknown): value is Board {
   if (value.revision !== undefined && !isNumber(value.revision)) return false;
   if (value.goal !== undefined && typeof value.goal !== "string") return false;
   if (value.planPending !== undefined && typeof value.planPending !== "boolean") return false;
+  if (
+    value.scaleApproval !== undefined &&
+    (!isRecord(value.scaleApproval) ||
+      typeof value.scaleApproval.signature !== "string" ||
+      !isNumber(value.scaleApproval.confirmedAt))
+  ) {
+    return false;
+  }
   if (value.activeDecision !== undefined && !isDriveDecision(value.activeDecision)) return false;
+  if (value.activeDrive !== undefined && !isActiveDrive(value.activeDrive)) return false;
   if (
     value.ownerSessions !== undefined &&
     (!Array.isArray(value.ownerSessions) ||
@@ -325,9 +443,23 @@ function isBoard(value: unknown): value is Board {
   return value.tasks.every(isTask);
 }
 
+function isActiveDrive(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
+    (value.taskIds === undefined ||
+      (Array.isArray(value.taskIds) &&
+        value.taskIds.length <= 64 &&
+        value.taskIds.every((id) => typeof id === "string"))) &&
+    isNumber(value.startedAt)
+  );
+}
+
 function isDriveDecision(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const interventions = ["handoff", "abort", "steer"];
+  const resolutions = [...interventions, "resume"];
   return (
     typeof value.id === "string" &&
     (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
@@ -341,9 +473,13 @@ function isDriveDecision(value: unknown): boolean {
     value.allowedInterventions.every((item) => interventions.includes(String(item))) &&
     isNumber(value.createdAt) &&
     (value.deliveredAt === undefined || isNumber(value.deliveredAt)) &&
+    (value.deliveryClaim === undefined ||
+      (isRecord(value.deliveryClaim) &&
+        typeof value.deliveryClaim.id === "string" &&
+        isNumber(value.deliveryClaim.claimedAt))) &&
     (value.resolution === undefined ||
       (isRecord(value.resolution) &&
-        interventions.includes(String(value.resolution.intervention)) &&
+        resolutions.includes(String(value.resolution.intervention)) &&
         isNumber(value.resolution.resolvedAt)))
   );
 }
@@ -374,6 +510,11 @@ function isTask(value: unknown): value is Task {
       (Array.isArray(value.successCriteria) &&
         value.successCriteria.every((criterion) => typeof criterion === "string"))) &&
     (value.verificationProfile === undefined || typeof value.verificationProfile === "string") &&
+    (value.reviewPolicy === undefined ||
+      value.reviewPolicy === "single" ||
+      value.reviewPolicy === "confirm" ||
+      value.reviewPolicy === "find-and-refute") &&
+    (value.discovery === undefined || isDiscoveryContract(value.discovery)) &&
     (value.findings === undefined ||
       (Array.isArray(value.findings) && value.findings.every(isReviewFinding))) &&
     Array.isArray(value.attempts) &&
@@ -389,10 +530,64 @@ function isTask(value: unknown): value is Task {
     (value.integratedCommit === undefined || typeof value.integratedCommit === "string") &&
     (value.verificationSummary === undefined || typeof value.verificationSummary === "string") &&
     (value.provenance === undefined || isArtifactProvenance(value.provenance)) &&
+    (value.approvedProvenance === undefined || isApprovedProvenance(value.approvedProvenance)) &&
     (value.reviewRejections === undefined || isNumber(value.reviewRejections)) &&
     (value.dispatchNote === undefined || typeof value.dispatchNote === "string") &&
     (value.dispatchClaim === undefined || isDispatchClaim(value.dispatchClaim))
   );
+}
+
+function isApprovedProvenance(value: unknown): boolean {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.componentHashes)) return false;
+  const digest = (candidate: unknown) =>
+    typeof candidate === "string" && /^[a-f0-9]{64}$/.test(candidate);
+  if (
+    !digest(value.fingerprint) ||
+    !digest(value.componentHashes.contract) ||
+    !digest(value.componentHashes.execution) ||
+    !digest(value.componentHashes.verification) ||
+    !digest(value.componentHashes.dependencies) ||
+    !isRecord(value.artifact) ||
+    (value.artifact.kind !== "git-tree" && value.artifact.kind !== "report") ||
+    typeof value.artifact.identity !== "string" ||
+    !(value.artifact.kind === "git-tree"
+      ? /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(value.artifact.identity)
+      : /^[a-f0-9]{64}$/.test(value.artifact.identity)) ||
+    !isNumber(value.approvedAt) ||
+    !Array.isArray(value.dependencyIdentities) ||
+    value.dependencyIdentities.length > 512
+  ) {
+    return false;
+  }
+  return value.dependencyIdentities.every(
+    (dependency) =>
+      isRecord(dependency) &&
+      typeof dependency.taskId === "string" &&
+      dependency.taskId.length > 0 &&
+      dependency.taskId.length <= 64 &&
+      (dependency.kind === "git-tree" || dependency.kind === "report") &&
+      typeof dependency.identity === "string" &&
+      (dependency.kind === "git-tree"
+        ? /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(dependency.identity)
+        : /^[a-f0-9]{64}$/.test(dependency.identity))
+  );
+}
+
+function isDiscoveryContract(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.allowedWritePaths) ||
+    value.allowedWritePaths.length < 1 ||
+    value.allowedWritePaths.length > 64 ||
+    !value.allowedWritePaths.every((path) => typeof path === "string")
+  ) {
+    return false;
+  }
+  try {
+    return normalizeWritePaths(value.allowedWritePaths as string[]).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function isArtifactProvenance(value: unknown): boolean {
@@ -450,6 +645,9 @@ function isAttempt(value: unknown): boolean {
     (value.exitCode === undefined || isNumber(value.exitCode)) &&
     (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
     (value.failureReason === undefined || isFailureReason(value.failureReason)) &&
+    (value.executionFingerprint === undefined ||
+      (typeof value.executionFingerprint === "string" &&
+        /^[a-f0-9]{64}$/.test(value.executionFingerprint))) &&
     (value.consumesAttempt === undefined || typeof value.consumesAttempt === "boolean") &&
     (value.providerFailure === undefined || typeof value.providerFailure === "boolean") &&
     (value.finalReport === undefined || typeof value.finalReport === "string") &&
@@ -465,6 +663,10 @@ function isAttempt(value: unknown): boolean {
     (value.reviewProvider === undefined || typeof value.reviewProvider === "string") &&
     (value.reviewLaunches === undefined ||
       (Array.isArray(value.reviewLaunches) && value.reviewLaunches.every(isReviewLaunch))) &&
+    (value.reviewConvergence === undefined || isReviewConvergence(value.reviewConvergence)) &&
+    (value.reviewConvergenceHistory === undefined ||
+      (Array.isArray(value.reviewConvergenceHistory) &&
+        value.reviewConvergenceHistory.every(isReviewConvergence))) &&
     (value.reviewUsage === undefined || isUsage(value.reviewUsage)) &&
     (value.reviewSessionFile === undefined || typeof value.reviewSessionFile === "string")
   );
@@ -474,9 +676,35 @@ function isReviewLaunch(value: unknown): boolean {
   if (!isRecord(value) || !isUsage(value.usage)) return false;
   return (
     isNumber(value.startedAt) &&
+    (value.id === undefined || typeof value.id === "string") &&
+    (value.reviewerIndex === undefined ||
+      (isNumber(value.reviewerIndex) &&
+        Number.isInteger(value.reviewerIndex) &&
+        value.reviewerIndex > 0)) &&
+    (value.role === undefined ||
+      value.role === "single" ||
+      value.role === "confirmer" ||
+      value.role === "finder" ||
+      value.role === "refuter") &&
+    (value.verdict === undefined ||
+      value.verdict === "approve" ||
+      value.verdict === "request_changes") &&
+    (value.criterionEvidence === undefined ||
+      (Array.isArray(value.criterionEvidence) &&
+        value.criterionEvidence.every(
+          (entry) =>
+            isRecord(entry) &&
+            isNumber(entry.criterion) &&
+            Number.isInteger(entry.criterion) &&
+            entry.criterion > 0 &&
+            typeof entry.passed === "boolean" &&
+            typeof entry.evidence === "string" &&
+            entry.evidence.length <= 500
+        ))) &&
     (value.model === undefined || typeof value.model === "string") &&
     (value.provider === undefined || typeof value.provider === "string") &&
     (value.sessionFile === undefined || typeof value.sessionFile === "string") &&
+    (value.logFile === undefined || typeof value.logFile === "string") &&
     (value.endedAt === undefined || isNumber(value.endedAt)) &&
     (value.exitCode === undefined || isNumber(value.exitCode)) &&
     (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
@@ -485,6 +713,28 @@ function isReviewLaunch(value: unknown): boolean {
     (value.promptCharacters === undefined || isNumber(value.promptCharacters)) &&
     (value.promptApproximateTokens === undefined || isNumber(value.promptApproximateTokens)) &&
     (value.promptSections === undefined || isPromptSections(value.promptSections))
+  );
+}
+
+function isReviewConvergence(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    (value.policy === "single" ||
+      value.policy === "confirm" ||
+      value.policy === "find-and-refute") &&
+    (value.status === "approved" ||
+      value.status === "changes_requested" ||
+      value.status === "disagreement" ||
+      value.status === "operational_failure") &&
+    isNumber(value.requiredApprovals) &&
+    Number.isInteger(value.requiredApprovals) &&
+    isNumber(value.actualApprovals) &&
+    Number.isInteger(value.actualApprovals) &&
+    isNumber(value.reviewerCount) &&
+    Number.isInteger(value.reviewerCount) &&
+    typeof value.summary === "string" &&
+    value.summary.length <= 2_000 &&
+    isNumber(value.decidedAt)
   );
 }
 
@@ -557,6 +807,8 @@ export function createTask(
     writePaths?: string[];
     successCriteria?: string[];
     verificationProfile?: string;
+    reviewPolicy?: "single" | "confirm" | "find-and-refute";
+    discovery?: { allowedWritePaths: string[] };
   }
 ): Task {
   const task: Task = {
@@ -574,6 +826,10 @@ export function createTask(
   if (input.writePaths) task.writePaths = normalizeWritePaths(input.writePaths);
   if (input.successCriteria) task.successCriteria = normalizeSuccessCriteria(input.successCriteria);
   if (input.verificationProfile) task.verificationProfile = input.verificationProfile;
+  if (input.reviewPolicy && input.reviewPolicy !== "single") task.reviewPolicy = input.reviewPolicy;
+  if (input.discovery) {
+    task.discovery = { allowedWritePaths: normalizeWritePaths(input.discovery.allowedWritePaths) };
+  }
   board.nextTaskNumber += 1;
   board.tasks.push(task);
   return task;
@@ -606,6 +862,13 @@ export function updateTask(
   } finally {
     releaseBoardLock(lock);
   }
+}
+
+export function assertTaskNotDispatched(task: Task): void {
+  if (!task.dispatchClaim) return;
+  throw new Error(
+    `${task.id} is owned by an active ${task.dispatchClaim.kind} dispatch. Wait for it to finish or abort it first.`
+  );
 }
 
 export interface DispatchClaimResult {
@@ -655,6 +918,16 @@ export function claimTaskDispatch(
         touchedFiles: [],
       });
       transition(fresh, "running");
+    }
+    const decision = board.activeDecision;
+    if (
+      decision?.kind === "stale_completion" &&
+      !decision.resolution &&
+      (decision.taskIds.includes(fresh.id) ||
+        decision.taskIds.every((id) => findTask(board, id)?.status === "cancelled"))
+    ) {
+      decision.resolution = { intervention: "resume", resolvedAt: now };
+      delete decision.deliveryClaim;
     }
   });
   if (!task) return undefined;
@@ -816,6 +1089,156 @@ export function isRunnable(board: Board, task: Task, explicit = false): boolean 
   return task.dependsOn.every((depId) => findTask(board, depId)?.status === "approved");
 }
 
+export function isFreshlyApproved(board: Board, task: Task, config: MaestroConfig): boolean {
+  return completionFreshness(board, task, config).state === "fresh";
+}
+
+export function isRunnableWithConfig(
+  board: Board,
+  task: Task,
+  config: MaestroConfig,
+  explicit = false
+): boolean {
+  if (board.planPending) return false;
+  const pending = task.status === "todo" || task.status === "changes_requested";
+  const retryable = explicit && (task.status === "failed" || task.status === "cancelled");
+  if (!pending && !retryable) return false;
+  return task.dependsOn.every((dependencyId) => {
+    const dependency = findTask(board, dependencyId);
+    return dependency ? isFreshlyApproved(board, dependency, config) : false;
+  });
+}
+
+export type HumanRetryCode =
+  | "eligible"
+  | "unknown_task"
+  | "plan_pending"
+  | "active"
+  | "foreign_owner"
+  | "dependency_blocked"
+  | "attempt_cap"
+  | "review_disagreement"
+  | "not_retryable";
+
+export interface HumanRetryEligibility {
+  eligible: boolean;
+  code: HumanRetryCode;
+  kind?: "execute" | "review";
+  requiresConfirmation: boolean;
+  message: string;
+}
+
+export function humanRetryRiskToken(task: Task): string {
+  return JSON.stringify({
+    status: task.status,
+    approvalKind: task.approvalKind,
+    integratedCommit: task.integratedCommit,
+    provenanceIntegratedCommit: task.provenance?.integratedCommit,
+    attempts: task.attempts.length,
+    updatedAt: task.updatedAt,
+  });
+}
+
+export function humanRetryEligibility(
+  board: Board,
+  taskId: string,
+  options: {
+    maxAttempts: number;
+    isLive: (taskId: string) => boolean;
+    ownerSession?: string | undefined;
+    config?: MaestroConfig;
+  }
+): HumanRetryEligibility {
+  const refused = (code: Exclude<HumanRetryCode, "eligible">, message: string) => ({
+    eligible: false,
+    code,
+    requiresConfirmation: false,
+    message,
+  });
+  const task = findTask(board, taskId);
+  if (!task) return refused("unknown_task", `Unknown task id: ${taskId}`);
+  if (board.activeDrive && board.activeDrive.ownerSession !== options.ownerSession) {
+    return refused("foreign_owner", `${task.id} is owned by an active drive from another session.`);
+  }
+  if (board.pausedDrive && board.pausedDrive.ownerSession !== options.ownerSession) {
+    return refused("foreign_owner", `${task.id} is owned by a paused drive from another session.`);
+  }
+  if (board.planPending) return refused("plan_pending", "Plan approval is pending.");
+  if (options.isLive(task.id) || task.status === "running" || task.dispatchClaim) {
+    return refused("active", `${task.id} is running or owned by an active dispatch.`);
+  }
+  const dependency = task.dependsOn.find((id) => {
+    const candidate = findTask(board, id);
+    if (!candidate) return true;
+    return options.config
+      ? !isFreshlyApproved(board, candidate, options.config)
+      : candidate.status !== "approved";
+  });
+  if (dependency) {
+    return refused(
+      "dependency_blocked",
+      `${task.id} cannot retry until dependency ${dependency} is approved.`
+    );
+  }
+  const convergence = task.attempts.at(-1)?.reviewConvergence?.status;
+  if (convergence === "disagreement") {
+    return refused(
+      "review_disagreement",
+      `${task.id} has unresolved reviewer disagreement; change its review policy or task contract before retrying.`
+    );
+  }
+  const latest = task.attempts.at(-1);
+  const reviewerFailure =
+    convergence === "operational_failure" ||
+    latest?.failureReason?.kind === "reviewer_failure" ||
+    latest?.reviewLaunches?.at(-1)?.failureReason?.kind === "reviewer_failure";
+  if (task.status === "ready_for_review" && reviewerFailure) {
+    return {
+      eligible: true,
+      code: "eligible",
+      kind: "review",
+      requiresConfirmation: false,
+      message: `${task.id} reviewer retry is eligible.`,
+    };
+  }
+  if (!["failed", "cancelled", "changes_requested", "approved"].includes(task.status)) {
+    return refused(
+      "not_retryable",
+      `${task.id} is ${task.status}; there is no failed work to retry.`
+    );
+  }
+  const consumedAttempts = task.attempts.filter(
+    (attempt) => attempt.consumesAttempt ?? !attempt.providerFailure
+  ).length;
+  if (consumedAttempts >= options.maxAttempts) {
+    return refused(
+      "attempt_cap",
+      `${task.id} reached the attempt cap (${options.maxAttempts}). Create a narrowly scoped successor with maestro_plan and set supersedesTaskId to ${task.id}; Maestro will atomically cancel this predecessor and rewire downstream dependencies.`
+    );
+  }
+  const risky =
+    task.status === "approved" ||
+    task.approvalKind === "manual" ||
+    task.integratedCommit !== undefined ||
+    task.provenance?.integratedCommit !== undefined;
+  const freshness =
+    task.status === "approved" && options.config
+      ? completionFreshness(board, task, options.config)
+      : undefined;
+  return {
+    eligible: true,
+    code: "eligible",
+    kind: "execute",
+    requiresConfirmation: risky,
+    message:
+      freshness && freshness.state !== "fresh"
+        ? `${task.id} has ${freshness.state} approved work (${freshness.reason}); retry requires explicit confirmation and preserves prior evidence until replacement approval.`
+        : risky
+          ? `${task.id} has accepted or integrated work; retry requires explicit confirmation.`
+          : `${task.id} execution retry is eligible.`,
+  };
+}
+
 export function scopedDependencyGaps(
   board: Board,
   taskIds: readonly string[]
@@ -834,6 +1257,37 @@ export function scopedDependencyGaps(
       for (const nested of dependency.dependsOn) visit(nested);
     };
     for (const dependencyId of task.dependsOn) visit(dependencyId);
+  }
+  return gaps.filter(
+    (gap, index) =>
+      gaps.findIndex(
+        (candidate) =>
+          candidate.taskId === gap.taskId && candidate.dependencyId === gap.dependencyId
+      ) === index
+  );
+}
+
+export function scopedDependencyGapsWithConfig(
+  board: Board,
+  taskIds: readonly string[],
+  config: MaestroConfig
+): Array<{ taskId: string; dependencyId: string }> {
+  const selected = new Set(taskIds.map((id) => id.trim().toUpperCase()));
+  const gaps: Array<{ taskId: string; dependencyId: string }> = [];
+  for (const taskId of selected) {
+    const task = findTask(board, taskId);
+    if (!task) continue;
+    const visit = (dependencyId: string, visited: Set<string>) => {
+      if (visited.has(dependencyId)) return;
+      visited.add(dependencyId);
+      const dependency = findTask(board, dependencyId);
+      if (dependency && isFreshlyApproved(board, dependency, config)) return;
+      if (dependency && !selected.has(dependency.id.toUpperCase())) {
+        gaps.push({ taskId: task.id, dependencyId: dependency.id });
+      }
+      for (const nested of dependency?.dependsOn ?? []) visit(nested, visited);
+    };
+    for (const dependencyId of task.dependsOn) visit(dependencyId, new Set());
   }
   return gaps.filter(
     (gap, index) =>
@@ -914,6 +1368,13 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
         .filter((task) => !validTiers.has(task.tier))
         .map((task) => ({ taskId: task.id, tier: task.tier }))
     : [];
+  const contractErrors: NonNullable<PlanValidation["contractErrors"]> = [];
+
+  for (const task of board.tasks) {
+    if (task.discovery && task.writePaths?.length !== 0) {
+      contractErrors.push({ taskId: task.id, message: "discovery tasks must use writePaths: []" });
+    }
+  }
 
   for (const task of board.tasks) {
     for (const dependencyId of task.dependsOn) {
@@ -984,6 +1445,7 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
     missingDependencies,
     dependencyCycles,
     invalidTiers,
+    ...(contractErrors.length > 0 ? { contractErrors } : {}),
     ...(writePathOverlaps.length > 0 ? { writePathOverlaps } : {}),
   };
 }
@@ -1054,6 +1516,29 @@ export function normalizeWritePaths(paths: string[]): string[] {
   ].sort();
 }
 
+export function normalizeTaskContract(input: {
+  brief: string;
+  writePaths?: string[];
+  successCriteria?: string[];
+}): { writePaths: string[]; successCriteria?: string[] } {
+  if (!input.writePaths) throw new Error("writePaths is required for every new task");
+  const writePaths = normalizeWritePaths(input.writePaths);
+  const noFileTask =
+    writePaths.length === 0 && /investigat|no[- ]file|read[- ]only/i.test(input.brief);
+  if (writePaths.length === 0 && !noFileTask) {
+    throw new Error("empty writePaths requires an explicit investigation or no-file brief");
+  }
+  if (!noFileTask && !input.successCriteria) {
+    throw new Error("successCriteria is required for every executable task");
+  }
+  const successCriteria = noFileTask
+    ? input.successCriteria && input.successCriteria.length > 0
+      ? normalizeSuccessCriteria(input.successCriteria)
+      : undefined
+    : normalizeSuccessCriteria(input.successCriteria ?? []);
+  return { writePaths, ...(successCriteria ? { successCriteria } : {}) };
+}
+
 function writePathsOverlap(left: string, right: string): boolean {
   if (left === right) return true;
   if (left.endsWith("/**")) return right.startsWith(left.slice(0, -2));
@@ -1099,6 +1584,20 @@ export function applyPlanTaskEdits(
     const profile = edits.verificationProfile.trim();
     if (profile) task.verificationProfile = profile;
     else delete task.verificationProfile;
+  }
+  if (edits.reviewPolicy !== undefined) {
+    const currentPolicy = task.reviewPolicy ?? "single";
+    if (edits.reviewPolicy !== currentPolicy) {
+      if (edits.reviewPolicy === "single") delete task.reviewPolicy;
+      else task.reviewPolicy = edits.reviewPolicy;
+      const latestAttempt = task.attempts.at(-1);
+      if (
+        latestAttempt?.reviewConvergence?.status === "disagreement" ||
+        latestAttempt?.reviewConvergence?.status === "operational_failure"
+      ) {
+        delete latestAttempt.reviewConvergence;
+      }
+    }
   }
   if (edits.cancelled === true) forceStatus(task, "cancelled");
   if (edits.cancelled === false && task.status === "cancelled") forceStatus(task, "todo");

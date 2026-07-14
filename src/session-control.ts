@@ -12,9 +12,7 @@ export function sessionCanControlDrive(
   ownerSession: string | undefined,
   currentSession: string | undefined
 ): boolean {
-  return (
-    ownerSession === undefined || currentSession === undefined || ownerSession === currentSession
-  );
+  return ownerSession === undefined || ownerSession === currentSession;
 }
 
 export function sessionSwitchBlocked(activeDrive: boolean, liveRunCount: number): boolean {
@@ -25,6 +23,24 @@ export function assertKnownTaskIds(board: Board, taskIds: string[] | undefined):
   if (!taskIds) return;
   const unknown = taskIds.filter((id) => !findTask(board, id));
   if (unknown.length > 0) throw new Error(`Unknown task id(s): ${unknown.join(", ")}`);
+}
+
+export function canonicalTaskIds(
+  board: Board,
+  taskIds: string[] | undefined
+): string[] | undefined {
+  if (!taskIds || taskIds.length === 0) return undefined;
+  const canonicalIds: string[] = [];
+  const unknownIds: string[] = [];
+
+  for (const id of taskIds) {
+    const task = findTask(board, id);
+    if (task) canonicalIds.push(task.id);
+    else unknownIds.push(id);
+  }
+
+  if (unknownIds.length > 0) throw new Error(`Unknown task id(s): ${unknownIds.join(", ")}`);
+  return [...new Set(canonicalIds)];
 }
 
 export function previousBoardSession(

@@ -152,7 +152,44 @@ export function applySettingsChange(
   else if (id === "autoCommit") config.autoCommit = value === "on";
   else if (id === "cleanupCompletedTasks") config.cleanupCompletedTasks = value === "on";
   else if (id === "maxAttempts") config.maxAttempts = Number(value);
-  else if (id === "maxCostPerTask") {
+  else if (id === "maxPlanTasks") {
+    config.maxPlanTasks = Number(value);
+    config.maxDiscoveryGeneratedTasks = Math.min(
+      config.maxDiscoveryGeneratedTasks,
+      config.maxPlanTasks
+    );
+    config.confirmationPlanTasks = Math.min(config.confirmationPlanTasks, config.maxPlanTasks);
+  } else if (id === "maxDiscoveryGeneratedTasks") {
+    config.maxDiscoveryGeneratedTasks = Number(value);
+    if (config.maxDiscoveryGeneratedTasks > config.maxPlanTasks) {
+      config.maxPlanTasks = config.maxDiscoveryGeneratedTasks;
+    }
+  } else if (id === "maxTotalLaunchesPerRun") {
+    config.maxTotalLaunchesPerRun = Number(value);
+    if (config.confirmationTotalLaunches > config.maxTotalLaunchesPerRun) {
+      config.confirmationTotalLaunches = config.maxTotalLaunchesPerRun;
+    }
+  } else if (id === "confirmationPlanTasks") {
+    config.confirmationPlanTasks = Number(value);
+    if (config.confirmationPlanTasks > config.maxPlanTasks) {
+      config.maxPlanTasks = config.confirmationPlanTasks;
+    }
+  } else if (id === "confirmationTotalLaunches") {
+    config.confirmationTotalLaunches = Number(value);
+    if (config.confirmationTotalLaunches > config.maxTotalLaunchesPerRun) {
+      config.maxTotalLaunchesPerRun = config.confirmationTotalLaunches;
+    }
+  } else if (id === "reviewRequiredApprovals") {
+    config.reviewRequiredApprovals = Number(value);
+    if (config.reviewRequiredApprovals > (config.maxReviewerLaunches ?? 4)) {
+      config.maxReviewerLaunches = config.reviewRequiredApprovals;
+    }
+  } else if (id === "maxReviewerLaunches") {
+    config.maxReviewerLaunches = Number(value);
+    if ((config.reviewRequiredApprovals ?? 2) > config.maxReviewerLaunches) {
+      config.reviewRequiredApprovals = Math.max(2, config.maxReviewerLaunches);
+    }
+  } else if (id === "maxCostPerTask") {
     config.maxCostPerTask = value === "off" ? 0 : Number(value.slice(1));
   } else if (id === "maxRunCost") {
     config.maxRunCost = value === "off" ? 0 : Number(value.slice(1));
@@ -384,6 +421,41 @@ export async function showSettings(
             description: "Hard cap on execution attempts before a task fails.",
           },
           {
+            id: "maxPlanTasks",
+            label: "Maximum plan tasks",
+            currentValue: String(config.maxPlanTasks),
+            values: ["16", "24", "32", "64", "128", "256", "512"],
+            description: "Hard task-count limit at every plan mutation boundary.",
+          },
+          {
+            id: "maxDiscoveryGeneratedTasks",
+            label: "Maximum discovery tasks",
+            currentValue: String(config.maxDiscoveryGeneratedTasks),
+            values: ["8", "16", "32", "64", "128"],
+            description: "Hard generated-task limit for one discovery result.",
+          },
+          {
+            id: "maxTotalLaunchesPerRun",
+            label: "Maximum launches per drive",
+            currentValue: String(config.maxTotalLaunchesPerRun),
+            values: ["32", "64", "128", "256", "512", "1024"],
+            description: "Hard combined executor and reviewer process-launch limit.",
+          },
+          {
+            id: "confirmationPlanTasks",
+            label: "Task confirmation threshold",
+            currentValue: String(config.confirmationPlanTasks),
+            values: ["8", "16", "24", "32", "64", "128"],
+            description: "Plans above this task count require explicit confirmation.",
+          },
+          {
+            id: "confirmationTotalLaunches",
+            label: "Launch confirmation threshold",
+            currentValue: String(config.confirmationTotalLaunches),
+            values: ["16", "32", "64", "128", "256", "512"],
+            description: "Raw launch upper bounds above this value require confirmation.",
+          },
+          {
             id: "maxCostPerTask",
             label: "Cost cap per attempt (USD)",
             currentValue: config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`,
@@ -410,7 +482,23 @@ export async function showSettings(
       if (section === "tiers") {
         return modelItems(Object.keys(config.tiers).filter((name) => name !== "review"));
       }
-      return modelItems(config.tiers.review ? ["review"] : []);
+      return [
+        {
+          id: "reviewRequiredApprovals",
+          label: "Required confirming approvals",
+          currentValue: String(config.reviewRequiredApprovals ?? 2),
+          values: ["2", "3", "4"],
+          description: "Independent approvals required by the confirm review policy.",
+        },
+        {
+          id: "maxReviewerLaunches",
+          label: "Maximum reviewer launches",
+          currentValue: String(config.maxReviewerLaunches ?? 4),
+          values: ["2", "3", "4", "6", "8"],
+          description: "Hard bound including provider fallbacks for one review attempt.",
+        },
+        ...modelItems(config.tiers.review ? ["review"] : []),
+      ];
     };
 
     let navigation: SettingsList;

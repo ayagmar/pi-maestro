@@ -1,11 +1,22 @@
 import { createHash } from "node:crypto";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { type ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { artifactFindings } from "./artifact-policy.js";
+import {
+  artifactFindings,
+  captureApprovedProvenance,
+  completionFreshness,
+  taskFingerprint,
+} from "./artifact-policy.js";
 import {
   claimTaskDispatch,
   findTask,
   forceStatus,
+  humanRetryEligibility,
+  humanRetryRiskToken,
   isRunnable,
+  isRunnableWithConfig,
   loadBoard,
   planValidationMessage,
   releaseTaskDispatch,
@@ -16,7 +27,8 @@ import {
   updateTask,
   validatePlan,
 } from "./board.js";
-import { resolveTierModels } from "./config.js";
+import { loadConfig, resolveTierModels } from "./config.js";
+import { DISCOVERY_TOOLS, discoveryInstructions } from "./discovery.js";
 import { runBudgetWarning, taskUsage, truncateText } from "./format.js";
 import {
   accountPromptContext,
@@ -24,7 +36,6 @@ import {
   buildReviewPrompt,
   parseVerdict,
 } from "./prompts.js";
-import { pruneTaskLogs } from "./retention.js";
 import {
   classifyFailure,
   type ExecutorHandle,
@@ -40,6 +51,7 @@ import {
   type Board,
   type MaestroConfig,
   type ReviewLaunch,
+  type ReviewPolicy,
   type Task,
   type TaskStatus,
   type TierConfig,
@@ -53,7 +65,11 @@ import {
   commitTree,
   createWorktree,
   headCommit,
-  mergeWorktree,
+  mainTreeIdentityMatches,
+  prepareWorktreeIntegration,
+  promotePreparedIntegration,
+  removePreparedIntegration,
+  removeUnreferencedCleanWorktree,
   removeWorktree,
   snapshotArtifact,
   type WorktreeRef,
@@ -157,8 +173,12 @@ export type DriveStopCode =
   | "plan_gate"
   | "budget_blocked"
   | "provider_blocked"
+  | "review_disagreement"
+  | "reviewer_failure"
+  | "launch_limit"
   | "escalation_required"
   | "attempt_cap"
+  | "stale_completion"
   | "blocked"
   | "round_limit"
   | "error";
@@ -332,7 +352,8 @@ export interface SchedulingWave {
 export function calculateSchedulingWave(
   board: Board,
   config: MaestroConfig,
-  taskIds?: string[]
+  taskIds?: string[],
+  simulateApprovedDependencies = false
 ): SchedulingWave {
   const selected = taskIds ? new Set(taskIds.map((id) => id.trim().toUpperCase())) : undefined;
   const tasks = board.tasks.filter(
@@ -347,7 +368,9 @@ export function calculateSchedulingWave(
     (task) =>
       !capped.includes(task) &&
       task.status !== "cancelled" &&
-      isRunnable(board, task, task.status === "failed")
+      (simulateApprovedDependencies
+        ? isRunnable(board, task, task.status === "failed")
+        : isRunnableWithConfig(board, task, config, task.status === "failed"))
   );
   const reviewable = tasks.filter((task) => task.status === "ready_for_review");
   const active = new Set([...runnable, ...reviewable].map((task) => task.id));
@@ -365,7 +388,7 @@ export function simulatePlan(board: Board, config: MaestroConfig, taskIds?: stri
   const simulated = structuredClone(board);
   const waves: string[] = [];
   for (let index = 1; index <= Math.min(64, simulated.tasks.length * 2 + 1); index += 1) {
-    const wave = calculateSchedulingWave(simulated, config, taskIds);
+    const wave = calculateSchedulingWave(simulated, config, taskIds, true);
     if (wave.runnableIds.length === 0 && wave.reviewableIds.length === 0) {
       const blocked = [...wave.cappedIds, ...wave.blockedIds];
       if (blocked.length > 0) waves.push(`blocked: ${[...new Set(blocked)].join(", ")}`);
@@ -414,6 +437,9 @@ export async function driveBoard(options: {
   trackRun: TrackRun;
   isLive?: (taskId: string) => boolean;
   onRetentionWarning?: (warning: string) => void;
+  humanRetryTaskId?: string;
+  humanRetryExpectedRiskToken?: string;
+  humanRetryOwnerSession?: string;
 }): Promise<DriveSummary> {
   const {
     cwd,
@@ -427,6 +453,9 @@ export async function driveBoard(options: {
     onRoundUpdate,
     trackRun,
     isLive = () => false,
+    humanRetryTaskId,
+    humanRetryExpectedRiskToken,
+    humanRetryOwnerSession,
   } = options;
   // Task ids are matched case-insensitively (see findTask), so normalize both
   // the requested ids and each task id before comparing. Comparing raw ids here
@@ -435,6 +464,17 @@ export async function driveBoard(options: {
   const isSelected = (task: Task): boolean =>
     selectedIds === undefined || selectedIds.has(task.id.trim().toUpperCase());
   let rounds = 0;
+  let rawLaunches = 0;
+  let humanExecuteDispatched = false;
+  const currentFingerprintConfig = (): MaestroConfig => loadConfig(cwd);
+  const humanRetryId = humanRetryTaskId?.trim().toUpperCase();
+  const boundedStartExecutor: StartExecutor = (startOptions) => {
+    if (rawLaunches >= config.maxTotalLaunchesPerRun) {
+      throw new Error(`workflow raw launch limit reached (${config.maxTotalLaunchesPerRun})`);
+    }
+    rawLaunches += 1;
+    return startExecutor(startOptions);
+  };
 
   const selectedTasks = (): Task[] => loadBoard(cwd).tasks.filter(isSelected);
   const finish = (stoppedBecause: DriveStopReason): DriveSummary => ({
@@ -442,6 +482,19 @@ export async function driveBoard(options: {
     tasks: selectedTasks().map((task) => snapshot(task)),
     stoppedBecause,
   });
+
+  // A new, explicit drive invocation is the retry boundary for an operational
+  // reviewer failure. Disagreement requires a deliberate task-policy edit.
+  for (const task of selectedTasks()) {
+    if (task.id.toUpperCase() === humanRetryId) continue;
+    if (terminalReviewConvergence(task) !== "operational_failure") continue;
+    updateTask(cwd, task.id, (fresh) => {
+      const attempt = fresh.attempts.at(-1);
+      if (attempt?.reviewConvergence?.status === "operational_failure") {
+        delete attempt.reviewConvergence;
+      }
+    });
+  }
 
   try {
     while (rounds < DRIVE_ROUND_LIMIT) {
@@ -454,7 +507,54 @@ export async function driveBoard(options: {
       if (validationError) return finish({ code: "error", message: validationError });
 
       const tasks = board.tasks.filter(isSelected);
-      if (tasks.every((task) => task.status === "approved")) {
+      const humanRetryTask = humanRetryId
+        ? tasks.find((task) => task.id.toUpperCase() === humanRetryId)
+        : undefined;
+      if (humanRetryId && !humanRetryExpectedRiskToken) {
+        return finish({
+          code: "blocked",
+          message: "Human retry confirmation evidence is missing; request the retry again.",
+        });
+      }
+      const retryEligibility = humanRetryTask
+        ? humanRetryEligibility(board, humanRetryTask.id, {
+            maxAttempts: config.maxAttempts,
+            config: currentFingerprintConfig(),
+            isLive,
+            ...(humanRetryOwnerSession ? { ownerSession: humanRetryOwnerSession } : {}),
+          })
+        : undefined;
+      if (humanRetryId && (!humanRetryTask || !retryEligibility?.eligible)) {
+        return finish({
+          code: "blocked",
+          message: retryEligibility?.message ?? `Unknown task id: ${humanRetryTaskId}`,
+          ...(humanRetryTask ? { taskIds: [humanRetryTask.id] } : {}),
+        });
+      }
+      if (
+        humanRetryTask &&
+        humanRetryExpectedRiskToken &&
+        humanRetryRiskToken(humanRetryTask) !== humanRetryExpectedRiskToken
+      ) {
+        return finish({
+          code: "blocked",
+          message: `${humanRetryTask.id} acceptance or integration evidence changed; confirm the retry again.`,
+          taskIds: [humanRetryTask.id],
+        });
+      }
+      const staleApproved = tasks.filter(
+        (task) =>
+          task.status === "approved" &&
+          completionFreshness(board, task, currentFingerprintConfig()).state !== "fresh"
+      );
+      if (!humanRetryTask && staleApproved.length > 0) {
+        return finish({
+          code: "stale_completion",
+          message: `approved completion is not reusable for ${staleApproved.map((task) => task.id).join(", ")}; retry it or create a successor after inspecting retained evidence`,
+          taskIds: staleApproved.map((task) => task.id),
+        });
+      }
+      if (!humanRetryTask && tasks.every((task) => task.status === "approved")) {
         return finish({ code: "completed", message: "all selected tasks are approved" });
       }
       if (board.planPending) {
@@ -472,28 +572,42 @@ export async function driveBoard(options: {
       // Stop before re-dispatching a task the reviewer has rejected twice; a
       // fresh drive or /maestro resume only continues after the orchestrator
       // changes the brief/tier (which resets the counter) or retries explicitly.
-      const escalated = tasks.filter(escalatedTask);
+      const escalated = tasks.filter(
+        (task) => task.id.toUpperCase() !== humanRetryId && escalatedTask(task)
+      );
       if (escalated.length > 0) return finish(escalationReason(escalated, config));
 
       rounds += 1;
-      const wave = calculateSchedulingWave(board, config, taskIds);
-      const runnable = tasks.filter((task) => wave.runnableIds.includes(task.id));
+      const wave = calculateSchedulingWave(board, currentFingerprintConfig(), taskIds);
+      const runnable = tasks.filter(
+        (task) =>
+          wave.runnableIds.includes(task.id) ||
+          (task.id.toUpperCase() === humanRetryId && retryEligibility?.kind === "execute")
+      );
       const budgetWarning =
         runnable.length > 0 ? runBudgetWarning(board.tasks, config.maxRunCost) : undefined;
 
       if (runnable.length > 0 && !budgetWarning) {
+        const dispatchable = runnable.slice(
+          0,
+          Math.max(0, config.maxTotalLaunchesPerRun - rawLaunches)
+        );
+        if (dispatchable.some((task) => task.id.toUpperCase() === humanRetryId)) {
+          humanExecuteDispatched = true;
+        }
         onRoundUpdate?.(
           rounds,
           "run",
-          runnable.map((task) => task.id)
+          dispatchable.map((task) => task.id)
         );
         const worktrees = new Map<string, WorktreeRef>();
         const created: WorktreeRef[] = [];
-        const isolateBatch = config.useWorktrees;
+        const isolateBatch = config.useWorktrees || retryEligibility?.kind === "execute";
         try {
-          for (const task of runnable) {
+          for (const task of dispatchable) {
             const previous = task.attempts.at(-1);
             const retained =
+              task.id.toUpperCase() !== humanRetryId &&
               task.status === "changes_requested" &&
               previous?.worktreePath &&
               previous.branch &&
@@ -516,7 +630,7 @@ export async function driveBoard(options: {
           throw error;
         }
 
-        await mapWithConcurrencyLimit(runnable, config.maxParallel, (task) => {
+        await mapWithConcurrencyLimit(dispatchable, config.maxParallel, (task) => {
           const tier = resolvedTiers.get(task.tier);
           if (!tier) throw new Error(`No resolved tier for "${task.tier}"`);
           const executeOptions: Parameters<typeof executeTask>[0] = {
@@ -525,15 +639,39 @@ export async function driveBoard(options: {
             task,
             tier,
             config,
-            startExecutor,
+            startExecutor: boundedStartExecutor,
+            canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+            humanRetry: task.id.toUpperCase() === humanRetryId,
             onUpdate,
             trackRun,
           };
           const worktree = worktrees.get(task.id);
           if (worktree) executeOptions.worktree = worktree;
           if (signal) executeOptions.signal = signal;
+          if (task.id.toUpperCase() === humanRetryId && humanRetryExpectedRiskToken) {
+            executeOptions.humanRetryExpectedRiskToken = humanRetryExpectedRiskToken;
+          }
+          if (task.id.toUpperCase() === humanRetryId && humanRetryOwnerSession) {
+            executeOptions.humanRetryOwnerSession = humanRetryOwnerSession;
+          }
           return executeTask(executeOptions);
         });
+        const freshBoard = loadBoard(cwd);
+        for (const ref of created) removeUnreferencedCleanWorktree(cwd, freshBoard, ref);
+        const freshHumanRetry = humanRetryId
+          ? freshBoard.tasks.find((task) => task.id.toUpperCase() === humanRetryId)
+          : undefined;
+        if (
+          freshHumanRetry &&
+          humanRetryExpectedRiskToken &&
+          humanRetryRiskToken(freshHumanRetry) !== humanRetryExpectedRiskToken
+        ) {
+          return finish({
+            code: "blocked",
+            message: `${freshHumanRetry.id} acceptance or integration evidence changed; confirm the retry again.`,
+            taskIds: [freshHumanRetry.id],
+          });
+        }
       }
 
       if (signal?.aborted) {
@@ -547,6 +685,28 @@ export async function driveBoard(options: {
       }
 
       const afterRuns = loadBoard(cwd);
+      const stoppedHumanRetry = humanExecuteDispatched
+        ? afterRuns.tasks.find((task) => task.id.toUpperCase() === humanRetryId)
+        : undefined;
+      if (
+        stoppedHumanRetry &&
+        (stoppedHumanRetry.status === "failed" || stoppedHumanRetry.status === "cancelled")
+      ) {
+        return finish({
+          code: "blocked",
+          message: `Human retry stopped after one execution attempt for ${stoppedHumanRetry.id}; retained recovery evidence is available for inspection.`,
+          taskIds: [stoppedHumanRetry.id],
+        });
+      }
+      if (
+        rawLaunches >= config.maxTotalLaunchesPerRun &&
+        afterRuns.tasks.some((task) => isSelected(task) && task.status !== "approved")
+      ) {
+        return finish({
+          code: "launch_limit",
+          message: `raw launch limit reached (${config.maxTotalLaunchesPerRun}); inspect retained launch evidence before starting another drive`,
+        });
+      }
       // Only execute-side provider blocks stop the drive here; a stale review
       // provider failure must fall through so the review phase can re-run it.
       const blockedAfterRuns = afterRuns.tasks.filter(
@@ -556,7 +716,10 @@ export async function driveBoard(options: {
         return finish(providerBlockedReason(blockedAfterRuns));
       }
       const reviewable = afterRuns.tasks.filter(
-        (task) => task.status === "ready_for_review" && isSelected(task)
+        (task) =>
+          task.status === "ready_for_review" &&
+          isSelected(task) &&
+          (!terminalReviewConvergence(task) || task.id.toUpperCase() === humanRetryId)
       );
       if (reviewable.length > 0) {
         onRoundUpdate?.(
@@ -566,18 +729,29 @@ export async function driveBoard(options: {
         );
         const reviewTier = resolvedTiers.get("review");
         if (!reviewTier) throw new Error('No resolved tier for "review"');
-        await mapWithConcurrencyLimit(reviewable, config.maxParallel, (task) => {
+        const reviewDispatchable = reviewable.slice(
+          0,
+          Math.max(0, config.maxTotalLaunchesPerRun - rawLaunches)
+        );
+        await mapWithConcurrencyLimit(reviewDispatchable, config.maxParallel, (task) => {
           const reviewOptions: Parameters<typeof reviewTask>[0] = {
             cwd,
             task,
             tier: reviewTier,
-            startExecutor,
+            startExecutor: boundedStartExecutor,
+            canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
             autoCommit: config.autoCommit,
+            reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
+            maxReviewerLaunches: config.maxReviewerLaunches ?? 4,
             availableTiers: Object.keys(config.tiers),
             onUpdate,
             trackRun,
             isLive,
+            humanRetry: task.id.toUpperCase() === humanRetryId,
           };
+          if (task.id.toUpperCase() === humanRetryId && humanRetryOwnerSession) {
+            reviewOptions.humanRetryOwnerSession = humanRetryOwnerSession;
+          }
           if (config.verificationProfiles)
             reviewOptions.verificationProfiles = config.verificationProfiles;
           if (config.logEvents !== undefined) reviewOptions.logEvents = config.logEvents;
@@ -595,8 +769,52 @@ export async function driveBoard(options: {
       }
 
       const freshTasks = selectedTasks();
+      const freshBoardAfterRound = loadBoard(cwd);
+      const staleAfterRound = freshTasks.filter(
+        (task) =>
+          task.status === "approved" &&
+          completionFreshness(freshBoardAfterRound, task, currentFingerprintConfig()).state !==
+            "fresh"
+      );
+      if (staleAfterRound.length > 0) {
+        return finish({
+          code: "stale_completion",
+          message: `approved completion is not reusable for ${staleAfterRound.map((task) => task.id).join(", ")}; retry it or create a successor after inspecting retained evidence`,
+          taskIds: staleAfterRound.map((task) => task.id),
+        });
+      }
       if (freshTasks.every((task) => task.status === "approved")) {
         return finish({ code: "completed", message: "all selected tasks are approved" });
+      }
+      if (rawLaunches >= config.maxTotalLaunchesPerRun) {
+        return finish({
+          code: "launch_limit",
+          message: `raw launch limit reached (${config.maxTotalLaunchesPerRun}); inspect retained launch evidence before starting another drive`,
+        });
+      }
+      const providerBlocked = freshTasks.filter(providerBlockedTask);
+      if (providerBlocked.length > 0) {
+        return finish(providerBlockedReason(providerBlocked));
+      }
+      const disagreements = freshTasks.filter(
+        (task) => terminalReviewConvergence(task) === "disagreement"
+      );
+      if (disagreements.length > 0) {
+        return finish({
+          code: "review_disagreement",
+          message: `reviewers disagreed for ${disagreements.map((task) => task.id).join(", ")}; deliberately change the task review policy before resuming`,
+          taskIds: disagreements.map((task) => task.id),
+        });
+      }
+      const reviewerFailures = freshTasks.filter(
+        (task) => terminalReviewConvergence(task) === "operational_failure"
+      );
+      if (reviewerFailures.length > 0) {
+        return finish({
+          code: "reviewer_failure",
+          message: `review operation failed for ${reviewerFailures.map((task) => task.id).join(", ")}; inspect the retained launch evidence before resuming`,
+          taskIds: reviewerFailures.map((task) => task.id),
+        });
       }
       if (shouldPause?.()) {
         return finish({
@@ -607,11 +825,6 @@ export async function driveBoard(options: {
       if (budgetWarning) {
         return finish({ code: "budget_blocked", message: budgetWarning });
       }
-      const providerBlocked = freshTasks.filter(providerBlockedTask);
-      if (providerBlocked.length > 0) {
-        return finish(providerBlockedReason(providerBlocked));
-      }
-
       const attemptCapped = freshTasks.filter(
         (task) =>
           task.status !== "approved" &&
@@ -629,7 +842,13 @@ export async function driveBoard(options: {
       const canContinue = freshTasks.some(
         (task) =>
           task.status === "ready_for_review" ||
-          (task.status !== "cancelled" && isRunnable(freshBoard, task, task.status === "failed"))
+          (task.status !== "cancelled" &&
+            isRunnableWithConfig(
+              freshBoard,
+              task,
+              currentFingerprintConfig(),
+              task.status === "failed"
+            ))
       );
       if (!canContinue) {
         const terminal = freshTasks.filter((task) => task.status !== "approved");
@@ -651,6 +870,13 @@ export async function driveBoard(options: {
     code: "round_limit",
     message: `drive stopped after the hard limit of ${DRIVE_ROUND_LIMIT} rounds`,
   });
+}
+
+function terminalReviewConvergence(task: Task): "disagreement" | "operational_failure" | undefined {
+  if (task.status !== "ready_for_review") return undefined;
+  const status = task.attempts.at(-1)?.reviewConvergence?.status;
+  if (status === "disagreement" || status === "operational_failure") return status;
+  return undefined;
 }
 
 function escalatedTask(task: Task): boolean {
@@ -713,12 +939,30 @@ export async function executeTask(options: {
   config: MaestroConfig;
   worktree?: WorktreeRef;
   startExecutor: StartExecutor;
+  canStartExecutor?: () => boolean;
+  humanRetry?: boolean;
+  humanRetryExpectedRiskToken?: string;
+  humanRetryOwnerSession?: string;
   signal?: AbortSignal;
   onUpdate: WorkflowUpdate;
   trackRun: TrackRun;
 }): Promise<TaskSnapshot> {
-  const { cwd, board, task, tier, config, worktree, startExecutor, signal, onUpdate, trackRun } =
-    options;
+  const {
+    cwd,
+    board,
+    task,
+    tier,
+    config,
+    worktree,
+    startExecutor,
+    canStartExecutor = () => true,
+    humanRetry = false,
+    humanRetryExpectedRiskToken,
+    humanRetryOwnerSession,
+    signal,
+    onUpdate,
+    trackRun,
+  } = options;
 
   const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
   if (validationError) throw new Error(validationError);
@@ -729,7 +973,7 @@ export async function executeTask(options: {
     const updated = updateTask(cwd, task.id, (fresh) => {
       forceStatus(fresh, "failed");
     });
-    const recoveryGuidance = `attempt cap reached (${config.maxAttempts}); create a narrowly scoped successor with maestro_plan, use maestro_update to rewire every downstream dependency to it, then start maestro_drive with an explicit taskIds list containing the successor and every rewired dependent while excluding this capped predecessor`;
+    const recoveryGuidance = `attempt cap reached (${config.maxAttempts}); create a narrowly scoped successor with maestro_plan and set supersedesTaskId to ${task.id} so Maestro atomically cancels this predecessor and rewires downstream dependencies, then start maestro_drive for the successor and rewired dependents`;
     const result = snapshot(updated ?? task, recoveryGuidance);
     delete result.retryAction;
     result.note = recoveryGuidance;
@@ -754,20 +998,55 @@ export async function executeTask(options: {
   let updated: Task | undefined;
 
   for (const [modelIndex, model] of models.entries()) {
-    const lifecycle = claimDispatchLifecycle(cwd, task.id, "execute", (freshBoard, freshTask) =>
-      isRunnable(freshBoard, freshTask, true)
-    );
+    if (!canStartExecutor()) {
+      return snapshot(
+        findTask(loadBoard(cwd), task.id) ?? updated ?? task,
+        "workflow raw launch limit reached"
+      );
+    }
+    let executionFingerprint: string | undefined;
+    const lifecycle = claimDispatchLifecycle(cwd, task.id, "execute", (freshBoard, freshTask) => {
+      executionFingerprint = taskFingerprint(freshBoard, freshTask, loadConfig(cwd))?.fingerprint;
+      if (!executionFingerprint) return false;
+      if (!humanRetry) return isRunnableWithConfig(freshBoard, freshTask, loadConfig(cwd), true);
+      const eligibility = humanRetryEligibility(freshBoard, freshTask.id, {
+        maxAttempts: config.maxAttempts,
+        config: loadConfig(cwd),
+        isLive: () => false,
+        ...(humanRetryOwnerSession ? { ownerSession: humanRetryOwnerSession } : {}),
+      });
+      if (!eligibility.eligible || eligibility.kind !== "execute") return false;
+      if (
+        humanRetryExpectedRiskToken &&
+        humanRetryRiskToken(freshTask) !== humanRetryExpectedRiskToken
+      ) {
+        return false;
+      }
+      if (freshTask.status === "approved" || freshTask.status === "cancelled") {
+        forceStatus(freshTask, "failed");
+      }
+      return true;
+    });
     const { dispatch } = lifecycle;
     if (!dispatch?.claimed || dispatch.attemptIndex === undefined || !lifecycle.release) {
       return snapshot(dispatch?.task ?? task, dispatch?.note ?? "execute dispatch declined");
     }
     const attemptIndex = dispatch.attemptIndex;
+    updateTask(cwd, task.id, (fresh) => {
+      if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
+      const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
+      if (attempt && executionFingerprint) attempt.executionFingerprint = executionFingerprint;
+    });
     const attemptTier: TierConfig = { ...tier };
     delete attemptTier.fallbacks;
     if (model === undefined) delete attemptTier.model;
     else attemptTier.model = model;
+    if (task.discovery) attemptTier.tools = DISCOVERY_TOOLS;
 
-    const prompt = buildExecutorPrompt(task, dependencyReports);
+    const basePrompt = buildExecutorPrompt(task, dependencyReports);
+    const prompt = task.discovery
+      ? `${basePrompt}\n\n${discoveryInstructions(task.discovery.allowedWritePaths)}`
+      : basePrompt;
     const promptContext = accountPromptContext(prompt);
     const runOptions: Parameters<StartExecutor>[0] = {
       stateDir: stateDir(cwd),
@@ -821,6 +1100,7 @@ export async function executeTask(options: {
       return snapshot(failed ?? task, message);
     }
     run.attempt.index = attemptIndex;
+    if (executionFingerprint) run.attempt.executionFingerprint = executionFingerprint;
     run.attempt.promptCharacters = promptContext.characters;
     run.attempt.promptApproximateTokens = promptContext.approximateTokens;
     run.attempt.promptSections = promptContext.sections;
@@ -951,20 +1231,83 @@ export function taskCommitMessage(task: Task): string {
 
 export { artifactFindings } from "./artifact-policy.js";
 
+type CriterionEvidence = NonNullable<ReviewLaunch["criterionEvidence"]>;
+
+function reviewEvidence(report: string, criteriaCount: number): CriterionEvidence | undefined {
+  const matches = [...report.matchAll(/^CRITERION\s+(\d+):\s*(PASS|FAIL)\s*(?:—|-)\s*(.+)$/gim)];
+  if (matches.length !== criteriaCount) return undefined;
+  const evidence = matches.map((match) => ({
+    criterion: Number(match[1]),
+    passed: match[2]?.toUpperCase() === "PASS",
+    evidence: redactFailureMessage(match[3] ?? "").slice(0, 500),
+  }));
+  const numbers = new Set(evidence.map((entry) => entry.criterion));
+  if (numbers.size !== criteriaCount) return undefined;
+  if (evidence.some((entry) => entry.criterion < 1 || entry.criterion > criteriaCount)) {
+    return undefined;
+  }
+  return evidence.sort((left, right) => left.criterion - right.criterion);
+}
+
+function policyReviewPrompt(
+  task: Task,
+  report: string,
+  policy: ReviewPolicy,
+  role: NonNullable<ReviewLaunch["role"]>,
+  finderReport?: string
+): string {
+  const base = buildReviewPrompt(task, report);
+  if (policy === "single") return base;
+  const criteria = (task.successCriteria ?? [])
+    .map((_criterion, index) => `CRITERION ${index + 1}: PASS|FAIL — bounded concrete evidence`)
+    .join("\n");
+  const roleText =
+    role === "finder"
+      ? "Act as the finding reviewer. Try to identify a concrete reason to reject the artifact."
+      : role === "refuter"
+        ? `Act as an independent confirmer/refuter. Assess the artifact yourself, then evaluate only this bounded finder evidence:\n${finderReport?.slice(0, 4_000) ?? "(none)"}`
+        : "Act as an independent confirmer. Do not assume another reviewer approved the artifact.";
+  return `${base}\n\n${roleText}\nReport every criterion exactly once using these lines:\n${criteria}\nThe VERDICT must agree with the criterion lines.`;
+}
+
+function convergenceRecord(
+  policy: ReviewPolicy,
+  status: NonNullable<Attempt["reviewConvergence"]>["status"],
+  requiredApprovals: number,
+  actualApprovals: number,
+  reviewerCount: number,
+  summary: string
+): NonNullable<Attempt["reviewConvergence"]> {
+  return {
+    policy,
+    status,
+    requiredApprovals,
+    actualApprovals,
+    reviewerCount,
+    summary: redactFailureMessage(summary).slice(0, 2_000),
+    decidedAt: Date.now(),
+  };
+}
+
 export async function reviewTask(options: {
   cwd: string;
   task: Task;
   tier: TierConfig;
   startExecutor: StartExecutor;
+  canStartExecutor?: () => boolean;
   autoCommit?: boolean;
   logEvents?: "compact" | "full" | undefined;
   maxLogBytes?: number | undefined;
+  reviewRequiredApprovals?: number;
+  maxReviewerLaunches?: number;
   availableTiers?: Iterable<string>;
   verificationProfiles?: Record<string, VerificationProfile>;
   signal?: AbortSignal;
   onUpdate: WorkflowUpdate;
   trackRun: TrackRun;
   isLive?: (taskId: string) => boolean;
+  humanRetry?: boolean;
+  humanRetryOwnerSession?: string;
   onRetentionWarning?: (warning: string) => void;
 }): Promise<TaskSnapshot> {
   const {
@@ -972,45 +1315,128 @@ export async function reviewTask(options: {
     task,
     tier,
     startExecutor,
+    canStartExecutor = () => true,
     autoCommit,
     logEvents,
     maxLogBytes,
+    reviewRequiredApprovals = 2,
+    maxReviewerLaunches = 4,
     availableTiers,
     verificationProfiles,
     signal,
     onUpdate,
     trackRun,
-    isLive = () => false,
+    humanRetry = false,
+    humanRetryOwnerSession,
   } = options;
   const board = loadBoard(cwd);
   const validationError = planValidationMessage(validatePlan(board, availableTiers));
   if (validationError) throw new Error(validationError);
   if (board.planPending) throw new Error("Plan approval is pending.");
 
-  const report = lastReport(task);
-  if (!report) return snapshot(task, "no executor report to review");
-  const latestAttempt = task.attempts.at(-1);
-  const configuredProfile = task.verificationProfile
-    ? verificationProfiles?.[task.verificationProfile]
-    : undefined;
-  if (task.verificationProfile && !configuredProfile) {
-    throw new Error(`Unknown verification profile: ${task.verificationProfile}`);
-  }
-
-  const lifecycle = claimDispatchLifecycle(
-    cwd,
-    task.id,
-    "review",
-    (_freshBoard, freshTask) => freshTask.status === "ready_for_review"
-  );
+  const lifecycle = claimDispatchLifecycle(cwd, task.id, "review", (freshBoard, freshTask) => {
+    if (!humanRetry) return freshTask.status === "ready_for_review";
+    const eligibility = humanRetryEligibility(freshBoard, freshTask.id, {
+      maxAttempts: Number.MAX_SAFE_INTEGER,
+      config: loadConfig(cwd),
+      isLive: () => false,
+      ...(humanRetryOwnerSession ? { ownerSession: humanRetryOwnerSession } : {}),
+    });
+    if (!eligibility.eligible || eligibility.kind !== "review") return false;
+    const attempt = freshTask.attempts.at(-1);
+    if (attempt?.reviewConvergence?.status === "operational_failure") {
+      attempt.reviewConvergenceHistory = [
+        ...(attempt.reviewConvergenceHistory ?? []),
+        structuredClone(attempt.reviewConvergence),
+      ];
+      delete attempt.reviewConvergence;
+    }
+    if (
+      attempt &&
+      attempt.reviewLaunches === undefined &&
+      (attempt.reviewReport !== undefined ||
+        attempt.reviewSessionFile !== undefined ||
+        attempt.reviewModel !== undefined ||
+        attempt.reviewProvider !== undefined ||
+        attempt.reviewUsage !== undefined)
+    ) {
+      const verdict = attempt.reviewReport ? parseVerdict(attempt.reviewReport) : undefined;
+      attempt.reviewLaunches = [
+        {
+          id: `legacy-${freshTask.id.toLowerCase()}-review-${attempt.index}`,
+          reviewerIndex: 1,
+          role: "single",
+          startedAt: attempt.endedAt ?? attempt.startedAt,
+          ...(attempt.endedAt === undefined ? {} : { endedAt: attempt.endedAt }),
+          ...(verdict === undefined
+            ? {}
+            : { verdict: verdict.approved ? ("approve" as const) : ("request_changes" as const) }),
+          ...(attempt.reviewModel === undefined ? {} : { model: attempt.reviewModel }),
+          ...(attempt.reviewProvider === undefined ? {} : { provider: attempt.reviewProvider }),
+          ...(attempt.reviewSessionFile === undefined
+            ? {}
+            : { sessionFile: attempt.reviewSessionFile }),
+          usage: structuredClone(attempt.reviewUsage ?? { input: 0, output: 0, cost: 0, turns: 0 }),
+          ...(attempt.reviewReport === undefined ? {} : { finalReport: attempt.reviewReport }),
+        },
+      ];
+    }
+    return true;
+  });
   const { dispatch } = lifecycle;
   if (!dispatch?.claimed || !lifecycle.release) {
     return snapshot(dispatch?.task ?? task, dispatch?.note ?? "review dispatch declined");
   }
 
   try {
+    const task = dispatch.task;
+    const report = lastReport(task);
+    if (!report) return snapshot(task, "no executor report to review");
+    const reviewPolicy = task.reviewPolicy ?? "single";
+    const latestAttempt = task.attempts.at(-1);
+    const runtimeConfig = (): MaestroConfig => {
+      const loaded = loadConfig(cwd);
+      if (verificationProfiles) loaded.verificationProfiles = verificationProfiles;
+      return loaded;
+    };
+    const effectiveProfileName =
+      task.verificationProfile ?? runtimeConfig().defaultVerificationProfile;
+    const configuredProfile = effectiveProfileName
+      ? runtimeConfig().verificationProfiles?.[effectiveProfileName]
+      : undefined;
+    if (effectiveProfileName && !configuredProfile) {
+      throw new Error(`Unknown verification profile: ${effectiveProfileName}`);
+    }
     const candidatePaths = latestAttempt?.touchedFiles ?? [];
     const candidateCwd = latestAttempt?.worktreePath ?? cwd;
+    const claimedAttemptIndex = latestAttempt?.index;
+    const claimedTaskContract = JSON.stringify({
+      title: task.title,
+      brief: task.brief,
+      tier: task.tier,
+      dependsOn: task.dependsOn,
+      writePaths: task.writePaths ?? [],
+      successCriteria: task.successCriteria ?? [],
+      verificationProfile: task.verificationProfile,
+      reviewPolicy,
+      commitMessage: task.commitMessage,
+    });
+    const reviewIdentityMatches = (fresh: Task): boolean =>
+      fresh.status === "ready_for_review" &&
+      fresh.dispatchClaim?.id === dispatch.claimId &&
+      fresh.attempts.at(-1)?.index === claimedAttemptIndex &&
+      lastReport(fresh) === report &&
+      JSON.stringify({
+        title: fresh.title,
+        brief: fresh.brief,
+        tier: fresh.tier,
+        dependsOn: fresh.dependsOn,
+        writePaths: fresh.writePaths ?? [],
+        successCriteria: fresh.successCriteria ?? [],
+        verificationProfile: fresh.verificationProfile,
+        reviewPolicy: fresh.reviewPolicy ?? "single",
+        commitMessage: fresh.commitMessage,
+      }) === claimedTaskContract;
     // Legacy/injected workflow harnesses may not provide a Git integration surface.
     // Every production auto-commit or worktree review requires full provenance.
     const requiresIntegration = Boolean(latestAttempt?.worktreePath || autoCommit);
@@ -1035,6 +1461,21 @@ export async function reviewTask(options: {
       });
     }
     const gateFindings = latestAttempt ? (artifactFindings(task, latestAttempt) ?? []) : [];
+    const currentExecutionFingerprint = taskFingerprint(loadBoard(cwd), task, runtimeConfig());
+    if (
+      !latestAttempt?.executionFingerprint ||
+      latestAttempt.executionFingerprint !== currentExecutionFingerprint?.fingerprint
+    ) {
+      gateFindings.push({
+        fingerprint: "execution-inputs-changed",
+        message: latestAttempt?.executionFingerprint
+          ? "Task, configured execution, verification, or dependency inputs changed after execution."
+          : "Execution has no versioned input fingerprint; use explicit manual acceptance for migration.",
+        status: "open",
+        firstAttempt: latestAttempt?.index ?? task.attempts.length,
+        lastAttempt: latestAttempt?.index ?? task.attempts.length,
+      });
+    }
     if (requiresIntegration && !candidateTree) {
       gateFindings.push({
         fingerprint: "artifact-snapshot-failed",
@@ -1067,13 +1508,27 @@ export async function reviewTask(options: {
     if (gateFindings && gateFindings.length > 0) {
       const notes = gateFindings.map((finding) => finding.message).join("\n");
       const updated = updateTask(cwd, task.id, (fresh) => {
-        transition(fresh, "changes_requested");
         fresh.reviewNotes = notes;
-        const fingerprints = new Set(gateFindings.map((finding) => finding.fingerprint));
-        fresh.findings = [
-          ...(fresh.findings ?? []).filter((finding) => !fingerprints.has(finding.fingerprint)),
-          ...gateFindings,
-        ];
+        const attempt = fresh.attempts.at(-1);
+        if (attempt) {
+          attempt.reviewConvergence = convergenceRecord(
+            reviewPolicy,
+            "operational_failure",
+            reviewPolicy === "confirm"
+              ? reviewRequiredApprovals
+              : reviewPolicy === "find-and-refute"
+                ? 2
+                : 1,
+            0,
+            0,
+            notes
+          );
+          attempt.failureReason = {
+            kind: "reviewer_failure",
+            message: redactFailureMessage(notes),
+            retryable: true,
+          };
+        }
       });
       return snapshot(updated ?? task, notes);
     }
@@ -1084,127 +1539,382 @@ export async function reviewTask(options: {
         : undefined;
     const models = [tier.model, ...(tier.fallbacks ?? [])];
     const reviewLaunches: ReviewLaunch[] = [];
-    let run!: ExecutorHandle;
-    let outcome!: RunOutcome;
+    let rawLaunchCount = 0;
+    let lastRun: ExecutorHandle | undefined;
+    let outcome: RunOutcome = {
+      exitCode: 1,
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      finalReport: "",
+      touchedFiles: [],
+      aborted: false,
+    };
 
-    for (const [modelIndex, model] of models.entries()) {
-      const launchTier: TierConfig = { ...tier };
-      delete launchTier.fallbacks;
-      if (model === undefined) delete launchTier.model;
-      else launchTier.model = model;
-      const reviewPrompt = buildReviewPrompt(task, report);
-      const reviewPromptContext = accountPromptContext(reviewPrompt);
-      const runOptions: Parameters<StartExecutor>[0] = {
-        stateDir: stateDir(cwd),
-        runId: `${task.id}-review-${task.attempts.length}-launch-${modelIndex + 1}`,
-        cwd: worktree?.worktreePath ?? cwd,
-        prompt: reviewPrompt,
-        tier: launchTier,
-        sessionLabel: sessionLabel(task, "review", task.attempts.length),
-        ...(logEvents === undefined ? {} : { logEvents }),
-        ...(maxLogBytes === undefined ? {} : { maxLogBytes }),
-        onUpdate: (update) => onUpdate(task.id, update),
-      };
-      if (signal) runOptions.signal = signal;
-
-      try {
-        run = startExecutor(runOptions);
-      } catch (error) {
-        const message = redactFailureMessage(
-          error instanceof Error ? error.message : String(error)
-        );
-        run = {
-          attempt: {
-            index: task.attempts.length,
-            logFile: "spawn-failed",
-            thinking: launchTier.thinking,
-            startedAt: Date.now(),
-            endedAt: Date.now(),
-            usage: { input: 0, output: 0, cost: 0, turns: 0 },
-            touchedFiles: [],
-            errorMessage: message,
-          },
-          outcome: Promise.resolve({
-            exitCode: 1,
-            usage: { input: 0, output: 0, cost: 0, turns: 0 },
-            finalReport: "",
-            touchedFiles: [],
-            aborted: false,
-            errorMessage: message,
-            failureCause: "process",
-          }),
-          steer: () => {},
-          abort: () => {},
+    const launchReviewer = async (
+      reviewerIndex: number,
+      role: NonNullable<ReviewLaunch["role"]>,
+      finderReport?: string
+    ): Promise<
+      | { verdict: { approved: boolean; notes: string }; report: string }
+      | { operationalFailure: string }
+      | { launchLimit: true }
+    > => {
+      if (candidateTree && snapshotArtifact(candidateCwd, candidatePaths) !== candidateTree) {
+        return { operationalFailure: "candidate artifact changed between logical reviewers" };
+      }
+      for (const [modelIndex, model] of models.entries()) {
+        if (!canStartExecutor()) return { launchLimit: true };
+        if (rawLaunchCount >= maxReviewerLaunches) {
+          return { operationalFailure: `review launch cap reached (${maxReviewerLaunches})` };
+        }
+        rawLaunchCount += 1;
+        const launchTier: TierConfig = { ...tier };
+        delete launchTier.fallbacks;
+        if (model === undefined) delete launchTier.model;
+        else launchTier.model = model;
+        const reviewPrompt = policyReviewPrompt(task, report, reviewPolicy, role, finderReport);
+        const promptContext = accountPromptContext(reviewPrompt);
+        const launchId = `${task.id}-review-${task.attempts.length}-${reviewerIndex}-${rawLaunchCount}`;
+        const placeholder: ReviewLaunch = {
+          id: launchId,
+          reviewerIndex,
+          role,
+          startedAt: Date.now(),
+          usage: { input: 0, output: 0, cost: 0, turns: 0 },
+          promptCharacters: promptContext.characters,
+          promptApproximateTokens: promptContext.approximateTokens,
+          promptSections: promptContext.sections,
         };
-      }
-      if (run.attempt.model === undefined && model !== undefined) run.attempt.model = model;
-      const untrack = trackRun({
-        taskId: task.id,
-        kind: "review",
-        turns: 0,
-        cost: 0,
-        lastActivity: "starting…",
-        handle: run,
-      });
+        updateTask(cwd, task.id, (fresh) => {
+          const attempt = fresh.attempts.at(-1);
+          if (attempt) attempt.reviewLaunches = [...(attempt.reviewLaunches ?? []), placeholder];
+        });
 
-      try {
-        outcome = await run.outcome;
-      } catch (error) {
-        outcome = rejectedRunOutcome(run, error);
-        run.attempt.endedAt = Date.now();
-      } finally {
-        untrack();
-      }
+        const runOptions: Parameters<StartExecutor>[0] = {
+          stateDir: stateDir(cwd),
+          runId: launchId,
+          cwd: worktree?.worktreePath ?? cwd,
+          prompt: reviewPrompt,
+          tier: launchTier,
+          sessionLabel: sessionLabel(task, "review", task.attempts.length),
+          ...(logEvents === undefined ? {} : { logEvents }),
+          ...(maxLogBytes === undefined ? {} : { maxLogBytes }),
+          onUpdate: (update) => {
+            const sessionFile = update.sessionFile;
+            if (sessionFile) {
+              updateTask(cwd, task.id, (fresh) => {
+                const launch = fresh.attempts
+                  .at(-1)
+                  ?.reviewLaunches?.find((candidate) => candidate.id === launchId);
+                if (launch) launch.sessionFile = sessionFile;
+              });
+            }
+            onUpdate(task.id, update);
+          },
+        };
+        if (signal) runOptions.signal = signal;
 
-      const failureReason = classifyFailure(outcome, "review") ?? outcome.failureReason;
-      const launch: ReviewLaunch = {
-        startedAt: run.attempt.startedAt,
-        usage: { ...outcome.usage },
-        exitCode: outcome.exitCode,
-        promptCharacters: reviewPromptContext.characters,
-        promptApproximateTokens: reviewPromptContext.approximateTokens,
-        promptSections: reviewPromptContext.sections,
-      };
-      const reviewModel = outcome.model ?? run.attempt.model;
-      if (reviewModel !== undefined) {
-        launch.model = reviewModel;
-        const provider = providerFromModel(reviewModel);
-        if (provider !== undefined) launch.provider = provider;
-      }
-      if (run.attempt.endedAt !== undefined) launch.endedAt = run.attempt.endedAt;
-      if (run.attempt.sessionFile !== undefined) launch.sessionFile = run.attempt.sessionFile;
-      if (outcome.errorMessage) launch.errorMessage = redactFailureMessage(outcome.errorMessage);
-      if (failureReason) launch.failureReason = failureReason;
-      if (outcome.finalReport) launch.finalReport = outcome.finalReport;
-      reviewLaunches.push(launch);
+        let run: ExecutorHandle;
+        try {
+          run = startExecutor(runOptions);
+        } catch (error) {
+          const message = redactFailureMessage(
+            error instanceof Error ? error.message : String(error)
+          );
+          run = {
+            attempt: {
+              index: task.attempts.length,
+              logFile: "spawn-failed",
+              thinking: launchTier.thinking,
+              startedAt: placeholder.startedAt,
+              endedAt: Date.now(),
+              usage: { input: 0, output: 0, cost: 0, turns: 0 },
+              touchedFiles: [],
+              errorMessage: message,
+            },
+            outcome: Promise.resolve({
+              exitCode: 1,
+              usage: { input: 0, output: 0, cost: 0, turns: 0 },
+              finalReport: "",
+              touchedFiles: [],
+              aborted: false,
+              errorMessage: message,
+              failureCause: "process",
+            }),
+            steer: () => {},
+            abort: () => {},
+          };
+        }
+        lastRun = run;
+        if (run.attempt.model === undefined && model !== undefined) run.attempt.model = model;
+        updateTask(cwd, task.id, (fresh) => {
+          const launch = fresh.attempts
+            .at(-1)
+            ?.reviewLaunches?.find((candidate) => candidate.id === launchId);
+          if (!launch) return;
+          launch.logFile = run.attempt.logFile;
+          if (run.attempt.sessionFile) launch.sessionFile = run.attempt.sessionFile;
+        });
+        const untrack = trackRun({
+          taskId: task.id,
+          kind: "review",
+          turns: 0,
+          cost: 0,
+          lastActivity: "starting…",
+          handle: run,
+        });
+        try {
+          outcome = await run.outcome;
+        } catch (error) {
+          outcome = rejectedRunOutcome(run, error);
+          run.attempt.endedAt = Date.now();
+        } finally {
+          untrack();
+        }
 
-      const canFallback =
-        failureReason?.kind === "provider_failure" && modelIndex < models.length - 1;
-      if (!canFallback) break;
+        const failureReason = classifyFailure(outcome, "review") ?? outcome.failureReason;
+        const launch: ReviewLaunch = {
+          ...placeholder,
+          logFile: run.attempt.logFile,
+          usage: { ...outcome.usage },
+          exitCode: outcome.exitCode,
+        };
+        const reviewModel = outcome.model ?? run.attempt.model;
+        if (reviewModel !== undefined) {
+          launch.model = reviewModel;
+          const provider = providerFromModel(reviewModel);
+          if (provider !== undefined) launch.provider = provider;
+        }
+        if (run.attempt.endedAt !== undefined) launch.endedAt = run.attempt.endedAt;
+        if (run.attempt.sessionFile !== undefined) launch.sessionFile = run.attempt.sessionFile;
+        if (outcome.errorMessage) launch.errorMessage = redactFailureMessage(outcome.errorMessage);
+        if (failureReason) launch.failureReason = failureReason;
+        if (outcome.finalReport) launch.finalReport = outcome.finalReport;
+
+        const parsed =
+          outcome.aborted || outcome.exitCode !== 0 || outcome.errorMessage
+            ? undefined
+            : parseVerdict(outcome.finalReport);
+        if (parsed && reviewPolicy !== "single") {
+          const evidence = reviewEvidence(outcome.finalReport, task.successCriteria?.length ?? 0);
+          if (!evidence || parsed.approved !== evidence.every((entry) => entry.passed)) {
+            launch.errorMessage = "reviewer returned malformed or inconsistent criterion evidence";
+          } else {
+            launch.criterionEvidence = evidence;
+            launch.verdict = parsed.approved ? "approve" : "request_changes";
+          }
+        } else if (parsed) {
+          launch.verdict = parsed.approved ? "approve" : "request_changes";
+        }
+        updateTask(cwd, task.id, (fresh) => {
+          const launches = fresh.attempts.at(-1)?.reviewLaunches;
+          const index = launches?.findIndex((candidate) => candidate.id === launchId) ?? -1;
+          if (launches && index >= 0) launches[index] = launch;
+        });
+        reviewLaunches.push(launch);
+
+        const canFallback =
+          failureReason?.kind === "provider_failure" && modelIndex < models.length - 1;
+        if (canFallback) continue;
+        if (failureReason) return { operationalFailure: failureReason.message };
+        if (!parsed) return { operationalFailure: "reviewer gave no VERDICT line" };
+        if (reviewPolicy !== "single" && !launch.criterionEvidence) {
+          return {
+            operationalFailure: launch.errorMessage ?? "reviewer criterion evidence invalid",
+          };
+        }
+        return { verdict: parsed, report: outcome.finalReport };
+      }
+      return { operationalFailure: "reviewer launch failed" };
+    };
+
+    const requiredApprovals =
+      reviewPolicy === "confirm"
+        ? reviewRequiredApprovals
+        : reviewPolicy === "find-and-refute"
+          ? 2
+          : 1;
+    const logicalResults: Array<{ verdict: { approved: boolean; notes: string }; report: string }> =
+      [];
+    let operationalFailure: string | undefined;
+    let launchLimitReached = false;
+    if (reviewPolicy === "find-and-refute") {
+      const finder = await launchReviewer(1, "finder");
+      if ("launchLimit" in finder) launchLimitReached = true;
+      else if ("operationalFailure" in finder) operationalFailure = finder.operationalFailure;
+      else {
+        logicalResults.push(finder);
+        const refuter = await launchReviewer(2, "refuter", finder.report);
+        if ("launchLimit" in refuter) launchLimitReached = true;
+        else if ("operationalFailure" in refuter) operationalFailure = refuter.operationalFailure;
+        else logicalResults.push(refuter);
+      }
+    } else {
+      const count = reviewPolicy === "confirm" ? reviewRequiredApprovals : 1;
+      for (let index = 1; index <= count; index += 1) {
+        const result = await launchReviewer(
+          index,
+          reviewPolicy === "single" ? "single" : "confirmer"
+        );
+        if ("launchLimit" in result) {
+          launchLimitReached = true;
+          break;
+        }
+        if ("operationalFailure" in result) {
+          operationalFailure = result.operationalFailure;
+          break;
+        }
+        logicalResults.push(result);
+        if (!result.verdict.approved) break;
+      }
     }
 
-    let verdict =
-      outcome.aborted || outcome.exitCode !== 0 || outcome.errorMessage
-        ? undefined
-        : parseVerdict(outcome.finalReport);
-    const reviewerRequestedChanges = verdict?.approved === false;
+    if (launchLimitReached) {
+      return snapshot(
+        findTask(loadBoard(cwd), task.id) ?? task,
+        "workflow raw launch limit reached"
+      );
+    }
+
+    const approvals = logicalResults.filter((result) => result.verdict.approved).length;
+    const reviewerCount = new Set(reviewLaunches.map((launch) => launch.reviewerIndex)).size;
+    const disagreement =
+      reviewPolicy === "find-and-refute" &&
+      logicalResults.length === 2 &&
+      logicalResults[0]?.verdict.approved !== logicalResults[1]?.verdict.approved;
+    let verdict = operationalFailure || disagreement ? undefined : logicalResults.at(-1)?.verdict;
+    let convergence = convergenceRecord(
+      reviewPolicy,
+      operationalFailure
+        ? "operational_failure"
+        : disagreement
+          ? "disagreement"
+          : verdict?.approved
+            ? "approved"
+            : "changes_requested",
+      requiredApprovals,
+      approvals,
+      reviewerCount,
+      operationalFailure ??
+        (disagreement
+          ? "finder and refuter reached conflicting verdicts"
+          : verdict?.notes || outcome.finalReport)
+    );
+    const reviewerRequestedChanges = convergence.status === "changes_requested";
     let mechanicalFailure: string | undefined;
     if (candidateTree && snapshotArtifact(candidateCwd, candidatePaths) !== candidateTree) {
       mechanicalFailure = "Candidate files changed while under review; integration was skipped.";
       verdict = { approved: false, notes: mechanicalFailure };
     }
+    let integrationAuthorized = false;
+    updateTask(cwd, task.id, (fresh) => {
+      integrationAuthorized = reviewIdentityMatches(fresh);
+    });
+    if (!integrationAuthorized) {
+      mechanicalFailure = "Review identity changed before integration; integration was skipped.";
+      convergence = convergenceRecord(
+        reviewPolicy,
+        "operational_failure",
+        requiredApprovals,
+        approvals,
+        reviewerCount,
+        mechanicalFailure
+      );
+      verdict = undefined;
+    }
     let mergeConflict: string | undefined;
     let integratedCommit: string | undefined;
+    let integratedTree: string | undefined;
+    let integrationVerification: Awaited<ReturnType<typeof runVerification>> | undefined;
+    const fingerprintBeforeIntegration = verdict?.approved
+      ? taskFingerprint(loadBoard(cwd), task, runtimeConfig())
+      : undefined;
+    if (verdict?.approved && !fingerprintBeforeIntegration) {
+      mechanicalFailure = "Approved completion fingerprint inputs are unavailable.";
+      verdict = undefined;
+    }
     if (verdict?.approved && worktree) {
-      const merge = await serializeMainTreeOperation(cwd, () => {
-        const result = mergeWorktree(cwd, worktree, taskCommitMessage(task));
-        if (result.ok) integratedCommit = headCommit(cwd);
-        return result;
-      });
-      if (!merge.ok) {
-        mergeConflict = `Approved review could not be merged because of a git conflict. Recovery worktree: ${worktree.worktreePath}\nBranch: ${worktree.branch}\n${merge.error ?? "Merge failed"}`;
+      const verificationStateDir = mkdtempSync(join(tmpdir(), "maestro-verification-"));
+      try {
+        await serializeMainTreeOperation(cwd, async () => {
+          const prepared = prepareWorktreeIntegration(cwd, worktree, taskCommitMessage(task));
+          try {
+            if (
+              !candidateTree ||
+              !artifactMatchesCommit(
+                prepared.tempRef.worktreePath,
+                candidateTree,
+                prepared.integratedCommit,
+                candidatePaths
+              )
+            ) {
+              throw new Error("prepared integration does not contain the reviewed candidate tree");
+            }
+            const heldTask = findTask(loadBoard(cwd), task.id);
+            if (!heldTask || !reviewIdentityMatches(heldTask)) {
+              throw new Error("review identity changed before prepared integration verification");
+            }
+            if (configuredProfile) {
+              integrationVerification = await runVerification({
+                cwd: prepared.tempRef.worktreePath,
+                stateDir: verificationStateDir,
+                name: `${task.id}-integrated`,
+                command: configuredProfile.command,
+                timeoutSeconds: configuredProfile.timeoutSeconds,
+                ...(signal ? { signal } : {}),
+              });
+            }
+            if (
+              headCommit(prepared.tempRef.worktreePath) !== prepared.integratedCommit ||
+              changedPaths(prepared.tempRef.worktreePath).length > 0
+            ) {
+              throw new Error("post-integration verification mutated the prepared checkout");
+            }
+            if (integrationVerification && !integrationVerification.ok) {
+              throw new Error(
+                `post-integration verification ${task.verificationProfile} failed or was interrupted`
+              );
+            }
+            const currentTask = findTask(loadBoard(cwd), task.id);
+            if (!currentTask || !reviewIdentityMatches(currentTask)) {
+              throw new Error("review identity changed before integration promotion");
+            }
+            const currentFingerprint = taskFingerprint(
+              loadBoard(cwd),
+              currentTask,
+              runtimeConfig()
+            );
+            if (
+              !currentFingerprint ||
+              currentFingerprint.fingerprint !== fingerprintBeforeIntegration?.fingerprint
+            ) {
+              throw new Error("task, config, or dependency fingerprint changed before promotion");
+            }
+            if (!mainTreeIdentityMatches(cwd, prepared.mainIdentity)) {
+              throw new Error("main checkout changed before integration promotion");
+            }
+            const promoted = promotePreparedIntegration(cwd, prepared);
+            if (!promoted.ok) {
+              throw new Error(promoted.error ?? "prepared integration promotion failed");
+            }
+            integratedCommit = prepared.integratedCommit;
+            integratedTree = prepared.integratedTree;
+          } finally {
+            removePreparedIntegration(cwd, prepared);
+          }
+        });
+      } catch (error) {
+        mergeConflict = `Approved review could not be integrated safely because of a git conflict or transaction check. Recovery worktree: ${worktree.worktreePath}\nBranch: ${worktree.branch}\n${error instanceof Error ? error.message : String(error)}`;
         mechanicalFailure = mergeConflict;
         verdict = { approved: false, notes: mergeConflict };
+      } finally {
+        if (integrationVerification) {
+          const directory = join(stateDir(cwd), "verification");
+          mkdirSync(directory, { recursive: true });
+          const logFile = join(directory, basename(integrationVerification.logFile));
+          copyFileSync(integrationVerification.logFile, logFile);
+          integrationVerification = { ...integrationVerification, logFile };
+        }
+        rmSync(verificationStateDir, { recursive: true, force: true });
       }
     } else if (verdict?.approved && autoCommit) {
       const files = reviewedAttempt?.touchedFiles ?? [];
@@ -1223,7 +1933,6 @@ export async function reviewTask(options: {
       verdict = { approved: false, notes: mechanicalFailure };
     }
 
-    let integratedTree: string | undefined;
     if (verdict?.approved && integratedCommit) {
       integratedTree = commitTree(cwd, integratedCommit);
       if (
@@ -1235,8 +1944,7 @@ export async function reviewTask(options: {
       }
     }
 
-    let integrationVerification: Awaited<ReturnType<typeof runVerification>> | undefined;
-    if (verdict?.approved && integratedCommit && configuredProfile) {
+    if (verdict?.approved && integratedCommit && configuredProfile && !worktree) {
       integrationVerification = await runVerification({
         cwd,
         stateDir: stateDir(cwd),
@@ -1255,8 +1963,63 @@ export async function reviewTask(options: {
         "Automated approval requires an authoritative Git artifact and proven integration.";
       verdict = { approved: false, notes: mechanicalFailure };
     }
+    if (mechanicalFailure) {
+      convergence = convergenceRecord(
+        reviewPolicy,
+        "operational_failure",
+        requiredApprovals,
+        approvals,
+        reviewerCount,
+        mechanicalFailure
+      );
+      verdict = undefined;
+    }
 
-    const updated = updateTask(cwd, task.id, (fresh) => {
+    const approvedProvenance = verdict?.approved
+      ? (() => {
+          const board = loadBoard(cwd);
+          const currentTask = findTask(board, task.id);
+          return currentTask
+            ? captureApprovedProvenance(board, currentTask, runtimeConfig())
+            : undefined;
+        })()
+      : undefined;
+    if (verdict?.approved && !approvedProvenance) {
+      mechanicalFailure = "Approved completion proof became unavailable before settlement.";
+      convergence = convergenceRecord(
+        reviewPolicy,
+        "operational_failure",
+        requiredApprovals,
+        approvals,
+        reviewerCount,
+        mechanicalFailure
+      );
+      verdict = undefined;
+    }
+
+    let finalMutationApplied = false;
+    let settlementProvenance = approvedProvenance;
+    const updated = updateTask(cwd, task.id, (fresh, freshBoard) => {
+      if (!reviewIdentityMatches(fresh)) return;
+      if (verdict?.approved) {
+        const liveProvenance = captureApprovedProvenance(
+          freshBoard,
+          fresh,
+          runtimeConfig(),
+          approvedProvenance?.approvedAt
+        );
+        if (
+          !liveProvenance ||
+          !approvedProvenance ||
+          JSON.stringify({ ...liveProvenance, approvedAt: 0 }) !==
+            JSON.stringify({ ...approvedProvenance, approvedAt: 0 })
+        ) {
+          settlementProvenance = undefined;
+          return;
+        }
+        settlementProvenance = liveProvenance;
+      }
+      finalMutationApplied = true;
       // Reviewer usage is billed against the task for honest per-task cost.
       const attempt = fresh.attempts.at(-1);
       if (attempt) {
@@ -1273,21 +2036,32 @@ export async function reviewTask(options: {
         attempt.usage.output += reviewUsage.output;
         attempt.usage.cost += reviewUsage.cost;
         attempt.usage.turns += reviewUsage.turns;
-        attempt.reviewUsage = reviewUsage;
-        attempt.reviewLaunches = [...(attempt.reviewLaunches ?? []), ...reviewLaunches];
+        const previousReviewUsage = attempt.reviewUsage ?? {
+          input: 0,
+          output: 0,
+          cost: 0,
+          turns: 0,
+        };
+        attempt.reviewUsage = {
+          input: previousReviewUsage.input + reviewUsage.input,
+          output: previousReviewUsage.output + reviewUsage.output,
+          cost: previousReviewUsage.cost + reviewUsage.cost,
+          turns: previousReviewUsage.turns + reviewUsage.turns,
+        };
         const latestLaunch = reviewLaunches.at(-1);
         if (latestLaunch?.model !== undefined) attempt.reviewModel = latestLaunch.model;
         if (latestLaunch?.provider !== undefined) attempt.reviewProvider = latestLaunch.provider;
         // Keep the full review report and session for post-hoc inspection.
         if (outcome.finalReport) attempt.reviewReport = outcome.finalReport;
-        if (run.attempt.sessionFile) attempt.reviewSessionFile = run.attempt.sessionFile;
+        if (lastRun?.attempt.sessionFile) attempt.reviewSessionFile = lastRun.attempt.sessionFile;
+        attempt.reviewConvergence = convergence;
 
         const reviewFailure =
           latestLaunch?.failureReason ??
-          (!verdict
+          (convergence.status === "operational_failure"
             ? {
                 kind: "reviewer_failure" as const,
-                message: "reviewer gave no VERDICT line",
+                message: convergence.summary,
                 retryable: true,
               }
             : undefined);
@@ -1298,7 +2072,10 @@ export async function reviewTask(options: {
         fresh.provenance.integratedCommit = integratedCommit;
         if (integratedTree) fresh.provenance.integratedTree = integratedTree;
       }
-      if (!verdict) return; // aborted/failed/no verdict: stays ready_for_review
+      if (!verdict) {
+        fresh.reviewNotes = convergence.summary;
+        return;
+      }
       if (verdict.approved) {
         transition(fresh, "approved");
         fresh.approvalKind = "reviewed";
@@ -1321,6 +2098,7 @@ export async function reviewTask(options: {
         }
         if (integratedCommit) fresh.integratedCommit = integratedCommit;
         else delete fresh.integratedCommit;
+        if (settlementProvenance) fresh.approvedProvenance = settlementProvenance;
         delete fresh.reviewNotes;
         // A chosen intervention succeeded; let a later retry start fresh.
         delete fresh.reviewRejections;
@@ -1376,18 +2154,28 @@ export async function reviewTask(options: {
     });
 
     const result = updated ?? task;
+    if (!finalMutationApplied) {
+      return snapshot(
+        result,
+        "Review identity changed before settlement; retained review evidence was not applied."
+      );
+    }
     if (result.status === "approved") {
       if (worktree) {
         await serializeMainTreeOperation(cwd, () => removeWorktree(cwd, worktree));
       }
-      const cleanup = pruneTaskLogs(cwd, result.id, () => loadBoard(cwd), isLive);
-      for (const warning of cleanup.warnings) options.onRetentionWarning?.(warning);
     }
     if (outcome.aborted) {
       return snapshot(result, "review aborted by user; task stays ready for review");
     }
     if (outcome.exitCode !== 0 || outcome.errorMessage) {
       return snapshot(result, `review failed: ${outcome.errorMessage ?? outcome.exitCode}`);
+    }
+    if (convergence.status === "disagreement") {
+      return snapshot(result, convergence.summary);
+    }
+    if (convergence.status === "operational_failure") {
+      return snapshot(result, convergence.summary);
     }
     if (!verdict) {
       return snapshot(result, "reviewer gave no VERDICT line; review again or inspect manually");

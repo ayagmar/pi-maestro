@@ -17,11 +17,20 @@ import {
   Text,
 } from "@earendil-works/pi-tui";
 import {
+  artifactFindings,
+  captureApprovedProvenance,
+  completionFreshness,
+  pathsOutsideWriteScope,
+} from "./artifact-policy.js";
+import {
   applyPlanTaskEdits,
   approvePlan,
   archiveBoard,
+  assertTaskNotDispatched,
   findTask,
   forceStatus,
+  humanRetryEligibility,
+  humanRetryRiskToken,
   listArchivedBoards,
   loadArchivedBoard,
   loadBoard,
@@ -29,10 +38,12 @@ import {
   planValidationMessage,
   rejectPlan,
   replaceBoard,
+  replaceBoardWithArchive,
   restoreArchivedBoard,
   saveBoard,
-  scopedDependencyGaps,
+  scopedDependencyGapsWithConfig,
   sweepDispatchState,
+  updateBoard,
   updateTask,
   validatePlan,
 } from "./board.js";
@@ -47,11 +58,19 @@ import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } fr
 import { Dashboard, type DashboardTaskAction } from "./dashboard.js";
 import { buildDoctorReport } from "./diagnostics.js";
 import {
+  buildDiscoveryBoard,
+  completedDiscoveryReport,
+  formatDiscoveryPreview,
+  parseDiscoveryOutput,
+} from "./discovery.js";
+import {
   type ActiveDriveControl,
+  acknowledgeDeliveredDecision,
   type BackgroundDrive,
   cleanupCompletedBoard,
   DriveRuntimeController,
   deliverPendingDecision,
+  persistActiveDrive,
   persistDriveDecision,
 } from "./drive-controller.js";
 import {
@@ -64,8 +83,22 @@ import {
   truncateText,
 } from "./format.js";
 import { notify, runHandoff } from "./handoff.js";
-import { exportPlan, importPlan } from "./plan-serialization.js";
+import {
+  comparePlans,
+  exportPlan,
+  formatPlanComparison,
+  importPlan,
+} from "./plan-serialization.js";
+import { formatWorkflowPreflight, preflightWorkflow } from "./preflight.js";
 import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
+import {
+  expandRecipe,
+  loadRecipes,
+  parseRecipeInput,
+  removeRecipe,
+  resolveRecipe,
+  saveRecipeFromBoard,
+} from "./recipes.js";
 import {
   captureBoardLogs,
   cleanupStaleLogs,
@@ -80,6 +113,7 @@ import {
 } from "./runner.js";
 import {
   assertKnownTaskIds,
+  canonicalTaskIds,
   maestroBoardCwd,
   previousBoardSession,
   sessionCanControlDrive,
@@ -112,11 +146,13 @@ import {
   lastReport,
   preflightTaskTiers,
   simulatePlan,
+  snapshot,
   type WorkflowRun,
 } from "./workflow.js";
 import {
   cleanupManagedWorktrees,
   inspectManagedWorktrees,
+  snapshotArtifact,
   sweepWorktrees,
   worktreeExists,
 } from "./worktree.js";
@@ -136,6 +172,7 @@ export default function maestro(
 
   const liveRuns = new Map<string, WorkflowRun>();
   const driveController = new DriveRuntimeController();
+  let runtimeActive = true;
   let contextNudgeShown = false;
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
@@ -162,10 +199,11 @@ export default function maestro(
   function adoptBoard(ctx: ExtensionContext): void {
     const current = ctx.sessionManager.getSessionFile();
     if (!current) return;
-    const board = loadBoard(ctx.cwd);
-    if (board.ownerSessions?.includes(current)) return;
-    board.ownerSessions = [...(board.ownerSessions ?? []), current];
-    saveBoard(ctx.cwd, board);
+    updateBoard(ctx.cwd, (board) => {
+      if (board.ownerSessions?.includes(current)) return false;
+      board.ownerSessions = [...(board.ownerSessions ?? []), current];
+      return true;
+    });
   }
 
   function refreshUI(ctx: ExtensionContext): void {
@@ -189,7 +227,7 @@ export default function maestro(
     }
 
     const progress = formatBoardProgress(board.tasks);
-    const status = projectStatus(board, liveRuns.keys());
+    const status = projectStatus(board, liveRuns.keys(), loadConfig(ctx.cwd));
     const running = status.running;
     const usage = boardUsage(board.tasks);
     const runningPart = running > 0 ? ` · ${running} running` : "";
@@ -239,20 +277,65 @@ export default function maestro(
       live.cost = update.cost;
       live.lastActivity = update.lastActivity;
     }
-    refreshUI(ctx);
+    if (runtimeActive) refreshUI(ctx);
     onProgress();
   }
 
   function trackRun(ctx: ExtensionContext, run: WorkflowRun): () => void {
     liveRuns.set(run.taskId, run);
-    refreshUI(ctx);
+    if (runtimeActive) refreshUI(ctx);
     // The workflow persists the running state immediately after registration.
     // Refresh again once that synchronous mutation has completed.
-    queueMicrotask(() => refreshUI(ctx));
+    queueMicrotask(() => {
+      if (runtimeActive) refreshUI(ctx);
+    });
     return () => {
       liveRuns.delete(run.taskId);
-      refreshUI(ctx);
+      if (runtimeActive) refreshUI(ctx);
     };
+  }
+
+  function manuallyApproveTask(ctx: ExtensionContext, taskId: string): Task {
+    return updateBoard(ctx.cwd, (board) => {
+      const task = findTask(board, taskId);
+      if (!task) throw new Error(`Unknown task id: ${taskId}`);
+      assertTaskNotDispatched(task);
+      if (task.status !== "ready_for_review") {
+        throw new Error("Manual approval requires a task that is ready for review.");
+      }
+      const attempt = task.attempts.at(-1);
+      if (!attempt?.finalReport?.trim() || attempt.endedAt === undefined) {
+        throw new Error("Manual approval requires a completed attempt with a final report.");
+      }
+      const findings = artifactFindings(task, attempt);
+      if (findings && findings.length > 0) {
+        throw new Error(`Manual approval refused: ${findings[0]?.message ?? "artifact is unsafe"}`);
+      }
+      if ((task.writePaths?.length ?? 0) > 0) {
+        if (attempt.touchedFiles.length === 0) {
+          throw new Error("Manual approval requires nonempty attributable Git changes.");
+        }
+        const outsideScope = pathsOutsideWriteScope(task, attempt);
+        if (outsideScope.length > 0) {
+          throw new Error(
+            `Manual approval refused changes outside write scope: ${outsideScope.join(", ")}`
+          );
+        }
+        const artifactCwd = attempt?.worktreePath ?? ctx.cwd;
+        const candidateTree = snapshotArtifact(artifactCwd, attempt.touchedFiles);
+        if (!candidateTree) throw new Error("Manual approval requires a scoped Git artifact.");
+        task.provenance = { candidateTree, capturedAt: Date.now() };
+      }
+      const proof = captureApprovedProvenance(board, task, loadConfig(ctx.cwd));
+      if (!proof) {
+        throw new Error("Manual approval requires an authoritative artifact or final report.");
+      }
+      forceStatus(task, "approved");
+      task.approvalKind = "manual";
+      task.verificationSummary = "accepted manually with versioned artifact proof";
+      task.approvedProvenance = proof;
+      return task;
+    });
   }
 
   async function runDriveWorkflow(
@@ -260,19 +343,31 @@ export default function maestro(
     taskIds: string[] | undefined,
     signal: AbortSignal | undefined,
     reportProgress: (message: string) => void,
-    shouldPause?: () => boolean
+    shouldPause?: () => boolean,
+    humanRetryTaskId?: string,
+    humanRetryExpectedRiskToken?: string,
+    humanRetryOwnerSession?: string
   ): Promise<DriveSummary> {
     const config = loadConfig(ctx.cwd);
     const board = loadBoard(ctx.cwd);
     const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
     if (validationError) throw new Error(validationError);
     assertKnownTaskIds(board, taskIds);
+    const workflowPreflight = preflightWorkflow(board, config, taskIds);
+    if (
+      workflowPreflight.requiresConfirmation &&
+      board.scaleApproval?.signature !== workflowPreflight.signature
+    ) {
+      throw new Error(`Workflow scale confirmation is required (${workflowPreflight.signature}).`);
+    }
     adoptBoard(ctx);
 
     const selected = taskIds
       ? taskIds.map((id) => findTask(board, id)).filter((task): task is Task => task !== undefined)
       : board.tasks;
-    const unresolved = selected.filter((task) => task.status !== "approved");
+    const unresolved = selected.filter(
+      (task) => task.status !== "approved" || task.id === humanRetryTaskId
+    );
     const resolvedTiers = board.planPending
       ? new Map<string, TierConfig>()
       : preflightTaskTiers(unresolved, config, ctx.modelRegistry, ctx.model?.provider);
@@ -312,104 +407,196 @@ export default function maestro(
     if (taskIds) driveOptions.taskIds = taskIds;
     if (signal) driveOptions.signal = signal;
     if (shouldPause) driveOptions.shouldPause = shouldPause;
+    if (humanRetryTaskId) driveOptions.humanRetryTaskId = humanRetryTaskId;
+    if (humanRetryExpectedRiskToken)
+      driveOptions.humanRetryExpectedRiskToken = humanRetryExpectedRiskToken;
+    if (humanRetryOwnerSession) driveOptions.humanRetryOwnerSession = humanRetryOwnerSession;
     return driveBoard(driveOptions);
   }
 
-  function sendDecision(evidence: string): void {
+  function sendDecision(evidence: string, decisionId: string): void {
+    if (!runtimeActive) throw new Error("Maestro session runtime is no longer active.");
     pi.sendMessage(
-      { customType: MESSAGE_TYPE, content: evidence, display: true },
+      { customType: MESSAGE_TYPE, content: evidence, display: true, details: { decisionId } },
       { triggerTurn: true, deliverAs: "followUp" }
     );
+  }
+
+  function validateDriveStart(ctx: ExtensionContext, taskIds: string[] | undefined): void {
+    const board = loadBoard(ctx.cwd);
+    const config = loadConfig(ctx.cwd);
+    const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
+    if (validationError) throw new Error(validationError);
+    assertKnownTaskIds(board, taskIds);
+    if (board.planPending) throw new Error("Plan approval is pending.");
+    const preflight = preflightWorkflow(board, config, taskIds);
+    if (preflight.requiresConfirmation && board.scaleApproval?.signature !== preflight.signature) {
+      throw new Error(
+        `Workflow scale confirmation is required (${preflight.signature}); use the human /${COMMAND} drive command to inspect and confirm preflight.`
+      );
+    }
+    if (!taskIds) return;
+
+    const gaps = scopedDependencyGapsWithConfig(board, taskIds, config);
+    if (gaps.length > 0) {
+      throw new Error(
+        `Scoped drive omits unresolved dependencies: ${gaps
+          .map((gap) => `${gap.taskId} requires ${gap.dependencyId}`)
+          .join(", ")}`
+      );
+    }
+  }
+
+  async function confirmDriveScale(
+    ctx: ExtensionContext,
+    taskIds: string[] | undefined
+  ): Promise<boolean> {
+    const board = loadBoard(ctx.cwd);
+    const config = loadConfig(ctx.cwd);
+    const preflight = preflightWorkflow(board, config, taskIds);
+    if (!preflight.requiresConfirmation || board.scaleApproval?.signature === preflight.signature) {
+      return true;
+    }
+    notify(ctx, formatWorkflowPreflight(preflight), "warning");
+    if (!ctx.hasUI) return false;
+    const confirmed = await ctx.ui.confirm(
+      "Confirm workflow scale?",
+      `${preflight.taskCount} tasks and up to ${preflight.totalLaunchUpperBound} raw launches (${preflight.signature}).`
+    );
+    if (!confirmed) return false;
+    updateBoard(ctx.cwd, (fresh) => {
+      const current = preflightWorkflow(fresh, loadConfig(ctx.cwd), taskIds);
+      if (current.signature !== preflight.signature) {
+        throw new Error("Workflow changed after preflight; inspect and confirm it again.");
+      }
+      fresh.scaleApproval = { signature: current.signature, confirmedAt: Date.now() };
+    });
+    return true;
   }
 
   function startBackgroundDrive(
     ctx: ExtensionContext,
     taskIds: string[] | undefined,
     signal?: AbortSignal,
-    reportProgress: (message: string) => void = () => {}
+    reportProgress: (message: string) => void = () => {},
+    humanRetryTaskId?: string,
+    humanRetryExpectedRiskToken?: string
   ): BackgroundDrive {
     if (driveController.hasActive()) throw new Error("An autonomous drive is already active.");
+    validateDriveStart(ctx, taskIds);
 
     const operation: BackgroundDrive = { promise: Promise.resolve() };
     const ownerSession = ctx.sessionManager.getSessionFile();
     if (ownerSession) operation.ownerSession = ownerSession;
-    driveController.setBackground(operation);
-    const statusRefresh = setInterval(() => refreshUI(ctx), 1_000);
-    statusRefresh.unref();
-    operation.promise = runControlledDrive(ctx, taskIds, signal, reportProgress)
-      .then((summary) => {
-        operation.summary = summary;
-        const message = formatDrivePulse(summary).slice(0, 4000);
-        if (summary.stoppedBecause.code === "completed") cleanupCompletedBoard(ctx.cwd);
-        persistDriveDecision(ctx.cwd, ownerSession, summary, message);
-        deliverPendingDecision(ctx.cwd, ownerSession, sendDecision);
-      })
-      .catch((error) => {
-        operation.error = error instanceof Error ? error.message : String(error);
-      })
-      .finally(() => {
-        clearInterval(statusRefresh);
-        refreshUI(ctx);
-      });
-    return driveController.getBackground() ?? operation;
-  }
-
-  function savePausedDrive(cwd: string, pausedDrive: PausedDriveState | undefined): void {
-    const board = loadBoard(cwd);
-    if (pausedDrive) board.pausedDrive = pausedDrive;
-    else delete board.pausedDrive;
-    saveBoard(cwd, board);
-  }
-
-  async function runControlledDrive(
-    ctx: ExtensionContext,
-    taskIds: string[] | undefined,
-    signal: AbortSignal | undefined,
-    reportProgress: (message: string) => void
-  ): Promise<DriveSummary> {
-    if (driveController.hasActive()) throw new Error("An autonomous drive is already active.");
-    const board = loadBoard(ctx.cwd);
-    const config = loadConfig(ctx.cwd);
-    const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
-    if (validationError) throw new Error(validationError);
-    assertKnownTaskIds(board, taskIds);
-    if (taskIds) {
-      const gaps = scopedDependencyGaps(board, taskIds);
-      if (gaps.length > 0) {
-        throw new Error(
-          `Scoped drive omits unresolved dependencies: ${gaps
-            .map((gap) => `${gap.taskId} requires ${gap.dependencyId}`)
-            .join(", ")}`
-        );
-      }
-    }
-
-    const ownerSession = ctx.sessionManager.getSessionFile();
+    const driveId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const control: ActiveDriveControl = {
+      id: driveId,
       cwd: ctx.cwd,
       pauseRequested: false,
       abortController: new AbortController(),
     };
     if (ownerSession) control.ownerSession = ownerSession;
     if (taskIds) control.taskIds = taskIds;
-    driveController.begin(control);
-    savePausedDrive(ctx.cwd, undefined);
+
+    const reserved = persistActiveDrive(ctx.cwd, {
+      id: driveId,
+      ...(ownerSession ? { ownerSession } : {}),
+      ...(taskIds ? { taskIds } : {}),
+      startedAt: Date.now(),
+    });
+    if (!reserved) {
+      throw new Error("Another session already owns an active or paused drive.");
+    }
+    try {
+      driveController.begin(control);
+    } catch (error) {
+      const summary = unexpectedDriveSummary(ctx.cwd, taskIds, error);
+      persistDriveDecision(ctx.cwd, ownerSession, summary, formatDrivePulse(summary), driveId);
+      throw error;
+    }
+    driveController.setBackground(operation);
+    const statusRefresh = setInterval(() => {
+      if (runtimeActive) refreshUI(ctx);
+    }, 1_000);
+    statusRefresh.unref();
+    operation.promise = runControlledDrive(
+      ctx,
+      control,
+      signal,
+      reportProgress,
+      humanRetryTaskId,
+      humanRetryExpectedRiskToken,
+      ownerSession
+    )
+      .then((summary) => {
+        operation.summary = summary;
+        const message = formatDrivePulse(summary).slice(0, 4000);
+        const persisted = persistDriveDecision(ctx.cwd, ownerSession, summary, message, driveId);
+        if (persisted && summary.stoppedBecause.code === "completed") {
+          cleanupCompletedBoard(ctx.cwd);
+        }
+        if (persisted && runtimeActive) {
+          deliverPendingDecision(ctx.cwd, ownerSession, sendDecision);
+        }
+      })
+      .catch((error) => {
+        operation.error = error instanceof Error ? error.message : String(error);
+        try {
+          const summary = unexpectedDriveSummary(ctx.cwd, taskIds, operation.error);
+          const persisted = persistDriveDecision(
+            ctx.cwd,
+            ownerSession,
+            summary,
+            formatDrivePulse(summary),
+            driveId
+          );
+          if (persisted && runtimeActive) {
+            deliverPendingDecision(ctx.cwd, ownerSession, sendDecision);
+          }
+        } catch (persistenceError) {
+          operation.error = `${operation.error}; could not persist internal error: ${String(persistenceError)}`;
+        }
+      })
+      .finally(() => {
+        driveController.finish(control);
+        clearInterval(statusRefresh);
+        if (runtimeActive) refreshUI(ctx);
+      });
+    return driveController.getBackground() ?? operation;
+  }
+
+  function savePausedDrive(cwd: string, pausedDrive: PausedDriveState | undefined): void {
+    updateBoard(cwd, (board) => {
+      if (pausedDrive) board.pausedDrive = pausedDrive;
+      else delete board.pausedDrive;
+      return true;
+    });
+  }
+
+  async function runControlledDrive(
+    ctx: ExtensionContext,
+    control: ActiveDriveControl,
+    signal: AbortSignal | undefined,
+    reportProgress: (message: string) => void,
+    humanRetryTaskId?: string,
+    humanRetryExpectedRiskToken?: string,
+    humanRetryOwnerSession?: string
+  ): Promise<DriveSummary> {
+    const taskIds = control.taskIds;
 
     const combinedSignal = signal
       ? AbortSignal.any([signal, control.abortController.signal])
       : control.abortController.signal;
-    let summary: DriveSummary;
-    try {
-      summary = await runDriveWorkflow(
-        ctx,
-        taskIds,
-        combinedSignal,
-        reportProgress,
-        () => control.pauseRequested
-      );
-    } finally {
-      driveController.finish(control);
-    }
+    const summary = await runDriveWorkflow(
+      ctx,
+      taskIds,
+      combinedSignal,
+      reportProgress,
+      () => control.pauseRequested,
+      humanRetryTaskId,
+      humanRetryExpectedRiskToken,
+      humanRetryOwnerSession
+    );
 
     if (
       summary.stoppedBecause.code === "paused" ||
@@ -418,10 +605,55 @@ export default function maestro(
     ) {
       const paused: PausedDriveState = {};
       if (taskIds) paused.taskIds = taskIds;
-      if (ownerSession) paused.ownerSession = ownerSession;
+      if (control.ownerSession) paused.ownerSession = control.ownerSession;
       savePausedDrive(ctx.cwd, paused);
     }
     return summary;
+  }
+
+  function unexpectedDriveSummary(
+    cwd: string,
+    taskIds: string[] | undefined,
+    error: unknown
+  ): DriveSummary {
+    const board = loadBoard(cwd);
+    const selected = board.tasks.filter((task) => !taskIds || taskIds.includes(task.id));
+    return {
+      rounds: 0,
+      tasks: selected.map((task) => snapshot(task)),
+      stoppedBecause: {
+        code: "error",
+        message: `Drive stopped with an internal error: ${error instanceof Error ? error.message : String(error)}`,
+        taskIds: selected.map((task) => task.id),
+      },
+    };
+  }
+
+  function sessionContainsDecision(ctx: ExtensionContext, decisionId: string): boolean {
+    const sessionManager = ctx.sessionManager as typeof ctx.sessionManager & {
+      getEntries?: () => unknown[];
+    };
+    if (typeof sessionManager.getEntries !== "function") return false;
+    return sessionManager.getEntries().some((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const record = entry as unknown as Record<string, unknown>;
+      const details = record.details;
+      if (
+        details &&
+        typeof details === "object" &&
+        (details as Record<string, unknown>).decisionId === decisionId
+      ) {
+        return true;
+      }
+      const message = record.message;
+      if (!message || typeof message !== "object") return false;
+      const messageDetails = (message as Record<string, unknown>).details;
+      return (
+        !!messageDetails &&
+        typeof messageDetails === "object" &&
+        (messageDetails as Record<string, unknown>).decisionId === decisionId
+      );
+    });
   }
 
   function launchCommandDrive(ctx: ExtensionCommandContext, taskIds: string[] | undefined): void {
@@ -429,6 +661,7 @@ export default function maestro(
       notify(ctx, message)
     );
     void operation.promise.then(() => {
+      if (!runtimeActive) return;
       refreshUI(ctx);
       if (operation.summary) {
         notify(
@@ -439,6 +672,101 @@ export default function maestro(
         return;
       }
       if (operation.error) notify(ctx, operation.error, "error");
+    });
+  }
+
+  async function requestHumanRetry(ctx: ExtensionContext, requestedTaskId: string): Promise<void> {
+    if (driveController.hasActive() || liveRuns.size > 0) {
+      notify(
+        ctx,
+        "Retry not started: an autonomous drive or executor is already running.",
+        "warning"
+      );
+      return;
+    }
+    const previewBoard = loadBoard(ctx.cwd);
+    const task = findTask(previewBoard, requestedTaskId);
+    const ownerSession = ctx.sessionManager.getSessionFile();
+    const eligibility = humanRetryEligibility(previewBoard, requestedTaskId, {
+      maxAttempts: loadConfig(ctx.cwd).maxAttempts,
+      config: loadConfig(ctx.cwd),
+      isLive: (id) => liveRuns.has(id),
+      ...(ownerSession ? { ownerSession } : {}),
+    });
+    if (!eligibility.eligible || !task) {
+      notify(ctx, `Retry not started: ${eligibility.message}`, "warning");
+      return;
+    }
+
+    const riskEvidence = humanRetryRiskToken(task);
+    if (eligibility.requiresConfirmation) {
+      if (!ctx.hasUI) {
+        notify(ctx, `Retry not started: ${eligibility.message}`, "warning");
+        return;
+      }
+      const confirmed = await ctx.ui.confirm(
+        "Retry accepted or integrated work?",
+        `${task.id} will run in a fresh isolated worktree. Existing attempts and recovery evidence will be preserved.`
+      );
+      if (!confirmed) {
+        notify(ctx, "Retry cancelled; accepted work was not changed.", "warning");
+        return;
+      }
+      const currentBoard = loadBoard(ctx.cwd);
+      const currentTask = findTask(currentBoard, task.id);
+      const currentEligibility = humanRetryEligibility(currentBoard, task.id, {
+        maxAttempts: loadConfig(ctx.cwd).maxAttempts,
+        config: loadConfig(ctx.cwd),
+        isLive: (id) => liveRuns.has(id),
+        ...(ownerSession ? { ownerSession } : {}),
+      });
+      if (
+        !currentTask ||
+        !currentEligibility.eligible ||
+        humanRetryRiskToken(currentTask) !== riskEvidence
+      ) {
+        notify(
+          ctx,
+          "Retry not started: task acceptance or integration evidence changed during confirmation.",
+          "warning"
+        );
+        return;
+      }
+    }
+    if (!(await confirmDriveScale(ctx, [task.id]))) {
+      notify(ctx, "Retry not started: workflow scale was not confirmed.", "warning");
+      return;
+    }
+    const confirmedTask = findTask(loadBoard(ctx.cwd), task.id);
+    if (!confirmedTask || humanRetryRiskToken(confirmedTask) !== riskEvidence) {
+      notify(
+        ctx,
+        "Retry not started: task acceptance or integration evidence changed; confirm it again.",
+        "warning"
+      );
+      return;
+    }
+
+    notify(ctx, `Retrying ${task.id} in isolated recovery mode…`);
+    const operation = startBackgroundDrive(
+      ctx,
+      [task.id],
+      undefined,
+      (message) => notify(ctx, message),
+      task.id,
+      riskEvidence
+    );
+    void operation.promise.then(() => {
+      if (!runtimeActive) return;
+      if (operation.summary) {
+        notify(
+          ctx,
+          formatDriveSummary(operation.summary),
+          operation.summary.stoppedBecause.code === "completed" ? "info" : "warning"
+        );
+      } else if (operation.error) {
+        notify(ctx, operation.error, "error");
+      }
     });
   }
 
@@ -460,8 +788,17 @@ export default function maestro(
     if (code === "escalation_required") {
       return `${base}\n\nChoose one: maestro_update to raise the tier or rewrite the brief, maestro_plan to split the task, cancel it, or ask the user when scope/cost judgment is required, then /maestro resume. Do not blindly retry or raise maxAttempts.`;
     }
+    if (code === "review_disagreement") {
+      return `${base}\n\nResolve the disagreement deliberately: use maestro_update to change the task reviewPolicy, or split/cancel the task after inspecting both retained reviewer reports. Then start maestro_drive for the corrected scope.`;
+    }
+    if (code === "reviewer_failure") {
+      return `${base}\n\nInspect the retained reviewer launch and artifact/verification evidence, correct the operational cause, then start maestro_drive for the affected task. Operational failures do not count as reviewer rejection or disagreement.`;
+    }
     if (code === "attempt_cap") {
-      return `${base}\n\nThe capped predecessor cannot run again because its consumed attempts remain even if its tier or brief changes. Create a narrowly scoped successor with maestro_plan whose title and brief identify the capped task. Keep the capped predecessor visible, then use maestro_update to replace its id in every downstream dependency while preserving unrelated dependencies. Start maestro_drive with an explicit taskIds list containing the successor and every rewired dependent, and excluding the capped predecessor. Do not raise the project maxAttempts to force another retry.`;
+      return `${base}\n\nThe capped predecessor cannot run again because its consumed attempts remain. Create a narrowly scoped successor with maestro_plan and set supersedesTaskId to the capped task. Maestro atomically preserves the predecessor as cancelled and rewires downstream dependencies. Then start maestro_drive for the successor and rewired dependents. Do not perform cancellation/rewiring as separate calls or raise maxAttempts.`;
+    }
+    if (code === "stale_completion") {
+      return `${base}\n\nThe approved proof is stale or legacy and cannot satisfy dependencies. Use the human Retry control for an isolated rerun, or create a scoped successor when the old work must remain retained. Inspect the fingerprint reason before changing the contract or configuration.`;
     }
     if (code === "blocked") {
       return `${base}\n\nChoose one: maestro_update the brief/tier, maestro_plan to split, cancel the task, or ask the user. Do not raise the project maxAttempts to force another retry.`;
@@ -554,9 +891,30 @@ export default function maestro(
           notify(ctx, "An autonomous drive or executor batch is already running.", "warning");
           return;
         }
-        const taskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
+        const requestedTaskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
+        let taskIds: string[] | undefined;
+        try {
+          taskIds = canonicalTaskIds(loadBoard(ctx.cwd), requestedTaskIds);
+          if (loadBoard(ctx.cwd).planPending) throw new Error("Plan approval is pending.");
+          if (!(await confirmDriveScale(ctx, taskIds))) {
+            notify(ctx, "Drive not started: workflow scale was not confirmed.", "warning");
+            return;
+          }
+          validateDriveStart(ctx, taskIds);
+        } catch (error) {
+          notify(ctx, `Drive not started: ${String(error)}`, "warning");
+          return;
+        }
         notify(ctx, `Driving ${taskIds?.join(", ") ?? "the whole board"}…`);
         launchCommandDrive(ctx, taskIds);
+        return;
+      }
+      case "retry": {
+        if (!rest || restParts.length !== 1) {
+          notify(ctx, `Usage: /${COMMAND} retry <taskId>`, "warning");
+          return;
+        }
+        await requestHumanRetry(ctx, rest);
         return;
       }
       case "pause": {
@@ -597,8 +955,21 @@ export default function maestro(
           notify(ctx, "Only the session that paused this drive may resume it.", "warning");
           return;
         }
-        notify(ctx, `Resuming ${paused.taskIds?.join(", ") ?? "the whole board"}…`);
-        launchCommandDrive(ctx, paused.taskIds);
+        let taskIds: string[] | undefined;
+        try {
+          taskIds = canonicalTaskIds(board, paused.taskIds);
+          if (board.planPending) throw new Error("Plan approval is pending.");
+          if (!(await confirmDriveScale(ctx, taskIds))) {
+            notify(ctx, "Drive not resumed: workflow scale was not confirmed.", "warning");
+            return;
+          }
+          validateDriveStart(ctx, taskIds);
+        } catch (error) {
+          notify(ctx, `Drive not resumed: ${String(error)}`, "warning");
+          return;
+        }
+        notify(ctx, `Resuming ${taskIds?.join(", ") ?? "the whole board"}…`);
+        launchCommandDrive(ctx, taskIds);
         return;
       }
       case "abort": {
@@ -630,7 +1001,7 @@ export default function maestro(
         return;
       }
       case "plan": {
-        const [planAction, planPath] = restParts;
+        const [planAction, planPath, planTaskId] = restParts;
         if (planAction === "export") {
           if (!planPath) {
             notify(ctx, `Usage: /${COMMAND} plan export <file>`, "warning");
@@ -660,7 +1031,8 @@ export default function maestro(
             imported = importPlan(
               readFileSync(resolve(ctx.cwd, planPath), "utf-8"),
               Object.keys(config.tiers),
-              Object.keys(config.verificationProfiles ?? {})
+              Object.keys(config.verificationProfiles ?? {}),
+              config.maxPlanTasks
             );
           } catch (error) {
             notify(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -689,7 +1061,187 @@ export default function maestro(
           notify(ctx, `Imported ${imported.tasks.length} task(s); plan approval is required.`);
           return;
         }
+        if (planAction === "diff" || planAction === "compare") {
+          if (!planPath) {
+            notify(ctx, `Usage: /${COMMAND} plan ${planAction} <file> [taskId]`, "warning");
+            return;
+          }
+          const config = loadConfig(ctx.cwd);
+          try {
+            const candidate = importPlan(
+              readFileSync(resolve(ctx.cwd, planPath), "utf-8"),
+              Object.keys(config.tiers),
+              Object.keys(config.verificationProfiles ?? {}),
+              config.maxPlanTasks
+            );
+            const comparison = comparePlans(loadBoard(ctx.cwd), candidate, config);
+            notify(
+              ctx,
+              formatPlanComparison(comparison, `/${COMMAND} plan compare ${planPath}`, planTaskId)
+            );
+          } catch (error) {
+            notify(ctx, error instanceof Error ? error.message : String(error), "error");
+          }
+          return;
+        }
         await showPlan(ctx);
+        return;
+      }
+      case "recipe": {
+        const match = rest.match(/^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]+))?$/);
+        const action = match?.[1]?.toLowerCase() ?? "list";
+        const name = match?.[2];
+        const trailing = match?.[3];
+
+        try {
+          if (action === "list") {
+            const recipes = loadRecipes(ctx.cwd);
+            notify(
+              ctx,
+              recipes.length === 0
+                ? "No valid workflow recipes found."
+                : recipes
+                    .map(
+                      ({ recipe, scope }) =>
+                        `${recipe.name} [${scope}] — ${recipe.description ?? `${recipe.tasks.length} task(s)`}`
+                    )
+                    .join("\n")
+            );
+            return;
+          }
+          if (action === "inspect") {
+            if (!name) {
+              notify(ctx, `Usage: /${COMMAND} recipe inspect <name>`, "warning");
+              return;
+            }
+            const resolved = resolveRecipe(ctx.cwd, name);
+            notify(
+              ctx,
+              `[${resolved.scope}] ${resolved.file}\n${JSON.stringify(resolved.recipe, null, 2)}`
+            );
+            return;
+          }
+          if (action === "preview") {
+            if (!name) {
+              notify(ctx, `Usage: /${COMMAND} recipe preview <name> [JSON input]`, "warning");
+              return;
+            }
+            const resolved = resolveRecipe(ctx.cwd, name);
+            const config = loadConfig(ctx.cwd);
+            const expanded = expandRecipe(
+              resolved.recipe,
+              parseRecipeInput(trailing),
+              Object.keys(config.tiers),
+              Object.keys(config.verificationProfiles ?? {}),
+              config.maxPlanTasks
+            );
+            notify(
+              ctx,
+              formatPlanComparison(
+                comparePlans(loadBoard(ctx.cwd), expanded, config),
+                `/${COMMAND} recipe preview ${name}`,
+                undefined,
+                4_000,
+                `/${COMMAND} recipe inspect ${name}`
+              )
+            );
+            return;
+          }
+          if (action === "save") {
+            if (!name) {
+              notify(ctx, `Usage: /${COMMAND} recipe save <name> [user|project]`, "warning");
+              return;
+            }
+            const scope = trailing?.toLowerCase() ?? "user";
+            if (scope !== "user" && scope !== "project") {
+              notify(ctx, "Recipe scope must be user or project.", "warning");
+              return;
+            }
+            const file = saveRecipeFromBoard(scope, ctx.cwd, name, loadBoard(ctx.cwd));
+            notify(ctx, `Saved ${scope} recipe "${name}" to ${file}.`);
+            return;
+          }
+          if (action === "run") {
+            if (!name) {
+              notify(ctx, `Usage: /${COMMAND} recipe run <name> [JSON input]`, "warning");
+              return;
+            }
+            if (liveRuns.size > 0) {
+              notify(ctx, "Executors are still running. Recipe run cancelled.", "warning");
+              return;
+            }
+            const resolved = resolveRecipe(ctx.cwd, name);
+            const config = loadConfig(ctx.cwd);
+            const expanded = expandRecipe(
+              resolved.recipe,
+              parseRecipeInput(trailing),
+              Object.keys(config.tiers),
+              Object.keys(config.verificationProfiles ?? {}),
+              config.maxPlanTasks
+            );
+            const current = loadBoard(ctx.cwd);
+            let archive: string | undefined;
+            if (current.tasks.length > 0) {
+              const confirmed =
+                ctx.hasUI &&
+                (await ctx.ui.confirm(
+                  "Run workflow recipe?",
+                  `Archive ${current.tasks.length} current task(s), then run "${name}"?`
+                ));
+              if (!confirmed) {
+                notify(ctx, "Recipe run cancelled; current board was not changed.", "warning");
+                return;
+              }
+              archive = archiveBoard(ctx.cwd);
+              if (!archive) {
+                notify(ctx, "Could not archive the current board; recipe run cancelled.", "error");
+                return;
+              }
+            }
+            replaceBoard(ctx.cwd, expanded, current.revision ?? 0);
+            refreshUI(ctx);
+            notify(
+              ctx,
+              `Expanded recipe "${name}" into ${expanded.tasks.length} task(s); plan approval is required.${archive ? ` Previous board archived at ${archive}.` : ""}`
+            );
+            return;
+          }
+          if (action === "remove") {
+            if (!name) {
+              notify(ctx, `Usage: /${COMMAND} recipe remove <name> [user|project]`, "warning");
+              return;
+            }
+            const requestedScope = trailing?.toLowerCase();
+            if (
+              requestedScope !== undefined &&
+              requestedScope !== "user" &&
+              requestedScope !== "project"
+            ) {
+              notify(ctx, "Recipe scope must be user or project.", "warning");
+              return;
+            }
+            const scope = requestedScope ?? resolveRecipe(ctx.cwd, name).scope;
+            const confirmed =
+              ctx.hasUI &&
+              (await ctx.ui.confirm(
+                "Remove workflow recipe?",
+                `Permanently remove ${scope} recipe "${name}"?`
+              ));
+            if (!confirmed) {
+              notify(ctx, "Recipe removal cancelled.", "warning");
+              return;
+            }
+            if (!removeRecipe(scope, ctx.cwd, name)) {
+              notify(ctx, `${scope} recipe "${name}" was not found.`, "warning");
+              return;
+            }
+            notify(ctx, `Removed ${scope} recipe "${name}".`);
+            return;
+          }
+          notify(ctx, `Unknown recipe action: ${action}`, "warning");
+        } catch (error) {
+          notify(ctx, error instanceof Error ? error.message : String(error), "error");
+        }
         return;
       }
       case "board":
@@ -728,6 +1280,90 @@ export default function maestro(
         notify(ctx, validationError ?? simulatePlan(board, loadConfig(ctx.cwd), taskIds));
         return;
       }
+      case "discover": {
+        const [taskId, requestedMode, ...extra] = restParts;
+        const mode = requestedMode ?? "append";
+        if (!taskId || extra.length > 0 || (mode !== "append" && mode !== "replace")) {
+          notify(ctx, `Usage: /${COMMAND} discover <taskId> [append|replace]`, "warning");
+          return;
+        }
+
+        try {
+          const previewBoard = loadBoard(ctx.cwd);
+          const previewRevision = previewBoard.revision ?? 0;
+          const discoveryTask = findTask(previewBoard, taskId);
+          if (liveRuns.has(discoveryTask?.id ?? taskId)) {
+            throw new Error(`${taskId} discovery output is still live; wait for completion.`);
+          }
+          const report = completedDiscoveryReport(discoveryTask);
+          const config = loadConfig(ctx.cwd);
+          const output = parseDiscoveryOutput(report, config.maxDiscoveryGeneratedTasks);
+          buildDiscoveryBoard(previewBoard, taskId, report, mode, config);
+          notify(ctx, formatDiscoveryPreview(output, mode));
+
+          const confirmed =
+            ctx.hasUI &&
+            (await ctx.ui.confirm(
+              "Apply discovery tasks?",
+              `${mode === "replace" ? "Replace the current board with" : "Append"} ${output.items.length} generated task(s)?`
+            ));
+          if (!confirmed) {
+            notify(ctx, "Discovery tasks were not approved; the board was not changed.", "warning");
+            return;
+          }
+
+          let archive: string | undefined;
+          if (mode === "append") {
+            updateBoard(ctx.cwd, (board) => {
+              if ((board.revision ?? 0) !== previewRevision) {
+                throw new Error(
+                  "The board changed after preview; inspect and approve discovery again."
+                );
+              }
+              const freshReport = completedDiscoveryReport(findTask(board, taskId));
+              if (freshReport !== report) {
+                throw new Error(
+                  "Discovery result changed after preview; inspect and approve it again."
+                );
+              }
+              const candidate = buildDiscoveryBoard(
+                board,
+                taskId,
+                report,
+                mode,
+                loadConfig(ctx.cwd)
+              );
+              board.nextTaskNumber = candidate.nextTaskNumber;
+              board.tasks = candidate.tasks;
+              board.planPending = true;
+              return true;
+            });
+          } else {
+            archive = replaceBoardWithArchive(ctx.cwd, (board) => {
+              if ((board.revision ?? 0) !== previewRevision) {
+                throw new Error(
+                  "The board changed after preview; inspect and approve discovery again."
+                );
+              }
+              const freshReport = completedDiscoveryReport(findTask(board, taskId));
+              if (freshReport !== report) {
+                throw new Error(
+                  "Discovery result changed after preview; inspect and approve it again."
+                );
+              }
+              return buildDiscoveryBoard(board, taskId, report, mode, loadConfig(ctx.cwd));
+            });
+          }
+          refreshUI(ctx);
+          notify(
+            ctx,
+            `Approved ${output.items.length} discovery task(s); plan approval is required.${archive ? ` Previous board archived at ${archive}.` : ""}`
+          );
+        } catch (error) {
+          notify(ctx, error instanceof Error ? error.message : String(error), "error");
+        }
+        return;
+      }
       case "costs": {
         const board = loadBoard(ctx.cwd);
         notify(
@@ -740,7 +1376,15 @@ export default function maestro(
       }
       case "reconcile": {
         const warnings: string[] = [];
-        for (const task of loadBoard(ctx.cwd).tasks) {
+        const board = loadBoard(ctx.cwd);
+        const config = loadConfig(ctx.cwd);
+        for (const task of board.tasks) {
+          if (task.status === "approved") {
+            const freshness = completionFreshness(board, task, config);
+            if (freshness.state !== "fresh") {
+              warnings.push(`${task.id}: ${freshness.state} completion — ${freshness.reason}`);
+            }
+          }
           if (task.approvalKind === "manual") warnings.push(`${task.id}: manually accepted`);
           if (task.status === "approved" && task.approvalKind !== "reviewed") {
             warnings.push(`${task.id}: approved without a reviewed artifact`);
@@ -1036,6 +1680,7 @@ export default function maestro(
             `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
             `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
             `/${COMMAND} drive [ids]    autonomously run, review, and retry tasks`,
+            `/${COMMAND} retry <taskId> retry failed work with isolated human-controlled safety`,
             `/${COMMAND} pause          stop the drive after active executors finish`,
             `/${COMMAND} resume         continue a paused drive from fresh board state`,
             `/${COMMAND} abort          abort a drive and its active executors`,
@@ -1047,6 +1692,7 @@ export default function maestro(
             `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
             `/${COMMAND} costs          show attempts, total/average cost, models, and providers`,
             `/${COMMAND} simulate [ids] preview deterministic dependency waves without running work`,
+            `/${COMMAND} discover <taskId> [append|replace]  preview and approve generated tasks`,
             `/${COMMAND} doctor         diagnose config, models, authentication, git, and managed worktrees`,
             `/${COMMAND} doctor cleanup remove rechecked stale/orphaned worktrees after confirmation`,
             `/${COMMAND} history [n]    show recent task status changes (default 20)`,
@@ -1054,6 +1700,9 @@ export default function maestro(
             `/${COMMAND} timeline archive <file> [id]  show archived evidence`,
             `/${COMMAND} plan export <file>  export a versioned plan without run evidence`,
             `/${COMMAND} plan import <file>  validate, archive current work, and import`,
+            `/${COMMAND} plan diff|compare <file> [taskId]  inspect plan changes without mutation`,
+            `/${COMMAND} recipe list|inspect|preview|save|run|remove  manage declarative recipes`,
+            `/${COMMAND} reconcile      report artifact/provenance inconsistencies without mutation`,
             `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
             `/${COMMAND} reset          archive and clear the board`,
           ].join("\n")
@@ -1089,7 +1738,9 @@ export default function maestro(
       (tui, theme, _keybindings, done) => {
         const dashboard = new Dashboard(theme, {
           getBoard: () => loadBoard(ctx.cwd),
+          getConfig: () => loadConfig(ctx.cwd),
           isLive: (taskId) => liveRuns.has(taskId),
+          liveKind: (taskId) => liveRuns.get(taskId)?.kind,
           liveActivity: (taskId) => {
             const live = liveRuns.get(taskId);
             if (!live) return undefined;
@@ -1103,9 +1754,18 @@ export default function maestro(
             liveRuns.get(taskId)?.handle.abort();
           },
           setTaskStatus: (taskId, status) => {
-            updateTask(ctx.cwd, taskId, (fresh) => {
-              forceStatus(fresh, status);
-            });
+            try {
+              if (status === "approved") manuallyApproveTask(ctx, taskId);
+              else {
+                updateTask(ctx.cwd, taskId, (fresh) => {
+                  assertTaskNotDispatched(fresh);
+                  forceStatus(fresh, status);
+                });
+              }
+            } catch (error) {
+              notify(ctx, error instanceof Error ? error.message : String(error), "warning");
+              return;
+            }
             if (status === "approved") {
               const cleanup = pruneTaskLogs(
                 ctx.cwd,
@@ -1130,6 +1790,15 @@ export default function maestro(
             const task = findTask(loadBoard(ctx.cwd), taskId);
             return isCommandContext(ctx) && task?.attempts.at(-1)?.reviewSessionFile !== undefined;
           },
+          retryEligibility: (taskId) =>
+            humanRetryEligibility(loadBoard(ctx.cwd), taskId, {
+              maxAttempts: loadConfig(ctx.cwd).maxAttempts,
+              config: loadConfig(ctx.cwd),
+              isLive: (id) => liveRuns.has(id),
+              ...(ctx.sessionManager.getSessionFile()
+                ? { ownerSession: ctx.sessionManager.getSessionFile() }
+                : {}),
+            }),
           selectTaskAction: (taskId, action) => done({ taskId, action }),
           close: () => done(null),
           requestRender: () => tui.requestRender(),
@@ -1145,24 +1814,7 @@ export default function maestro(
 
     if (!selection) return;
     if (selection.action === "retry") {
-      try {
-        const operation = startBackgroundDrive(ctx, [selection.taskId], undefined, (message) =>
-          notify(ctx, message)
-        );
-        void operation.promise.then(() => {
-          if (operation.summary) {
-            notify(
-              ctx,
-              formatDriveSummary(operation.summary),
-              operation.summary.stoppedBecause.code === "completed" ? "info" : "warning"
-            );
-          } else if (operation.error) {
-            notify(ctx, operation.error, "error");
-          }
-        });
-      } catch (error) {
-        notify(ctx, error instanceof Error ? error.message : String(error), "error");
-      }
+      await requestHumanRetry(ctx, selection.taskId);
       return;
     }
     if (selection.action === "view_report") {
@@ -1240,13 +1892,63 @@ export default function maestro(
         const fresh = loadBoard(ctx.cwd);
         const config = loadConfig(ctx.cwd);
         const validationError = planValidationMessage(
-          approvePlan(fresh, Object.keys(config.tiers))
+          validatePlan(fresh, Object.keys(config.tiers))
         );
         if (validationError) {
           notify(ctx, `${validationError}\nEdit the listed tasks before approving.`, "error");
           continue;
         }
-        saveBoard(ctx.cwd, fresh);
+        const preflight = preflightWorkflow(fresh, config);
+        notify(
+          ctx,
+          formatWorkflowPreflight(preflight),
+          preflight.requiresConfirmation ? "warning" : "info"
+        );
+        if (preflight.requiresConfirmation) {
+          const confirmed =
+            ctx.hasUI &&
+            (await ctx.ui.confirm(
+              "Confirm workflow scale?",
+              `${preflight.taskCount} tasks and up to ${preflight.totalLaunchUpperBound} raw launches (${preflight.signature}).`
+            ));
+          if (!confirmed) {
+            notify(ctx, "Plan remains gated; workflow scale was not confirmed.", "warning");
+            continue;
+          }
+        }
+        try {
+          updateBoard(ctx.cwd, (current) => {
+            const currentConfig = loadConfig(ctx.cwd);
+            const currentValidationError = planValidationMessage(
+              validatePlan(current, Object.keys(currentConfig.tiers))
+            );
+            if (currentValidationError) throw new Error(currentValidationError);
+            const currentPreflight = preflightWorkflow(current, currentConfig);
+            if (
+              preflight.requiresConfirmation &&
+              currentPreflight.signature !== preflight.signature
+            ) {
+              throw new Error("Workflow changed after preflight confirmation.");
+            }
+            if (!preflight.requiresConfirmation && currentPreflight.requiresConfirmation) {
+              throw new Error("Workflow now requires explicit scale confirmation.");
+            }
+            if (currentPreflight.requiresConfirmation) {
+              current.scaleApproval = {
+                signature: currentPreflight.signature,
+                confirmedAt: Date.now(),
+              };
+            }
+            approvePlan(current, Object.keys(currentConfig.tiers));
+          });
+        } catch (error) {
+          notify(
+            ctx,
+            `${error instanceof Error ? error.message : String(error)} Inspect and confirm the plan again; it remains gated.`,
+            "warning"
+          );
+          return;
+        }
         refreshUI(ctx);
         notify(ctx, "Plan approved. Executors may now be started with maestro_drive.");
         return;
@@ -1273,6 +1975,12 @@ export default function maestro(
   async function editPlanTask(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
     const task = findTask(loadBoard(ctx.cwd), taskId);
     if (!task) return;
+    try {
+      assertTaskNotDispatched(task);
+    } catch (error) {
+      notify(ctx, error instanceof Error ? error.message : String(error), "warning");
+      return;
+    }
     const draft = structuredClone(task);
     const tiers = Object.keys(loadConfig(ctx.cwd).tiers);
 
@@ -1300,6 +2008,10 @@ export default function maestro(
         {
           value: "verification",
           label: `Verification · ${draft.verificationProfile ?? "none"}`,
+        },
+        {
+          value: "reviewPolicy",
+          label: `Review policy · ${draft.reviewPolicy ?? "single"}`,
         },
       ]);
       if (!action || action === "cancel") return;
@@ -1381,6 +2093,21 @@ export default function maestro(
         }
         continue;
       }
+      if (action === "reviewPolicy") {
+        const reviewPolicy = await pickFromList(ctx, "Review policy", [
+          { value: "single", label: "Single reviewer" },
+          { value: "confirm", label: "Independent confirmations" },
+          { value: "find-and-refute", label: "Find and refute" },
+        ]);
+        if (reviewPolicy) {
+          applyPlanTaskEdits(
+            draft,
+            { reviewPolicy: reviewPolicy as "single" | "confirm" | "find-and-refute" },
+            tiers
+          );
+        }
+        continue;
+      }
       if (action === "cancellation") {
         const state = await pickFromList(ctx, "Cancellation state", [
           { value: "active", label: "Active" },
@@ -1403,6 +2130,7 @@ export default function maestro(
           ...(draft.writePaths ? { writePaths: draft.writePaths } : {}),
           ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
           verificationProfile: draft.verificationProfile ?? "",
+          reviewPolicy: draft.reviewPolicy ?? "single",
           cancelled: draft.status === "cancelled",
         },
         tiers
@@ -1419,22 +2147,29 @@ export default function maestro(
         notify(ctx, `${validationError}\nChanges were not saved.`, "error");
         continue;
       }
-      updateTask(ctx.cwd, draft.id, (fresh) => {
-        applyPlanTaskEdits(
-          fresh,
-          {
-            title: draft.title,
-            brief: draft.brief,
-            tier: draft.tier,
-            dependsOn: draft.dependsOn,
-            ...(draft.writePaths ? { writePaths: draft.writePaths } : {}),
-            ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
-            verificationProfile: draft.verificationProfile ?? "",
-            cancelled: draft.status === "cancelled",
-          },
-          tiers
-        );
-      });
+      try {
+        updateTask(ctx.cwd, draft.id, (fresh) => {
+          assertTaskNotDispatched(fresh);
+          applyPlanTaskEdits(
+            fresh,
+            {
+              title: draft.title,
+              brief: draft.brief,
+              tier: draft.tier,
+              dependsOn: draft.dependsOn,
+              ...(draft.writePaths ? { writePaths: draft.writePaths } : {}),
+              ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
+              verificationProfile: draft.verificationProfile ?? "",
+              reviewPolicy: draft.reviewPolicy ?? "single",
+              cancelled: draft.status === "cancelled",
+            },
+            tiers
+          );
+        });
+      } catch (error) {
+        notify(ctx, error instanceof Error ? error.message : String(error), "warning");
+        return;
+      }
       refreshUI(ctx);
       notify(ctx, `${draft.id} plan changes saved.`);
       return;
@@ -1543,15 +2278,28 @@ export default function maestro(
         description: "Switch this TUI into the reviewer's session",
       });
     }
-    for (const status of [
-      "todo",
-      "ready_for_review",
-      "changes_requested",
-      "approved",
-      "cancelled",
-    ] as TaskStatus[]) {
-      if (status !== task.status) {
-        actions.push({ value: `status:${status}`, label: `Mark as ${STATUS_LABELS[status]}` });
+    const retry = humanRetryEligibility(board, task.id, {
+      maxAttempts: loadConfig(ctx.cwd).maxAttempts,
+      config: loadConfig(ctx.cwd),
+      isLive: (id) => liveRuns.has(id),
+      ...(ctx.sessionManager.getSessionFile()
+        ? { ownerSession: ctx.sessionManager.getSessionFile() }
+        : {}),
+    });
+    if (retry.eligible) {
+      actions.push({ value: "retry", label: "Retry failed work", description: retry.message });
+    }
+    if (!(["approved", "failed", "cancelled"] as TaskStatus[]).includes(task.status)) {
+      for (const status of [
+        "todo",
+        "ready_for_review",
+        "changes_requested",
+        "approved",
+        "cancelled",
+      ] as TaskStatus[]) {
+        if (status !== task.status) {
+          actions.push({ value: `status:${status}`, label: `Mark as ${STATUS_LABELS[status]}` });
+        }
       }
     }
 
@@ -1578,15 +2326,24 @@ export default function maestro(
       await openReviewerSession(ctx, task.id);
       return;
     }
+    if (action === "retry") {
+      await requestHumanRetry(ctx, task.id);
+      return;
+    }
     if (action.startsWith("status:")) {
       const status = action.slice("status:".length) as TaskStatus;
-      updateTask(ctx.cwd, task.id, (fresh) => {
-        forceStatus(fresh, status);
-        if (status === "approved") {
-          fresh.approvalKind = "manual";
-          fresh.verificationSummary = "accepted manually from the dashboard";
+      try {
+        if (status === "approved") manuallyApproveTask(ctx, task.id);
+        else {
+          updateTask(ctx.cwd, task.id, (fresh) => {
+            assertTaskNotDispatched(fresh);
+            forceStatus(fresh, status);
+          });
         }
-      });
+      } catch (error) {
+        notify(ctx, error instanceof Error ? error.message : String(error), "warning");
+        return;
+      }
       if (status === "approved") {
         const cleanup = pruneTaskLogs(
           ctx.cwd,
@@ -1762,6 +2519,7 @@ export default function maestro(
   });
 
   pi.on("session_start", (event, ctx) => {
+    runtimeActive = true;
     liveRuns.clear();
     contextNudgeShown = false;
     // Session switches reload extensions, so switchWithReturn's in-memory
@@ -1787,7 +2545,39 @@ export default function maestro(
     // expired claims are reclaimed with their attempt in one board transaction.
     const recoveryNotes = sweepDispatchState(boardCwd);
     for (const note of recoveryNotes) notify(ctx, note, "warning");
-    const recovered = loadBoard(boardCwd);
+    let recovered = loadBoard(boardCwd);
+    const orphanedDrive = recovered.activeDrive;
+    const currentSession = ctx.sessionManager.getSessionFile();
+    if (
+      orphanedDrive &&
+      !driveController.hasActive() &&
+      liveRuns.size === 0 &&
+      sessionCanControlDrive(orphanedDrive.ownerSession, currentSession)
+    ) {
+      const summary = unexpectedDriveSummary(
+        boardCwd,
+        orphanedDrive.taskIds,
+        "the owning extension runtime stopped before recording an outcome"
+      );
+      persistDriveDecision(
+        boardCwd,
+        orphanedDrive.ownerSession,
+        summary,
+        formatDrivePulse(summary),
+        orphanedDrive.id
+      );
+      recovered = loadBoard(boardCwd);
+    }
+    const pendingDecision = recovered.activeDecision;
+    if (
+      pendingDecision &&
+      !pendingDecision.deliveredAt &&
+      sessionCanControlDrive(pendingDecision.ownerSession, currentSession) &&
+      sessionContainsDecision(ctx, pendingDecision.id)
+    ) {
+      acknowledgeDeliveredDecision(boardCwd, pendingDecision.id);
+      recovered = loadBoard(boardCwd);
+    }
     deliverPendingDecision(boardCwd, ctx.sessionManager.getSessionFile(), sendDecision);
     const knownWorktrees = recovered.tasks.flatMap((task) =>
       task.attempts.flatMap((attempt) =>
@@ -1815,6 +2605,26 @@ export default function maestro(
   // The before-switch/fork guards normally keep active work in this runtime.
   // Shutdown still aborts as a final safety net so a forced reload or exit can never orphan it.
   pi.on("session_shutdown", () => {
+    runtimeActive = false;
+    const active = driveController.activeOwner();
+    if (active) {
+      try {
+        const summary = unexpectedDriveSummary(
+          active.cwd,
+          active.taskIds,
+          "the extension runtime shut down while the drive was active"
+        );
+        persistDriveDecision(
+          active.cwd,
+          active.ownerSession,
+          summary,
+          formatDrivePulse(summary),
+          active.id
+        );
+      } catch {
+        // The durable active-drive record remains for owner-scoped startup reconciliation.
+      }
+    }
     driveController.shutdown();
     for (const run of liveRuns.values()) {
       run.handle.abort();

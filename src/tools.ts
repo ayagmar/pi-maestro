@@ -6,12 +6,27 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { applyPlanTaskEdits, createTask, loadBoard, saveBoard, updateTask } from "./board.js";
+import {
+  applyPlanTaskEdits,
+  assertTaskNotDispatched,
+  createTask,
+  findTask,
+  forceStatus,
+  loadBoard,
+  normalizeTaskContract,
+  normalizeWritePaths,
+  planValidationMessage,
+  saveBoard,
+  updateBoard,
+  updateTask,
+  validatePlan,
+} from "./board.js";
 import { loadConfig } from "./config.js";
 import { COMMAND } from "./constants.js";
 import { type BackgroundDrive, type DriveRuntimeController } from "./drive-controller.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
-import { assertKnownTaskIds } from "./session-control.js";
+import { assertPlanTaskLimit, preflightWorkflow } from "./preflight.js";
+import { canonicalTaskIds, sessionCanControlDrive } from "./session-control.js";
 import { formatStatusProjection, projectStatus } from "./status.js";
 import { type Task, type TaskStatus } from "./types.js";
 import {
@@ -69,13 +84,35 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             maxItems: 12,
             description: "Explicit observable outcomes the executor and reviewer must verify.",
           }),
+          discovery: Type.Optional(
+            Type.Object({
+              allowedWritePaths: Type.Array(Type.String(), {
+                minItems: 1,
+                maxItems: 64,
+                description:
+                  "Repository-relative scopes generated tasks may write. The discovery task itself must be explicit read-only/no-file work with writePaths=[].",
+              }),
+            })
+          ),
           verificationProfile: Type.Optional(
             Type.String({ description: "Trusted configured verification profile name" })
+          ),
+          reviewPolicy: Type.Optional(
+            StringEnum(["single", "confirm", "find-and-refute"] as const, {
+              description:
+                "Review convergence policy. single is the default; confirm requires independent approvals; find-and-refute compares a finder with an independent refuter.",
+            })
           ),
           commitMessage: Type.Optional(
             Type.String({
               description:
                 "Conventional commit message (e.g. 'fix: handle empty board') used when this task's approved work is committed. Defaults to 'feat: <title>'.",
+            })
+          ),
+          supersedesTaskId: Type.Optional(
+            Type.String({
+              description:
+                "Failed, cancelled, or changes-requested predecessor this task replaces. Maestro atomically cancels it and rewires all downstream dependencies to this new task.",
             })
           ),
           dependsOn: Type.Optional(
@@ -89,73 +126,106 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      adoptBoard(ctx);
       const config = loadConfig(ctx.cwd);
-      const board = loadBoard(ctx.cwd);
-      const initialTaskCount = board.tasks.length;
-      const created: Task[] = [];
-      for (const input of params.tasks as {
-        title: string;
-        brief: string;
-        tier: string;
-        commitMessage?: string;
-        dependsOn?: string[];
-        writePaths?: string[];
-        successCriteria?: string[];
-        verificationProfile?: string;
-      }[]) {
-        const verificationProfile = input.verificationProfile ?? config.defaultVerificationProfile;
-        if (verificationProfile && !config.verificationProfiles?.[verificationProfile]) {
-          throw new Error(`Unknown verification profile: ${verificationProfile}`);
+      const result = updateBoard(ctx.cwd, (board) => {
+        assertPlanTaskLimit(board.tasks.length + (params.tasks as unknown[]).length, config);
+        const initialTaskCount = board.tasks.length;
+        const created: Task[] = [];
+        const supersededTaskIds = new Set<string>();
+        const supersessions: Array<{ predecessorId: string; successorId: string }> = [];
+        for (const input of params.tasks as {
+          title: string;
+          brief: string;
+          tier: string;
+          commitMessage?: string;
+          supersedesTaskId?: string;
+          dependsOn?: string[];
+          writePaths?: string[];
+          successCriteria?: string[];
+          verificationProfile?: string;
+          reviewPolicy?: "single" | "confirm" | "find-and-refute";
+          discovery?: { allowedWritePaths: string[] };
+        }[]) {
+          const verificationProfile =
+            input.verificationProfile ?? config.defaultVerificationProfile;
+          if (verificationProfile && !config.verificationProfiles?.[verificationProfile]) {
+            throw new Error(`Unknown verification profile: ${verificationProfile}`);
+          }
+          const contract = normalizeTaskContract(input);
+          let discovery: { allowedWritePaths: string[] } | undefined;
+          if (input.discovery) {
+            if (contract.writePaths.length !== 0) {
+              throw new Error("Discovery tasks must use writePaths: []");
+            }
+            const allowedWritePaths = normalizeWritePaths(input.discovery.allowedWritePaths);
+            if (allowedWritePaths.length === 0) {
+              throw new Error("Discovery tasks require at least one allowed generated write scope");
+            }
+            discovery = { allowedWritePaths };
+          }
+          if (!config.tiers[input.tier]) {
+            throw new Error(
+              `Unknown tier "${input.tier}". Available tiers: ${Object.keys(config.tiers).join(", ")}`
+            );
+          }
+          const taskInput: Parameters<typeof createTask>[1] = {
+            title: input.title,
+            brief: input.brief,
+            tier: input.tier,
+          };
+          if (input.commitMessage) taskInput.commitMessage = input.commitMessage;
+          if (input.dependsOn) taskInput.dependsOn = input.dependsOn;
+          taskInput.writePaths = contract.writePaths;
+          if (contract.successCriteria) taskInput.successCriteria = contract.successCriteria;
+          if (discovery) taskInput.discovery = discovery;
+          if (verificationProfile) taskInput.verificationProfile = verificationProfile;
+          if (input.reviewPolicy) taskInput.reviewPolicy = input.reviewPolicy;
+          const task = createTask(board, taskInput);
+          created.push(task);
+
+          if (input.supersedesTaskId) {
+            const predecessorId = input.supersedesTaskId.trim().toUpperCase();
+            if (supersededTaskIds.has(predecessorId)) {
+              throw new Error(`${predecessorId} cannot be superseded more than once in one plan.`);
+            }
+            applyTaskSupersession(board, task, predecessorId);
+            supersededTaskIds.add(predecessorId);
+            supersessions.push({ predecessorId, successorId: task.id });
+          }
         }
-        if (!input.writePaths) throw new Error("writePaths is required for every new task");
-        const noFileTask =
-          input.writePaths.length === 0 && /investigat|no[- ]file|read[- ]only/i.test(input.brief);
-        if (!noFileTask && !input.successCriteria) {
-          throw new Error("successCriteria is required for every executable task");
+        const validationError = planValidationMessage(
+          validatePlan(board, Object.keys(config.tiers))
+        );
+        if (validationError) throw new Error(validationError);
+
+        // The plan gate protects the initial board. Once execution has started,
+        // the orchestrator may add recovery/successor tasks without stopping the
+        // drive for another human approval. Explicit recipe/discovery expansion
+        // keeps its own mandatory approval gate.
+        if (config.planGate && created.length > 0 && initialTaskCount === 0) {
+          board.planPending = true;
         }
-        if (
-          input.writePaths.length === 0 &&
-          !/investigat|no[- ]file|read[- ]only/i.test(input.brief)
-        ) {
-          throw new Error("Empty writePaths requires an explicit investigation or no-file brief");
-        }
-        if (!config.tiers[input.tier]) {
-          throw new Error(
-            `Unknown tier "${input.tier}". Available tiers: ${Object.keys(config.tiers).join(", ")}`
-          );
-        }
-        const taskInput: Parameters<typeof createTask>[1] = {
-          title: input.title,
-          brief: input.brief,
-          tier: input.tier,
-        };
-        if (input.commitMessage) taskInput.commitMessage = input.commitMessage;
-        if (input.dependsOn) taskInput.dependsOn = input.dependsOn;
-        taskInput.writePaths = input.writePaths;
-        if (input.successCriteria) taskInput.successCriteria = input.successCriteria;
-        if (verificationProfile) taskInput.verificationProfile = verificationProfile;
-        created.push(createTask(board, taskInput));
-      }
-      // The plan gate protects the initial board. Once execution has started,
-      // the orchestrator may add recovery/successor tasks without stopping the
-      // drive for another human approval. Explicit recipe/discovery expansion
-      // keeps its own mandatory approval gate.
-      if (config.planGate && created.length > 0 && initialTaskCount === 0) {
-        board.planPending = true;
-      }
-      saveBoard(ctx.cwd, board);
+        if (preflightWorkflow(board, config).requiresConfirmation) board.planPending = true;
+        return { created, supersessions, planPending: board.planPending };
+      });
+      adoptBoard(ctx);
       refreshUI(ctx);
 
+      const { created, supersessions } = result;
       const lines = created.map((task) => `${task.id}: ${task.title} (${task.tier})`);
-      const approval = board.planPending
+      const approval = result.planPending
         ? `\n\nPlan awaits user approval via /${COMMAND} plan. Do not start maestro_drive yet.`
+        : "";
+      const replacement = supersessions.length
+        ? `\nSuperseded atomically: ${supersessions
+            .map(({ predecessorId, successorId }) => `${predecessorId} → ${successorId}`)
+            .join(", ")}. Downstream dependencies were rewired.`
         : "";
       return {
         content: [
           {
             type: "text",
-            text: `Created ${created.length} task(s):\n${lines.join("\n")}${approval}`,
+            text: `Created ${created.length} task(s):\n${lines.join("\n")}${replacement}${approval}`,
           },
         ],
         details: { action: "plan", tasks: created.map((task) => snapshot(task)) },
@@ -185,32 +255,73 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       action: StringEnum(["start", "inspect", "intervene"] as const),
       taskIds: Type.Optional(
         Type.Array(Type.String(), {
-          description: "Specific task ids to drive. Omit to drive the whole board.",
+          description:
+            "Optional task scope. For start, drive these tasks; for inspect, show these tasks; for a live steer/abort, target these tasks. Omit for the whole board or all live tasks.",
         })
       ),
-      intervention: Type.Optional(StringEnum(["steer", "abort", "handoff"] as const)),
-      decisionId: Type.Optional(Type.String({ description: "Active settled decision to resolve" })),
-      instruction: Type.Optional(Type.String({ maxLength: 1000 })),
+      intervention: Type.Optional(
+        StringEnum(["steer", "abort", "handoff"] as const, {
+          description:
+            "Used only with action=intervene. Steer/abort target live executors. With decisionId, steer resumes after board fixes, abort settles the decision, and handoff transfers it.",
+        })
+      ),
+      decisionId: Type.Optional(
+        Type.String({
+          description:
+            "Settled decision to resolve with handoff or abort. After changing the board to address a decision, use action=start directly instead.",
+        })
+      ),
+      instruction: Type.Optional(
+        Type.String({
+          maxLength: 1000,
+          description: "Steering text for live executors. Ignored for handoff/abort compatibility.",
+        })
+      ),
     }),
     prepareArguments(args) {
-      if (args && typeof args === "object" && !("action" in args))
-        return { ...args, action: "start" };
-      return args as Record<PropertyKey, unknown>;
+      if (!args || typeof args !== "object") return args as Record<PropertyKey, unknown>;
+      const input = args as Record<string, unknown>;
+      const action = input.action;
+      if (action === "drive" || action === "resume") return { ...input, action: "start" };
+      if (action === "status") return { ...input, action: "inspect" };
+      if (action === "steer" || action === "abort" || action === "handoff") {
+        return { ...input, action: "intervene", intervention: action };
+      }
+      if (!("action" in input)) {
+        return { ...input, action: input.intervention ? "intervene" : "start" };
+      }
+      return input;
     },
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const input = params as unknown as DriveToolInput;
       validateDriveToolInput(input);
+      const board = loadBoard(ctx.cwd);
+      const taskIds = canonicalTaskIds(board, input.taskIds);
       if (input.action === "inspect") {
-        const board = loadBoard(ctx.cwd);
-        const tasks = board.tasks.map((task) => snapshot(task));
-        const live = [...liveRuns.values()]
-          .map((run) => `${run.taskId}: ${run.lastActivity}`)
-          .join("\n");
-        const decision = board.activeDecision;
+        const selectedTasks = board.tasks.filter((task) => !taskIds || taskIds.includes(task.id));
+        const tasks = selectedTasks.map((task) => snapshot(task));
+        const selectedIds = new Set(selectedTasks.map((task) => task.id));
+        const selectedRuns = [...liveRuns.values()].filter((run) => selectedIds.has(run.taskId));
+        const live = selectedRuns.map((run) => `${run.taskId}: ${run.lastActivity}`).join("\n");
+        const decision =
+          board.activeDecision &&
+          (!taskIds ||
+            board.activeDecision.taskIds.length === 0 ||
+            board.activeDecision.taskIds.some((id) => selectedIds.has(id)))
+            ? board.activeDecision
+            : undefined;
         const decisionText = decision
           ? `\nDecision ${decision.id} (${decision.kind}): ${decision.evidence}`
           : "";
-        const statusText = formatStatusProjection(projectStatus(board, liveRuns.keys()));
+        const projectedBoard = { ...board, tasks: selectedTasks };
+        if (!decision) delete projectedBoard.activeDecision;
+        const statusText = formatStatusProjection(
+          projectStatus(
+            projectedBoard,
+            selectedRuns.map((run) => run.taskId),
+            loadConfig(ctx.cwd)
+          )
+        );
         return {
           content: [
             {
@@ -234,8 +345,20 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             throw new Error("Decision is stale or already resolved");
           }
           const current = ctx.sessionManager.getSessionFile();
-          if (decision.ownerSession && current && decision.ownerSession !== current) {
+          if (!sessionCanControlDrive(decision.ownerSession, current)) {
             throw new Error("Only the decision owner may resolve it");
+          }
+          if (intervention === "steer") {
+            startBackgroundDrive(ctx, taskIds, signal);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Decision ${decision.id} addressed; drive resumed for ${taskIds?.join(", ") ?? "the whole board"}.`,
+                },
+              ],
+              details: { action: "drive", tasks: [] },
+            };
           }
           if (!decision.allowedInterventions.includes(intervention)) {
             throw new Error(`${intervention} is not allowed for this decision`);
@@ -253,13 +376,14 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         if (input.intervention === "handoff") {
           pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
         } else {
-          if (liveRuns.size === 0) throw new Error("No live executor to intervene in.");
-          for (const run of liveRuns.values()) {
+          const selectedRuns = [...liveRuns.values()].filter(
+            (run) => !taskIds || taskIds.includes(run.taskId)
+          );
+          if (selectedRuns.length === 0)
+            throw new Error("No matching live executor to intervene in.");
+          for (const run of selectedRuns) {
             if (input.intervention === "abort") run.handle.abort();
-            else
-              run.handle.steer(
-                input.instruction ?? "Report the concrete blocker or finish the scoped task."
-              );
+            else run.handle.steer(input.instruction as string);
           }
         }
         return {
@@ -267,9 +391,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           details: { action: "drive", tasks: [] },
         };
       }
-      const taskIds = input.taskIds;
       if (driveController.hasActive()) throw new Error("An autonomous drive is already active.");
-      assertKnownTaskIds(loadBoard(ctx.cwd), taskIds);
       startBackgroundDrive(ctx, taskIds, signal);
       return {
         content: [
@@ -325,6 +447,17 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       verificationProfile: Type.Optional(
         Type.String({ description: "Replacement trusted verification profile; empty clears it" })
       ),
+      reviewPolicy: Type.Optional(
+        StringEnum(["single", "confirm", "find-and-refute"] as const, {
+          description: "Replacement review convergence policy",
+        })
+      ),
+      supersedesTaskId: Type.Optional(
+        Type.String({
+          description:
+            "Stopped predecessor this existing task replaces. Atomically cancel it and rewire all downstream dependencies to taskId.",
+        })
+      ),
       cancel: Type.Optional(
         Type.Boolean({ description: "Set true to cancel, or false to reactivate a cancelled task" })
       ),
@@ -339,6 +472,8 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         writePaths,
         successCriteria,
         verificationProfile,
+        reviewPolicy,
+        supersedesTaskId,
         cancel,
       } = params as {
         taskId: string;
@@ -349,6 +484,8 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         writePaths?: string[];
         successCriteria?: string[];
         verificationProfile?: string;
+        reviewPolicy?: "single" | "confirm" | "find-and-refute";
+        supersedesTaskId?: string;
         cancel?: boolean;
       };
       const config = loadConfig(ctx.cwd);
@@ -361,7 +498,9 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       if (liveRuns.has(taskId.trim().toUpperCase())) {
         throw new Error(`${taskId} is running. Abort it first or wait for it to finish.`);
       }
-      const updated = updateTask(ctx.cwd, taskId, (fresh) => {
+      const updated = updateTask(ctx.cwd, taskId, (fresh, board) => {
+        assertPlanTaskLimit(board.tasks.length, config);
+        assertTaskNotDispatched(fresh);
         applyPlanTaskEdits(
           fresh,
           {
@@ -372,10 +511,18 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             ...(writePaths !== undefined ? { writePaths } : {}),
             ...(successCriteria !== undefined ? { successCriteria } : {}),
             ...(verificationProfile !== undefined ? { verificationProfile } : {}),
+            ...(reviewPolicy !== undefined ? { reviewPolicy } : {}),
             ...(cancel !== undefined ? { cancelled: cancel } : {}),
           },
           Object.keys(config.tiers)
         );
+        if (supersedesTaskId) {
+          applyTaskSupersession(board, fresh, supersedesTaskId);
+          const validationError = planValidationMessage(
+            validatePlan(board, Object.keys(config.tiers))
+          );
+          if (validationError) throw new Error(validationError);
+        }
       });
       if (!updated) throw new Error(`Unknown task: ${taskId}`);
       refreshUI(ctx);
@@ -390,6 +537,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         args.brief ? "brief" : null,
         args.tier ? `tier→${args.tier}` : null,
         args.dependsOn ? "dependencies" : null,
+        args.supersedesTaskId ? `supersedes ${args.supersedesTaskId}` : null,
         args.cancel === true ? "cancel" : null,
         args.cancel === false ? "reactivate" : null,
       ]
@@ -404,6 +552,45 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
     },
     renderResult: renderTaskListResult,
   });
+}
+
+function applyTaskSupersession(
+  board: ReturnType<typeof loadBoard>,
+  successor: Task,
+  predecessorId: string
+): void {
+  const predecessor = findTask(board, predecessorId);
+  if (!predecessor || predecessor === successor) {
+    throw new Error(`Unknown predecessor: ${predecessorId}`);
+  }
+  if (
+    predecessor.status !== "failed" &&
+    predecessor.status !== "cancelled" &&
+    predecessor.status !== "changes_requested"
+  ) {
+    throw new Error(
+      `${predecessor.id} cannot be superseded while ${predecessor.status}; only failed, cancelled, or changes-requested tasks can be replaced.`
+    );
+  }
+  if (
+    successor.dependsOn.some(
+      (dependencyId) => dependencyId.toUpperCase() === predecessor.id.toUpperCase()
+    )
+  ) {
+    throw new Error(`${successor.id} cannot depend on the predecessor it supersedes.`);
+  }
+
+  forceStatus(predecessor, "cancelled");
+  for (const dependent of board.tasks) {
+    if (dependent === successor) continue;
+    dependent.dependsOn = [
+      ...new Set(
+        dependent.dependsOn.map((dependencyId) =>
+          dependencyId.toUpperCase() === predecessor.id.toUpperCase() ? successor.id : dependencyId
+        )
+      ),
+    ];
+  }
 }
 
 function renderTaskListResult(
@@ -465,8 +652,8 @@ export interface DriveToolInput {
 
 export function validateDriveToolInput(input: DriveToolInput): void {
   if (input.action === "inspect") {
-    if (input.taskIds || input.intervention || input.instruction || input.decisionId) {
-      throw new Error("inspect does not accept taskIds, intervention, decisionId, or instruction");
+    if (input.intervention || input.instruction || input.decisionId) {
+      throw new Error("inspect does not accept intervention, decisionId, or instruction");
     }
     return;
   }
@@ -476,11 +663,7 @@ export function validateDriveToolInput(input: DriveToolInput): void {
     }
     return;
   }
-  if (input.taskIds) throw new Error("intervene does not accept taskIds");
   if (!input.intervention) throw new Error("intervention is required");
-  if (input.intervention !== "steer" && input.instruction) {
-    throw new Error("instruction is only valid for steer");
-  }
   if (input.intervention === "steer" && !input.instruction?.trim()) {
     throw new Error("steer requires an instruction");
   }

@@ -22,8 +22,12 @@ Run focused behavioral tests while changing code, then:
 
 ```bash
 pnpm run check
+pnpm run check
 git diff --check
 ```
+
+The two full checks must report the same test count. Also run `pnpm run typecheck`, `pnpm test`,
+`pnpm run lint`, and `pnpm run format:check` explicitly when producing final verification evidence.
 
 Bug fixes should add a behavioral regression test. Registration assertions do not replace behavior tests. Never delete or narrow tests to make a gate pass.
 

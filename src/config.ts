@@ -20,6 +20,13 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   useWorktrees: false,
   autoCommit: true,
   maxAttempts: 3,
+  maxPlanTasks: 64,
+  maxDiscoveryGeneratedTasks: 32,
+  maxTotalLaunchesPerRun: 128,
+  confirmationPlanTasks: 24,
+  confirmationTotalLaunches: 64,
+  reviewRequiredApprovals: 2,
+  maxReviewerLaunches: 4,
   maxCostPerTask: 5,
   maxRunCost: 25,
   statusWaitSeconds: 60,
@@ -79,6 +86,13 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
+      maxPlanTasks: 64,
+      maxDiscoveryGeneratedTasks: 32,
+      maxTotalLaunchesPerRun: 128,
+      confirmationPlanTasks: 24,
+      confirmationTotalLaunches: 64,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
       maxCostPerTask: 5,
       maxRunCost: 25,
       statusWaitSeconds: 60,
@@ -108,6 +122,13 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
+      maxPlanTasks: 64,
+      maxDiscoveryGeneratedTasks: 32,
+      maxTotalLaunchesPerRun: 128,
+      confirmationPlanTasks: 24,
+      confirmationTotalLaunches: 64,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
       maxCostPerTask: 2,
       maxRunCost: 25,
       statusWaitSeconds: 60,
@@ -137,6 +158,13 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
+      maxPlanTasks: 64,
+      maxDiscoveryGeneratedTasks: 32,
+      maxTotalLaunchesPerRun: 128,
+      confirmationPlanTasks: 24,
+      confirmationTotalLaunches: 64,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
       maxCostPerTask: 2,
       maxRunCost: 25,
       statusWaitSeconds: 60,
@@ -166,6 +194,13 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
+      maxPlanTasks: 64,
+      maxDiscoveryGeneratedTasks: 32,
+      maxTotalLaunchesPerRun: 128,
+      confirmationPlanTasks: 24,
+      confirmationTotalLaunches: 64,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
       maxCostPerTask: 5,
       maxRunCost: 25,
       statusWaitSeconds: 60,
@@ -195,6 +230,13 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
+      maxPlanTasks: 64,
+      maxDiscoveryGeneratedTasks: 32,
+      maxTotalLaunchesPerRun: 128,
+      confirmationPlanTasks: 24,
+      confirmationTotalLaunches: 64,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
       maxCostPerTask: 5,
       maxRunCost: 25,
       statusWaitSeconds: 60,
@@ -224,6 +266,13 @@ export const PRESETS: Preset[] = [
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
+      maxPlanTasks: 64,
+      maxDiscoveryGeneratedTasks: 32,
+      maxTotalLaunchesPerRun: 128,
+      confirmationPlanTasks: 24,
+      confirmationTotalLaunches: 64,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
       maxCostPerTask: 5,
       maxRunCost: 25,
       statusWaitSeconds: 60,
@@ -267,6 +316,14 @@ export function mergeConfig(
     useWorktrees: override.useWorktrees ?? base.useWorktrees,
     autoCommit: override.autoCommit ?? base.autoCommit,
     maxAttempts: override.maxAttempts ?? base.maxAttempts,
+    maxPlanTasks: override.maxPlanTasks ?? base.maxPlanTasks,
+    maxDiscoveryGeneratedTasks:
+      override.maxDiscoveryGeneratedTasks ?? base.maxDiscoveryGeneratedTasks,
+    maxTotalLaunchesPerRun: override.maxTotalLaunchesPerRun ?? base.maxTotalLaunchesPerRun,
+    confirmationPlanTasks: override.confirmationPlanTasks ?? base.confirmationPlanTasks,
+    confirmationTotalLaunches: override.confirmationTotalLaunches ?? base.confirmationTotalLaunches,
+    reviewRequiredApprovals: override.reviewRequiredApprovals ?? base.reviewRequiredApprovals ?? 2,
+    maxReviewerLaunches: override.maxReviewerLaunches ?? base.maxReviewerLaunches ?? 4,
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
     maxRunCost: override.maxRunCost ?? base.maxRunCost,
     statusWaitSeconds: override.statusWaitSeconds ?? base.statusWaitSeconds,
@@ -291,8 +348,12 @@ export function mergeConfig(
   };
 }
 
+export function userDataDirectory(): string {
+  return getAgentDir();
+}
+
 export function configFile(scope: ConfigScope, cwd: string): string {
-  if (scope === "user") return join(getAgentDir(), USER_CONFIG_FILE);
+  if (scope === "user") return join(userDataDirectory(), USER_CONFIG_FILE);
   return join(cwd, PROJECT_CONFIG_FILE);
 }
 
@@ -302,6 +363,13 @@ const CONFIG_KEYS = new Set([
   "useWorktrees",
   "autoCommit",
   "maxAttempts",
+  "maxPlanTasks",
+  "maxDiscoveryGeneratedTasks",
+  "maxTotalLaunchesPerRun",
+  "confirmationPlanTasks",
+  "confirmationTotalLaunches",
+  "reviewRequiredApprovals",
+  "maxReviewerLaunches",
   "maxCostPerTask",
   "maxRunCost",
   "statusWaitSeconds",
@@ -330,6 +398,13 @@ export function validateConfig(value: unknown): string | undefined {
   const ranges: Record<string, [number, number]> = {
     maxParallel: [1, 64],
     maxAttempts: [1, 100],
+    maxPlanTasks: [1, 512],
+    maxDiscoveryGeneratedTasks: [1, 128],
+    maxTotalLaunchesPerRun: [1, 4_096],
+    confirmationPlanTasks: [1, 512],
+    confirmationTotalLaunches: [1, 4_096],
+    reviewRequiredApprovals: [2, 8],
+    maxReviewerLaunches: [1, 16],
     maxCostPerTask: [0, 1_000_000],
     maxRunCost: [0, 1_000_000],
     statusWaitSeconds: [0, 240],
@@ -350,6 +425,58 @@ export function validateConfig(value: unknown): string | undefined {
     ) {
       return `${key} must be a finite number from ${minimum} to ${maximum}`;
     }
+  }
+  for (const key of [
+    "maxParallel",
+    "maxAttempts",
+    "maxPlanTasks",
+    "maxDiscoveryGeneratedTasks",
+    "maxTotalLaunchesPerRun",
+    "confirmationPlanTasks",
+    "confirmationTotalLaunches",
+    "reviewRequiredApprovals",
+    "maxReviewerLaunches",
+  ]) {
+    if (config[key] !== undefined && !Number.isInteger(config[key])) {
+      return `${key} must be an integer`;
+    }
+  }
+  const requiredApprovals = config.reviewRequiredApprovals;
+  const maximumLaunches = config.maxReviewerLaunches;
+  if (
+    typeof requiredApprovals === "number" &&
+    typeof maximumLaunches === "number" &&
+    requiredApprovals > maximumLaunches
+  ) {
+    return "reviewRequiredApprovals cannot exceed maxReviewerLaunches";
+  }
+  if (
+    typeof config.maxDiscoveryGeneratedTasks === "number" &&
+    typeof config.maxPlanTasks === "number" &&
+    config.maxDiscoveryGeneratedTasks > config.maxPlanTasks
+  ) {
+    return "maxDiscoveryGeneratedTasks cannot exceed maxPlanTasks";
+  }
+  if (
+    typeof config.maxReviewerLaunches === "number" &&
+    typeof config.maxTotalLaunchesPerRun === "number" &&
+    config.maxReviewerLaunches > config.maxTotalLaunchesPerRun
+  ) {
+    return "maxReviewerLaunches cannot exceed maxTotalLaunchesPerRun";
+  }
+  if (
+    typeof config.confirmationPlanTasks === "number" &&
+    typeof config.maxPlanTasks === "number" &&
+    config.confirmationPlanTasks > config.maxPlanTasks
+  ) {
+    return "confirmationPlanTasks cannot exceed maxPlanTasks";
+  }
+  if (
+    typeof config.confirmationTotalLaunches === "number" &&
+    typeof config.maxTotalLaunchesPerRun === "number" &&
+    config.confirmationTotalLaunches > config.maxTotalLaunchesPerRun
+  ) {
+    return "confirmationTotalLaunches cannot exceed maxTotalLaunchesPerRun";
   }
   if (
     config.logEvents !== undefined &&
@@ -478,6 +605,13 @@ export function describeConfig(config: MaestroConfig): string {
     `planGate: ${config.planGate}`,
     `useWorktrees: ${config.useWorktrees}`,
     `maxAttempts: ${config.maxAttempts}`,
+    `maxPlanTasks: ${config.maxPlanTasks}`,
+    `maxDiscoveryGeneratedTasks: ${config.maxDiscoveryGeneratedTasks}`,
+    `maxTotalLaunchesPerRun: ${config.maxTotalLaunchesPerRun}`,
+    `confirmationPlanTasks: ${config.confirmationPlanTasks}`,
+    `confirmationTotalLaunches: ${config.confirmationTotalLaunches}`,
+    `reviewRequiredApprovals: ${config.reviewRequiredApprovals ?? 2}`,
+    `maxReviewerLaunches: ${config.maxReviewerLaunches ?? 4}`,
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
     `maxRunCost: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,
     `statusWaitSeconds: ${config.statusWaitSeconds}`,
