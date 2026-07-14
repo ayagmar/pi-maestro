@@ -12,6 +12,8 @@ import {
   type DashboardActions,
   DASHBOARD_BINDINGS,
   DEFAULT_DASHBOARD_BODY_HEIGHT,
+  type LivePaneLaunch,
+  LivePaneComponent,
   projectEvidenceSections,
   taskLaunches,
   wrapText,
@@ -1634,6 +1636,205 @@ test("changes requested uses an error color distinct from running", () => {
     assert.ok(colors.some(([color, text]) => color === "error" && text === "↻"));
   } finally {
     dashboard.dispose();
+  }
+});
+
+test("live pane renders bounded empty, title, transcript, and settled states", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-render-"));
+  const logFile = join(directory, "executor.jsonl");
+  writeFileSync(
+    logFile,
+    `${[
+      { type: "tool_execution_start", toolName: "bash", args: { command: "pnpm test" } },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "first line\nsecond line" }],
+        },
+      },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join("\n")}\n`
+  );
+  const theme = {
+    fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  let launches: LivePaneLaunch[] = [];
+  const pane = new LivePaneComponent(theme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    height: 7,
+  });
+  try {
+    assert.match(pane.render(80).join("\n"), /Agents settled/);
+    launches = [
+      {
+        key: "execute:T1:one",
+        taskId: "T1",
+        title: "A deliberately long executor title",
+        kind: "execute",
+        logFile,
+        model: "provider/model",
+        turns: 2,
+        cost: 0.25,
+        lastActivity: "testing",
+      },
+    ];
+    const lines = pane.render(80);
+    const text = lines.join("\n");
+    assert.ok(lines.length <= 7);
+    assert.ok(lines.every((line) => visibleWidth(line) <= 80));
+    assert.match(text, /<accent>T1 · A deliberately long executor title \[provider\/model\]/);
+    assert.match(text, /<toolTitle>\$ pnpm test/);
+    assert.match(text, /<toolOutput>second line/);
+    assert.doesNotMatch(text, /▶ T1/, "one launch must not render the agent strip");
+
+    launches = [];
+    assert.match(pane.render(80).join("\n"), /✓ T1 settled/);
+  } finally {
+    pane.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("live pane follows output and keeps manually scrolled rows anchored", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-scroll-"));
+  const logFile = join(directory, "executor.jsonl");
+  const append = (text: string) =>
+    appendFileSync(
+      logFile,
+      `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`
+    );
+  for (let index = 1; index <= 8; index += 1) append(`line ${index}`);
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [
+      {
+        key: "execute:T1:scroll",
+        taskId: "T1",
+        title: "Scroll",
+        kind: "execute",
+        logFile,
+        turns: 1,
+        cost: 0,
+        lastActivity: "working",
+      },
+    ],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    height: 5,
+  });
+  try {
+    pane.focused = true;
+    assert.match(pane.render(40).join("\n"), /line 8/);
+    pane.handleInput("k");
+    const anchored = pane.render(40);
+    assert.doesNotMatch(anchored.join("\n"), /line 8/);
+    append("line 9");
+    assert.deepEqual(pane.render(40).slice(0, -1), anchored.slice(0, -1));
+    pane.handleInput("G");
+    assert.match(pane.render(40).join("\n"), /line 9/);
+  } finally {
+    pane.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("live pane keeps selection stable and advances once when the selected launch settles", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-select-"));
+  const launch = (taskId: string): LivePaneLaunch => {
+    const logFile = join(directory, `${taskId}.jsonl`);
+    writeFileSync(
+      logFile,
+      `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `${taskId} transcript` }] } })}\n`
+    );
+    return {
+      key: `execute:${taskId}`,
+      taskId,
+      title: `Task ${taskId}`,
+      kind: "execute",
+      logFile,
+      turns: 1,
+      cost: 0,
+      lastActivity: "working",
+    };
+  };
+  let launches = [launch("T1")];
+  let cycleCalls = 0;
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {
+      cycleCalls += 1;
+    },
+    height: 8,
+  });
+  try {
+    assert.match(pane.render(80).join("\n"), /T1 transcript/);
+    launches = [...launches, launch("T2"), launch("T3")];
+    const three = pane.render(80).join("\n");
+    assert.match(three, /▶ T1/);
+    assert.match(three, /T1 transcript/);
+    assert.doesNotMatch(three, /T2 transcript/);
+
+    pane.focused = true;
+    pane.handleInput("\x1b[C");
+    assert.match(pane.render(80).join("\n"), /T2 transcript/);
+    launches = launches.filter((launch) => launch.taskId !== "T2");
+    const advanced = pane.render(80).join("\n");
+    assert.match(advanced, /✓ T2 settled · following T3/);
+    assert.match(advanced, /T3 transcript/);
+    assert.equal(
+      (
+        pane
+          .render(80)
+          .join("\n")
+          .match(/✓ T2 settled/g) ?? []
+      ).length,
+      1
+    );
+
+    pane.handleInput("\x1b\x17");
+    assert.equal(cycleCalls, 1, "focused overlay input must handle ctrl+alt+w itself");
+  } finally {
+    pane.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("live pane windows multiple agents without consuming every transcript row", () => {
+  const launches: LivePaneLaunch[] = Array.from({ length: 8 }, (_, index) => ({
+    key: `execute:T${index + 1}`,
+    taskId: `T${index + 1}`,
+    title: `Task ${index + 1}`,
+    kind: "execute",
+    logFile: `/missing/live-pane-${index + 1}.jsonl`,
+    turns: 0,
+    cost: 0,
+    lastActivity: "starting",
+  }));
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    height: 5,
+  });
+  try {
+    pane.focused = true;
+    for (let index = 0; index < 5; index += 1) pane.handleInput("\x1b[C");
+    const lines = pane.render(42);
+    assert.ok(lines.length <= 5);
+    assert.match(lines.join("\n"), /T6 · Task 6/);
+    assert.match(lines.join("\n"), /Waiting for agent output/);
+    assert.ok(lines.every((line) => visibleWidth(line) <= 42));
+  } finally {
+    pane.dispose();
   }
 });
 

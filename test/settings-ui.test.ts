@@ -143,6 +143,7 @@ test("settings changes preserve existing values and persist provider-qualified s
   try {
     let config = structuredClone(DEFAULT_CONFIG);
     config = applySettingsChange(config, "planGate", "on");
+    config = applySettingsChange(config, "livePanes", "off");
     config = applySettingsChange(config, "maxParallel", "6");
     config = applySettingsChange(config, "maxCostPerTask", "$5");
     config = applySettingsChange(config, "statusWaitSeconds", "30");
@@ -154,6 +155,7 @@ test("settings changes preserve existing values and persist provider-qualified s
 
     const persisted = JSON.parse(readFileSync(join(cwd, ".pi", "maestro.json"), "utf-8"));
     assert.equal(persisted.planGate, true);
+    assert.equal(persisted.livePanes, false);
     assert.equal(persisted.maxParallel, 6);
     assert.equal(persisted.maxCostPerTask, 5);
     assert.equal(persisted.statusWaitSeconds, 30);

@@ -120,12 +120,36 @@ const fakeTheme = {
 
 interface TestTui {
   requestRender: () => void;
-  terminal: { rows: number };
+  terminal: { rows: number; columns: number };
 }
 
 interface TestComponent {
+  focused?: boolean;
+  render?: (width: number) => string[];
+  invalidate?: () => void;
   handleInput: (data: string) => void;
   dispose?: () => void;
+}
+
+interface TestOverlay {
+  component: TestComponent;
+  hidden: boolean;
+  focused: boolean;
+  closed: boolean;
+  focusCalls: number;
+  unfocusCalls: number;
+  unfocusArgumentCounts: number[];
+  hideCalls: number;
+  disposeCalls: number;
+  options: Record<string, unknown>;
+  handle: {
+    hide(): void;
+    setHidden(hidden: boolean): void;
+    isHidden(): boolean;
+    focus(): void;
+    unfocus(...args: unknown[]): void;
+    isFocused(): boolean;
+  };
 }
 
 interface NewSessionOptions {
@@ -141,7 +165,7 @@ interface FreshCtx extends CommandCtx {
 interface CommandCtx {
   cwd: string;
   hasUI: boolean;
-  mode: "tui";
+  mode: "tui" | "rpc" | "print";
   modelRegistry: object;
   sessionManager: {
     getEntries?: () => unknown[];
@@ -155,7 +179,7 @@ interface CommandCtx {
     theme: typeof fakeTheme;
     notify: (message: string, level?: string) => void;
     setStatus: () => void;
-    setWidget: () => void;
+    setWidget: (key: string, widget: unknown) => void;
     setWorkingMessage: (message?: string) => void;
     custom?: <T>(
       factory: (
@@ -163,7 +187,8 @@ interface CommandCtx {
         theme: Theme,
         keybindings: object,
         done: (value: T) => void
-      ) => TestComponent
+      ) => TestComponent,
+      options?: Record<string, unknown>
     ) => Promise<T>;
     confirm?: (title: string, message: string) => Promise<boolean>;
   };
@@ -182,6 +207,13 @@ interface UiScript {
   beforeConfirm?: () => void;
 }
 
+interface HostOptions {
+  mode?: CommandCtx["mode"];
+  hasUI?: boolean;
+  rows?: number;
+  columns?: number;
+}
+
 const enter = "\r";
 const escapeKey = "\x1b";
 const down = "\x1b[B";
@@ -196,7 +228,8 @@ function loadMaestro(
   cwd: string,
   startExecutor?: StartExecutor,
   sessionFile = owner,
-  uiScript?: UiScript
+  uiScript?: UiScript,
+  host: HostOptions = {}
 ): {
   ctx: CommandCtx;
   notices: string[];
@@ -205,8 +238,23 @@ function loadMaestro(
   events: Map<string, EventHandler>;
   userMessages: Array<{ message: string; options?: { deliverAs?: string } }>;
   messages: Array<{ message: unknown; options?: { triggerTurn?: boolean; deliverAs?: string } }>;
+  shortcuts: Map<string, (ctx: CommandCtx) => unknown>;
+  overlays: TestOverlay[];
+  widgets: unknown[];
+  workingMessages: Array<string | undefined>;
+  tui: TestTui;
+  isEditorFocused(): boolean;
 } {
   const notices: string[] = [];
+  const shortcuts = new Map<string, (ctx: CommandCtx) => unknown>();
+  const overlays: TestOverlay[] = [];
+  const widgets: unknown[] = [];
+  const workingMessages: Array<string | undefined> = [];
+  const tui: TestTui = {
+    requestRender: () => {},
+    terminal: { rows: host.rows ?? 40, columns: host.columns ?? 120 },
+  };
+  let editorFocused = true;
   const userMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
   const messages: Array<{
     message: unknown;
@@ -218,16 +266,90 @@ function loadMaestro(
       notices.push(message);
     },
     setStatus: () => {},
-    setWidget: () => {},
-    setWorkingMessage: () => {},
+    setWidget: (_key: string, widget: unknown) => widgets.push(widget),
+    setWorkingMessage: (message?: string) => workingMessages.push(message),
     custom: async <T>(
       factory: (
         tui: TestTui,
         theme: Theme,
         keybindings: object,
         done: (value: T) => void
-      ) => TestComponent
+      ) => TestComponent,
+      options?: Record<string, unknown>
     ): Promise<T> => {
+      if (options?.overlay === true) {
+        return await new Promise<T>((resolve) => {
+          let component: TestComponent;
+          let overlay: TestOverlay;
+          let settled = false;
+          const done = (value: T) => {
+            if (settled) return;
+            settled = true;
+            overlay.closed = true;
+            component.dispose?.();
+            editorFocused = true;
+            resolve(value);
+          };
+          component = factory(tui, fakeTheme, {}, done);
+          component.focused = true;
+          editorFocused = false;
+          overlay = {
+            component,
+            hidden: false,
+            focused: true,
+            closed: false,
+            focusCalls: 0,
+            unfocusCalls: 0,
+            unfocusArgumentCounts: [],
+            hideCalls: 0,
+            disposeCalls: 0,
+            options,
+            handle: undefined as unknown as TestOverlay["handle"],
+          };
+          const dispose = component.dispose?.bind(component);
+          component.dispose = () => {
+            overlay.disposeCalls += 1;
+            dispose?.();
+          };
+          overlay.handle = {
+            hide: () => {
+              overlay.hideCalls += 1;
+              overlay.hidden = true;
+              overlay.focused = false;
+              component.focused = false;
+            },
+            setHidden: (hidden) => {
+              overlay.hidden = hidden;
+              if (!hidden) return;
+              overlay.focused = false;
+              component.focused = false;
+              editorFocused = true;
+            },
+            isHidden: () => overlay.hidden,
+            focus: () => {
+              if (overlay.hidden || overlay.closed) return;
+              overlay.focused = true;
+              component.focused = true;
+              editorFocused = false;
+              overlay.focusCalls += 1;
+            },
+            unfocus: (...args: unknown[]) => {
+              overlay.focused = false;
+              component.focused = false;
+              editorFocused = args.length === 0;
+              overlay.unfocusCalls += 1;
+              overlay.unfocusArgumentCounts.push(args.length);
+            },
+            isFocused: () => overlay.focused,
+          };
+          overlays.push(overlay);
+          const onHandle = options.onHandle as
+            | ((handle: TestOverlay["handle"]) => void)
+            | undefined;
+          onHandle?.(overlay.handle);
+        });
+      }
+
       const step = uiScript?.steps.shift();
       assert.ok(step, "unexpected TUI modal");
       return await new Promise<T>((resolve) => {
@@ -236,12 +358,7 @@ function loadMaestro(
           component.dispose?.();
           resolve(value);
         };
-        component = factory(
-          { requestRender: () => {}, terminal: { rows: 40 } },
-          fakeTheme,
-          {},
-          done
-        );
+        component = factory(tui, fakeTheme, {}, done);
         step.before?.();
         for (const key of step.keys) component.handleInput(key);
       });
@@ -253,8 +370,8 @@ function loadMaestro(
   };
   const ctx: CommandCtx = {
     cwd,
-    hasUI: true,
-    mode: "tui",
+    hasUI: host.hasUI ?? true,
+    mode: host.mode ?? "tui",
     modelRegistry: {},
     sessionManager: {
       getLeafId: () => "leaf-1",
@@ -275,7 +392,9 @@ function loadMaestro(
     registerCommand: (_name: string, options: RegisteredCommand) => {
       command = options;
     },
-    registerShortcut: () => {},
+    registerShortcut: (key: string, options: { handler: (ctx: CommandCtx) => unknown }) => {
+      shortcuts.set(key, options.handler);
+    },
     registerMessageRenderer: () => {},
     setSessionName: () => {},
     setLabel: () => {},
@@ -291,7 +410,28 @@ function loadMaestro(
   };
   maestro(pi as unknown as ExtensionAPI, { startExecutor: startExecutor ?? unusedExecutor });
   assert.ok(command, "maestro must register its command");
-  return { ctx, notices, command, tools, events, userMessages, messages };
+  return {
+    ctx,
+    notices,
+    command,
+    tools,
+    events,
+    userMessages,
+    messages,
+    shortcuts,
+    overlays,
+    widgets,
+    workingMessages,
+    tui,
+    isEditorFocused: () => editorFocused,
+  };
+}
+
+function renderLatestWidget(runtime: { widgets: unknown[]; tui: TestTui }): string[] {
+  const factory = runtime.widgets.at(-1);
+  if (typeof factory !== "function") return [];
+  const component = factory(runtime.tui, fakeTheme) as TestComponent;
+  return component.render?.(80) ?? [];
 }
 
 test("session startup preserves a running task with an active dispatch lease", () => {
@@ -3408,6 +3548,218 @@ test("reload acknowledges a decision already appended to the owner session witho
       assert.equal(messages.length, 0);
       assert.ok(loadBoard(cwd).activeDecision?.deliveredAt);
       assert.equal(loadBoard(cwd).activeDecision?.deliveryClaim, undefined);
+    }
+  );
+});
+
+test("ambient executor pane cycles through its real input path and resolves every close", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        cleanupCompletedTasks: false,
+        maxParallel: 3,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      for (const index of [1, 2, 3]) {
+        createTask(board, {
+          title: `Parallel ${index}`,
+          brief: `run parallel task ${index}`,
+          tier: "standard",
+          writePaths: [`src/${index}.ts`],
+          successCriteria: [`task ${index} settles`],
+        });
+      }
+      board.ownerSessions = [owner];
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const finishes = new Map<string, (outcome: RunOutcome) => void>();
+      const startExecutor: StartExecutor = (options) => ({
+        attempt: { ...executorAttempt(), logFile: `${options.runId}.jsonl` },
+        outcome: new Promise<RunOutcome>((resolve) => finishes.set(options.runId, resolve)),
+        steer: () => {},
+        abort: () => {},
+      });
+      const runtime = loadMaestro(cwd, startExecutor);
+      await runtime.tools
+        .get("maestro_drive")
+        ?.execute("three-live", { action: "start" }, undefined, undefined, runtime.ctx);
+      await waitFor(
+        () => finishes.size === 3 && runtime.overlays.length === 1,
+        "live pane did not open"
+      );
+
+      const firstPane = runtime.overlays[0];
+      assert.ok(firstPane);
+      assert.equal(firstPane.unfocusCalls, 1);
+      assert.deepEqual(firstPane.unfocusArgumentCounts, [0]);
+      assert.equal(firstPane.focused, false);
+      assert.equal(runtime.isEditorFocused(), true);
+      assert.deepEqual(firstPane.options.overlayOptions, {
+        anchor: "right-center",
+        width: "45%",
+        maxHeight: "80%",
+        visible: (firstPane.options.overlayOptions as { visible: unknown }).visible,
+      });
+      const visible = (firstPane.options.overlayOptions as { visible: (width: number) => boolean })
+        .visible;
+      assert.equal(visible(99), false);
+      assert.equal(visible(100), true);
+      const initial = firstPane.component.render?.(80).join("\n") ?? "";
+      assert.match(initial, /T1 · Parallel 1/);
+      assert.match(initial, /▶ T1/);
+
+      runtime.tui.terminal.columns = 99;
+      assert.notDeepEqual(renderLatestWidget(runtime), []);
+      runtime.tui.terminal.columns = 100;
+      assert.deepEqual(renderLatestWidget(runtime), []);
+
+      const cycle = runtime.shortcuts.get("ctrl+alt+w");
+      assert.ok(cycle);
+      const foreignCtx: CommandCtx = {
+        ...runtime.ctx,
+        sessionManager: { ...runtime.ctx.sessionManager, getSessionFile: () => other },
+      };
+      cycle(foreignCtx);
+      assert.equal(firstPane.focused, false, "a foreign session cannot focus the owner pane");
+
+      cycle(runtime.ctx);
+      assert.equal(firstPane.focused, true);
+      assert.equal(runtime.isEditorFocused(), false);
+      firstPane.component.handleInput("\x1b");
+      assert.equal(firstPane.focused, false);
+      assert.equal(runtime.isEditorFocused(), true);
+      cycle(runtime.ctx);
+      assert.equal(firstPane.focused, true);
+      firstPane.component.handleInput("\x1b\x17");
+      await waitFor(() => firstPane.closed, "focused ctrl+alt+w did not close through done");
+      assert.equal(firstPane.hideCalls, 0, "OverlayHandle.hide must never close a custom pane");
+      assert.equal(firstPane.disposeCalls, 1);
+      assert.ok(firstPane.unfocusArgumentCounts.every((count) => count === 0));
+      assert.equal(runtime.isEditorFocused(), true);
+      assert.notDeepEqual(renderLatestWidget(runtime), []);
+
+      const first = [...finishes.entries()].find(([runId]) => runId.startsWith("T1-"));
+      assert.ok(first);
+      first[1]({
+        exitCode: 1,
+        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+        finalReport: "cancelled",
+        touchedFiles: [],
+        aborted: true,
+        failureCause: "user_abort",
+      });
+      await waitFor(
+        () => !loadBoard(cwd).tasks[0]?.dispatchClaim,
+        "selected executor did not settle"
+      );
+      assert.equal(runtime.overlays.length, 1, "hidden pane must not flap for the same drive");
+
+      cycle(runtime.ctx);
+      await waitFor(() => runtime.overlays.length === 2, "hidden pane did not reopen on demand");
+      const reopened = runtime.overlays[1];
+      assert.ok(reopened);
+      assert.equal(reopened.focused, false);
+      assert.equal(runtime.isEditorFocused(), true);
+      assert.ok(reopened.unfocusArgumentCounts.every((count) => count === 0));
+      assert.deepEqual(renderLatestWidget(runtime), []);
+
+      for (const [runId, finish] of finishes) {
+        if (runId.startsWith("T1-")) continue;
+        finish({
+          exitCode: 1,
+          usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+          finalReport: "cancelled",
+          touchedFiles: [],
+          aborted: true,
+          failureCause: "user_abort",
+        });
+      }
+      await waitFor(() => reopened.closed, "last settlement did not resolve the reopened pane");
+      assert.equal(reopened.hideCalls, 0);
+      assert.equal(reopened.disposeCalls, 1);
+    }
+  );
+});
+
+test("ambient pane shutdown resolves through done without stale handles", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Shutdown", brief: "run", tier: "standard" });
+      board.ownerSessions = [owner];
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let finish: ((outcome: RunOutcome) => void) | undefined;
+      const aborted: RunOutcome = {
+        exitCode: 1,
+        usage: { input: 0, output: 0, cost: 0, turns: 1 },
+        finalReport: "cancelled",
+        touchedFiles: [],
+        aborted: true,
+        failureCause: "user_abort",
+      };
+      const runtime = loadMaestro(cwd, () => ({
+        attempt: executorAttempt(),
+        outcome: new Promise<RunOutcome>((resolve) => {
+          finish = resolve;
+        }),
+        steer: () => {},
+        abort: () => finish?.(aborted),
+      }));
+      await runtime.tools
+        .get("maestro_drive")
+        ?.execute("shutdown-pane", { action: "start" }, undefined, undefined, runtime.ctx);
+      await waitFor(() => runtime.overlays.length === 1, "live pane did not open");
+      const pane = runtime.overlays[0];
+      assert.ok(pane);
+
+      runtime.events.get("session_shutdown")?.({}, runtime.ctx);
+      await waitFor(() => pane.closed, "shutdown did not resolve the pane promise");
+      assert.equal(pane.disposeCalls, 1);
+      assert.equal(pane.hideCalls, 0);
+    }
+  );
+});
+
+test("disabled ambient panes leave the status widget available", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, livePanes: false, autoCommit: false });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Disabled pane", brief: "run", tier: "standard" });
+      board.ownerSessions = [owner];
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let finish: ((outcome: RunOutcome) => void) | undefined;
+      const runtime = loadMaestro(cwd, () => ({
+        attempt: executorAttempt(),
+        outcome: new Promise<RunOutcome>((resolve) => {
+          finish = resolve;
+        }),
+        steer: () => {},
+        abort: () => {},
+      }));
+      await runtime.tools
+        .get("maestro_drive")
+        ?.execute("disabled-pane", { action: "start" }, undefined, undefined, runtime.ctx);
+      await waitFor(() => finish !== undefined, "executor did not launch");
+      assert.equal(runtime.overlays.length, 0);
+      assert.notDeepEqual(renderLatestWidget(runtime), []);
+      runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
+      assert.equal(runtime.overlays.length, 0);
+      finish?.({
+        exitCode: 1,
+        usage: { input: 0, output: 0, cost: 0, turns: 1 },
+        finalReport: "cancelled",
+        touchedFiles: [],
+        aborted: true,
+        failureCause: "user_abort",
+      });
     }
   );
 });

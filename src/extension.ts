@@ -14,6 +14,7 @@ import {
   Key,
   Markdown,
   matchesKey,
+  type OverlayHandle,
   type SelectItem,
   SelectList,
   Text,
@@ -60,7 +61,12 @@ import {
   resolveTierModels,
 } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
-import { Dashboard, type DashboardTaskAction } from "./dashboard.js";
+import {
+  Dashboard,
+  type DashboardTaskAction,
+  type LivePaneLaunch,
+  LivePaneComponent,
+} from "./dashboard.js";
 import { buildDoctorReport } from "./diagnostics.js";
 import {
   buildDiscoveryBoard,
@@ -168,6 +174,14 @@ export interface MaestroDependencies {
   startExecutor: typeof defaultStartExecutor;
 }
 
+interface LivePaneRuntime {
+  handle?: OverlayHandle;
+  component?: LivePaneComponent;
+  done?: () => void;
+  isResponsiveVisible?: () => boolean;
+  closing: boolean;
+}
+
 export function scrollableTextOffset(
   offset: number,
   delta: number,
@@ -176,6 +190,8 @@ export function scrollableTextOffset(
 ): number {
   return Math.max(0, Math.min(Math.max(0, lineCount - pageSize), offset + delta));
 }
+
+const livePaneResponsiveVisibility = (width: number): boolean => width >= 100;
 
 export default function maestro(
   pi: ExtensionAPI,
@@ -193,6 +209,8 @@ export default function maestro(
   let activeCwd = process.cwd();
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
+  let hiddenLivePaneDriveId: string | undefined;
+  let livePane: LivePaneRuntime | undefined;
 
   function sessionOwnsBoard(ctx: ExtensionContext, board: Board): boolean {
     if (!board.ownerSessions || board.ownerSessions.length === 0) return true; // legacy board
@@ -244,6 +262,143 @@ export default function maestro(
     }
   }
 
+  function currentDriveId(): string | undefined {
+    return driveController.activeOwner()?.id;
+  }
+
+  function livePaneLaunches(ctx: ExtensionContext): LivePaneLaunch[] {
+    const board = loadBoard(ctx.cwd);
+    return [...liveRuns.values()]
+      .filter((run) => run.kind === "execute")
+      .map((run) => {
+        const task = findTask(board, run.taskId);
+        const attempt = run.handle.attempt;
+        return {
+          key: `${run.kind}:${run.taskId}:${attempt.startedAt}:${attempt.logFile}`,
+          taskId: run.taskId,
+          title: task?.title ?? run.taskId,
+          kind: run.kind,
+          logFile: attempt.logFile,
+          ...(attempt.model ? { model: attempt.model } : {}),
+          ...(attempt.provider ? { provider: attempt.provider } : {}),
+          turns: run.turns,
+          cost: run.cost,
+          lastActivity: run.lastActivity,
+        };
+      });
+  }
+
+  function watchedLiveRunCount(): number {
+    return [...liveRuns.values()].filter((run) => run.kind === "execute").length;
+  }
+
+  function canShowLivePane(ctx: ExtensionContext): boolean {
+    if (ctx.mode !== "tui" || !loadConfig(ctx.cwd).livePanes) return false;
+    const activeDrive = driveController.activeOwner();
+    if (!activeDrive) return false;
+    return sessionCanControlDrive(activeDrive.ownerSession, ctx.sessionManager.getSessionFile());
+  }
+
+  function livePaneIsVisible(width: number): boolean {
+    const pane = livePane;
+    if (!pane?.handle || pane.closing || pane.handle.isHidden()) return false;
+    return livePaneResponsiveVisibility(width);
+  }
+
+  function closeLivePane(): void {
+    const pane = livePane;
+    if (!pane || pane.closing || !pane.done) return;
+    pane.closing = true;
+    pane.done();
+  }
+
+  function openLivePane(ctx: ExtensionContext): void {
+    if (livePane || watchedLiveRunCount() === 0 || !canShowLivePane(ctx)) return;
+
+    const pane: LivePaneRuntime = { closing: false };
+    livePane = pane;
+    let completion: Promise<void>;
+    try {
+      completion = ctx.ui.custom<void>(
+        (tui, theme, _keybindings, done) => {
+          pane.done = () => done(undefined);
+          pane.isResponsiveVisible = () => livePaneResponsiveVisibility(tui.terminal.columns);
+          pane.component = new LivePaneComponent(theme, {
+            getLaunches: () => livePaneLaunches(ctx),
+            getHeight: () => Math.max(1, Math.floor(tui.terminal.rows * 0.8)),
+            requestRender: () => tui.requestRender(),
+            onEscape: () => {
+              pane.handle?.unfocus();
+              refreshUI(ctx);
+            },
+            onCycleVisibility: () => cycleLivePane(ctx),
+          });
+          return pane.component;
+        },
+        {
+          overlay: true,
+          overlayOptions: {
+            anchor: "right-center",
+            width: "45%",
+            maxHeight: "80%",
+            visible: livePaneResponsiveVisibility,
+          },
+          onHandle: (handle) => {
+            pane.handle = handle;
+            if (!runtimeActive || watchedLiveRunCount() === 0 || !canShowLivePane(ctx)) {
+              closeLivePane();
+              return;
+            }
+            handle.unfocus();
+            refreshUI(ctx);
+          },
+        }
+      );
+    } catch {
+      pane.component?.dispose();
+      if (livePane === pane) livePane = undefined;
+      return;
+    }
+
+    const finish = () => {
+      if (livePane !== pane) return;
+      livePane = undefined;
+      if (!runtimeActive || watchedLiveRunCount() === 0 || !canShowLivePane(ctx)) return;
+      syncLivePane(ctx);
+      refreshUI(ctx);
+    };
+    void completion.then(finish, finish);
+  }
+
+  function syncLivePane(ctx: ExtensionContext): void {
+    if (watchedLiveRunCount() === 0 || !canShowLivePane(ctx)) {
+      closeLivePane();
+      return;
+    }
+    if (livePane) return;
+    if (hiddenLivePaneDriveId === currentDriveId()) return;
+    openLivePane(ctx);
+  }
+
+  function cycleLivePane(ctx: ExtensionContext): void {
+    if (watchedLiveRunCount() === 0 || !canShowLivePane(ctx)) return;
+    const pane = livePane;
+    if (!pane) {
+      if (hiddenLivePaneDriveId === currentDriveId()) hiddenLivePaneDriveId = undefined;
+      openLivePane(ctx);
+      return;
+    }
+    if (pane.closing || !pane.handle || !pane.isResponsiveVisible?.()) return;
+    if (!pane.handle.isFocused()) {
+      pane.handle.focus();
+      return;
+    }
+
+    hiddenLivePaneDriveId = currentDriveId();
+    closeLivePane();
+    refreshUI(ctx);
+  }
+
   function refreshUI(ctx: ExtensionContext): void {
     // Executor stdout events outlive session switches; any access on a stale
     // ctx throws. Skip — the next session's events arrive with a live ctx.
@@ -254,6 +409,7 @@ export default function maestro(
     }
     const board = loadBoard(ctx.cwd);
     notifyQuarantine(ctx);
+    syncLivePane(ctx);
 
     // Sessions that never touched this board (fresh /maestro-less chats in
     // the same repo) don't get its status bar. Live runs always show:
@@ -289,7 +445,7 @@ export default function maestro(
       return;
     }
     ctx.ui.setWorkingMessage(`maestro · ${running} executor(s) · $${usage.cost.toFixed(2)}`);
-    ctx.ui.setWidget(COMMAND, (_tui, theme) => {
+    ctx.ui.setWidget(COMMAND, (tui, theme) => {
       const lines = [...liveRuns.values()].map((run) => {
         const task = findTask(board, run.taskId);
         const title = task ? task.title : run.taskId;
@@ -304,7 +460,10 @@ export default function maestro(
           )
         );
       });
-      return { render: () => lines, invalidate: () => {} };
+      return {
+        render: () => (livePaneIsVisible(tui.terminal.columns) ? [] : lines),
+        invalidate: () => {},
+      };
     });
   }
 
@@ -325,6 +484,7 @@ export default function maestro(
   }
 
   function trackRun(ctx: ExtensionContext, run: WorkflowRun): () => void {
+    if (hiddenLivePaneDriveId !== currentDriveId()) hiddenLivePaneDriveId = undefined;
     liveRuns.set(run.taskId, run);
     if (runtimeActive) refreshUI(ctx);
     // The workflow persists the running state immediately after registration.
@@ -1922,6 +2082,11 @@ export default function maestro(
     },
   });
 
+  pi.registerShortcut("ctrl+alt+w", {
+    description: "Cycle the maestro live pane",
+    handler: (ctx) => cycleLivePane(ctx),
+  });
+
   /**
    * Works from both the command handler and the shortcut. Shortcut handlers
    * only get ExtensionContext, so session actions are hidden when the host
@@ -2860,6 +3025,8 @@ export default function maestro(
   pi.on("session_start", (event, ctx) => {
     activeCwd = ctx.cwd;
     runtimeActive = true;
+    closeLivePane();
+    hiddenLivePaneDriveId = undefined;
     liveRuns.clear();
     contextNudgeShown = false;
     // Session switches reload extensions, so switchWithReturn's in-memory
@@ -2946,6 +3113,7 @@ export default function maestro(
   // Shutdown still aborts as a final safety net so a forced reload or exit can never orphan it.
   pi.on("session_shutdown", () => {
     runtimeActive = false;
+    closeLivePane();
     const active = driveController.activeOwner();
     if (active) {
       try {

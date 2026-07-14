@@ -335,6 +335,10 @@ repository without an initial commit include next-step guidance. `/maestro docto
 confirmation before removing stale/orphaned entries, then rechecks the board and live runs so active
 and recoverable worktrees remain untouched. In non-interactive mode, add `confirm` explicitly.
 
+### Live executor pane
+
+When a drive launches executors, Maestro opens an owner-scoped transcript pane beside the editor on wide terminals. It follows new output without taking focus, so you can keep typing. Press `ctrl+alt+w` to focus the pane, press it again while focused to hide it, and press it once more from the editor to restore it. Inside the pane, use `←/→` to switch agents, `j/k` or `PgUp/PgDn` to scroll, `g/G` for top/follow mode, and `esc` to return focus to the editor. Set `livePanes` to `false` to keep only the compact status widget.
+
 ### Commands
 
 ```
@@ -357,6 +361,7 @@ and recoverable worktrees remain untouched. In non-interactive mode, add `confir
 /maestro recipe remove <name> [user|project]  remove only after confirmation
 /maestro discover <taskId> [append|replace]  preview and approve bounded discovery output
 /maestro board            full-screen live dashboard (aliases: dash, dashboard; also ctrl+alt+b)
+ctrl+alt+w                cycle the ambient live pane: visible, focused, hidden
 /maestro open <taskId>    switch into an executor's session
 /maestro back             switch back to the previous session (after open/reviewer open)
 /maestro config           interactive settings editor (user scope)

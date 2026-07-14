@@ -11,6 +11,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 |---|---:|---|
 | `maxParallel` | 3 | 1–64 |
 | `planGate` | false | Require human plan approval |
+| `livePanes` | true | Show owner-scoped live executor transcripts beside the editor in TUI mode |
 | `useWorktrees` | false | Isolate task checkouts |
 | `autoCommit` | true | Commit only attributed task paths |
 | `maxAttempts` | 3 | 1–100 consumed attempts |

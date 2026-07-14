@@ -56,6 +56,7 @@ test("default config has the documented tiers and no model overrides", () => {
   ]);
   assert.equal(DEFAULT_CONFIG.maxParallel, 3);
   assert.equal(DEFAULT_CONFIG.planGate, false);
+  assert.equal(DEFAULT_CONFIG.livePanes, true);
   assert.equal(DEFAULT_CONFIG.useWorktrees, false);
   assert.equal(DEFAULT_CONFIG.maxCostPerTask, 5);
   assert.equal(DEFAULT_CONFIG.maxRunCost, 25);
@@ -82,6 +83,7 @@ test("every preset defines all four tiers and keeps review read-only", () => {
       `preset ${preset.name}`
     );
     assert.equal(preset.config.planGate, false, `preset ${preset.name}`);
+    assert.equal(preset.config.livePanes, true, `preset ${preset.name}`);
     assert.equal(preset.config.useWorktrees, false, `preset ${preset.name}`);
     assert.equal(preset.config.maxRunCost, 25, `preset ${preset.name}`);
     assert.equal(preset.config.statusWaitSeconds, 60, `preset ${preset.name}`);
@@ -106,6 +108,7 @@ test("describeConfig lists preset name and every tier", () => {
   assert.match(text, /preset: inherit/);
   assert.match(text, /maxParallel: 3/);
   assert.match(text, /planGate: false/);
+  assert.match(text, /livePanes: true/);
   assert.match(text, /useWorktrees: false/);
   assert.match(text, /maxRunCost: \$25/);
   assert.match(text, /statusWaitSeconds: 60/);
@@ -258,10 +261,14 @@ test("mergeConfig carries attempt, cost, and pulse settings", () => {
 });
 
 test("validateConfig rejects malformed fields and accepts explicit zero partials", () => {
-  assert.equal(validateConfig({ maxRunCost: 0, watchdogIdleSeconds: 0 }), undefined);
+  assert.equal(
+    validateConfig({ maxRunCost: 0, watchdogIdleSeconds: 0, livePanes: false }),
+    undefined
+  );
   assert.match(validateConfig({ maxParallel: -1 }) ?? "", /maxParallel/);
   assert.match(validateConfig({ logEvents: "verbose" }) ?? "", /logEvents/);
   assert.match(validateConfig({ cleanupCompletedTasks: "yes" }) ?? "", /boolean/);
+  assert.match(validateConfig({ livePanes: "yes" }) ?? "", /livePanes must be boolean/);
   assert.match(validateConfig({ reviewRequiredApprovals: 1 }) ?? "", /reviewRequiredApprovals/);
   assert.match(validateConfig({ maxReviewerLaunches: 2.5 }) ?? "", /integer/);
   assert.match(

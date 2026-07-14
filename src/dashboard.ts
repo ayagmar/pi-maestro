@@ -1,6 +1,7 @@
 import { type Theme } from "@earendil-works/pi-coding-agent";
 import {
   Input,
+  Key,
   matchesKey,
   truncateToWidth,
   visibleWidth,
@@ -24,7 +25,7 @@ import {
 } from "./format.js";
 import { projectRunPhases, projectStatus } from "./status.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
-import { TranscriptTail } from "./transcript.js";
+import { TranscriptTail, type TranscriptItem } from "./transcript.js";
 import {
   type Attempt,
   type Board,
@@ -218,6 +219,341 @@ function statusColor(status: TaskStatus): "success" | "error" | "warning" | "acc
   if (status === "running") return "warning";
   if (status === "ready_for_review") return "accent";
   return "muted";
+}
+
+/** Shared transcript projection used by the dashboard and ambient live pane. */
+export function styledTranscriptLines(
+  theme: Theme,
+  items: readonly TranscriptItem[],
+  width: number
+): string[] {
+  const safeWidth = Math.max(1, Math.floor(width));
+  const lines: string[] = [];
+
+  for (const item of items) {
+    if (item.kind === "tool") {
+      lines.push(
+        theme.fg("muted", "→ ") +
+          theme.fg("toolTitle", truncateToWidth(item.text, Math.max(1, safeWidth - 2)))
+      );
+      continue;
+    }
+    if (item.kind === "tool_error") {
+      lines.push(theme.fg("error", truncateToWidth(`→ ${item.text}`, safeWidth)));
+      continue;
+    }
+    if (item.kind === "status") {
+      lines.push(theme.fg("dim", truncateToWidth(item.text, safeWidth)));
+      continue;
+    }
+    for (const raw of item.text.split("\n")) {
+      for (const line of wrapText(raw, safeWidth)) {
+        lines.push(theme.fg("toolOutput", line));
+      }
+    }
+  }
+
+  return lines.map((line) => truncateToWidth(line, safeWidth));
+}
+
+export interface LivePaneLaunch {
+  /** Stable identity for one executor or reviewer process launch. */
+  key: string;
+  taskId: string;
+  title: string;
+  kind: "execute" | "review";
+  logFile: string;
+  model?: string;
+  provider?: string;
+  turns: number;
+  cost: number;
+  lastActivity: string;
+}
+
+export interface LivePaneOptions {
+  getLaunches(): readonly LivePaneLaunch[];
+  requestRender(): void;
+  onEscape(): void;
+  onCycleVisibility(): void;
+  height?: number;
+  getHeight?: () => number;
+}
+
+type LivePaneStatus = "thinking" | "streaming" | "tool" | "done";
+
+const LIVE_PANE_STATUS: Record<
+  LivePaneStatus,
+  { glyph: string; color: "warning" | "success" | "accent" }
+> = {
+  thinking: { glyph: "◐", color: "warning" },
+  streaming: { glyph: "●", color: "success" },
+  tool: { glyph: "◑", color: "accent" },
+  done: { glyph: "✓", color: "success" },
+};
+
+/** Ambient, bounded transcript follower for active executor and reviewer launches. */
+export class LivePaneComponent {
+  focused = false;
+  private selectedKey: string | undefined;
+  private readonly launchOrder: string[] = [];
+  private previousLaunches = new Map<string, LivePaneLaunch>();
+  private readonly tails = new Map<string, TranscriptTail>();
+  private scrollOffset = Number.MAX_SAFE_INTEGER;
+  private renderedScrollOffset = 0;
+  private followMode = true;
+  private settledNotice: string | undefined;
+  private timer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(
+    private readonly theme: Theme,
+    private readonly options: LivePaneOptions
+  ) {
+    this.timer = setInterval(() => options.requestRender(), REFRESH_MS);
+    this.timer.unref();
+  }
+
+  dispose(): void {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  invalidate(): void {}
+
+  handleInput(data: string): void {
+    if (!this.focused) return;
+    if (matchesKey(data, Key.ctrlAlt("w"))) {
+      this.options.onCycleVisibility();
+      return;
+    }
+    if (matchesKey(data, Key.escape)) {
+      this.options.onEscape();
+      return;
+    }
+
+    const launches = this.syncLaunches();
+    if (matchesKey(data, Key.left)) {
+      this.selectOffset(launches, -1);
+      return;
+    }
+    if (matchesKey(data, Key.right)) {
+      this.selectOffset(launches, 1);
+      return;
+    }
+    if (matchesKey(data, Key.up) || data === "k") {
+      this.followMode = false;
+      this.scrollOffset = Math.max(0, this.renderedScrollOffset - 1);
+      this.options.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.down) || data === "j") {
+      this.scrollOffset = this.renderedScrollOffset + 1;
+      this.options.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.pageUp)) {
+      this.followMode = false;
+      this.scrollOffset = Math.max(0, this.renderedScrollOffset - 10);
+      this.options.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.pageDown)) {
+      this.scrollOffset = this.renderedScrollOffset + 10;
+      this.options.requestRender();
+      return;
+    }
+    if (data === "g") {
+      this.followMode = false;
+      this.scrollOffset = 0;
+      this.options.requestRender();
+      return;
+    }
+    if (data === "G" || matchesKey(data, Key.shift("g"))) {
+      this.followMode = true;
+      this.scrollOffset = Number.MAX_SAFE_INTEGER;
+      this.options.requestRender();
+    }
+  }
+
+  render(width: number): string[] {
+    const safeWidth = Math.max(1, Math.floor(width));
+    const height = Math.max(
+      1,
+      Math.floor(this.options.getHeight?.() ?? this.options.height ?? DEFAULT_DASHBOARD_BODY_HEIGHT)
+    );
+    const launches = this.syncLaunches();
+    const selected = launches.find((launch) => launch.key === this.selectedKey);
+    if (!selected) return this.renderSettled(safeWidth, height);
+
+    const tail = this.tailFor(selected);
+    tail.poll();
+    const transcript = styledTranscriptLines(this.theme, tail.items, safeWidth);
+    if (transcript.length === 0) {
+      transcript.push(
+        this.theme.fg("muted", truncateToWidth("Waiting for agent output…", safeWidth))
+      );
+    }
+
+    const header = this.renderHeader(selected, tail.items, safeWidth);
+    const footerRows = height >= 3 ? 1 : 0;
+    const stripRows = launches.length > 1 && height >= 4 ? 1 : 0;
+    const noticeRows = this.settledNotice && height >= 5 ? 1 : 0;
+    const bodyHeight = Math.max(0, height - 1 - footerRows - stripRows - noticeRows);
+    const maxScroll = Math.max(0, transcript.length - bodyHeight);
+    const requestedOffset = this.followMode ? Number.MAX_SAFE_INTEGER : this.scrollOffset;
+    this.renderedScrollOffset = Math.min(requestedOffset, maxScroll);
+    const body = transcript.slice(
+      this.renderedScrollOffset,
+      this.renderedScrollOffset + bodyHeight
+    );
+
+    const lines = [
+      header,
+      ...(stripRows ? [this.renderLaunchStrip(launches, safeWidth)] : []),
+      ...(noticeRows
+        ? [this.theme.fg("success", truncateToWidth(this.settledNotice ?? "", safeWidth))]
+        : []),
+      ...body,
+      ...(footerRows
+        ? [this.renderFooter(transcript.length, bodyHeight, this.renderedScrollOffset, safeWidth)]
+        : []),
+    ];
+    return lines.slice(0, height).map((line) => truncateToWidth(line, safeWidth));
+  }
+
+  private tailFor(launch: LivePaneLaunch): TranscriptTail {
+    const existing = this.tails.get(launch.key);
+    if (existing?.file === launch.logFile) return existing;
+    const tail = new TranscriptTail(launch.logFile);
+    this.tails.set(launch.key, tail);
+    return tail;
+  }
+
+  private renderHeader(
+    launch: LivePaneLaunch,
+    items: readonly TranscriptItem[],
+    width: number
+  ): string {
+    const identity = launch.model ?? launch.provider ?? "model unknown";
+    const title =
+      launch.kind === "review"
+        ? `${launch.taskId} · review · [${identity}]`
+        : `${launch.taskId} · ${launch.title} [${identity}]`;
+    const status = this.launchStatus(items);
+    const details = LIVE_PANE_STATUS[status];
+    const statusText = `${details.glyph} ${status}`;
+    const availableTitle = Math.max(1, width - visibleWidth(statusText) - 1);
+    return truncateToWidth(
+      `${this.theme.fg("accent", truncateToWidth(title, availableTitle))} ${this.theme.fg(details.color, statusText)}`,
+      width
+    );
+  }
+
+  private launchStatus(items: readonly TranscriptItem[]): LivePaneStatus {
+    const latest = items.at(-1);
+    if (!latest) return "thinking";
+    if (latest.kind === "status") return "done";
+    if (latest.kind === "tool" || latest.kind === "tool_error") return "tool";
+    return "streaming";
+  }
+
+  private renderLaunchStrip(launches: readonly LivePaneLaunch[], width: number): string {
+    const selectedIndex = Math.max(
+      0,
+      launches.findIndex((launch) => launch.key === this.selectedKey)
+    );
+    const capacity = Math.max(1, Math.floor(width / 14));
+    const start = Math.min(
+      Math.max(0, selectedIndex - Math.floor(capacity / 2)),
+      Math.max(0, launches.length - capacity)
+    );
+    const visible = launches.slice(start, start + capacity).map((launch) => {
+      const selected = launch.key === this.selectedKey;
+      const marker = selected ? "▶" : "·";
+      const label = `${marker} ${launch.taskId}`;
+      return selected ? this.theme.fg("accent", label) : this.theme.fg("dim", label);
+    });
+    const earlier = start > 0 ? `←${start} ` : "";
+    const later =
+      start + visible.length < launches.length
+        ? ` +${launches.length - start - visible.length}→`
+        : "";
+    return truncateToWidth(
+      `${this.theme.fg("dim", earlier)}${visible.join(this.theme.fg("dim", " │ "))}${this.theme.fg("dim", later)}`,
+      width
+    );
+  }
+
+  private renderFooter(
+    transcriptLines: number,
+    visibleLines: number,
+    offset: number,
+    width: number
+  ): string {
+    const first = transcriptLines === 0 ? 0 : offset + 1;
+    const last = Math.min(transcriptLines, offset + visibleLines);
+    const position = `${first}-${last}/${transcriptLines}`;
+    const follow = this.followMode
+      ? this.theme.fg("success", "● follow")
+      : this.theme.fg("dim", "○ paused");
+    const hints = "←/→ agent · j/k scroll · PgUp/PgDn · g/G top/end · esc editor · ctrl+alt+w hide";
+    return this.theme.fg("dim", truncateToWidth(`${position} ${follow} · ${hints}`, width));
+  }
+
+  private renderSettled(width: number, height: number): string[] {
+    const lines = [this.theme.fg("success", truncateToWidth("✓ Agents settled", width))];
+    if (this.settledNotice && height > 1) {
+      lines.push(this.theme.fg("dim", truncateToWidth(this.settledNotice, width)));
+    }
+    if (height > lines.length) {
+      lines.push(this.theme.fg("dim", truncateToWidth("esc editor", width)));
+    }
+    return lines.slice(0, height).map((line) => truncateToWidth(line, width));
+  }
+
+  private selectOffset(launches: readonly LivePaneLaunch[], offset: -1 | 1): void {
+    if (launches.length < 2) return;
+    const selected = launches.findIndex((launch) => launch.key === this.selectedKey);
+    const next = (Math.max(0, selected) + offset + launches.length) % launches.length;
+    const launch = launches[next];
+    if (!launch || launch.key === this.selectedKey) return;
+    this.selectedKey = launch.key;
+    this.followMode = true;
+    this.scrollOffset = Number.MAX_SAFE_INTEGER;
+    this.settledNotice = undefined;
+    this.options.requestRender();
+  }
+
+  private syncLaunches(): readonly LivePaneLaunch[] {
+    const launches = this.options.getLaunches();
+    for (const launch of launches) {
+      if (!this.launchOrder.includes(launch.key)) this.launchOrder.push(launch.key);
+    }
+    if (!this.selectedKey) {
+      this.selectedKey = launches[0]?.key;
+      if (this.selectedKey) this.settledNotice = undefined;
+    }
+
+    if (this.selectedKey && !launches.some((launch) => launch.key === this.selectedKey)) {
+      const settled = this.previousLaunches.get(this.selectedKey);
+      const settledIndex = this.launchOrder.indexOf(this.selectedKey);
+      const liveKeys = new Set(launches.map((launch) => launch.key));
+      const following = [
+        ...this.launchOrder.slice(settledIndex + 1),
+        ...this.launchOrder.slice(0, Math.max(0, settledIndex)),
+      ].find((key) => liveKeys.has(key));
+      this.selectedKey = following ?? launches[0]?.key;
+      const next = launches.find((launch) => launch.key === this.selectedKey);
+      this.settledNotice = settled
+        ? `✓ ${settled.taskId} settled${next ? ` · following ${next.taskId}` : ""}`
+        : undefined;
+      this.followMode = true;
+      this.scrollOffset = Number.MAX_SAFE_INTEGER;
+    }
+
+    this.previousLaunches = new Map(launches.map((launch) => [launch.key, launch]));
+    return launches;
+  }
 }
 
 /**
@@ -894,23 +1230,8 @@ export class Dashboard {
       wrapped.push(theme.fg("muted", "Waiting for executor output…"));
     }
 
-    for (const item of this.detailView === "transcript" ? (tail?.items ?? []) : []) {
-      if (item.kind === "tool") {
-        wrapped.push(
-          theme.fg("muted", "→ ") +
-            theme.fg("toolTitle", truncateToWidth(item.text, Math.max(1, width - 2)))
-        );
-      } else if (item.kind === "tool_error") {
-        wrapped.push(theme.fg("error", `→ ${truncateToWidth(item.text, Math.max(1, width - 2))}`));
-      } else if (item.kind === "status") {
-        wrapped.push(theme.fg("dim", item.text));
-      } else {
-        for (const raw of item.text.split("\n")) {
-          for (const line of wrapText(raw, width)) {
-            wrapped.push(theme.fg("toolOutput", line));
-          }
-        }
-      }
+    if (this.detailView === "transcript") {
+      wrapped.push(...styledTranscriptLines(theme, tail?.items ?? [], width));
     }
 
     const modeLines =

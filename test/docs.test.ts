@@ -65,6 +65,7 @@ test("configuration docs match runtime defaults and commands remain documented",
   const defaults: Array<[string, string | number | boolean]> = [
     ["maxParallel", DEFAULT_CONFIG.maxParallel],
     ["planGate", DEFAULT_CONFIG.planGate],
+    ["livePanes", DEFAULT_CONFIG.livePanes],
     ["useWorktrees", DEFAULT_CONFIG.useWorktrees],
     ["autoCommit", DEFAULT_CONFIG.autoCommit],
     ["maxAttempts", DEFAULT_CONFIG.maxAttempts],
@@ -101,7 +102,9 @@ test("configuration docs match runtime defaults and commands remain documented",
     assert.ok(read("README.md").includes(`/maestro ${command}`));
   }
   assert.equal(MAESTRO_COMMANDS.includes("plan compare" as never), false);
-  assert.doesNotMatch(read("README.md"), /\/maestro list\b|plan compare/);
+  assert.equal(MAESTRO_COMMANDS.includes("watch" as never), false);
+  assert.equal(MAESTRO_COMMANDS.length, 36, "ambient panes must not add a slash command");
+  assert.doesNotMatch(read("README.md"), /\/maestro list\b|plan compare|\/maestro watch\b/);
 });
 
 test("declared package shape contains runtime and required documentation", () => {

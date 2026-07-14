@@ -17,6 +17,7 @@ export const REVIEW_TOOLS = "read,bash,grep,find,ls";
 export const DEFAULT_CONFIG: MaestroConfig = {
   maxParallel: 3,
   planGate: false,
+  livePanes: true,
   useWorktrees: false,
   autoCommit: true,
   maxAttempts: 3,
@@ -83,6 +84,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       planGate: false,
+      livePanes: true,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -119,6 +121,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 4,
       planGate: false,
+      livePanes: true,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -155,6 +158,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 4,
       planGate: false,
+      livePanes: true,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -191,6 +195,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       planGate: false,
+      livePanes: true,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -227,6 +232,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       planGate: false,
+      livePanes: true,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
@@ -263,6 +269,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       planGate: false,
+      livePanes: true,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
@@ -313,6 +320,7 @@ export function mergeConfig(
   return {
     maxParallel: override.maxParallel ?? base.maxParallel,
     planGate: override.planGate ?? base.planGate,
+    livePanes: override.livePanes ?? base.livePanes,
     useWorktrees: override.useWorktrees ?? base.useWorktrees,
     autoCommit: override.autoCommit ?? base.autoCommit,
     maxAttempts: override.maxAttempts ?? base.maxAttempts,
@@ -360,6 +368,7 @@ export function configFile(scope: ConfigScope, cwd: string): string {
 const CONFIG_KEYS = new Set([
   "maxParallel",
   "planGate",
+  "livePanes",
   "useWorktrees",
   "autoCommit",
   "maxAttempts",
@@ -390,7 +399,13 @@ export function validateConfig(value: unknown): string | undefined {
   const config = value as Record<string, unknown>;
   const unknown = Object.keys(config).find((key) => !CONFIG_KEYS.has(key));
   if (unknown) return `unknown field ${unknown}`;
-  const booleanKeys = ["planGate", "useWorktrees", "autoCommit", "cleanupCompletedTasks"];
+  const booleanKeys = [
+    "planGate",
+    "livePanes",
+    "useWorktrees",
+    "autoCommit",
+    "cleanupCompletedTasks",
+  ];
   for (const key of booleanKeys) {
     if (config[key] !== undefined && typeof config[key] !== "boolean")
       return `${key} must be boolean`;
@@ -603,6 +618,7 @@ export function describeConfig(config: MaestroConfig): string {
     `preset: ${matchingPreset(config)}`,
     `maxParallel: ${config.maxParallel}`,
     `planGate: ${config.planGate}`,
+    `livePanes: ${config.livePanes}`,
     `useWorktrees: ${config.useWorktrees}`,
     `maxAttempts: ${config.maxAttempts}`,
     `maxPlanTasks: ${config.maxPlanTasks}`,

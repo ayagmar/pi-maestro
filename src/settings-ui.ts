@@ -147,6 +147,7 @@ export function applySettingsChange(
     return preset ? structuredClone(preset.config) : config;
   }
   if (id === "planGate") config.planGate = value === "on";
+  else if (id === "livePanes") config.livePanes = value === "on";
   else if (id === "maxParallel") config.maxParallel = Number(value);
   else if (id === "useWorktrees") config.useWorktrees = value === "on";
   else if (id === "autoCommit") config.autoCommit = value === "on";
@@ -391,6 +392,13 @@ export async function showSettings(
             currentValue: config.planGate ? "on" : "off",
             values: ["off", "on"],
             description: "Pause newly planned tasks until you approve them with /maestro plan.",
+          },
+          {
+            id: "livePanes",
+            label: "Ambient live panes",
+            currentValue: config.livePanes ? "on" : "off",
+            values: ["on", "off"],
+            description: "Show owner-scoped executor transcripts beside the editor.",
           },
           {
             id: "useWorktrees",
