@@ -26,6 +26,7 @@ test("README onboarding links and exact model tools are documented", () => {
   ]) {
     assert.equal(existsSync(join(root, path)), true, `${path} must exist`);
   }
+  assert.match(readme, /maestro_update.*invalidateInFlight/s);
   const architecture = read("docs/architecture.md");
   assert.match(architecture, /maestro_plan.*maestro_update.*maestro_drive/s);
 });

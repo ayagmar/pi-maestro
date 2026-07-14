@@ -460,7 +460,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
     name: "maestro_update",
     label: "Maestro Update",
     description:
-      "Update a planned task: refine its brief, retitle it, change its tier or dependencies, cancel it, or reactivate it. Use when a task failed twice with the same root cause or the plan needs adjusting. Running tasks cannot be updated.",
+      "Update a planned task: refine its contract, retitle it, cancel it, or reactivate it. Contract edits on running or ready-for-review tasks are rejected unless invalidateInFlight is true; cancellation remains allowed. Active dispatch ownership still prevents racing a live executor or reviewer.",
     promptSnippet: "Refine a task's brief/tier or cancel it (maestro board)",
     parameters: Type.Object({
       taskId: Type.String({ description: "Task id like T1" }),
@@ -483,6 +483,9 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       verificationProfile: Type.Optional(
         Type.String({ description: "Replacement trusted verification profile; empty clears it" })
       ),
+      commitMessage: Type.Optional(
+        Type.String({ description: "Replacement conventional commit message; empty clears it" })
+      ),
       reviewPolicy: Type.Optional(
         StringEnum(["single", "confirm", "find-and-refute"] as const, {
           description: "Replacement review convergence policy",
@@ -492,6 +495,12 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         Type.String({
           description:
             "Stopped predecessor this existing task replaces. Atomically cancel it and rewire all downstream dependencies to taskId.",
+        })
+      ),
+      invalidateInFlight: Type.Optional(
+        Type.Boolean({
+          description:
+            "Acknowledge that contract edits to a running or ready-for-review task invalidate its current attempt/review and cost.",
         })
       ),
       cancel: Type.Optional(
@@ -508,8 +517,10 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         writePaths,
         successCriteria,
         verificationProfile,
+        commitMessage,
         reviewPolicy,
         supersedesTaskId,
+        invalidateInFlight,
         cancel,
       } = params as {
         taskId: string;
@@ -520,8 +531,10 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         writePaths?: string[];
         successCriteria?: string[];
         verificationProfile?: string;
+        commitMessage?: string;
         reviewPolicy?: "single" | "confirm" | "find-and-refute";
         supersedesTaskId?: string;
+        invalidateInFlight?: boolean;
         cancel?: boolean;
       };
       const config = loadConfig(ctx.cwd);
@@ -543,7 +556,15 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         tier !== undefined ||
         writePaths !== undefined ||
         verificationProfile !== undefined ||
-        reviewPolicy !== undefined;
+        reviewPolicy !== undefined ||
+        dependsOn !== undefined ||
+        commitMessage !== undefined;
+      const costSoFar = beforeTask ? snapshot(beforeTask).cost : 0;
+      if (wasInFlight && editsContractField && !invalidateInFlight) {
+        throw new Error(
+          `${beforeTask.id} is ${beforeTask.status} with an in-flight attempt/review ($${costSoFar.toFixed(4)} cost so far). This contract edit would invalidate that work. Wait for it to settle or pass invalidateInFlight: true to acknowledge the invalidation.`
+        );
+      }
       const updated = updateTask(ctx.cwd, taskId, (fresh, board) => {
         assertPlanTaskLimit(board.tasks.length, config);
         assertTaskNotDispatched(fresh);
@@ -557,6 +578,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             ...(writePaths !== undefined ? { writePaths } : {}),
             ...(successCriteria !== undefined ? { successCriteria } : {}),
             ...(verificationProfile !== undefined ? { verificationProfile } : {}),
+            ...(commitMessage !== undefined ? { commitMessage } : {}),
             ...(reviewPolicy !== undefined ? { reviewPolicy } : {}),
             ...(cancel !== undefined ? { cancelled: cancel } : {}),
           },
@@ -574,7 +596,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       refreshUI(ctx);
       const text =
         wasInFlight && editsContractField
-          ? `Updated: ${taskLine(updated)}\nNote: ${updated.id} has an in-flight attempt/review; this edit invalidates it and the task will need re-execution under the new contract.`
+          ? `Updated: ${taskLine(updated)}\nWarning: $${costSoFar.toFixed(4)} of in-flight attempt/review cost was invalidated with invalidateInFlight: true; ${updated.id} needs re-execution under the new contract.`
           : `Updated: ${taskLine(updated)}`;
       return {
         content: [{ type: "text", text }],
@@ -587,6 +609,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         args.brief ? "brief" : null,
         args.tier ? `tier→${args.tier}` : null,
         args.dependsOn ? "dependencies" : null,
+        args.commitMessage !== undefined ? "commit message" : null,
         args.supersedesTaskId ? `supersedes ${args.supersedesTaskId}` : null,
         args.cancel === true ? "cancel" : null,
         args.cancel === false ? "reactivate" : null,

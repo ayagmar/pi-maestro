@@ -1513,7 +1513,46 @@ test("maestro_update cannot mutate a task owned by a persisted dispatch", async 
   );
 });
 
-test("maestro_update warns when editing a contract field on a ready_for_review task", async () => {
+test("maestro_update rejects contract edits on an in-flight task without acknowledgement", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Running",
+        brief: "work in progress",
+        tier: "standard",
+        writePaths: ["src/running.ts"],
+        successCriteria: ["Running behavior works"],
+      });
+      task.status = "running";
+      const attempt = executorAttempt();
+      attempt.usage.cost = 1.76;
+      task.attempts.push(attempt);
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const boardFile = join(cwd, ".pi", "maestro", "board.json");
+      const before = readFileSync(boardFile, "utf-8");
+      const { ctx, tools } = loadMaestro(cwd);
+      const update = tools.get("maestro_update");
+      assert.ok(update);
+
+      await assert.rejects(
+        update.execute(
+          "edit-in-flight-task",
+          { taskId: "T1", brief: "revised brief" },
+          undefined,
+          undefined,
+          ctx
+        ),
+        /\$1\.7600.*invalidateInFlight/
+      );
+      assert.equal(readFileSync(boardFile, "utf-8"), before);
+    }
+  );
+});
+
+test("maestro_update applies acknowledged in-flight contract edits with a warning", async () => {
   await withBoard(
     (cwd) => {
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
@@ -1525,6 +1564,41 @@ test("maestro_update warns when editing a contract field on a ready_for_review t
         successCriteria: ["Reviewed behavior works"],
       });
       task.status = "ready_for_review";
+      const attempt = executorAttempt();
+      attempt.usage.cost = 1.76;
+      task.attempts.push(attempt);
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const update = tools.get("maestro_update");
+      assert.ok(update);
+      assert.match(JSON.stringify(update.parameters), /invalidateInFlight/);
+
+      const result = await update.execute(
+        "acknowledge-in-flight-edit",
+        { taskId: "T1", brief: "revised brief", invalidateInFlight: true },
+        undefined,
+        undefined,
+        ctx
+      );
+
+      assert.equal(findTask(loadBoard(cwd), "T1")?.brief, "revised brief");
+      assert.match(result?.content[0]?.text ?? "", /Warning:.*\$1\.7600.*invalidateInFlight/s);
+    }
+  );
+});
+
+test("maestro_update allows cancellation while a task is in flight", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Running",
+        brief: "work in progress",
+        tier: "standard",
+      });
+      task.status = "running";
       saveBoard(cwd, board);
     },
     async (cwd) => {
@@ -1533,13 +1607,15 @@ test("maestro_update warns when editing a contract field on a ready_for_review t
       assert.ok(update);
 
       const result = await update.execute(
-        "edit-in-flight-task",
-        { taskId: "T1", brief: "revised brief" },
+        "cancel-in-flight-task",
+        { taskId: "T1", cancel: true },
         undefined,
         undefined,
         ctx
       );
-      assert.match(result?.content[0]?.text ?? "", /in-flight/);
+
+      assert.equal(findTask(loadBoard(cwd), "T1")?.status, "cancelled");
+      assert.doesNotMatch(result?.content[0]?.text ?? "", /invalidateInFlight/);
     }
   );
 });
@@ -1569,7 +1645,8 @@ test("maestro_update does not warn when editing a todo task", async () => {
         undefined,
         ctx
       );
-      assert.doesNotMatch(result?.content[0]?.text ?? "", /in-flight/);
+      assert.equal(findTask(loadBoard(cwd), "T1")?.brief, "revised brief");
+      assert.doesNotMatch(result?.content[0]?.text ?? "", /in-flight|invalidateInFlight/);
     }
   );
 });
