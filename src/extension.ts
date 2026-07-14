@@ -1379,9 +1379,6 @@ export default function maestro(
           case "dashboard":
             await showDashboard(ctx);
             return;
-          case "list":
-            await showBoard(ctx);
-            return;
           case "open": {
             if (!rest) {
               notify(ctx, "Usage: /maestro open <taskId>", "warning");

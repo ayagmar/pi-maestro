@@ -124,6 +124,7 @@ interface TestTui {
 
 interface TestComponent {
   handleInput: (data: string) => void;
+  dispose?: () => void;
 }
 
 interface NewSessionOptions {
@@ -229,11 +230,16 @@ function loadMaestro(
       const step = uiScript?.steps.shift();
       assert.ok(step, "unexpected TUI modal");
       return await new Promise<T>((resolve) => {
-        const component = factory(
+        let component: TestComponent;
+        const done = (value: T) => {
+          component.dispose?.();
+          resolve(value);
+        };
+        component = factory(
           { requestRender: () => {}, terminal: { rows: 40 } },
           fakeTheme,
           {},
-          resolve
+          done
         );
         step.before?.();
         for (const key of step.keys) component.handleInput(key);
@@ -358,6 +364,8 @@ test("unknown maestro subcommands identify the requested command", async () => {
       const loaded = loadMaestro(cwd);
       await loaded.command.handler("wat", loaded.ctx);
       assert.match(loaded.notices.at(-1) ?? "", /^Unknown subcommand "wat"\. Available commands:/);
+      await loaded.command.handler("list", loaded.ctx);
+      assert.match(loaded.notices.at(-1) ?? "", /^Unknown subcommand "list"\. Available commands:/);
     }
   );
 });
@@ -934,10 +942,10 @@ test("manual acceptance rejects out-of-scope artifacts before recording versione
     },
     async (cwd) => {
       const refusalScript: UiScript = {
-        steps: [{ keys: select(0) }, { keys: select(4) }],
+        steps: [{ keys: ["m", down, down, enter, "q"] }],
       };
       const refused = loadMaestro(cwd, undefined, owner, refusalScript);
-      await refused.command.handler("list", refused.ctx);
+      await refused.command.handler("board", refused.ctx);
       assert.match(refused.notices.at(-1) ?? "", /outside write scope/);
       assert.equal(findTask(loadBoard(cwd), "T1")?.status, "ready_for_review");
 
@@ -949,10 +957,10 @@ test("manual acceptance rejects out-of-scope artifacts before recording versione
         completed.touchedFiles = ["src/allowed.ts"];
       });
       const approvalScript: UiScript = {
-        steps: [{ keys: select(0) }, { keys: select(4) }],
+        steps: [{ keys: ["m", down, down, enter, "q"] }],
       };
       const accepted = loadMaestro(cwd, undefined, owner, approvalScript);
-      await accepted.command.handler("list", accepted.ctx);
+      await accepted.command.handler("board", accepted.ctx);
       const approved = findTask(loadBoard(cwd), "T1");
       assert.equal(approved?.status, "approved");
       assert.equal(approved?.approvalKind, "manual");
