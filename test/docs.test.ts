@@ -126,6 +126,8 @@ test("declared package shape contains runtime and required documentation", () =>
     repository: { url: string };
     homepage: string;
     bugs: string;
+    peerDependencies: Record<string, string>;
+    scripts: Record<string, string>;
     pi?: { image?: string };
   };
   assert.equal(pkg.main, "./src/index.ts");
@@ -133,7 +135,14 @@ test("declared package shape contains runtime and required documentation", () =>
   assert.equal(pkg.homepage, "https://github.com/ayagmar/pi-maestro#readme");
   assert.equal(pkg.bugs, "https://github.com/ayagmar/pi-maestro/issues");
   assert.doesNotMatch(pkg.pi?.image ?? "", /placehold\.co/i);
-  for (const entry of ["src/", "docs/", "README.md", "CONTRIBUTING.md"]) {
+  for (const entry of [
+    "src/",
+    "docs/",
+    "README.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+  ]) {
     assert.ok(pkg.files.includes(entry));
   }
   assert.equal(existsSync(join(root, pkg.main)), true);
@@ -141,4 +150,6 @@ test("declared package shape contains runtime and required documentation", () =>
     assert.equal(pkg.files.includes(excluded), false);
   }
   assert.match(read("scripts/smoke-test.mjs"), /registers exactly three model tools/);
+  assert.match(pkg.scripts.check ?? "", /package-smoke-test/);
+  assert.ok(Object.values(pkg.peerDependencies).every((range) => range !== "*"));
 });

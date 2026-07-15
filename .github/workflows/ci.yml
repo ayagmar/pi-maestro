@@ -9,6 +9,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24]
 
     steps:
       - name: Checkout
@@ -22,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node-version }}
           cache: "pnpm"
 
       - name: Install dependencies
@@ -33,6 +37,9 @@ jobs:
 
       - name: Smoke test
         run: pnpm run smoke-test
+
+      - name: Test packed artifact
+        run: pnpm run package-smoke-test
 
       - name: Run tests
         run: pnpm run test

@@ -53,6 +53,12 @@ pi install git:github.com/ayagmar/pi-maestro
 pi install /path/to/pi-maestro
 ```
 
+## Compatibility and support
+
+Pi Maestro requires Node.js 22 or 24 and is tested against the `0.80.x` Pi package line. Its peer ranges intentionally stop before `0.81.0`; newer Pi releases require an explicit compatibility update rather than being accepted silently. Before `1.0.0`, only the latest published `0.1.x` release receives fixes.
+
+Report bugs through [GitHub Issues](https://github.com/ayagmar/pi-maestro/issues). Report suspected vulnerabilities privately using the repository Security tab; see [SECURITY.md](SECURITY.md).
+
 ## Five-minute start
 
 1. Install the extension with the command above.
@@ -167,8 +173,10 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   workflow phase, then `→` drills into that phase's tasks and again into executor/reviewer launches;
   `←` moves back up. Live transcripts and evidence refresh without model calls. The durable run view uses
   **discovery → plan approval → execution → review → integration → verification → recovery →
-  complete**, then task and launch evidence. Phase and status refreshes are mechanical and never
-  wake a model. Press `?` for the complete dashboard keybinding guide. From the dashboard you can:
+  complete**, then task and launch evidence. Each phase distinguishes the current phase, a recovery
+  phase that needs attention, retained historical evidence, and phases with no evidence; its detail pane
+  explains purpose, task-state counts, and the next action. Phase and status refreshes are mechanical and
+  never wake a model. Press `?` for the complete dashboard keybinding guide. From the dashboard you can:
   - `↑↓` select within the current phase/task/launch level, `→` drill in, `←` go back, and
     `PgUp/PgDn` scroll the selected transcript
   - `s` **steer a running executor** — choose **Stop - wrong approach, report current state**,
@@ -487,7 +495,7 @@ Maestro is not a sandbox, CI service, analytics database, or generic plugin syst
 
 ```bash
 pnpm install
-pnpm run check    # typecheck + smoke test + tests + lint + format
+pnpm run check    # typecheck + source/packed smoke tests + tests + lint + format
 ```
 
 Quick manual test:

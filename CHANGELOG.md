@@ -17,10 +17,11 @@
 
 - Added one automatic commit per approved task.
 - Added optional worktree isolation for parallel tasks, with merge-then-delete cleanup after approval.
+- Made physical task checkouts ephemeral: recoverable idle work is checkpointed on its task branch and restored only for retry, review, or inspection.
 
 ### Observability
 
-- Added a live dashboard with steering templates and a settled-task filter.
+- Added a phase-first live dashboard with steering templates, status filters, task and launch drill-down, and explicit current/attention/evidence phase states.
 - Persisted review verdicts, task status history, and descriptive numbered attempt and review session names.
 - Added board archiving and replay.
 
@@ -28,3 +29,9 @@
 
 - Added built-in presets and an interactive settings UI.
 - Added user and project configuration scopes, including primary and fallback model selection.
+
+### Compatibility and release safety
+
+- Added Node.js 22 and 24 CI coverage and bounded compatibility with the Pi `0.80.x` package line.
+- Added packed-artifact content and extension-registration smoke testing.
+- Added a security policy and automated dependency update configuration.

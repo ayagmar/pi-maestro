@@ -22,7 +22,9 @@
     "docs/",
     "examples/",
     "README.md",
-    "CONTRIBUTING.md"
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    "SECURITY.md"
   ],
   "scripts": {
     "lint": "biome lint . --error-on-warnings",
@@ -31,8 +33,9 @@
     "format:check": "biome format .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "smoke-test": "node ./scripts/run-isolated.mjs node --import=tsx ./scripts/smoke-test.mjs",
+    "package-smoke-test": "node ./scripts/package-smoke-test.mjs",
     "test": "node ./scripts/run-isolated.mjs node --import=tsx --test ./test/*.test.ts",
-    "check": "pnpm run typecheck && pnpm run smoke-test && pnpm test && pnpm run lint && pnpm run format:check"
+    "check": "pnpm run typecheck && pnpm run smoke-test && pnpm run package-smoke-test && pnpm test && pnpm run lint && pnpm run format:check"
   },
   "pi": {
     "extensions": [
@@ -40,10 +43,10 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-ai": "^0.80.0",
+    "@earendil-works/pi-coding-agent": "^0.80.0",
+    "@earendil-works/pi-tui": "^0.80.0",
+    "typebox": "^1.1.38"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.9",
