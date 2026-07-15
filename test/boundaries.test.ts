@@ -94,15 +94,27 @@ test("only board owns the board persistence name", () => {
 test("pure policy modules do not import Pi, TUI, process, runner, or Git adapters", () => {
   const pureFiles = new Set([
     "artifact-policy.ts",
+    "dashboard-evidence.ts",
+    "dashboard-launches.ts",
+    "plan-review.ts",
     "plan-serialization.ts",
     "status.ts",
     "timeline.ts",
+    "workflow-policy.ts",
   ]);
   const forbidden = /@earendil-works\/pi-|node:child_process|\.\/runner\.js|\.\/worktree\.js/;
   const violations = sourceFiles()
     .filter((file) => pureFiles.has(file.name) && forbidden.test(file.contents))
     .map((file) => file.name);
   assert.deepEqual(violations, []);
+});
+
+test("dashboard session IO lives outside the dashboard controller", () => {
+  const dashboard = sourceFiles().find((file) => file.name === "dashboard.ts")?.contents ?? "";
+  assert.doesNotMatch(dashboard, /node:fs|SessionManager|buildSessionContext/);
+
+  const livePane = sourceFiles().find((file) => file.name === "live-pane.ts")?.contents ?? "";
+  assert.match(livePane, /SessionManager/);
 });
 
 test("index is a composition entry point and adapters own registrations", () => {

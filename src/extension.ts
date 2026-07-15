@@ -64,7 +64,6 @@ import {
   type DashboardTaskAction,
   LivePaneComponent,
   type LivePaneLaunch,
-  taskLaunches,
 } from "./dashboard.js";
 import { buildDoctorReport } from "./diagnostics.js";
 import {
@@ -94,6 +93,8 @@ import {
   truncateText,
 } from "./format.js";
 import { notify, runHandoff } from "./handoff.js";
+import { collectLivePaneLaunches } from "./live-pane-launches.js";
+import { formatPlanReviewMarkdown } from "./plan-review.js";
 import {
   comparePlans,
   exportPlan,
@@ -122,6 +123,7 @@ import {
   findSessionFile,
   type RunUpdate,
 } from "./runner.js";
+import { showScrollableMarkdown, showScrollableText } from "./scrollable-viewer.js";
 import {
   assertKnownTaskIds,
   canonicalTaskIds,
@@ -145,7 +147,6 @@ export {
 import { registerMaestroTools } from "./tools.js";
 import {
   type Board,
-  type MaestroConfig,
   type PausedDriveState,
   type Task,
   type TaskStatus,
@@ -170,6 +171,9 @@ import {
   worktreeExists,
 } from "./worktree.js";
 
+export { formatPlanReviewMarkdown } from "./plan-review.js";
+export { scrollableTextOffset } from "./scrollable-viewer.js";
+
 export interface MaestroDependencies {
   startExecutor: typeof defaultStartExecutor;
 }
@@ -182,63 +186,7 @@ interface LivePaneRuntime {
   closing: boolean;
 }
 
-export function scrollableTextOffset(
-  offset: number,
-  delta: number,
-  lineCount: number,
-  pageSize = 18
-): number {
-  return Math.max(0, Math.min(Math.max(0, lineCount - pageSize), offset + delta));
-}
-
 const livePaneResponsiveVisibility = (width: number): boolean => width >= 100;
-
-/** Rich read-only plan projection used at the approval gate. */
-export function formatPlanReviewMarkdown(board: Board, config: MaestroConfig): string {
-  const tasks = board.tasks.filter((task) => task.status !== "cancelled");
-  const preflight = formatWorkflowPreflight(preflightWorkflow(board, config));
-  const sections = tasks.map((task) => {
-    const criteria = (task.successCriteria ?? []).map((item) => `- ${item}`).join("\n") || "- None";
-    const writes = task.writePaths?.map((path) => `\`${path}\``).join(", ") || "None";
-    const reviewPolicy = task.reviewPolicy ?? "single";
-    const review =
-      reviewPolicy === "confirm"
-        ? `${reviewPolicy} (${config.reviewRequiredApprovals} independent approvals)`
-        : reviewPolicy;
-    const discoveryScope = task.discovery?.allowedWritePaths
-      .map((path) => `\`${path}\``)
-      .join(", ");
-    return [
-      `## ${task.id} · ${task.title}`,
-      `**Tier:** ${task.tier}  `,
-      `**Dependencies:** ${task.dependsOn.join(", ") || "None"}  `,
-      `**Review:** ${review}  `,
-      `**Verification:** ${task.verificationProfile ?? "None"}  `,
-      `**Commit:** ${task.commitMessage ? `\`${task.commitMessage}\`` : "Automatic"}`,
-      "",
-      "### Brief",
-      task.brief,
-      "",
-      "### Success criteria",
-      criteria,
-      "",
-      "### Write scope",
-      writes,
-      ...(discoveryScope ? ["", "### Discovery output scope", discoveryScope] : []),
-    ].join("\n");
-  });
-  return [
-    "# Maestro plan review",
-    `**${tasks.length} task${tasks.length === 1 ? "" : "s"} awaiting approval**`,
-    "",
-    preflight
-      .split("\n")
-      .map((line) => `> ${line}`)
-      .join("\n"),
-    "",
-    ...sections,
-  ].join("\n");
-}
 
 export default function maestro(
   pi: ExtensionAPI,
@@ -314,80 +262,7 @@ export default function maestro(
   }
 
   function livePaneLaunches(ctx: ExtensionContext): LivePaneLaunch[] {
-    const currentBoard = loadBoard(ctx.cwd);
-    let board = currentBoard;
-    let archived = false;
-    if (currentBoard.tasks.length === 0) {
-      const latestArchive = latestArchiveFile(ctx.cwd);
-      if (latestArchive) {
-        try {
-          board = loadArchivedBoard(ctx.cwd, latestArchive.file);
-          archived = true;
-        } catch {
-          // A corrupt newest archive must not hide the empty current board or break the TUI.
-        }
-      }
-    }
-    const liveByLog = new Map(
-      [...liveRuns.values()].map((run) => [run.handle.attempt.logFile, run] as const)
-    );
-    const launches = board.tasks.flatMap((task) =>
-      taskLaunches(task).map((launch): LivePaneLaunch => {
-        const review = launch.review;
-        const logFile = review?.logFile ?? launch.attempt.logFile;
-        const live = liveByLog.get(logFile);
-        return {
-          key: launch.key,
-          taskId: task.id,
-          title: `${task.title} · ${launch.label}${archived ? " · archived" : ""}`,
-          kind: launch.kind,
-          logFile,
-          ...(live?.handle.attempt.sessionFile || review?.sessionFile || launch.attempt.sessionFile
-            ? {
-                sessionFile:
-                  live?.handle.attempt.sessionFile ??
-                  review?.sessionFile ??
-                  launch.attempt.sessionFile,
-              }
-            : {}),
-          ...(live?.handle.attempt.model || review?.model || launch.attempt.model
-            ? { model: live?.handle.attempt.model ?? review?.model ?? launch.attempt.model }
-            : {}),
-          ...(live?.handle.attempt.provider || review?.provider || launch.attempt.provider
-            ? {
-                provider:
-                  live?.handle.attempt.provider ?? review?.provider ?? launch.attempt.provider,
-              }
-            : {}),
-          turns: live?.turns ?? review?.usage.turns ?? launch.attempt.usage.turns,
-          cost: live?.cost ?? review?.usage.cost ?? launch.attempt.usage.cost,
-          lastActivity: live?.lastActivity ?? "settled",
-          live: live !== undefined,
-        };
-      })
-    );
-
-    const representedLogs = new Set(launches.map((launch) => launch.logFile));
-    for (const run of liveRuns.values()) {
-      const attempt = run.handle.attempt;
-      if (representedLogs.has(attempt.logFile)) continue;
-      const task = findTask(board, run.taskId);
-      launches.push({
-        key: `${run.taskId}:${run.kind}:${attempt.index}:${attempt.startedAt}`,
-        taskId: run.taskId,
-        title: task?.title ?? run.taskId,
-        kind: run.kind,
-        logFile: attempt.logFile,
-        ...(attempt.sessionFile ? { sessionFile: attempt.sessionFile } : {}),
-        ...(attempt.model ? { model: attempt.model } : {}),
-        ...(attempt.provider ? { provider: attempt.provider } : {}),
-        turns: run.turns,
-        cost: run.cost,
-        lastActivity: run.lastActivity,
-        live: true,
-      });
-    }
-    return launches;
+    return collectLivePaneLaunches(ctx.cwd, liveRuns);
   }
 
   function watchedLiveRunCount(): number {
@@ -2484,89 +2359,6 @@ export default function maestro(
 
   function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
     return "switchSession" in ctx;
-  }
-
-  async function showScrollableText(
-    ctx: ExtensionCommandContext,
-    title: string,
-    lines: string[]
-  ): Promise<void> {
-    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-      let offset = 0;
-      const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
-      return {
-        render: (width: number) => {
-          const content = new Text(lines.slice(offset, offset + 18).join("\n"), 1, 0);
-          return [
-            ...heading.render(width),
-            ...content.render(width),
-            "",
-            theme.fg("dim", "↑↓/PgUp/PgDn scroll · enter/esc close"),
-          ];
-        },
-        invalidate: () => heading.invalidate(),
-        handleInput: (data: string) => {
-          if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
-            done();
-            return;
-          }
-          if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) {
-            offset = scrollableTextOffset(offset, -10, lines.length);
-          }
-          if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) {
-            offset = scrollableTextOffset(offset, 10, lines.length);
-          }
-          tui.requestRender();
-        },
-      };
-    });
-  }
-
-  async function showScrollableMarkdown(
-    ctx: ExtensionCommandContext,
-    title: string,
-    markdownText: string
-  ): Promise<void> {
-    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-      let offset = 0;
-      let rendered: string[] = [];
-      let renderedWidth = -1;
-      const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
-      const markdown = new Markdown(markdownText, 1, 0, getMarkdownTheme());
-      return {
-        render: (width: number) => {
-          if (renderedWidth !== width) {
-            rendered = markdown.render(width);
-            renderedWidth = width;
-          }
-          const pageSize = Math.max(6, tui.terminal.rows - 6);
-          offset = Math.min(offset, Math.max(0, rendered.length - pageSize));
-          return [
-            ...heading.render(width),
-            ...rendered.slice(offset, offset + pageSize),
-            theme.fg("dim", "↑↓/PgUp/PgDn scroll · enter/esc close"),
-          ];
-        },
-        invalidate: () => {
-          heading.invalidate();
-          markdown.invalidate();
-          renderedWidth = -1;
-        },
-        handleInput: (data: string) => {
-          if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
-            done();
-            return;
-          }
-          if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) {
-            offset = Math.max(0, offset - 10);
-          }
-          if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) {
-            offset += 10;
-          }
-          tui.requestRender();
-        },
-      };
-    });
   }
 
   async function showPlanOverview(ctx: ExtensionCommandContext, board: Board): Promise<void> {

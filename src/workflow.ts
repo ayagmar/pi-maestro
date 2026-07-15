@@ -15,14 +15,12 @@ import {
   forceStatus,
   humanRetryEligibility,
   humanRetryRiskToken,
-  isRunnable,
   isRunnableWithConfig,
   isTaskSettled,
   loadBoard,
   planValidationMessage,
   releaseTaskDispatch,
   renewTaskDispatch,
-  scopedDependencyGaps,
   stateDir,
   transition,
   updateTask,
@@ -30,7 +28,7 @@ import {
 } from "./board.js";
 import { loadConfig, resolveTierModels } from "./config.js";
 import { DISCOVERY_TOOLS, discoveryInstructions } from "./discovery.js";
-import { runBudgetWarning, taskUsage, truncateText } from "./format.js";
+import { runBudgetWarning, truncateText } from "./format.js";
 import {
   accountPromptContext,
   buildExecutorPrompt,
@@ -59,6 +57,31 @@ import {
   type VerificationProfile,
 } from "./types.js";
 import {
+  calculateSchedulingWave,
+  consumesMaxAttempt,
+  DRIVE_ROUND_LIMIT,
+  type DriveStopReason,
+  type DriveSummary,
+  lastReport,
+  snapshot,
+  type TaskSnapshot,
+} from "./workflow-policy.js";
+import {
+  escalatedTask,
+  escalationReason,
+  noProgressReason,
+  providerBlockedReason,
+  providerBlockedTask,
+  scheduleTransientProviderRetry,
+  terminalReviewConvergence,
+} from "./workflow-stop-policy.js";
+
+export {
+  classifyProviderFailure,
+  type ProviderFailureClass,
+} from "./workflow-stop-policy.js";
+
+import {
   artifactMatchesCommit,
   captureDiff,
   changedPaths,
@@ -78,6 +101,20 @@ import {
   worktreeExists,
 } from "./worktree.js";
 
+export {
+  type AttemptSnapshot,
+  calculateSchedulingWave,
+  type DriveStopCode,
+  type DriveStopReason,
+  type DriveSummary,
+  formatDriveSummary,
+  lastReport,
+  type SchedulingWave,
+  simulatePlan,
+  snapshot,
+  type TaskSnapshot,
+} from "./workflow-policy.js";
+
 const mainTreeOperationTails = new Map<string, Promise<void>>();
 
 async function serializeMainTreeOperation<T>(cwd: string, operation: () => T): Promise<T> {
@@ -94,37 +131,6 @@ async function serializeMainTreeOperation<T>(cwd: string, operation: () => T): P
   } finally {
     if (mainTreeOperationTails.get(cwd) === tail) mainTreeOperationTails.delete(cwd);
   }
-}
-
-export interface AttemptSnapshot {
-  attempt: number;
-  model?: string;
-  provider?: string;
-  reviewModel?: string;
-  reviewProvider?: string;
-  turns: number;
-  cost: number;
-  touchedFiles: string[];
-  failureReason?: Attempt["failureReason"];
-  consumesAttempt?: boolean;
-  reviewLaunches?: ReviewLaunch[];
-  reviewNotes?: string;
-}
-
-export interface TaskSnapshot {
-  id: string;
-  title: string;
-  status: TaskStatus;
-  tier: string;
-  /** Attempts that consume maxAttempts. */
-  attempts: number;
-  /** Raw executor launches, including provider failures and fallbacks. */
-  launches?: number;
-  cost: number;
-  turns: number;
-  history: AttemptSnapshot[];
-  retryAction?: string;
-  note?: string;
 }
 
 export interface WorkflowRun {
@@ -168,153 +174,8 @@ function claimDispatchLifecycle(
   };
 }
 
-export type DriveStopCode =
-  | "completed"
-  | "aborted"
-  | "paused"
-  | "plan_gate"
-  | "budget_blocked"
-  | "provider_blocked"
-  | "review_disagreement"
-  | "reviewer_failure"
-  | "launch_limit"
-  | "escalation_required"
-  | "attempt_cap"
-  | "stale_completion"
-  | "blocked"
-  | "no_progress"
-  | "round_limit"
-  | "error";
-
-export interface DriveStopReason {
-  code: DriveStopCode;
-  message: string;
-  taskIds?: string[];
-}
-
-export interface DriveSummary {
-  rounds: number;
-  tasks: TaskSnapshot[];
-  stoppedBecause: DriveStopReason;
-}
-
-export function formatDriveSummary(summary: DriveSummary): string {
-  const approved = summary.tasks.filter((task) => task.status === "approved").length;
-  const failed = summary.tasks.filter((task) => task.status === "failed").length;
-  const cancelled = summary.tasks.filter((task) => task.status === "cancelled").length;
-  const blocked = summary.tasks.length - approved - failed - cancelled;
-  const attempts = summary.tasks.reduce((total, task) => total + task.attempts, 0);
-  const launches = summary.tasks.reduce(
-    (total, task) => total + (task.launches ?? task.history.length),
-    0
-  );
-  const totalCost = summary.tasks.reduce((total, task) => total + task.cost, 0);
-  const billedAttempts = summary.tasks
-    .flatMap((task) => task.history)
-    .filter((item) => item.cost > 0);
-  const averageCost =
-    billedAttempts.length === 0
-      ? 0
-      : billedAttempts.reduce((total, item) => total + item.cost, 0) / billedAttempts.length;
-  const models = new Set(
-    summary.tasks.flatMap((task) =>
-      task.history.flatMap((item) =>
-        [item.model, item.reviewModel].filter((value) => value !== undefined)
-      )
-    )
-  );
-  const providers = new Set(
-    summary.tasks.flatMap((task) =>
-      task.history.flatMap((item) =>
-        [item.provider, item.reviewProvider].filter((value) => value !== undefined)
-      )
-    )
-  );
-  const identity = [
-    models.size > 0 ? `models: ${[...models].join(", ")}` : "",
-    providers.size > 0 ? `providers: ${[...providers].join(", ")}` : "",
-  ].filter(Boolean);
-
-  return [
-    `Drive ${summary.stoppedBecause.code} after ${summary.rounds} round(s): ${approved} approved · ${failed} failed · ${cancelled} cancelled · ${blocked} blocked`,
-    `${attempts} consuming attempt${attempts === 1 ? "" : "s"} · ${launches} launch${launches === 1 ? "" : "es"} · $${totalCost.toFixed(4)} total · $${averageCost.toFixed(4)} avg billed launch`,
-    ...identity,
-    summary.stoppedBecause.message,
-  ].join("\n");
-}
-
 export type DriveRoundPhase = "run" | "review";
 export type DriveRoundUpdate = (round: number, phase: DriveRoundPhase, taskIds: string[]) => void;
-
-const DRIVE_ROUND_LIMIT = 20;
-
-/** Consecutive genuine reviewer rejections before the drive escalates instead of retrying. */
-const REVIEW_REJECTION_LIMIT = 2;
-
-/** Built-in tiers, cheapest first, used to recommend the next rung on escalation. */
-const TIER_LADDER = ["trivial", "standard", "complex"] as const;
-
-function consumesMaxAttempt(attempt: Attempt): boolean {
-  return attempt.consumesAttempt ?? !attempt.providerFailure;
-}
-
-export function snapshot(task: Task, note?: string): TaskSnapshot {
-  const usage = taskUsage(task);
-  const history = task.attempts.map((attempt) => {
-    const item: AttemptSnapshot = {
-      attempt: attempt.index,
-      turns: attempt.usage.turns,
-      cost: attempt.usage.cost,
-      touchedFiles: [...attempt.touchedFiles],
-    };
-    if (attempt.model !== undefined) item.model = attempt.model;
-    if (attempt.provider !== undefined) item.provider = attempt.provider;
-    if (attempt.reviewModel !== undefined) item.reviewModel = attempt.reviewModel;
-    if (attempt.reviewProvider !== undefined) item.reviewProvider = attempt.reviewProvider;
-    if (attempt.failureReason !== undefined) item.failureReason = attempt.failureReason;
-    item.consumesAttempt = consumesMaxAttempt(attempt);
-    if (attempt.reviewLaunches !== undefined) {
-      item.reviewLaunches = structuredClone(attempt.reviewLaunches);
-    }
-    if (attempt.reviewNotes !== undefined) item.reviewNotes = attempt.reviewNotes;
-    return item;
-  });
-  const result: TaskSnapshot = {
-    id: task.id,
-    title: task.title,
-    status: task.status,
-    tier: task.tier,
-    attempts: task.attempts.filter(consumesMaxAttempt).length,
-    launches: task.attempts.length,
-    cost: usage.cost,
-    turns: usage.turns,
-    history,
-  };
-
-  if (
-    task.status === "failed" ||
-    task.status === "cancelled" ||
-    task.status === "changes_requested"
-  ) {
-    result.retryAction = `maestro_drive({ action: "start", taskIds: ["${task.id}"] })`;
-  } else if (task.status === "ready_for_review" && task.attempts.at(-1)?.failureReason) {
-    result.retryAction = `maestro_drive({ action: "start", taskIds: ["${task.id}"] })`;
-  }
-
-  const persistedReason = task.attempts.at(-1)?.failureReason?.message;
-  const usefulNote =
-    note ?? (task.status === "changes_requested" ? task.reviewNotes : persistedReason);
-  if (usefulNote !== undefined) {
-    result.note = result.retryAction ? `${usefulNote}\nRetry: ${result.retryAction}` : usefulNote;
-  } else if (result.retryAction) {
-    result.note = `Retry: ${result.retryAction}`;
-  }
-  return result;
-}
-
-export function lastReport(task: Task): string | undefined {
-  return task.attempts.at(-1)?.finalReport;
-}
 
 export function preflightTaskTiers(
   tasks: Task[],
@@ -343,88 +204,6 @@ export function preflightTaskTiers(
   }
 
   return resolvedTiers;
-}
-
-export interface SchedulingWave {
-  runnableIds: string[];
-  reviewableIds: string[];
-  cappedIds: string[];
-  blockedIds: string[];
-}
-
-export function calculateSchedulingWave(
-  board: Board,
-  config: MaestroConfig,
-  taskIds?: string[],
-  simulateApprovedDependencies = false
-): SchedulingWave {
-  const selected = taskIds ? new Set(taskIds.map((id) => id.trim().toUpperCase())) : undefined;
-  const tasks = board.tasks.filter(
-    (task) => selected === undefined || selected.has(task.id.trim().toUpperCase())
-  );
-  const capped = tasks.filter(
-    (task) =>
-      task.attempts.filter(consumesMaxAttempt).length >= config.maxAttempts &&
-      task.status !== "approved"
-  );
-  const runnable = tasks.filter(
-    (task) =>
-      !capped.includes(task) &&
-      task.status !== "cancelled" &&
-      (simulateApprovedDependencies
-        ? isRunnable(board, task, task.status === "failed")
-        : isRunnableWithConfig(board, task, config, task.status === "failed"))
-  );
-  const reviewable = tasks.filter((task) => task.status === "ready_for_review");
-  const active = new Set([...runnable, ...reviewable].map((task) => task.id));
-  return {
-    runnableIds: runnable.map((task) => task.id),
-    reviewableIds: reviewable.map((task) => task.id),
-    cappedIds: capped.map((task) => task.id),
-    blockedIds: tasks
-      .filter((task) => !active.has(task.id) && !["approved", "cancelled"].includes(task.status))
-      .map((task) => task.id),
-  };
-}
-
-export function simulatePlan(board: Board, config: MaestroConfig, taskIds?: string[]): string {
-  const simulated = structuredClone(board);
-  const waves: string[] = [];
-  for (let index = 1; index <= Math.min(64, simulated.tasks.length * 2 + 1); index += 1) {
-    const wave = calculateSchedulingWave(simulated, config, taskIds, true);
-    if (wave.runnableIds.length === 0 && wave.reviewableIds.length === 0) {
-      const blocked = [...wave.cappedIds, ...wave.blockedIds];
-      if (blocked.length > 0) waves.push(`blocked: ${[...new Set(blocked)].join(", ")}`);
-      break;
-    }
-    const ids = [...wave.runnableIds, ...wave.reviewableIds];
-    waves.push(`wave ${index}: ${ids.slice(0, config.maxParallel).join(", ")}`);
-    for (const id of wave.runnableIds) {
-      const task = findTask(simulated, id);
-      if (task) forceStatus(task, "ready_for_review");
-    }
-    for (const id of wave.reviewableIds) {
-      const task = findTask(simulated, id);
-      if (task) forceStatus(task, "approved");
-    }
-  }
-  const scope = taskIds?.join(", ") ?? "whole board";
-  const dependencyGaps = taskIds ? scopedDependencyGaps(board, taskIds) : [];
-  return truncateText(
-    [
-      `Mechanical simulation (${scope}; assumes each run and review succeeds):`,
-      ...(dependencyGaps.length > 0
-        ? [
-            `incomplete scope: ${dependencyGaps
-              .map((gap) => `${gap.taskId} requires ${gap.dependencyId}`)
-              .join(", ")}`,
-          ]
-        : []),
-      ...(waves.length ? waves : ["no work"]),
-      `maximum concurrency: ${config.maxParallel}`,
-    ].join("\n"),
-    4000
-  );
 }
 
 export async function driveBoard(options: {
@@ -924,153 +703,6 @@ export async function driveBoard(options: {
     code: "round_limit",
     message: `drive stopped after the hard limit of ${DRIVE_ROUND_LIMIT} rounds`,
   });
-}
-
-function noProgressReason(tasks: Task[], dispatchResults: TaskSnapshot[]): DriveStopReason {
-  const notes = new Map(
-    dispatchResults.map((result) => [
-      result.id,
-      result.note ?? "dispatch declined without a reason",
-    ])
-  );
-  const pending = tasks.filter((task) => !["approved", "cancelled"].includes(task.status));
-  const details = pending.map(
-    (task) => `${task.id} (${task.status}): ${notes.get(task.id) ?? "no dispatch was attempted"}`
-  );
-  return {
-    code: "no_progress",
-    message: `Drive stopped because no executor or reviewer launched and no selected task changed status.\n${details.join("\n")}`,
-    taskIds: pending.map((task) => task.id),
-  };
-}
-
-function terminalReviewConvergence(task: Task): "disagreement" | "operational_failure" | undefined {
-  if (task.status !== "ready_for_review") return undefined;
-  const status = task.attempts.at(-1)?.reviewConvergence?.status;
-  if (status === "disagreement" || status === "operational_failure") return status;
-  return undefined;
-}
-
-function escalatedTask(task: Task): boolean {
-  return (
-    task.status === "changes_requested" && (task.reviewRejections ?? 0) >= REVIEW_REJECTION_LIMIT
-  );
-}
-
-function escalationReason(tasks: Task[], config: MaestroConfig): DriveStopReason {
-  const details = tasks.map((task) => {
-    const notes = task.reviewNotes ?? task.attempts.at(-1)?.reviewNotes;
-    const evidence = notes
-      ? redactFailureMessage(truncateText(notes, 3))
-      : "no reviewer notes recorded";
-    const rung = TIER_LADDER.indexOf(task.tier as (typeof TIER_LADDER)[number]);
-    const nextTier =
-      rung >= 0 ? TIER_LADDER.slice(rung + 1).find((name) => config.tiers[name]) : undefined;
-    const action = nextTier
-      ? `raise the tier to "${nextTier}" with maestro_update`
-      : "rewrite, split, or cancel the brief with maestro_update and apply orchestrator judgment";
-    return `${task.id} [tier ${task.tier}]: ${evidence}\n  → ${action}`;
-  });
-  return {
-    code: "escalation_required",
-    message: `Reviewer rejected the same work ${REVIEW_REJECTION_LIMIT} times; autonomous retries stopped for orchestrator intervention.\n${details.join("\n")}\nAfter changing the brief/tier (which resets the counter) or an explicit scoped maestro_drive, use /maestro resume.`,
-    taskIds: tasks.map((task) => task.id),
-  };
-}
-
-export type ProviderFailureClass = "transient" | "persistent";
-
-const PROVIDER_FAILURE_PATTERNS: Record<ProviderFailureClass, readonly RegExp[]> = {
-  persistent: [
-    /\b(?:auth(?:entication|orization)?|unauthenticated|unauthorized)\b/i,
-    /\b(?:invalid|missing|expired|revoked)\s+(?:api[ -]?)?key\b/i,
-    /\b(?:quota|billing|payment|credit|usage limit)\b/i,
-    /\bmodel(?:[-_ ]not[-_ ]found|\s+does not exist|\s+unavailable for)\b/i,
-    /\b(?:permission|forbidden)\b/i,
-    /\b(?:401|403)\b/,
-  ],
-  transient: [
-    /\b(?:timeout|timed out|etimedout)\b/i,
-    /\b(?:econnreset|econnrefused|connection resets?|connection refused|network error)\b/i,
-    /\b(?:http\s*)?429\b/i,
-    /\b(?:http\s*)?5\d\d\b/i,
-    /\b(?:overloaded|rate limit|service unavailable|temporarily unavailable)\b/i,
-  ],
-};
-
-export function classifyProviderFailure(message: string | undefined): ProviderFailureClass {
-  const evidence = message ?? "";
-  for (const pattern of PROVIDER_FAILURE_PATTERNS.persistent) {
-    if (pattern.test(evidence)) return "persistent";
-  }
-  for (const pattern of PROVIDER_FAILURE_PATTERNS.transient) {
-    if (pattern.test(evidence)) return "transient";
-  }
-  return "persistent";
-}
-
-function providerFailureMessage(task: Task): string | undefined {
-  const attempt = task.attempts.at(-1);
-  return attempt?.reviewLaunches?.at(-1)?.failureReason?.message ?? attempt?.failureReason?.message;
-}
-
-function scheduleTransientProviderRetry(
-  cwd: string,
-  tasks: Task[],
-  retriedTaskIds: Set<string>
-): boolean {
-  if (
-    tasks.some((task) => classifyProviderFailure(providerFailureMessage(task)) === "persistent")
-  ) {
-    return false;
-  }
-
-  const retryable = tasks.filter((task) => !retriedTaskIds.has(task.id));
-  if (retryable.length === 0) return false;
-  for (const task of retryable) {
-    retriedTaskIds.add(task.id);
-    if (task.status !== "ready_for_review") continue;
-    updateTask(cwd, task.id, (fresh) => {
-      const attempt = fresh.attempts.at(-1);
-      if (attempt?.reviewConvergence?.status === "operational_failure") {
-        delete attempt.reviewConvergence;
-      }
-    });
-  }
-  return true;
-}
-
-function providerBlockedTask(task: Task): boolean {
-  const latest = task.attempts.at(-1);
-  if (!latest) return false;
-  if (task.status === "failed") return !consumesMaxAttempt(latest);
-  if (task.status !== "ready_for_review") return false;
-  return latest.reviewLaunches?.at(-1)?.failureReason?.kind === "provider_failure";
-}
-
-function providerBlockedReason(
-  tasks: Task[],
-  transientProviderRetries: ReadonlySet<string>
-): DriveStopReason {
-  const details = tasks.map((task) => {
-    const attempt = task.attempts.at(-1);
-    const reviewFailure = attempt?.reviewLaunches?.at(-1);
-    const model = reviewFailure?.model ?? attempt?.model ?? "configured model";
-    const provider = reviewFailure?.provider ?? attempt?.provider;
-    const identity = provider ? `${model} (${provider})` : model;
-    const message = reviewFailure?.failureReason?.message ?? attempt?.failureReason?.message;
-    const failureClass = classifyProviderFailure(message);
-    const retry =
-      failureClass === "transient" && transientProviderRetries.has(task.id)
-        ? "; auto-retried once and failed again"
-        : "";
-    return `${task.id} [${failureClass}${retry}]: ${identity}${message ? ` — ${redactFailureMessage(message)}` : ""}`;
-  });
-  return {
-    code: "provider_blocked",
-    message: `Provider access blocked; autonomous retries stopped. ${details.join("; ")}\nPersistent failures require provider configuration; transient failures reach this decision only after one automatic retry. Check provider quota/authentication or configure another fallback in /maestro config, then use /maestro resume (or explicitly retry the task).`,
-    taskIds: tasks.map((task) => task.id),
-  };
 }
 
 export async function executeTask(options: {
