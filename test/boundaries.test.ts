@@ -190,6 +190,17 @@ test("session navigation state lives outside the extension root", () => {
   assert.match(navigator, /sessionSwitchBlocked/);
 });
 
+test("review prompt and convergence policy live outside workflow effects", () => {
+  const files = sourceFiles();
+  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
+  assert.doesNotMatch(workflow, /function reviewEvidence|function convergenceRecord/);
+
+  const policy = files.find((file) => file.name === "workflow-review-policy.ts")?.contents ?? "";
+  assert.match(policy, /function reviewEvidence/);
+  assert.match(policy, /function convergenceRecord/);
+  assert.match(policy, /function staleExecutionInputsMessage/);
+});
+
 test("index is a composition entry point and adapters own registrations", () => {
   const files = sourceFiles();
   const index = files.find((file) => file.name === "index.ts")?.contents ?? "";
