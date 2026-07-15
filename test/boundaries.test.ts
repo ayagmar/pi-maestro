@@ -96,6 +96,7 @@ test("pure policy modules do not import Pi, TUI, process, runner, or Git adapter
     "artifact-policy.ts",
     "dashboard-evidence.ts",
     "dashboard-launches.ts",
+    "dashboard-navigation.ts",
     "plan-review.ts",
     "plan-serialization.ts",
     "status.ts",
@@ -107,6 +108,19 @@ test("pure policy modules do not import Pi, TUI, process, runner, or Git adapter
     .filter((file) => pureFiles.has(file.name) && forbidden.test(file.contents))
     .map((file) => file.name);
   assert.deepEqual(violations, []);
+});
+
+test("dashboard navigation projection lives outside the TUI controller", () => {
+  const files = sourceFiles();
+  const dashboard = files.find((file) => file.name === "dashboard.ts")?.contents ?? "";
+  assert.match(dashboard, /stableTaskSelection/);
+  assert.match(dashboard, /stableLaunchSelection/);
+  assert.doesNotMatch(dashboard, /tasks\.findIndex\(\(task\) => task\.id === this\.selectedTaskId/);
+
+  const navigation = files.find((file) => file.name === "dashboard-navigation.ts")?.contents ?? "";
+  assert.match(navigation, /function visibleDashboardTasks/);
+  assert.match(navigation, /function stableTaskSelection/);
+  assert.match(navigation, /function stableLaunchSelection/);
 });
 
 test("dashboard session IO lives outside the dashboard controller", () => {

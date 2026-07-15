@@ -31,6 +31,13 @@ import {
 
 import { type DashboardLaunch, taskLaunches } from "./dashboard-launches.js";
 import {
+  type DashboardFilter,
+  DASHBOARD_FILTERS,
+  stableLaunchSelection,
+  stableTaskSelection,
+  visibleDashboardTasks,
+} from "./dashboard-navigation.js";
+import {
   boardUsage,
   formatCostSummary,
   formatStatusHistory,
@@ -111,20 +118,8 @@ type Mode =
   | "confirm_accept"
   | "help";
 type ConfirmAction = "abort" | "accept";
-type DashboardFilter = "all" | TaskGroup;
 type NavigationLevel = "phase" | "task" | "launch";
 type DetailView = "transcript" | "timeline" | "summary" | "evidence";
-
-const GROUPS: readonly TaskGroup[] = [
-  "blocked",
-  "ready",
-  "running",
-  "review-needed",
-  "approved",
-  "failed",
-  "cancelled",
-];
-const FILTERS: readonly DashboardFilter[] = ["all", ...GROUPS];
 
 const GROUP_LABELS: Record<TaskGroup, string> = {
   blocked: "blocked",
@@ -297,35 +292,30 @@ export class Dashboard {
   }
 
   private tasksBeforeDoneFilter(): Task[] {
-    let tasks =
-      this.filter === "all"
-        ? GROUPS.flatMap((group) => this.frame.grouped[group])
-        : this.frame.grouped[this.filter];
-    if (this.phaseScoped) {
-      const taskIds = new Set(this.phases()[this.phaseIndex]?.taskIds ?? []);
-      tasks = tasks.filter((task) => taskIds.has(task.id));
-    }
-    return tasks;
+    return visibleDashboardTasks(
+      this.frame.grouped,
+      this.filter,
+      this.phaseScoped ? this.phases()[this.phaseIndex]?.taskIds : undefined,
+      false
+    );
   }
 
   /** Tasks currently shown, ordered by their workflow group. */
   private visibleTasks(): Task[] {
-    const tasks = this.tasksBeforeDoneFilter();
-    if (!this.hideDone) return tasks;
-    return tasks.filter((task) => task.status !== "approved" && task.status !== "cancelled");
+    return visibleDashboardTasks(
+      this.frame.grouped,
+      this.filter,
+      this.phaseScoped ? this.phases()[this.phaseIndex]?.taskIds : undefined,
+      this.hideDone
+    );
   }
 
   private selectedTask(): Task | undefined {
     if (this.navigationLevel === "phase") return undefined;
-    const tasks = this.visibleTasks();
-    const stableIndex = this.selectedTaskId
-      ? tasks.findIndex((task) => task.id === this.selectedTaskId)
-      : -1;
-    if (stableIndex >= 0) this.selected = stableIndex;
-    if (this.selected >= tasks.length) this.selected = Math.max(0, tasks.length - 1);
-    const task = tasks[this.selected];
-    this.selectedTaskId = task?.id;
-    return task;
+    const selection = stableTaskSelection(this.visibleTasks(), this.selectedTaskId, this.selected);
+    this.selected = selection.index;
+    this.selectedTaskId = selection.task?.id;
+    return selection.task;
   }
 
   private phases() {
@@ -335,15 +325,14 @@ export class Dashboard {
   private selectedLaunch(): DashboardLaunch | undefined {
     const task = this.selectedTask();
     if (!task) return undefined;
-    const launches = taskLaunches(task);
-    const stableIndex = this.selectedLaunchKey
-      ? launches.findIndex((launch) => launch.key === this.selectedLaunchKey)
-      : -1;
-    if (stableIndex >= 0) this.launchIndex = stableIndex;
-    if (this.launchIndex >= launches.length) this.launchIndex = Math.max(0, launches.length - 1);
-    const launch = launches[this.launchIndex];
-    this.selectedLaunchKey = launch?.key;
-    return launch;
+    const selection = stableLaunchSelection(
+      taskLaunches(task),
+      this.selectedLaunchKey,
+      this.launchIndex
+    );
+    this.launchIndex = selection.index;
+    this.selectedLaunchKey = selection.launch?.key;
+    return selection.launch;
   }
 
   private tailFor(task: Task): TranscriptTail | undefined {
@@ -512,8 +501,8 @@ export class Dashboard {
       this.selectedTaskId = undefined;
       this.scrollUp = 0;
     } else if (data === "g") {
-      const current = FILTERS.indexOf(this.filter);
-      this.filter = FILTERS[(current + 1) % FILTERS.length] ?? "all";
+      const current = DASHBOARD_FILTERS.indexOf(this.filter);
+      this.filter = DASHBOARD_FILTERS[(current + 1) % DASHBOARD_FILTERS.length] ?? "all";
       this.selected = 0;
       this.selectedTaskId = undefined;
       this.scrollUp = 0;
