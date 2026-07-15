@@ -5,7 +5,7 @@ Pi Maestro separates deterministic policy, persisted state, runtime adapters, an
 ```text
 Composition entry (src/index.ts) -> Pi runtime adapter (src/extension.ts)
                  |
-Tools / commands / UI (src/tools.ts, src/commands.ts, src/dashboard.ts)
+Tools / commands / UI (src/tools.ts, src/command-dispatcher.ts, src/dashboard.ts)
                  |
 Drive runtime (src/drive-controller.ts) -> workflow orchestration (src/workflow.ts)
                  |                         |
@@ -25,7 +25,8 @@ Board boundary (src/board.ts)       runner.ts / worktree.ts
 | Git, worktrees, immutable tree identity | `src/worktree.ts` | No other module executes Git. |
 | Composition entry | `src/index.ts` | Re-exports the extension factory only; it owns no runtime state. |
 | Model tool schemas, execution adapters, and rendering | `src/tools.ts` | Registers exactly the three model-facing tools. |
-| Human command registration and parsing | `src/commands.ts` | Owns the slash-command surface; runtime handlers are composed by `src/extension.ts`. |
+| Human command registration | `src/commands.ts` | The only module that registers the slash-command surface. |
+| Human command dispatch | `src/command-dispatcher.ts` | Routes command families through explicit runtime, navigation, and view interfaces; family modules own their behavior. |
 | Session replacement | `src/handoff.ts` | The only module allowed to call `newSession()`. |
 | Pi lifecycle and UI wiring | `src/extension.ts` | Composes adapters, controller, workflow, dashboard, shortcuts, and event hooks. |
 

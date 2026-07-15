@@ -32,35 +32,10 @@ import {
   updateTask,
   validatePlan,
 } from "./board.js";
-import { MaestroCommandCompletions } from "./command-completions.js";
-import {
-  handleConfigCommand,
-  handleCostsCommand,
-  handleReconcileCommand,
-  handleSimulationCommand,
-  handleTimelineCommand,
-} from "./command-inspection.js";
-import { handlePlanCommand } from "./command-plans.js";
-import {
-  handleAbortCommand,
-  handleDriveCommand,
-  handleHandoffCommand,
-  handlePauseCommand,
-  handleResumeCommand,
-  handleRetryCommand,
-  handleStartCommand,
-  type RunCommandRuntime,
-  type RunCommandSession,
-} from "./command-run-control.js";
-import { handleDiscoveryCommand, handleRecipeCommand } from "./command-recipes.js";
-import {
-  handleDoctorCommand,
-  handleHistoryCommand,
-  handleReplayCommand,
-  handleResetCommand,
-} from "./command-recovery.js";
+import { MaestroCommandDispatcher } from "./command-dispatcher.js";
+import type { RunCommandRuntime, RunCommandSession } from "./command-run-control.js";
 import { pickFromList } from "./command-ui.js";
-import { parseCommand, registerMaestroCommand } from "./commands.js";
+import { registerMaestroCommand } from "./commands.js";
 import { loadConfig, resolveTierModels } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE } from "./constants.js";
 import {
@@ -160,7 +135,6 @@ export default function maestro(
   });
   let runtimeActive = true;
   let contextNudgeShown = false;
-  const commandCompletions = new MaestroCommandCompletions(process.cwd());
   let livePane: LivePaneRuntime | undefined;
   let suppressedAutoPaneDriveId: string | undefined;
 
@@ -861,6 +835,7 @@ export default function maestro(
   const commandRuntime: RunCommandRuntime = {
     hasActiveDrive: () => driveController.hasActive(),
     liveRunCount: () => liveRuns.size,
+    liveTaskIds: () => new Set(liveRuns.keys()),
     isTaskLive: (taskId) => liveRuns.has(taskId),
     activeOwner: () => driveController.activeOwner(),
     requestPause: () => {
@@ -894,180 +869,27 @@ export default function maestro(
     startBackgroundDrive,
   });
 
-  registerMaestroCommand(
-    pi,
-    async (args, ctx) => {
-      commandCompletions.setCwd(ctx.cwd);
-      let { subcommand, rest, restParts } = parseCommand(args);
-      if (!subcommand && ctx.mode === "tui") {
-        const selected = await showMaestroHome(ctx);
-        if (!selected) return;
-        ({ subcommand, rest, restParts } = parseCommand(selected));
-      }
-
-      try {
-        switch (subcommand) {
-          case "start":
-            await handleStartCommand(ctx, rest, commandRuntime, commandSession);
-            return;
-          case "back": {
-            await sessionNavigator.back(ctx);
-            return;
-          }
-          case "drive":
-            await handleDriveCommand(ctx, rest, commandRuntime);
-            return;
-          case "retry":
-            await handleRetryCommand(ctx, rest, restParts, commandRuntime);
-            return;
-          case "pause":
-            handlePauseCommand(ctx, commandRuntime);
-            return;
-          case "resume":
-            await handleResumeCommand(ctx, commandRuntime);
-            return;
-          case "abort":
-            handleAbortCommand(ctx, commandRuntime);
-            return;
-          case "plan":
-            await handlePlanCommand(ctx, restParts, {
-              hasLiveRuns: () => liveRuns.size > 0,
-              onBoardChanged: () => refreshUI(ctx),
-              reviewPlan: showPlan,
-            });
-            return;
-          case "recipe":
-            await handleRecipeCommand(ctx, rest, {
-              hasLiveRuns: () => liveRuns.size > 0,
-              isTaskLive: (taskId) => liveRuns.has(taskId),
-              onBoardChanged: () => refreshUI(ctx),
-            });
-            return;
-          case "agents":
-            openLivePane(ctx, true);
-            return;
-          case "workflows":
-            await showWorkflowBrowser(ctx, {
-              hasLiveRuns: () => liveRuns.size > 0,
-              onBoardChanged: () => refreshUI(ctx),
-              reviewPlan: showPlan,
-            });
-            return;
-          case "board":
-          case "dash":
-          case "dashboard":
-            await showDashboard(ctx);
-            return;
-          case "open": {
-            if (!rest) {
-              notify(ctx, "Usage: /maestro open <taskId>", "warning");
-              return;
-            }
-            await sessionNavigator.openTask(ctx, rest);
-            return;
-          }
-          case "config":
-            await handleConfigCommand(ctx, rest, () => refreshUI(ctx));
-            return;
-          case "simulate":
-            handleSimulationCommand(ctx, rest);
-            return;
-          case "discover":
-            await handleDiscoveryCommand(ctx, restParts, {
-              hasLiveRuns: () => liveRuns.size > 0,
-              isTaskLive: (taskId) => liveRuns.has(taskId),
-              onBoardChanged: () => refreshUI(ctx),
-            });
-            return;
-          case "costs":
-            handleCostsCommand(ctx);
-            return;
-          case "reconcile":
-            handleReconcileCommand(ctx);
-            return;
-          case "doctor":
-            await handleDoctorCommand(ctx, restParts, {
-              hasLiveRuns: () => liveRuns.size > 0,
-              isTaskLive: (taskId) => liveRuns.has(taskId),
-              liveTaskIds: () => new Set(liveRuns.keys()),
-              onBoardChanged: () => refreshUI(ctx),
-            });
-            return;
-          case "handoff":
-            await handleHandoffCommand(ctx, commandRuntime, commandSession);
-            return;
-          case "history":
-            handleHistoryCommand(ctx, rest);
-            return;
-          case "timeline":
-            handleTimelineCommand(ctx, restParts);
-            return;
-          case "replay":
-            await handleReplayCommand(ctx, rest, {
-              hasLiveRuns: () => liveRuns.size > 0,
-              isTaskLive: (taskId) => liveRuns.has(taskId),
-              liveTaskIds: () => new Set(liveRuns.keys()),
-              onBoardChanged: () => refreshUI(ctx),
-            });
-            return;
-          case "reset":
-            await handleResetCommand(ctx, rest, {
-              hasLiveRuns: () => liveRuns.size > 0,
-              isTaskLive: (taskId) => liveRuns.has(taskId),
-              liveTaskIds: () => new Set(liveRuns.keys()),
-              onBoardChanged: () => refreshUI(ctx),
-            });
-            return;
-          default:
-            notify(
-              ctx,
-              [
-                ...(subcommand ? [`Unknown subcommand "${subcommand}". Available commands:`] : []),
-                "start/plan/drive",
-                `/${COMMAND} start <goal>   plan + delegate a goal with the orchestrator`,
-                `/${COMMAND} handoff        continue run/review in a fresh session (drops planning context)`,
-                `/${COMMAND} drive [ids]    autonomously run, review, and retry tasks`,
-                `/${COMMAND} retry <taskId> retry failed work with isolated human-controlled safety`,
-                `/${COMMAND} pause          stop the drive after active executors finish`,
-                `/${COMMAND} resume         continue a paused drive from fresh board state`,
-                `/${COMMAND} abort          abort a drive and its active executors`,
-                `/${COMMAND} plan           review, approve, or reject a gated plan`,
-                "",
-                "observe",
-                `/${COMMAND} board          phase-first project dashboard (tasks, launches, evidence, actions)`,
-                `/${COMMAND} agents         browse live and completed executor/reviewer sessions`,
-                `/${COMMAND} open <taskId>  switch into an executor session`,
-                `/${COMMAND} back           switch back to the previous session`,
-                "",
-                "scripting",
-                `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
-                `/${COMMAND} costs          show attempts, total/average cost, models, and providers`,
-                `/${COMMAND} simulate [ids] preview deterministic dependency waves without running work`,
-                `/${COMMAND} plan export <file>  export a versioned plan without run evidence`,
-                `/${COMMAND} plan import <file>  validate, archive current work, and import`,
-                `/${COMMAND} plan diff <file> [taskId]  inspect plan changes without mutation`,
-                `/${COMMAND} recipe list|inspect|preview|save|run|remove  manage declarative recipes`,
-                `/${COMMAND} workflows      interactively browse and operate reusable workflows`,
-                "",
-                "recover",
-                `/${COMMAND} discover <taskId> [append|replace]  preview and approve generated tasks`,
-                `/${COMMAND} doctor         diagnose config, models, authentication, git, and managed worktrees`,
-                `/${COMMAND} doctor cleanup remove rechecked stale/orphaned worktrees after confirmation`,
-                `/${COMMAND} history [n]    show recent task status changes (default 20)`,
-                `/${COMMAND} timeline [id]  show derived run/task evidence chronologically`,
-                `/${COMMAND} timeline archive <file> [id]  show archived evidence`,
-                `/${COMMAND} reconcile      report artifact/provenance inconsistencies without mutation`,
-                `/${COMMAND} replay [file]  restore an archived board (picker when omitted)`,
-                `/${COMMAND} reset [confirm] archive and clear the board`,
-              ].join("\n")
-            );
-        }
-      } finally {
-        notifyQuarantine(ctx);
-      }
-    },
-    (prefix) => commandCompletions.complete(prefix)
+  const commandDispatcher = new MaestroCommandDispatcher(
+    process.cwd(),
+    commandRuntime,
+    commandSession,
+    sessionNavigator,
+    {
+      showHome: showMaestroHome,
+      showAgents: (ctx) => openLivePane(ctx, true),
+      showWorkflows: (ctx) =>
+        showWorkflowBrowser(ctx, {
+          hasLiveRuns: () => liveRuns.size > 0,
+          onBoardChanged: () => refreshUI(ctx),
+          reviewPlan: showPlan,
+        }),
+      showDashboard,
+      showPlan,
+      onBoardChanged: refreshUI,
+      notifyQuarantine,
+    }
   );
+  registerMaestroCommand(pi, commandDispatcher.dispatch, commandDispatcher.complete);
 
   pi.registerShortcut("ctrl+alt+b", {
     description: "Open the maestro dashboard",
@@ -1401,7 +1223,7 @@ export default function maestro(
   });
 
   pi.on("session_start", (event, ctx) => {
-    commandCompletions.setCwd(ctx.cwd);
+    commandDispatcher.setCwd(ctx.cwd);
     runtimeActive = true;
     closeLivePane();
     suppressedAutoPaneDriveId = undefined;

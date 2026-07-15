@@ -14,6 +14,7 @@ import { inspectGit } from "./worktree.js";
 export interface RunCommandRuntime {
   hasActiveDrive(): boolean;
   liveRunCount(): number;
+  liveTaskIds(): Set<string>;
   isTaskLive(taskId: string): boolean;
   activeOwner(): Pick<ActiveDriveControl, "id" | "cwd" | "ownerSession" | "taskIds"> | undefined;
   requestPause(): void;

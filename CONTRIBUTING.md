@@ -11,7 +11,8 @@
 - `src/index.ts`: minimal extension entry point
 - `src/extension.ts`: Pi lifecycle and UI composition
 - `src/tools.ts`: the three model tool adapters
-- `src/commands.ts`: human slash-command registration and parsing
+- `src/commands.ts`: human slash-command registration
+- `src/command-dispatcher.ts`: human command routing to cohesive command families
 - `test/boundaries.test.ts`: enforced architecture ownership
 
 Keep code readable and local. Prefer early returns and the smallest correct implementation. Do not add fallback paths or abstractions without a proven caller.

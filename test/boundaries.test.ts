@@ -134,6 +134,18 @@ test("plan command UI and mutations live outside the extension root", () => {
   assert.match(planReview, /approvePlan\(/);
 });
 
+test("command dispatcher owns slash-command routing", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /parseCommand|switch \(subcommand\)|handleStartCommand/);
+
+  const dispatcher = files.find((file) => file.name === "command-dispatcher.ts")?.contents ?? "";
+  assert.match(dispatcher, /class MaestroCommandDispatcher/);
+  assert.match(dispatcher, /switch \(subcommand\)/);
+  assert.match(dispatcher, /handleStartCommand/);
+  assert.match(dispatcher, /handleRecovery|handleDoctorCommand/);
+});
+
 test("run-control commands live outside the extension root", () => {
   const files = sourceFiles();
   const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
