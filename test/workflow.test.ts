@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -578,6 +578,7 @@ test("failed trusted candidate verification blocks reviewer launch", async () =>
 
 test("review ownership remains claimed through post-integration verification", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-ownership-"));
+  const control = mkdtempSync(join(tmpdir(), "maestro-review-control-"));
   try {
     execFileSync("git", ["init"], { cwd });
     execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
@@ -598,7 +599,7 @@ test("review ownership remains claimed through post-integration verification", a
     const script = join(cwd, "verify.cjs");
     writeFileSync(
       script,
-      `const fs = require("node:fs");\nconst countFile = ${JSON.stringify(join(cwd, "count"))};\nconst marker = ${JSON.stringify(join(cwd, "integration-started"))};\nconst count = Number(fs.existsSync(countFile) ? fs.readFileSync(countFile, "utf8") : 0) + 1;\nfs.writeFileSync(countFile, String(count));\nif (count === 2) { fs.writeFileSync(marker, "started"); setTimeout(() => {}, 500); }\n`
+      `const fs = require("node:fs");\nconst countFile = ${JSON.stringify(join(control, "count"))};\nconst marker = ${JSON.stringify(join(control, "integration-started"))};\nconst count = Number(fs.existsSync(countFile) ? fs.readFileSync(countFile, "utf8") : 0) + 1;\nfs.writeFileSync(countFile, String(count));\nif (count === 2) { fs.writeFileSync(marker, "started"); setTimeout(() => {}, 500); }\n`
     );
     const verificationProfiles = {
       required: { command: `${process.execPath} ${script}`, timeoutSeconds: 5 },
@@ -624,7 +625,7 @@ test("review ownership remains claimed through post-integration verification", a
     };
 
     const first = reviewTask(reviewOptions);
-    while (!existsSync(join(cwd, "integration-started"))) {
+    while (!existsSync(join(control, "integration-started"))) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     const duplicate = await reviewTask(reviewOptions);
@@ -637,6 +638,7 @@ test("review ownership remains claimed through post-integration verification", a
     assert.equal(findTask(loadBoard(cwd), task.id)?.attempts[0]?.reviewLaunches?.length, 1);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(control, { recursive: true, force: true });
   }
 });
 
@@ -746,6 +748,42 @@ test("formatDriveSummary reports outcomes, attempts, meaningful cost, and identi
   assert.match(summary, /models: openai\/gpt-5, anthropic\/claude/);
   assert.match(summary, /providers: openai, anthropic/);
   assert.match(summary, /dependency unavailable$/);
+});
+
+test("drive completes an all-cancelled selection without launching work", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-cancelled-complete-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const first = createTask(board, { title: "First", brief: "cancelled", tier: "standard" });
+    const second = createTask(board, { title: "Second", brief: "cancelled", tier: "standard" });
+    forceStatus(first, "cancelled");
+    forceStatus(second, "cancelled");
+    saveBoard(cwd, board);
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: () => {
+        throw new Error("settled tasks must not launch executors or reviewers");
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.equal(result.rounds, 0);
+    assert.match(result.stoppedBecause.message, /settled/);
+    assert.deepEqual(
+      result.tasks.map((task) => task.status),
+      ["cancelled", "cancelled"]
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("drive stops when a review dispatch declines without making progress", async () => {
@@ -2394,6 +2432,8 @@ test("approval auto-commits the task's touched files as one conventional commit"
     git("config", "user.email", "test@local");
     git("config", "user.name", "Test");
     writeFileSync(join(cwd, "base.txt"), "base\n");
+    writeFileSync(join(cwd, "staged.txt"), "base staged\n");
+    writeFileSync(join(cwd, "dirty.txt"), "base dirty\n");
     git("add", "-A");
     git("commit", "-qm", "chore: base");
 
@@ -2406,9 +2446,14 @@ test("approval auto-commits the task's touched files as one conventional commit"
     task.attempts.push(done);
     recordExecutionFingerprint(cwd, board, task);
     saveBoard(cwd, board);
-    // The task's file plus an unrelated dirty file that must NOT be committed.
+    // The task's file plus unrelated staged, unstaged, and untracked changes.
     writeFileSync(join(cwd, "widget.txt"), "fixed\n");
+    writeFileSync(join(cwd, "staged.txt"), "user staged\n");
+    git("add", "staged.txt");
+    writeFileSync(join(cwd, "dirty.txt"), "user dirty\n");
     writeFileSync(join(cwd, "unrelated.txt"), "untouched\n");
+    const stagedBefore = git("diff", "--cached", "--", "staged.txt");
+    const dirtyBefore = git("diff", "--", "dirty.txt");
 
     await reviewTask({
       cwd,
@@ -2425,9 +2470,136 @@ test("approval auto-commits the task's touched files as one conventional commit"
     const committed = git("show", "--name-only", "--pretty=format:", "HEAD");
     assert.match(committed, /widget\.txt/);
     assert.doesNotMatch(committed, /unrelated\.txt/);
+    assert.equal(git("diff", "--cached", "--", "staged.txt"), stagedBefore);
+    assert.equal(git("diff", "--", "dirty.txt"), dirtyBefore);
     assert.match(git("status", "--porcelain"), /unrelated\.txt/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("main-tree verification evidence comes from the committed reviewed snapshot", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-main-tree-evidence-test-"));
+  const control = mkdtempSync(join(tmpdir(), "maestro-main-tree-evidence-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "chore: base");
+
+    const { board, task } = boardWithTask("ready_for_review");
+    task.writePaths = ["widget.txt"];
+    task.successCriteria = ["The widget is adjusted"];
+    task.verificationProfile = "required";
+    const done = attempt("Executor completed the task");
+    done.touchedFiles = ["widget.txt"];
+    task.attempts.push(done);
+    writeFileSync(join(cwd, "widget.txt"), "reviewed\n");
+
+    const script = join(cwd, "verify.cjs");
+    const evidenceFile = join(control, "verified-tree");
+    writeFileSync(
+      script,
+      `const { execFileSync } = require("node:child_process");\nconst fs = require("node:fs");\nconst tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();\nfs.writeFileSync(${JSON.stringify(evidenceFile)}, tree);\n`
+    );
+    const verificationProfiles = {
+      required: { command: `${process.execPath} ${script}`, timeoutSeconds: 5 },
+    };
+    saveConfig("project", cwd, { ...config, autoCommit: true, verificationProfiles });
+    recordExecutionFingerprint(cwd, board, task, { ...loadConfig(cwd), verificationProfiles });
+    saveBoard(cwd, board);
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: executor({ finalReport: "Verified.\nVERDICT: APPROVE" }),
+      autoCommit: true,
+      verificationProfiles,
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    const committedTree = git("rev-parse", "HEAD^{tree}");
+    assert.equal(result.status, "approved", result.note);
+    assert.equal(readFileSync(evidenceFile, "utf8"), committedTree);
+    assert.equal(persisted?.provenance?.candidateTree, committedTree);
+    assert.equal(persisted?.provenance?.integratedTree, committedTree);
+    assert.equal(persisted?.provenance?.integratedCommit, git("rev-parse", "HEAD"));
+    assert.ok(persisted?.provenance?.verifiedAt);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(control, { recursive: true, force: true });
+  }
+});
+
+test("main-tree promotion refuses deterministic mutation after review without committing it", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-main-tree-mutation-test-"));
+  const control = mkdtempSync(join(tmpdir(), "maestro-main-tree-control-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    writeFileSync(join(cwd, "staged.txt"), "base staged\n");
+    writeFileSync(join(cwd, "dirty.txt"), "base dirty\n");
+    git("add", "-A");
+    git("commit", "-qm", "chore: base");
+    const baseHead = git("rev-parse", "HEAD");
+
+    const { board, task } = boardWithTask("ready_for_review");
+    task.commitMessage = "fix: adjust the widget";
+    task.writePaths = ["widget.txt"];
+    task.successCriteria = ["The widget is adjusted"];
+    task.verificationProfile = "required";
+    const done = attempt("Executor completed the task");
+    done.touchedFiles = ["widget.txt"];
+    task.attempts.push(done);
+    writeFileSync(join(cwd, "widget.txt"), "reviewed\n");
+    writeFileSync(join(cwd, "staged.txt"), "user staged\n");
+    git("add", "staged.txt");
+    writeFileSync(join(cwd, "dirty.txt"), "user dirty\n");
+    const stagedBefore = git("diff", "--cached", "--", "staged.txt");
+    const dirtyBefore = git("diff", "--", "dirty.txt");
+
+    const script = join(cwd, "verify.cjs");
+    writeFileSync(
+      script,
+      `const fs = require("node:fs");\nconst countFile = ${JSON.stringify(join(control, "count"))};\nconst count = Number(fs.existsSync(countFile) ? fs.readFileSync(countFile, "utf8") : 0) + 1;\nfs.writeFileSync(countFile, String(count));\nif (count === 2) fs.writeFileSync(${JSON.stringify(join(cwd, "widget.txt"))}, "unreviewed\\n");\n`
+    );
+    const verificationProfiles = {
+      required: { command: `${process.execPath} ${script}`, timeoutSeconds: 5 },
+    };
+    saveConfig("project", cwd, { ...config, autoCommit: true, verificationProfiles });
+    recordExecutionFingerprint(cwd, board, task, { ...loadConfig(cwd), verificationProfiles });
+    saveBoard(cwd, board);
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      startExecutor: executor({ finalReport: "Verified.\nVERDICT: APPROVE" }),
+      autoCommit: true,
+      verificationProfiles,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.notEqual(result.status, "approved");
+    assert.match(result.note ?? "", /changed|mutation/i);
+    assert.equal(git("rev-parse", "HEAD"), baseHead);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.integratedCommit, undefined);
+    assert.equal(readFileSync(join(cwd, "widget.txt"), "utf8"), "unreviewed\n");
+    assert.equal(git("diff", "--cached", "--", "staged.txt"), stagedBefore);
+    assert.equal(git("diff", "--", "dirty.txt"), dirtyBefore);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(control, { recursive: true, force: true });
   }
 });
 

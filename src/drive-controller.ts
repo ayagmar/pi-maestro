@@ -1,5 +1,5 @@
 import { completionFreshness } from "./artifact-policy.js";
-import { archiveBoard, updateBoard } from "./board.js";
+import { archiveBoard, isTaskSettled, updateBoard } from "./board.js";
 import { loadConfig } from "./config.js";
 import { truncateText } from "./format.js";
 import { type ActiveDriveState, type DriveDecision, type TaskStatus } from "./types.js";
@@ -229,7 +229,7 @@ export function cleanupCompletedBoard(cwd: string): void {
       board.tasks.length === 0 ||
       board.tasks.some(
         (task) =>
-          (task.status !== "approved" && task.status !== "cancelled") ||
+          !isTaskSettled(task) ||
           (task.status === "approved" && completionFreshness(board, task, config).state !== "fresh")
       )
     ) {

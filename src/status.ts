@@ -1,5 +1,5 @@
 import { completionFreshness } from "./artifact-policy.js";
-import { blockedReason, taskGroup } from "./board.js";
+import { blockedReason, isTaskSettled, taskGroup } from "./board.js";
 import { boardUsage } from "./format.js";
 import { type Board, type MaestroConfig } from "./types.js";
 
@@ -87,11 +87,7 @@ export function projectRunPhases(
   );
   const allComplete =
     board.tasks.length > 0 &&
-    board.tasks.every(
-      (task) =>
-        task.status === "cancelled" ||
-        (task.status === "approved" && !staleApprovedIds.has(task.id))
-    );
+    board.tasks.every((task) => isTaskSettled(task) && !staleApprovedIds.has(task.id));
   const reviewPending = board.tasks.some((task) => task.status === "ready_for_review");
   const integrationPending = board.tasks.some(
     (task) => task.provenance?.candidateTree && !task.provenance.integratedCommit
@@ -178,11 +174,7 @@ export function projectRunPhases(
       )
       .map((task) => task.id),
     complete: board.tasks
-      .filter(
-        (task) =>
-          task.status === "cancelled" ||
-          (task.status === "approved" && !staleApprovedIds.has(task.id))
-      )
+      .filter((task) => isTaskSettled(task) && !staleApprovedIds.has(task.id))
       .map((task) => task.id),
   };
 
@@ -203,6 +195,7 @@ export interface StatusProjection {
   blocked: number;
   running: number;
   approved: number;
+  cancelled: number;
   total: number;
   cost: number;
   recovery?: string;
@@ -234,17 +227,21 @@ export function projectStatus(
       : []
   );
   const blocked = board.tasks.filter(
-    (task) => blockedReason(board, task) !== undefined || staleApproved.has(task.id)
+    (task) =>
+      task.status !== "cancelled" &&
+      (blockedReason(board, task) !== undefined || staleApproved.has(task.id))
   ).length;
   const approved = board.tasks.filter(
     (task) => task.status === "approved" && !staleApproved.has(task.id)
   ).length;
+  const cancelled = board.tasks.filter((task) => task.status === "cancelled").length;
   const base = {
     runnable,
     reviewable,
     blocked,
     running,
     approved,
+    cancelled,
     total: board.tasks.length,
     cost: boardUsage(board.tasks).cost,
   };
@@ -267,7 +264,9 @@ export function projectStatus(
       ...base,
     };
   }
-  if (approved === board.tasks.length) return { code: "complete", phase: "complete", ...base };
+  if (approved + cancelled === board.tasks.length) {
+    return { code: "complete", phase: "complete", ...base };
+  }
   if (runnable > 0 || reviewable > 0)
     return { code: "ready", phase: phase ?? "execution", ...base };
   return { code: "blocked", phase: phase ?? "recovery", recovery: "inspect blockers", ...base };
@@ -276,5 +275,5 @@ export function projectStatus(
 export function formatStatusProjection(status: StatusProjection): string {
   const owner = status.ownerSession ? ` · owner ${status.ownerSession}` : "";
   const recovery = status.recovery ? ` · recovery: ${status.recovery}` : "";
-  return `${status.code} · ${status.phase} · ${status.approved}/${status.total} approved · ${status.running} running · ${status.runnable} runnable · ${status.reviewable} reviewable · ${status.blocked} blocked · $${status.cost.toFixed(4)}${owner}${recovery}`;
+  return `${status.code} · ${status.phase} · ${status.approved} approved · ${status.cancelled} cancelled · ${status.running} running · ${status.runnable} runnable · ${status.reviewable} reviewable · ${status.blocked} blocked · $${status.cost.toFixed(4)}${owner}${recovery}`;
 }

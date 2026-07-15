@@ -20,7 +20,41 @@ test("status projection uses one deterministic phase and accounting model", () =
   task.status = "approved";
   const complete = projectStatus(board);
   assert.equal(complete.code, "complete");
-  assert.match(formatStatusProjection(complete), /complete · 1\/1 approved/);
+  assert.match(formatStatusProjection(complete), /complete · 1 approved · 0 cancelled/);
+});
+
+test("all-cancelled and mixed settled boards agree on complete status and phase", () => {
+  const allCancelled: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const firstCancelled = createTask(allCancelled, {
+    title: "Cancelled one",
+    brief: "cancelled",
+    tier: "standard",
+  });
+  firstCancelled.status = "cancelled";
+  const secondCancelled = createTask(allCancelled, {
+    title: "Cancelled two",
+    brief: "cancelled",
+    tier: "standard",
+  });
+  secondCancelled.status = "cancelled";
+
+  const cancelledStatus = projectStatus(allCancelled);
+  assert.equal(cancelledStatus.code, "complete");
+  assert.equal(cancelledStatus.phase, "complete");
+  assert.equal(cancelledStatus.approved, 0);
+  assert.equal(cancelledStatus.cancelled, 2);
+  assert.equal(cancelledStatus.blocked, 0);
+  assert.match(formatStatusProjection(cancelledStatus), /0 approved · 2 cancelled/);
+
+  const mixed: Board = structuredClone(allCancelled);
+  const approved = mixed.tasks[0];
+  assert.ok(approved);
+  approved.status = "approved";
+  const mixedStatus = projectStatus(mixed);
+  assert.equal(mixedStatus.code, "complete");
+  assert.equal(projectRunPhases(mixed).find((phase) => phase.current)?.id, "complete");
+  assert.equal(mixedStatus.approved, 1);
+  assert.equal(mixedStatus.cancelled, 1);
 });
 
 test("phase projection always returns all phases with deterministic precedence and membership", () => {

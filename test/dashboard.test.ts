@@ -8,12 +8,12 @@ import { type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { humanRetryEligibility } from "../src/board.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import {
+  DASHBOARD_BINDINGS,
   Dashboard,
   type DashboardActions,
-  DASHBOARD_BINDINGS,
   DEFAULT_DASHBOARD_BODY_HEIGHT,
-  type LivePaneLaunch,
   LivePaneComponent,
+  type LivePaneLaunch,
   projectEvidenceSections,
   taskLaunches,
   wrapText,
@@ -42,6 +42,30 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     updatedAt: 0,
     ...overrides,
   };
+}
+
+function inputFocuses(component: unknown): { steer: boolean; followUp: boolean } {
+  const inputs = component as {
+    steerInput: { focused: boolean };
+    followUpInput: { focused: boolean };
+  };
+  return { steer: inputs.steerInput.focused, followUp: inputs.followUpInput.focused };
+}
+
+function richTranscriptState(component: unknown, key: string) {
+  const pane = component as {
+    sessionTranscripts: Map<
+      string,
+      {
+        container: object | undefined;
+        entries: unknown[];
+        pendingTools: Map<string, unknown>;
+      }
+    >;
+  };
+  const transcript = pane.sessionTranscripts.get(key);
+  assert.ok(transcript);
+  return transcript;
 }
 
 function makeActions(board: Board, overrides: Partial<DashboardActions> = {}): DashboardActions {
@@ -315,6 +339,30 @@ test("dashboard queues a follow-up for the selected live run", () => {
     const output = dashboard.render(100).join("\n");
     assert.match(output, /Queued follow-up for T1/);
     assert.match(output, /F follow-up/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard focuses only its active text input", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board, { isLive: () => true }));
+  try {
+    dashboard.focused = true;
+    assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: false });
+
+    dashboard.handleInput("F");
+    assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: true });
+    dashboard.handleInput("\x1b");
+    assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: false });
+
+    dashboard.handleInput("s");
+    for (let index = 0; index < 3; index += 1) dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+    assert.deepEqual(inputFocuses(dashboard), { steer: true, followUp: false });
+
+    dashboard.focused = false;
+    assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: false });
   } finally {
     dashboard.dispose();
   }
@@ -1723,6 +1771,7 @@ test("live pane renders session messages with pi chat components", () => {
     assert.match(output, /Inspect the fixture/);
     assert.match(output, /Assistant fixture answer/);
     assert.match(output, /read/);
+    assert.equal(richTranscriptState(pane, "execute:T1:session").pendingTools.size, 0);
     assert.doesNotMatch(output, /\]133;A/);
   } finally {
     pane.dispose();
@@ -1774,7 +1823,7 @@ test("live pane falls back to raw rows for unavailable session transcripts", () 
   }
 });
 
-test("live pane reloads a session transcript when its file grows", () => {
+test("live pane parses only appended session entries", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-reload-"));
   const sessionFile = join(directory, "session.jsonl");
   copyFileSync(livePaneSessionFixture, sessionFile);
@@ -1801,6 +1850,9 @@ test("live pane reloads a session transcript when its file grows", () => {
   });
   try {
     assert.doesNotMatch(pane.render(80).join("\n"), /Reloaded assistant line/);
+    const initial = richTranscriptState(pane, "execute:T1:reload");
+    const initialContainer = initial.container;
+    assert.equal(initial.entries.length, 3);
     appendFileSync(
       sessionFile,
       `${JSON.stringify({
@@ -1828,6 +1880,106 @@ test("live pane reloads a session transcript when its file grows", () => {
       })}\n`
     );
     assert.match(pane.render(80).join("\n"), /Reloaded assistant line/);
+    const appended = richTranscriptState(pane, "execute:T1:reload");
+    assert.equal(appended.container, initialContainer);
+    assert.equal(appended.entries.length, 4);
+  } finally {
+    pane.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("live pane rerenders at a new width without reparsing unchanged session history", () => {
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [
+      {
+        key: "execute:T1:width",
+        taskId: "T1",
+        title: "Width transcript",
+        kind: "execute",
+        logFile: "/missing/raw-log.jsonl",
+        sessionFile: livePaneSessionFixture,
+        turns: 1,
+        cost: 0,
+        lastActivity: "working",
+      },
+    ],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    tui: fakeTui,
+    cwd: "/tmp/live-pane-fixture",
+    height: 30,
+  });
+  try {
+    pane.render(80);
+    const initial = richTranscriptState(pane, "execute:T1:width");
+    const initialContainer = initial.container;
+    const initialEntries = initial.entries;
+    pane.render(48);
+    const resized = richTranscriptState(pane, "execute:T1:width");
+    assert.equal(resized.container, initialContainer);
+    assert.equal(resized.entries, initialEntries);
+  } finally {
+    pane.dispose();
+  }
+});
+
+test("live pane safely rebuilds a replaced or truncated session file", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-replaced-"));
+  const sessionFile = join(directory, "session.jsonl");
+  copyFileSync(livePaneSessionFixture, sessionFile);
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [
+      {
+        key: "execute:T1:replaced",
+        taskId: "T1",
+        title: "Replaced transcript",
+        kind: "execute",
+        logFile: "/missing/raw-log.jsonl",
+        sessionFile,
+        turns: 1,
+        cost: 0,
+        lastActivity: "working",
+      },
+    ],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    tui: fakeTui,
+    cwd: directory,
+    height: 30,
+  });
+  try {
+    assert.match(pane.render(80).join("\n"), /Assistant fixture answer/);
+    const initialContainer = richTranscriptState(pane, "execute:T1:replaced").container;
+    writeFileSync(
+      sessionFile,
+      [
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "replacement",
+          timestamp: "2026-01-02T00:00:00.000Z",
+          cwd: directory,
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "replacement-user",
+          parentId: null,
+          timestamp: "2026-01-02T00:00:01.000Z",
+          message: { role: "user", content: "Replacement history", timestamp: 1 },
+        }),
+        "",
+      ].join("\n")
+    );
+
+    const output = pane.render(80).join("\n");
+    assert.match(output, /Replacement history/);
+    assert.doesNotMatch(output, /Assistant fixture answer/);
+    const replaced = richTranscriptState(pane, "execute:T1:replaced");
+    assert.notEqual(replaced.container, initialContainer);
+    assert.equal(replaced.entries.length, 1);
   } finally {
     pane.dispose();
     rmSync(directory, { recursive: true, force: true });
@@ -1882,7 +2034,7 @@ test("live pane renders bounded empty, title, transcript, and settled states", (
     const lines = pane.render(80);
     const text = lines.join("\n");
     assert.ok(lines.length <= 7);
-    assert.ok(lines.every((line) => visibleWidth(line) <= 80));
+    assert.ok(lines.every((line) => visibleWidth(line.replace(/<\/?[^>]+>/g, "")) <= 80));
     assert.match(text, /<accent>T1 · A deliberately long executor title \[provider\/model\]/);
     assert.match(text, /<toolTitle>\$ pnpm test/);
     assert.match(text, /<toolOutput>second line/);
@@ -1893,6 +2045,48 @@ test("live pane renders bounded empty, title, transcript, and settled states", (
   } finally {
     pane.dispose();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("agent sessions offer Pi switching only after the drive is safe to leave", () => {
+  let safeToSwitch = false;
+  let opened = 0;
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [
+      {
+        key: "execute:T1:recorded",
+        taskId: "T1",
+        title: "Recorded session",
+        kind: "execute",
+        logFile: "/missing/recorded.log",
+        sessionFile: "/missing/recorded-session.jsonl",
+        turns: 1,
+        cost: 0.01,
+        lastActivity: "settled",
+        live: false,
+      },
+    ],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    canOpenSession: () => safeToSwitch,
+    onOpenSession: () => {
+      opened += 1;
+    },
+    height: 8,
+  });
+  pane.focused = true;
+  try {
+    assert.match(pane.render(100).join("\n"), /open after drive settles/);
+    pane.handleInput("\r");
+    assert.equal(opened, 0);
+
+    safeToSwitch = true;
+    assert.match(pane.render(100).join("\n"), /enter open in Pi/);
+    pane.handleInput("\r");
+    assert.equal(opened, 1);
+  } finally {
+    pane.dispose();
   }
 });
 
@@ -1930,7 +2124,7 @@ test("live pane follows output and keeps manually scrolled rows anchored", () =>
     const anchored = pane.render(40);
     assert.doesNotMatch(anchored.join("\n"), /line 8/);
     append("line 9");
-    assert.deepEqual(pane.render(40).slice(0, -1), anchored.slice(0, -1));
+    assert.deepEqual(pane.render(40).slice(0, -2), anchored.slice(0, -2));
     pane.handleInput("G");
     assert.match(pane.render(40).join("\n"), /line 9/);
   } finally {
@@ -2042,6 +2236,46 @@ test("live pane steers and queues follow-up for the selected launch", () => {
   }
 });
 
+test("live pane focuses only its active text input", () => {
+  const launch: LivePaneLaunch = {
+    key: "execute:T1:focus",
+    taskId: "T1",
+    title: "Focus",
+    kind: "execute",
+    logFile: "/missing/focus.jsonl",
+    turns: 0,
+    cost: 0,
+    lastActivity: "starting",
+  };
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [launch],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    onSteer: () => {},
+    onFollowUp: () => {},
+  });
+  try {
+    pane.focused = true;
+    assert.deepEqual(inputFocuses(pane), { steer: false, followUp: false });
+
+    pane.handleInput("F");
+    assert.deepEqual(inputFocuses(pane), { steer: false, followUp: true });
+    pane.handleInput("\x1b");
+    assert.deepEqual(inputFocuses(pane), { steer: false, followUp: false });
+
+    pane.handleInput("s");
+    for (let index = 0; index < 3; index += 1) pane.handleInput("\x1b[B");
+    pane.handleInput("\r");
+    assert.deepEqual(inputFocuses(pane), { steer: true, followUp: false });
+
+    pane.focused = false;
+    assert.deepEqual(inputFocuses(pane), { steer: false, followUp: false });
+  } finally {
+    pane.dispose();
+  }
+});
+
 test("live pane watches mixed reviewer and executor logs without selection flapping", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-review-"));
   const log = (name: string, text: string) => {
@@ -2094,7 +2328,7 @@ test("live pane watches mixed reviewer and executor logs without selection flapp
     pane.render(80);
     pane.handleInput("\x1b[C");
     let output = pane.render(80).join("\n");
-    assert.match(output, /T3 · review · \[review\/model\]/);
+    assert.match(output, /T3 · Reviewed task \[review\/model\]/);
     assert.match(output, /reviewer transcript/);
 
     launches = [...launches, later];

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { captureApprovedProvenance } from "../src/artifact-policy.js";
-import { listArchivedBoards, loadBoard, saveBoard, updateBoard } from "../src/board.js";
+import { createTask, listArchivedBoards, loadBoard, saveBoard, updateBoard } from "../src/board.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
 import {
   cleanupCompletedBoard,
@@ -238,6 +238,31 @@ test("only the current drive can replace its claim with a terminal decision", ()
     );
     assert.equal(loadBoard(cwd).activeDecision?.evidence, "current callback");
     assert.equal(loadBoard(cwd).activeDrive, undefined);
+  });
+});
+
+test("completed-board cleanup archives all-cancelled settled work", () => {
+  withBoard((cwd) => {
+    const board: Board = {
+      version: 1,
+      nextTaskNumber: 1,
+      goal: "cancelled scope",
+      tasks: [],
+    };
+    const first = createTask(board, { title: "First", brief: "cancelled", tier: "standard" });
+    const second = createTask(board, { title: "Second", brief: "cancelled", tier: "standard" });
+    first.status = "cancelled";
+    second.status = "cancelled";
+    saveBoard(cwd, board);
+
+    cleanupCompletedBoard(cwd);
+
+    const cleaned = loadBoard(cwd);
+    assert.deepEqual(cleaned.tasks, []);
+    assert.equal(cleaned.goal, undefined);
+    const [archive] = listArchivedBoards(cwd);
+    assert.ok(archive);
+    assert.equal(archive.taskCount, 2);
   });
 });
 

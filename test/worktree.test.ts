@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,6 +17,9 @@ import {
   cleanupManagedWorktrees,
   createWorktree,
   inspectManagedWorktrees,
+  prepareMainTreeIntegration,
+  promotePreparedMainTreeIntegration,
+  removePreparedIntegration,
   snapshotArtifact,
   sweepWorktrees,
   worktreeRef,
@@ -182,6 +185,37 @@ test("artifact snapshots include untracked content and exclude unrelated dirty f
     assert.equal(git(cwd, "status", "--porcelain").includes("unrelated.txt"), true);
     assert.equal(snapshotArtifact(cwd, []), undefined);
   } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("failed main-tree HEAD CAS leaves the real index byte-for-byte unchanged", () => {
+  const cwd = repository();
+  let prepared: ReturnType<typeof prepareMainTreeIntegration> | undefined;
+  const hook = join(cwd, ".git", "hooks", "reference-transaction");
+  try {
+    const baseHead = git(cwd, "rev-parse", "HEAD");
+    writeFileSync(join(cwd, "shared.txt"), "reviewed\n");
+    writeFileSync(join(cwd, "staged.txt"), "user staged\n");
+    git(cwd, "add", "staged.txt");
+    const stagedBefore = git(cwd, "diff", "--cached", "--", "staged.txt");
+    const candidateTree = snapshotArtifact(cwd, ["shared.txt"]);
+    assert.ok(candidateTree);
+    prepared = prepareMainTreeIntegration(cwd, candidateTree, "fix: reviewed snapshot");
+    const indexBefore = readFileSync(join(cwd, ".git", "index"));
+
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+    chmodSync(hook, 0o755);
+    const result = promotePreparedMainTreeIntegration(cwd, prepared, ["shared.txt"]);
+
+    assert.equal(result.ok, false);
+    assert.equal(git(cwd, "rev-parse", "HEAD"), baseHead);
+    assert.deepEqual(readFileSync(join(cwd, ".git", "index")), indexBefore);
+    assert.equal(git(cwd, "diff", "--cached", "--", "staged.txt"), stagedBefore);
+    assert.equal(readFileSync(join(cwd, "shared.txt"), "utf8"), "reviewed\n");
+  } finally {
+    rmSync(hook, { force: true });
+    if (prepared) removePreparedIntegration(cwd, prepared);
     rmSync(cwd, { recursive: true, force: true });
   }
 });

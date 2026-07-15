@@ -97,14 +97,26 @@ test("configuration docs match runtime defaults and commands remain documented",
     "reconcile",
     "plan diff",
     "recipe preview",
+    "agents",
+    "workflows",
   ] as const) {
     assert.ok(MAESTRO_COMMANDS.includes(command));
     assert.ok(read("README.md").includes(`/maestro ${command}`));
   }
   assert.equal(MAESTRO_COMMANDS.includes("plan compare" as never), false);
   assert.equal(MAESTRO_COMMANDS.includes("watch" as never), false);
-  assert.equal(MAESTRO_COMMANDS.length, 36, "ambient panes must not add a slash command");
+  assert.equal(MAESTRO_COMMANDS.length, 39);
   assert.doesNotMatch(read("README.md"), /\/maestro list\b|plan compare|\/maestro watch\b/);
+  assert.doesNotMatch(read("docs/operations.md"), /plan compare/);
+});
+
+test("documentation matches review fallback, reset, and settled-task behavior", () => {
+  const readme = read("README.md");
+  assert.match(readme, /review launches use the same\s+provider-failure fallback rules/i);
+  assert.doesNotMatch(readme, /review runs currently use its primary `model` only/i);
+  assert.match(readme, /non-interactive.*reset confirm/is);
+  assert.match(readme, /approved and cancelled tasks are settled/i);
+  assert.match(read("docs/configuration.md"), /effective configuration.*after.*merg/is);
 });
 
 test("declared package shape contains runtime and required documentation", () => {
@@ -114,11 +126,13 @@ test("declared package shape contains runtime and required documentation", () =>
     repository: { url: string };
     homepage: string;
     bugs: string;
+    pi?: { image?: string };
   };
   assert.equal(pkg.main, "./src/index.ts");
   assert.equal(pkg.repository.url, "git+https://github.com/ayagmar/pi-maestro.git");
   assert.equal(pkg.homepage, "https://github.com/ayagmar/pi-maestro#readme");
   assert.equal(pkg.bugs, "https://github.com/ayagmar/pi-maestro/issues");
+  assert.doesNotMatch(pkg.pi?.image ?? "", /placehold\.co/i);
   for (const entry of ["src/", "docs/", "README.md", "CONTRIBUTING.md"]) {
     assert.ok(pkg.files.includes(entry));
   }

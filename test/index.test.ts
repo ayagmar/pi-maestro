@@ -4,9 +4,10 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { initTheme, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { taskFingerprint } from "../src/artifact-policy.js";
 import {
+  archiveBoard,
   consumeQuarantineNotice,
   createTask,
   findTask,
@@ -19,16 +20,17 @@ import {
 } from "../src/board.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
 import { deliverPendingDecision } from "../src/drive-controller.js";
-import { exportPlan } from "../src/plan-serialization.js";
 import maestro, {
   assertKnownTaskIds,
-  formatPlanOverview,
+  formatPlanReviewMarkdown,
   maestroBoardCwd,
   previousBoardSession,
   scrollableTextOffset,
   sessionCanControlDrive,
   sessionSwitchBlocked,
 } from "../src/index.js";
+import { exportPlan } from "../src/plan-serialization.js";
+import { saveRecipeFromBoard } from "../src/recipes.js";
 import { type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board } from "../src/types.js";
 import { type StartExecutor } from "../src/workflow.js";
@@ -178,6 +180,7 @@ interface CommandCtx {
   };
   waitForIdle?: () => Promise<void>;
   newSession?: (options: NewSessionOptions) => Promise<{ cancelled: boolean }>;
+  switchSession?: (sessionFile: string) => Promise<{ cancelled: boolean }>;
   ui: {
     theme: typeof fakeTheme;
     notify: (message: string, level?: string) => void;
@@ -202,6 +205,7 @@ type EventHandler = (event: unknown, ctx: CommandCtx) => unknown;
 interface TuiStep {
   keys: string[];
   before?: () => void;
+  inspect?: (lines: string[]) => void;
 }
 
 interface UiScript {
@@ -363,6 +367,7 @@ function loadMaestro(
         };
         component = factory(tui, fakeTheme, {}, done);
         step.before?.();
+        step.inspect?.(component.render?.(100) ?? []);
         for (const key of step.keys) component.handleInput(key);
       });
     },
@@ -671,83 +676,60 @@ test("gated plan editor cancel discards draft changes", async () => {
   );
 });
 
-test("plan overview stays read-only beside the focused editor and closes through done", async () => {
+test("plan review renders task contracts as themed markdown without mutation", async () => {
   await withBoard(
     (cwd) => {
       const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
       createTask(board, {
-        title: "Side plan",
-        brief: "Read this plan while continuing to type",
+        title: "Rendered plan",
+        brief: "Read this plan before approving it",
         tier: "standard",
-        writePaths: ["src/side.ts"],
-        successCriteria: ["Side view is readable"],
+        writePaths: ["src/rendered.ts"],
+        successCriteria: ["The review surface is readable"],
       });
       saveBoard(cwd, board);
     },
     async (cwd) => {
-      const script: UiScript = { steps: [{ keys: select(4) }, { keys: select(4) }] };
-      const runtime = loadMaestro(cwd, undefined, owner, script);
       const before = loadBoard(cwd);
-
-      await runtime.command.handler("plan", runtime.ctx);
-      const pane = runtime.overlays[0];
-      assert.ok(pane);
-      assert.equal(pane.focused, false);
-      assert.equal(runtime.isEditorFocused(), true);
-      assert.deepEqual(pane.unfocusArgumentCounts, [0]);
-      assert.match(pane.component.render?.(80).join("\n") ?? "", /T1 Side plan/);
-      assert.deepEqual(loadBoard(cwd), before, "the beside-editor view must not mutate the board");
-
-      await runtime.command.handler("plan", runtime.ctx);
-      await waitFor(() => pane.closed, "closing the plan pane did not resolve through done");
-      assert.equal(pane.hideCalls, 0);
-      assert.equal(pane.disposeCalls, 1);
-      assert.deepEqual(loadBoard(cwd), before);
-    }
-  );
-});
-
-test("plan modal and side pane use one overview formatter", () => {
-  const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
-  createTask(board, { title: "Shared overview", brief: "one formatter", tier: "standard" });
-  assert.match(formatPlanOverview(board, DEFAULT_CONFIG).join("\n"), /T1 Shared overview/);
-
-  const source = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf-8");
-  assert.equal(
-    source.match(/formatWorkflowPreflight\(preflight\)\.split/g)?.length,
-    1,
-    "overview construction must live only in formatPlanOverview"
-  );
-  assert.match(source, /showPlanOverview[\s\S]*formatPlanOverview\(/);
-  assert.match(source, /openPlanPane[\s\S]*formatPlanOverview\(/);
-});
-
-test("approving a plan closes its beside-editor view without changing approval flow", async () => {
-  await withBoard(
-    (cwd) => {
-      const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
-      createTask(board, {
-        title: "Approve side plan",
-        brief: "valid plan",
-        tier: "standard",
-        writePaths: ["src/approve.ts"],
-        successCriteria: ["Plan remains valid"],
-      });
-      saveBoard(cwd, board);
-    },
-    async (cwd) => {
-      const script: UiScript = { steps: [{ keys: select(4) }, { keys: select(2) }] };
+      const script: UiScript = {
+        steps: [
+          { keys: select(0) },
+          {
+            keys: [enter],
+            inspect: (lines) => {
+              const output = lines.join("\n");
+              assert.match(output, /Rendered plan/);
+              assert.match(output, /The review surface is readable/);
+              assert.match(output, /src\/rendered\.ts/);
+              assert.doesNotMatch(output, /^# /m);
+            },
+          },
+          { keys: [escapeKey] },
+        ],
+      };
       const runtime = loadMaestro(cwd, undefined, owner, script);
-      await runtime.command.handler("plan", runtime.ctx);
-      const pane = runtime.overlays[0];
-      assert.ok(pane);
 
       await runtime.command.handler("plan", runtime.ctx);
-      assert.equal(loadBoard(cwd).planPending, false);
-      await waitFor(() => pane.closed, "approval did not close the plan pane");
-      assert.equal(pane.hideCalls, 0);
+
+      assert.deepEqual(loadBoard(cwd), before);
+      assert.equal(script.steps.length, 0);
     }
   );
+});
+
+test("plan markdown contains the complete approval contract", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
+  createTask(board, {
+    title: "Shared overview",
+    brief: "one formatter",
+    tier: "standard",
+    writePaths: ["src/shared.ts"],
+    successCriteria: ["Contract is visible"],
+  });
+  const markdown = formatPlanReviewMarkdown(board, DEFAULT_CONFIG);
+  assert.match(markdown, /## T1 · Shared overview/);
+  assert.match(markdown, /Contract is visible/);
+  assert.match(markdown, /`src\/shared\.ts`/);
 });
 
 test("gated plan approval reports invalid references and cycles without changing the board", async () => {
@@ -844,21 +826,16 @@ test("gated plan rejection confirmation archives and clears the board", async ()
     },
     async (cwd) => {
       const script: UiScript = {
-        steps: [{ keys: select(4) }, { keys: select(3) }],
+        steps: [{ keys: select(3) }],
         confirmations: [true],
       };
       const runtime = loadMaestro(cwd, undefined, owner, script);
 
       await runtime.command.handler("plan", runtime.ctx);
-      const pane = runtime.overlays[0];
-      assert.ok(pane);
-      await runtime.command.handler("plan", runtime.ctx);
 
       assert.deepEqual(loadBoard(cwd).tasks, []);
       assert.equal(listArchivedBoards(cwd).length, 1);
       assert.match(runtime.notices[0] ?? "", /Plan rejected\. Board archived at/);
-      await waitFor(() => pane.closed, "rejection did not close the plan pane");
-      assert.equal(pane.hideCalls, 0);
       assert.equal(script.steps.length, 0);
       assert.deepEqual(script.confirmations, []);
     }
@@ -1203,7 +1180,7 @@ test("manual acceptance rejects out-of-scope artifacts before recording versione
       const refusedCompletion = refused.command.handler("board", refused.ctx);
       const refusedDashboard = refused.overlays[0];
       assert.ok(refusedDashboard);
-      for (const key of ["m", down, down, enter, "q"]) {
+      for (const key of ["\x1b[C", "m", down, down, enter, "q"]) {
         refusedDashboard.component.handleInput(key);
       }
       await refusedCompletion;
@@ -1221,7 +1198,7 @@ test("manual acceptance rejects out-of-scope artifacts before recording versione
       const acceptedCompletion = accepted.command.handler("board", accepted.ctx);
       const acceptedDashboard = accepted.overlays[0];
       assert.ok(acceptedDashboard);
-      for (const key of ["m", down, down, enter, "q"]) {
+      for (const key of ["\x1b[C", "m", down, down, enter, "q"]) {
         acceptedDashboard.component.handleInput(key);
       }
       await acceptedCompletion;
@@ -1602,7 +1579,7 @@ test("discovery approval refuses a stale board instead of overwriting concurrent
         loadBoard(cwd).tasks.map(({ title }) => title),
         ["Discover work", "Concurrent task"]
       );
-      assert.match(notices.at(-1) ?? "", /board changed after preview/);
+      assert.match(notices.at(-1) ?? "", /board changed after preview|stale maestro board/);
       assert.equal(listArchivedBoards(cwd).length, 0);
     }
   );
@@ -1669,14 +1646,138 @@ test("running a malformed effective recipe reports its file without changing the
   );
 });
 
-test("/maestro help lists the costs command", async () => {
+test("/maestro opens a discoverable project control center", async () => {
+  await withBoard(
+    () => {},
+    async (cwd) => {
+      const script: UiScript = {
+        steps: [
+          {
+            keys: [escapeKey],
+            inspect: (lines) => {
+              const output = lines.join("\n");
+              assert.match(output, /project control center/);
+              assert.match(output, /project dashboard/);
+              assert.match(output, /agent sessions/);
+              assert.match(output, /Manage workflows/);
+              assert.match(output, /Configure this project/);
+            },
+          },
+        ],
+      };
+      const { ctx, command } = loadMaestro(cwd, undefined, owner, script);
+      await command.handler("", ctx);
+      assert.equal(script.steps.length, 0);
+    }
+  );
+});
+
+test("agent browser explains when no sessions exist", async () => {
   await withBoard(
     () => {},
     async (cwd) => {
       const { ctx, notices, command } = loadMaestro(cwd);
-      await command.handler("", ctx);
-      assert.match(notices[0] ?? "", /\/maestro costs/);
-      assert.match(notices[0] ?? "", /\/maestro recipe/);
+      await command.handler("agents", ctx);
+      assert.match(notices.at(-1) ?? "", /No Maestro agent sessions yet/);
+      assert.match(notices.at(-1) ?? "", /Start a drive/);
+    }
+  );
+});
+
+test("agent browser opens a completed Pi session after confirmation", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [], ownerSessions: [owner] };
+      const task = createTask(board, {
+        title: "Recorded agent",
+        brief: "Inspect the persisted session",
+        tier: "standard",
+      });
+      const attempt = executorAttempt();
+      attempt.endedAt = Date.now();
+      attempt.sessionFile = executor;
+      task.attempts.push(attempt);
+      task.status = "approved";
+      saveBoard(cwd, board);
+      assert.ok(archiveBoard(cwd));
+      saveBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+    },
+    async (cwd) => {
+      const script: UiScript = { steps: [], confirmations: [true] };
+      const runtime = loadMaestro(cwd, undefined, owner, script);
+      const switched: string[] = [];
+      runtime.ctx.switchSession = async (sessionFile) => {
+        switched.push(sessionFile);
+        return { cancelled: false };
+      };
+
+      await runtime.command.handler("agents", runtime.ctx);
+      const viewer = runtime.overlays[0];
+      assert.ok(viewer);
+      assert.match(viewer.component.render?.(100).join("\n") ?? "", /Recorded agent.*archived/);
+      viewer.component.handleInput(enter);
+
+      await waitFor(() => switched.length === 1, "recorded agent session did not open");
+      assert.deepEqual(switched, [executor]);
+      assert.equal(viewer.closed, true);
+    }
+  );
+});
+
+test("workflow browser exposes metadata, actions, and a readable preview", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Reusable task",
+        brief: "Exercise the workflow browser",
+        tier: "standard",
+        writePaths: ["src/reusable.ts"],
+        successCriteria: ["Workflow remains reusable"],
+      });
+      saveBoard(cwd, board);
+      saveRecipeFromBoard("project", cwd, "browser-test", board);
+    },
+    async (cwd) => {
+      const script: UiScript = {
+        steps: [
+          {
+            keys: select(1),
+            inspect: (lines) => {
+              const output = lines.join("\n");
+              assert.match(output, /Maestro workflows/);
+              assert.match(output, /Save board as workflow/);
+              assert.match(output, /browser-test/);
+              assert.match(output, /project/);
+            },
+          },
+          {
+            keys: select(0),
+            inspect: (lines) => {
+              const output = lines.join("\n");
+              assert.match(output, /View workflow/);
+              assert.match(output, /Preview on current board/);
+              assert.match(output, /Create plan from workflow/);
+              assert.match(output, /Remove workflow/);
+            },
+          },
+          {
+            keys: [escapeKey],
+            inspect: (lines) => {
+              const output = lines.join("\n");
+              assert.match(output, /browser-test/);
+              assert.match(output, /Reusable task/);
+              assert.match(output, /Scope:/);
+            },
+          },
+          { keys: [escapeKey] },
+        ],
+      };
+      const { ctx, command } = loadMaestro(cwd, undefined, owner, script);
+
+      await command.handler("workflows", ctx);
+
+      assert.equal(script.steps.length, 0);
     }
   );
 });
@@ -2260,7 +2361,7 @@ test("maestro_drive inspect returns bounded scoped board state without starting 
         undefined,
         ctx
       );
-      assert.match(result.content[0]?.text ?? "", /0\/1 approved/);
+      assert.match(result.content[0]?.text ?? "", /0 approved · 0 cancelled/);
       assert.match(result.content[0]?.text ?? "", /No live executors/);
       assert.equal(findTask(loadBoard(cwd), "T1")?.status, "todo");
     }
@@ -3063,6 +3164,199 @@ function _altSession(ctx: CommandCtx, sessionFile: string): CommandCtx {
   };
 }
 
+function setupResetBoard(cwd: string): string {
+  const board: Board = { version: 1, nextTaskNumber: 1, goal: "keep this goal", tasks: [] };
+  const task = createTask(board, { title: "Reset me", brief: "work", tier: "standard" });
+  const logFile = join(cwd, ".pi", "maestro", "logs", "T1-attempt-1.jsonl");
+  task.attempts.push({
+    index: 1,
+    logFile,
+    thinking: "low",
+    startedAt: 1,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+  });
+  saveBoard(cwd, board);
+  mkdirSync(join(cwd, ".pi", "maestro", "logs"), { recursive: true });
+  writeFileSync(logFile, "evidence\n");
+  return logFile;
+}
+
+test("replay preserves work added while the archive picker is open", async () => {
+  await withBoard(
+    (cwd) => {
+      const archived: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(archived, { title: "Archived", brief: "old", tier: "standard" });
+      saveBoard(cwd, archived);
+      assert.ok(archiveBoard(cwd));
+
+      const current: Board = { version: 1, nextTaskNumber: 1, goal: "current", tasks: [] };
+      createTask(current, { title: "Current", brief: "live", tier: "standard" });
+      saveBoard(cwd, current);
+    },
+    async (cwd) => {
+      const script: UiScript = {
+        steps: [
+          {
+            keys: [enter],
+            before: () => {
+              updateBoard(cwd, (board) => {
+                createTask(board, { title: "Concurrent", brief: "new", tier: "standard" });
+              });
+            },
+          },
+        ],
+      };
+      const runtime = loadMaestro(cwd, undefined, owner, script);
+
+      await runtime.command.handler("replay", runtime.ctx);
+
+      assert.deepEqual(
+        loadBoard(cwd).tasks.map((task) => task.title),
+        ["Current", "Concurrent"]
+      );
+      assert.equal(loadBoard(cwd).goal, "current");
+      assert.equal(listArchivedBoards(cwd).length, 1);
+      assert.match(runtime.notices.at(-1) ?? "", /stale maestro board|confirm again/i);
+    }
+  );
+});
+
+test("headless reset refuses without an explicit confirmation token", async () => {
+  await withBoard(setupResetBoard, async (cwd) => {
+    const runtime = loadMaestro(cwd, undefined, owner, undefined, {
+      mode: "print",
+      hasUI: false,
+    });
+    const boardFile = join(cwd, ".pi", "maestro", "board.json");
+    const logFile = join(cwd, ".pi", "maestro", "logs", "T1-attempt-1.jsonl");
+    const boardBefore = readFileSync(boardFile);
+    const logBefore = readFileSync(logFile);
+    const archivesBefore = listArchivedBoards(cwd);
+
+    await runtime.command.handler("reset", runtime.ctx);
+
+    assert.match(runtime.notices.at(-1) ?? "", /reset confirm/i);
+    assert.deepEqual(readFileSync(boardFile), boardBefore);
+    assert.deepEqual(readFileSync(logFile), logBefore);
+    assert.deepEqual(listArchivedBoards(cwd), archivesBefore);
+    assert.equal(loadBoard(cwd).goal, "keep this goal");
+  });
+});
+
+test("headless reset confirm archives the exact revision and clears the board", async () => {
+  await withBoard(setupResetBoard, async (cwd) => {
+    const runtime = loadMaestro(cwd, undefined, owner, undefined, {
+      mode: "print",
+      hasUI: false,
+    });
+    const before = loadBoard(cwd);
+
+    await runtime.command.handler("reset confirm", runtime.ctx);
+
+    const board = loadBoard(cwd);
+    assert.equal(board.tasks.length, 0);
+    assert.equal(board.goal, undefined);
+    const [archive] = listArchivedBoards(cwd);
+    assert.ok(archive);
+    const archived = JSON.parse(readFileSync(archive.file, "utf8")) as Board;
+    assert.equal(archived.revision, before.revision);
+    assert.equal(archived.goal, before.goal);
+    assert.deepEqual(archived.tasks, before.tasks);
+    assert.match(runtime.notices.at(-1) ?? "", /Board reset\. Archived at/);
+  });
+});
+
+test("interactive reset cancellation creates no archive and changes nothing", async () => {
+  await withBoard(setupResetBoard, async (cwd) => {
+    const script: UiScript = { steps: [], confirmations: [false] };
+    const runtime = loadMaestro(cwd, undefined, owner, script);
+    const boardFile = join(cwd, ".pi", "maestro", "board.json");
+    const logFile = join(cwd, ".pi", "maestro", "logs", "T1-attempt-1.jsonl");
+    const boardBefore = readFileSync(boardFile);
+    const logBefore = readFileSync(logFile);
+
+    await runtime.command.handler("reset", runtime.ctx);
+
+    assert.deepEqual(readFileSync(boardFile), boardBefore);
+    assert.deepEqual(readFileSync(logFile), logBefore);
+    assert.equal(listArchivedBoards(cwd).length, 0);
+    assert.equal(loadBoard(cwd).goal, "keep this goal");
+  });
+});
+
+test("reset preserves concurrent work added during confirmation", async () => {
+  await withBoard(setupResetBoard, async (cwd) => {
+    const script: UiScript = {
+      steps: [],
+      confirmations: [true],
+      beforeConfirm: () => {
+        updateBoard(cwd, (board) => {
+          createTask(board, { title: "Concurrent", brief: "new work", tier: "standard" });
+        });
+      },
+    };
+    const runtime = loadMaestro(cwd, undefined, owner, script);
+
+    await runtime.command.handler("reset", runtime.ctx);
+
+    assert.deepEqual(
+      loadBoard(cwd).tasks.map((task) => task.title),
+      ["Reset me", "Concurrent"]
+    );
+    assert.equal(loadBoard(cwd).goal, "keep this goal");
+    assert.equal(listArchivedBoards(cwd).length, 0);
+    assert.match(runtime.notices.at(-1) ?? "", /inspect.*confirm reset again/i);
+  });
+});
+
+test("live-run protection takes precedence over reset confirmation", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, goal: "live goal", tasks: [] };
+      createTask(board, { title: "Live", brief: "work", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let started!: () => void;
+      const executorStarted = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const startExecutor: StartExecutor = (options) => ({
+        attempt: executorAttempt(),
+        outcome: new Promise<RunOutcome>((resolve) => {
+          started();
+          options.signal?.addEventListener("abort", () =>
+            resolve({
+              exitCode: 1,
+              usage: { input: 0, output: 0, cost: 0, turns: 0 },
+              finalReport: "",
+              touchedFiles: [],
+              aborted: true,
+            })
+          );
+        }),
+        steer: () => {},
+        followUp: () => {},
+        abort: () => {},
+      });
+      const runtime = loadMaestro(cwd, startExecutor, owner, undefined, {
+        mode: "print",
+        hasUI: false,
+      });
+
+      await runtime.command.handler("drive", runtime.ctx);
+      await executorStarted;
+      await runtime.command.handler("reset confirm", runtime.ctx);
+
+      assert.match(runtime.notices.at(-1) ?? "", /still running.*before resetting/i);
+      assert.equal(loadBoard(cwd).tasks.length, 1);
+      assert.equal(listArchivedBoards(cwd).length, 0);
+      await runtime.command.handler("abort", runtime.ctx);
+    }
+  );
+});
+
 test("completed drives archive and clear tasks by default", async () => {
   await withBoard(
     (cwd) => {
@@ -3697,13 +3991,14 @@ test("reload acknowledges a decision already appended to the owner session witho
   );
 });
 
-test("ambient executor pane cycles through its real input path and resolves every close", async () => {
+test("passive agent pane and session browser resolve every close", async () => {
   await withBoard(
     (cwd) => {
       saveConfig("project", cwd, {
         ...DEFAULT_CONFIG,
         autoCommit: false,
         cleanupCompletedTasks: false,
+        livePanes: true,
         maxParallel: 3,
       });
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
@@ -3776,57 +4071,37 @@ test("ambient executor pane cycles through its real input path and resolves ever
       cycle(runtime.ctx);
       assert.equal(firstPane.focused, true);
       assert.equal(runtime.isEditorFocused(), false);
-      firstPane.component.handleInput("\x1b");
-      assert.equal(firstPane.focused, false);
-      assert.equal(runtime.isEditorFocused(), true);
-      cycle(runtime.ctx);
-      assert.equal(firstPane.focused, true);
       firstPane.component.handleInput("\x1b\x17");
-      await waitFor(() => firstPane.closed, "focused ctrl+alt+w did not close through done");
+      await waitFor(() => firstPane.closed, "shortcut did not dismiss the focused passive pane");
       assert.equal(firstPane.hideCalls, 0, "OverlayHandle.hide must never close a custom pane");
       assert.equal(firstPane.disposeCalls, 1);
-      assert.ok(firstPane.unfocusArgumentCounts.every((count) => count === 0));
       assert.equal(runtime.isEditorFocused(), true);
       assert.notDeepEqual(renderLatestWidget(runtime), []);
 
-      const first = [...finishes.entries()].find(([runId]) => runId.startsWith("T1-"));
-      assert.ok(first);
-      first[1]({
-        exitCode: 1,
-        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
-        finalReport: "cancelled",
-        touchedFiles: [],
-        aborted: true,
-        failureCause: "user_abort",
+      cycle(runtime.ctx);
+      await waitFor(() => runtime.overlays.length === 2, "agent-session viewer did not open");
+      const viewer = runtime.overlays[1];
+      assert.ok(viewer);
+      assert.equal(viewer.focused, true);
+      assert.deepEqual(viewer.options.overlayOptions, {
+        anchor: "center",
+        width: "92%",
+        maxHeight: "92%",
+        margin: 1,
       });
-      await waitFor(
-        () => !loadBoard(cwd).tasks[0]?.dispatchClaim,
-        "selected executor did not settle"
-      );
-      assert.equal(runtime.overlays.length, 1, "hidden pane must not flap for the same drive");
-
-      cycle(runtime.ctx);
-      await waitFor(() => runtime.overlays.length === 2, "hidden pane did not reopen on demand");
-      const reopened = runtime.overlays[1];
-      assert.ok(reopened);
-      assert.equal(reopened.focused, false);
-      assert.equal(runtime.isEditorFocused(), true);
-      assert.ok(reopened.unfocusArgumentCounts.every((count) => count === 0));
-      assert.deepEqual(renderLatestWidget(runtime), []);
-
-      cycle(runtime.ctx);
-      reopened.component.handleInput("s");
-      reopened.component.handleInput("\r");
-      reopened.component.handleInput("F");
-      for (const character of "summarize later") reopened.component.handleInput(character);
-      reopened.component.handleInput("\r");
+      viewer.component.handleInput("\x1b[C");
+      viewer.component.handleInput("s");
+      viewer.component.handleInput("\r");
+      viewer.component.handleInput("F");
+      for (const character of "summarize later") viewer.component.handleInput(character);
+      viewer.component.handleInput("\r");
       assert.match(steered[0] ?? "", /^T2-.*:Stop - wrong approach/);
       assert.match(followedUp[0] ?? "", /^T2-.*:summarize later/);
-      assert.match(reopened.component.render?.(80).join("\n") ?? "", /Queued follow-up for T2/);
-      reopened.component.handleInput("\x1b");
+      assert.match(viewer.component.render?.(80).join("\n") ?? "", /Queued follow-up for T2/);
+      viewer.component.handleInput("\x1b");
+      await waitFor(() => viewer.closed, "agent-session viewer did not close");
 
-      for (const [runId, finish] of finishes) {
-        if (runId.startsWith("T1-")) continue;
+      for (const finish of finishes.values()) {
         finish({
           exitCode: 1,
           usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
@@ -3836,20 +4111,22 @@ test("ambient executor pane cycles through its real input path and resolves ever
           failureCause: "user_abort",
         });
       }
-      await waitFor(() => reopened.closed, "last settlement did not resolve the reopened pane");
-      assert.equal(reopened.hideCalls, 0);
-      assert.equal(reopened.disposeCalls, 1);
+      await waitFor(
+        () => loadBoard(cwd).tasks.every((task) => !task.dispatchClaim),
+        "executors did not settle"
+      );
     }
   );
 });
 
-test("ambient executor pane renders its recorded session transcript", async () => {
+test("passive agent pane renders its recorded session transcript", async () => {
   await withBoard(
     (cwd) => {
       saveConfig("project", cwd, {
         ...DEFAULT_CONFIG,
         autoCommit: false,
         cleanupCompletedTasks: false,
+        livePanes: true,
       });
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
       createTask(board, { title: "Rich transcript", brief: "run", tier: "standard" });
@@ -3894,18 +4171,24 @@ test("ambient executor pane renders its recorded session transcript", async () =
         aborted: true,
         failureCause: "user_abort",
       });
-      await waitFor(() => pane.closed, "live pane did not close after settlement");
+      await waitFor(() => !loadBoard(cwd).tasks[0]?.dispatchClaim, "executor did not settle");
+      assert.equal(pane.closed, false, "recorded session should remain inspectable");
+      assert.match(pane.component.render?.(80).join("\n") ?? "", /done/);
+      runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
+      pane.component.handleInput("\x1b\x17");
+      await waitFor(() => pane.closed, "recorded session viewer did not close");
     }
   );
 });
 
-test("review launches reopen the ambient pane with transcript actions", async () => {
+test("review launches update the passive agent pane with transcript actions", async () => {
   await withBoard(
     (cwd) => {
       saveConfig("project", cwd, {
         ...DEFAULT_CONFIG,
         autoCommit: false,
         cleanupCompletedTasks: false,
+        livePanes: true,
       });
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
       createTask(board, {
@@ -3959,15 +4242,12 @@ test("review launches reopen the ambient pane with transcript actions", async ()
         touchedFiles: [],
         aborted: false,
       });
-      await waitFor(
-        () => finishReviewer !== undefined && runtime.overlays.length === 2,
-        "reviewer pane did not open"
-      );
+      await waitFor(() => finishReviewer !== undefined, "reviewer launch did not start");
 
-      const reviewerPane = runtime.overlays[1];
+      const reviewerPane = runtime.overlays[0];
       assert.ok(reviewerPane);
       const output = reviewerPane.component.render?.(80).join("\n") ?? "";
-      assert.match(output, /T1 · review · \[review\/model\]/);
+      assert.match(output, /T1 · Review this · review #1 · single \[review\/model\]/);
       assert.match(output, /reviewer is checking/);
       runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
       reviewerPane.component.handleInput("s");
@@ -3986,15 +4266,23 @@ test("review launches reopen the ambient pane with transcript actions", async ()
         touchedFiles: [],
         aborted: false,
       });
-      await waitFor(() => reviewerPane.closed, "reviewer settlement did not close the pane");
+      await waitFor(
+        () => loadBoard(cwd).tasks[0]?.status === "approved",
+        "reviewer settlement did not approve the task"
+      );
+      assert.equal(reviewerPane.closed, false, "review session should remain inspectable");
+      runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
+      reviewerPane.component.handleInput("\x1b\x17");
+      await waitFor(() => reviewerPane.closed, "reviewer pane did not close");
       assert.equal(reviewerPane.hideCalls, 0);
     }
   );
 });
 
-test("ambient pane shutdown resolves through done without stale handles", async () => {
+test("passive agent pane shutdown resolves through done without stale handles", async () => {
   await withBoard(
     (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, livePanes: true, autoCommit: false });
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
       createTask(board, { title: "Shutdown", brief: "run", tier: "standard" });
       board.ownerSessions = [owner];
@@ -4034,7 +4322,72 @@ test("ambient pane shutdown resolves through done without stale handles", async 
   );
 });
 
-test("disabled ambient panes leave the status widget available", async () => {
+test("shortcut replaces a hidden narrow passive pane with the centered session browser", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, livePanes: true, autoCommit: false });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [], ownerSessions: [owner] };
+      createTask(board, { title: "Narrow viewer", brief: "run", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let finish: ((outcome: RunOutcome) => void) | undefined;
+      const runtime = loadMaestro(
+        cwd,
+        () => ({
+          attempt: executorAttempt(),
+          outcome: new Promise<RunOutcome>((resolve) => {
+            finish = resolve;
+          }),
+          steer: () => {},
+          followUp: () => {},
+          abort: () => {},
+        }),
+        owner,
+        undefined,
+        { columns: 90 }
+      );
+      await runtime.tools
+        .get("maestro_drive")
+        ?.execute("narrow-viewer", { action: "start" }, undefined, undefined, runtime.ctx);
+      await waitFor(() => runtime.overlays.length === 1, "passive pane did not open");
+      const passive = runtime.overlays[0];
+      assert.ok(passive);
+      const visible = (passive.options.overlayOptions as { visible: (width: number) => boolean })
+        .visible;
+      assert.equal(visible(90), false);
+
+      runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
+
+      await waitFor(() => runtime.overlays.length === 2, "centered session browser did not open");
+      const viewer = runtime.overlays[1];
+      assert.ok(viewer);
+      assert.equal(passive.closed, true);
+      assert.equal(viewer.focused, true);
+      assert.deepEqual(viewer.options.overlayOptions, {
+        anchor: "center",
+        width: "92%",
+        maxHeight: "92%",
+        margin: 1,
+      });
+      viewer.component.handleInput(escapeKey);
+      finish?.({
+        exitCode: 1,
+        usage: { input: 0, output: 0, cost: 0, turns: 0 },
+        finalReport: "cancelled",
+        touchedFiles: [],
+        aborted: true,
+        failureCause: "user_abort",
+      });
+      await waitFor(
+        () => !loadBoard(cwd).tasks[0]?.dispatchClaim,
+        "narrow executor did not settle"
+      );
+    }
+  );
+});
+
+test("manual agent viewer works when automatic panes are disabled", async () => {
   await withBoard(
     (cwd) => {
       saveConfig("project", cwd, { ...DEFAULT_CONFIG, livePanes: false, autoCommit: false });
@@ -4061,7 +4414,18 @@ test("disabled ambient panes leave the status widget available", async () => {
       assert.equal(runtime.overlays.length, 0);
       assert.notDeepEqual(renderLatestWidget(runtime), []);
       runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
-      assert.equal(runtime.overlays.length, 0);
+      await waitFor(() => runtime.overlays.length === 1, "manual agent viewer did not open");
+      const viewer = runtime.overlays[0];
+      assert.ok(viewer);
+      assert.equal(viewer.focused, true);
+      assert.deepEqual(viewer.options.overlayOptions, {
+        anchor: "center",
+        width: "92%",
+        maxHeight: "92%",
+        margin: 1,
+      });
+      viewer.component.handleInput(escapeKey);
+      await waitFor(() => viewer.closed, "manual agent viewer did not close");
       finish?.({
         exitCode: 1,
         usage: { input: 0, output: 0, cost: 0, turns: 1 },

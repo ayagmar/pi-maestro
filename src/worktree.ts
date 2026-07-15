@@ -1,8 +1,18 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { STATE_DIR } from "./constants.js";
 import { MAX_INJECTED_CONTEXT_LENGTH } from "./prompts.js";
 import { type Board, type Task } from "./types.js";
 
@@ -131,11 +141,8 @@ export function worktreeExists(ref: WorktreeRef): boolean {
   return existsSync(ref.worktreePath);
 }
 
-/** Git-authoritative changed paths for one checkout, including staged, unstaged, and untracked files. */
-export function changedPaths(cwd: string): string[] {
-  const output = gitOutput(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+function changedPathsFromPorcelain(output: string): string[] {
   if (!output) return [];
-
   const entries = output.split("\0").filter(Boolean);
   const paths: string[] = [];
   for (let index = 0; index < entries.length; index += 1) {
@@ -149,18 +156,40 @@ export function changedPaths(cwd: string): string[] {
   return [...new Set(paths.map((path) => path.replaceAll("\\", "/")))].sort();
 }
 
+/** Git-authoritative changed paths for one checkout, including staged, unstaged, and untracked files. */
+export function changedPaths(cwd: string): string[] {
+  const output = gitOutput(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  return changedPathsFromPorcelain(output);
+}
+
 /** Exact Git-visible main-tree identity used to fail closed before promotion. */
-export function mainTreeIdentity(cwd: string): MainTreeIdentity {
-  const porcelain = gitOutput(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  const paths = changedPaths(cwd);
+function captureMainTreeIdentity(cwd: string, env?: NodeJS.ProcessEnv): MainTreeIdentity {
+  const porcelain = gitOutput(
+    cwd,
+    [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+      "--",
+      ".",
+      `:(exclude)${STATE_DIR}/**`,
+    ],
+    env
+  );
+  const paths = changedPathsFromPorcelain(porcelain);
   const worktreeTree = paths.length === 0 ? commitTree(cwd, "HEAD") : snapshotArtifact(cwd, paths);
   if (!worktreeTree) throw new Error("could not snapshot the main checkout worktree");
   return {
     head: headCommit(cwd),
-    indexTree: git(cwd, ["write-tree"]),
+    indexTree: git(cwd, ["write-tree"], env),
     porcelainHash: createHash("sha256").update(porcelain).digest("hex"),
     worktreeTree,
   };
+}
+
+export function mainTreeIdentity(cwd: string): MainTreeIdentity {
+  return captureMainTreeIdentity(cwd);
 }
 
 export function mainTreeIdentityMatches(cwd: string, expected: MainTreeIdentity): boolean {
@@ -263,6 +292,38 @@ function integrationWorktreeRef(): WorktreeRef {
   };
 }
 
+/** Prepare a reviewed main-tree snapshot as an immutable commit in an isolated checkout. */
+export function prepareMainTreeIntegration(
+  mainCwd: string,
+  candidateTree: string,
+  message: string
+): PreparedIntegration {
+  const mainIdentity = mainTreeIdentity(mainCwd);
+  const baseCommit = mainIdentity.head;
+  const integratedCommit = git(mainCwd, [
+    "commit-tree",
+    candidateTree,
+    "-p",
+    baseCommit,
+    "-m",
+    message,
+  ]);
+  const tempRef = integrationWorktreeRef();
+  try {
+    git(mainCwd, ["worktree", "add", "-b", tempRef.branch, tempRef.worktreePath, integratedCommit]);
+    return {
+      baseCommit,
+      integratedCommit,
+      integratedTree: candidateTree,
+      mainIdentity,
+      tempRef,
+    };
+  } catch (error) {
+    removeWorktree(mainCwd, tempRef);
+    throw error;
+  }
+}
+
 /** Prepare a reviewed task merge away from the integration checkout. */
 export function prepareWorktreeIntegration(
   mainCwd: string,
@@ -290,6 +351,67 @@ export function prepareWorktreeIntegration(
   } catch (error) {
     removeWorktree(mainCwd, tempRef);
     throw error;
+  }
+}
+
+/**
+ * Prepare task-scoped index entries under Git's index lock, then advance HEAD
+ * with compare-and-swap and atomically install that index. The working files
+ * are never overwritten, so later mutations remain visible as recovery edits.
+ */
+export function promotePreparedMainTreeIntegration(
+  mainCwd: string,
+  prepared: PreparedIntegration,
+  paths: string[]
+): MergeResult {
+  if (paths.length === 0) return { ok: false, error: "main-tree promotion has no task paths" };
+
+  const indexFile = resolve(mainCwd, git(mainCwd, ["rev-parse", "--git-path", "index"]));
+  const indexLock = `${indexFile}.lock`;
+  try {
+    closeSync(openSync(indexLock, "wx"));
+  } catch {
+    return {
+      ok: false,
+      error: "main checkout index is locked; retry after the other Git operation finishes",
+    };
+  }
+
+  let ownsIndexLock = true;
+  try {
+    copyFileSync(indexFile, indexLock);
+    const preparedIndexEnv = {
+      ...process.env,
+      GIT_INDEX_FILE: indexLock,
+      GIT_OPTIONAL_LOCKS: "0",
+    };
+    const currentIdentity = captureMainTreeIdentity(mainCwd, preparedIndexEnv);
+    if (JSON.stringify(currentIdentity) !== JSON.stringify(prepared.mainIdentity)) {
+      return { ok: false, error: "main checkout changed after snapshot preparation" };
+    }
+
+    git(mainCwd, ["reset", "--quiet", prepared.integratedCommit, "--", ...paths], preparedIndexEnv);
+    git(mainCwd, ["update-ref", "HEAD", prepared.integratedCommit, prepared.baseCommit]);
+    try {
+      renameSync(indexLock, indexFile);
+      ownsIndexLock = false;
+      return { ok: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        git(mainCwd, ["update-ref", "HEAD", prepared.baseCommit, prepared.integratedCommit]);
+        return { ok: false, error: `${message}; HEAD was restored` };
+      } catch (rollbackError) {
+        return {
+          ok: false,
+          error: `${message}; HEAD contains the reviewed commit but index installation failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        };
+      }
+    }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    if (ownsIndexLock) rmSync(indexLock, { force: true });
   }
 }
 

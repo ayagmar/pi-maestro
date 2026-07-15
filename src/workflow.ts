@@ -17,6 +17,7 @@ import {
   humanRetryRiskToken,
   isRunnable,
   isRunnableWithConfig,
+  isTaskSettled,
   loadBoard,
   planValidationMessage,
   releaseTaskDispatch,
@@ -61,13 +62,14 @@ import {
   artifactMatchesCommit,
   captureDiff,
   changedPaths,
-  commitAll,
   commitTree,
   createWorktree,
   headCommit,
   mainTreeIdentityMatches,
+  prepareMainTreeIntegration,
   prepareWorktreeIntegration,
   promotePreparedIntegration,
+  promotePreparedMainTreeIntegration,
   removePreparedIntegration,
   removeUnreferencedCleanWorktree,
   removeWorktree,
@@ -556,8 +558,8 @@ export async function driveBoard(options: {
           taskIds: staleApproved.map((task) => task.id),
         });
       }
-      if (!humanRetryTask && tasks.every((task) => task.status === "approved")) {
-        return finish({ code: "completed", message: "all selected tasks are approved" });
+      if (!humanRetryTask && tasks.every(isTaskSettled)) {
+        return finish({ code: "completed", message: "all selected tasks are settled" });
       }
       if (board.planPending) {
         return finish({
@@ -717,7 +719,7 @@ export async function driveBoard(options: {
       }
       if (
         rawLaunches >= config.maxTotalLaunchesPerRun &&
-        afterRuns.tasks.some((task) => isSelected(task) && task.status !== "approved")
+        afterRuns.tasks.some((task) => isSelected(task) && !isTaskSettled(task))
       ) {
         return finish({
           code: "launch_limit",
@@ -825,8 +827,8 @@ export async function driveBoard(options: {
           taskIds: staleAfterRound.map((task) => task.id),
         });
       }
-      if (freshTasks.every((task) => task.status === "approved")) {
-        return finish({ code: "completed", message: "all selected tasks are approved" });
+      if (freshTasks.every(isTaskSettled)) {
+        return finish({ code: "completed", message: "all selected tasks are settled" });
       }
       if (rawLaunches >= config.maxTotalLaunchesPerRun) {
         return finish({
@@ -872,7 +874,7 @@ export async function driveBoard(options: {
       }
       const attemptCapped = freshTasks.filter(
         (task) =>
-          task.status !== "approved" &&
+          !isTaskSettled(task) &&
           task.attempts.filter(consumesMaxAttempt).length >= config.maxAttempts
       );
       if (attemptCapped.length > 0) {
@@ -903,7 +905,7 @@ export async function driveBoard(options: {
             ))
       );
       if (!canContinue) {
-        const terminal = freshTasks.filter((task) => task.status !== "approved");
+        const terminal = freshTasks.filter((task) => !isTaskSettled(task));
         return finish({
           code: "blocked",
           message: `no further tasks can run or be reviewed: ${terminal.map((task) => `${task.id} (${task.status})`).join(", ")}`,
@@ -2092,33 +2094,92 @@ export async function reviewTask(options: {
       }
     } else if (verdict?.approved && autoCommit) {
       const files = reviewedAttempt?.touchedFiles ?? [];
+      const verificationStateDir = mkdtempSync(join(tmpdir(), "maestro-verification-"));
       try {
-        if (configuredProfile) {
-          const verificationStateDir = mkdtempSync(join(tmpdir(), "maestro-verification-"));
+        await serializeMainTreeOperation(cwd, async () => {
+          if (!candidateTree || snapshotArtifact(cwd, files) !== candidateTree) {
+            throw new Error(
+              "Candidate artifact changed after review; the unreviewed working files were left untouched."
+            );
+          }
+          const prepared = prepareMainTreeIntegration(cwd, candidateTree, taskCommitMessage(task));
           try {
-            integrationVerification = await runVerification({
-              cwd,
-              stateDir: verificationStateDir,
-              name: `${task.id}-candidate`,
-              command: configuredProfile.command,
-              timeoutSeconds: configuredProfile.timeoutSeconds,
-              ...(signal ? { signal } : {}),
-            });
+            if (
+              !artifactMatchesCommit(
+                prepared.tempRef.worktreePath,
+                candidateTree,
+                prepared.integratedCommit,
+                files
+              )
+            ) {
+              throw new Error("prepared commit does not contain the reviewed candidate tree");
+            }
+            const heldTask = findTask(loadBoard(cwd), task.id);
+            if (!heldTask || !reviewIdentityMatches(heldTask)) {
+              throw new Error("review identity changed before prepared commit verification");
+            }
+            if (configuredProfile) {
+              integrationVerification = await runVerification({
+                cwd: prepared.tempRef.worktreePath,
+                stateDir: verificationStateDir,
+                name: `${task.id}-integrated`,
+                command: configuredProfile.command,
+                timeoutSeconds: configuredProfile.timeoutSeconds,
+                ...(signal ? { signal } : {}),
+              });
+            }
+            if (
+              headCommit(prepared.tempRef.worktreePath) !== prepared.integratedCommit ||
+              changedPaths(prepared.tempRef.worktreePath).length > 0
+            ) {
+              throw new Error("post-review verification mutated the prepared commit checkout");
+            }
+            if (integrationVerification && !integrationVerification.ok) {
+              throw new Error(
+                `post-review verification ${task.verificationProfile} failed or was interrupted`
+              );
+            }
+            const currentTask = findTask(loadBoard(cwd), task.id);
+            if (!currentTask || !reviewIdentityMatches(currentTask)) {
+              throw new Error("review identity changed before main-tree promotion");
+            }
+            const currentFingerprint = taskFingerprint(
+              loadBoard(cwd),
+              currentTask,
+              runtimeConfig()
+            );
+            if (
+              !currentFingerprint ||
+              currentFingerprint.fingerprint !== fingerprintBeforeIntegration?.fingerprint
+            ) {
+              throw new Error("task, config, or dependency fingerprint changed before promotion");
+            }
+            if (!mainTreeIdentityMatches(cwd, prepared.mainIdentity)) {
+              throw new Error(
+                "main checkout changed after review; the immutable reviewed commit was not promoted"
+              );
+            }
+            const promoted = promotePreparedMainTreeIntegration(cwd, prepared, files);
+            if (!promoted.ok) {
+              throw new Error(promoted.error ?? "prepared main-tree promotion failed");
+            }
+            integratedCommit = prepared.integratedCommit;
+            integratedTree = prepared.integratedTree;
           } finally {
-            rmSync(verificationStateDir, { recursive: true, force: true });
+            removePreparedIntegration(cwd, prepared);
           }
-          if (!integrationVerification.ok) {
-            mechanicalFailure = `Pre-commit verification ${task.verificationProfile} failed; no integration commit was created.`;
-          }
-        }
-        if (mechanicalFailure) throw new Error(mechanicalFailure);
-        const committed = await serializeMainTreeOperation(cwd, () =>
-          commitAll(cwd, taskCommitMessage(task), files)
-        );
-        if (committed) integratedCommit = headCommit(cwd);
-        else mechanicalFailure = "The reviewed artifact could not be committed.";
+        });
       } catch (error) {
         mechanicalFailure = `The reviewed artifact could not be committed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        if (integrationVerification) {
+          const directory = join(stateDir(cwd), "verification");
+          mkdirSync(directory, { recursive: true });
+          const logFile = join(directory, basename(integrationVerification.logFile));
+          copyFileSync(integrationVerification.logFile, logFile);
+          integrationVerification = { ...integrationVerification, logFile };
+        }
+        rmSync(verificationStateDir, { recursive: true, force: true });
       }
       if (mechanicalFailure) verdict = { approved: false, notes: mechanicalFailure };
     } else if (verdict?.approved && requiresIntegration) {

@@ -374,7 +374,7 @@ export interface MaestroConfig {
   maxParallel: number;
   /** Require explicit user approval after planning before executors can start. */
   planGate: boolean;
-  /** Show owner-scoped live launch transcripts beside the editor in TUI mode. */
+  /** Automatically open the passive live-session pane when agents launch. */
   livePanes: boolean;
   /** Isolate tasks in per-task git worktrees when a batch dispatches in parallel. */
   useWorktrees: boolean;

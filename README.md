@@ -56,8 +56,8 @@ pi install /path/to/pi-maestro
 ## Five-minute start
 
 1. Install the extension with the command above.
-2. Run `/maestro doctor` to confirm config, model auth, and git are ready.
-3. Run `/maestro start <goal>` in the repository.
+2. Run `/maestro` to open the project control center, then choose **Check setup and recovery**.
+3. Choose **Start a new goal** there, or run `/maestro start <goal>` directly.
 4. Let the orchestrator create tasks with explicit success criteria and write scopes.
 5. If `planGate` is enabled, inspect and approve with `/maestro plan`.
 6. Start or resume with `/maestro drive`; use `/maestro timeline` for model-free history.
@@ -163,13 +163,14 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
 
 - **Footer status**: `⚡ maestro 2/5 · 2 running · $0.1234` — live while executors run.
 - **Live widget** above the editor shows each running executor: task, turns, cost, current tool.
-- **`/maestro board`** (or `ctrl+alt+b`): full-screen live dashboard — task list on the left,
-  live transcript of the selected task on the right (tailed from the executor's event log,
-  auto-refreshing twice a second). Its durable run view drills through the fixed phases
+- **`/maestro board`** (or `ctrl+alt+b`): phase-first project dashboard. It opens on the current
+  workflow phase, then `→` drills into that phase's tasks and again into executor/reviewer launches;
+  `←` moves back up. Live transcripts and evidence refresh without model calls. The durable run view uses
   **discovery → plan approval → execution → review → integration → verification → recovery →
   complete**, then task and launch evidence. Phase and status refreshes are mechanical and never
   wake a model. Press `?` for the complete dashboard keybinding guide. From the dashboard you can:
-  - `↑↓` switch between executors, `PgUp/PgDn` scroll the transcript
+  - `↑↓` select within the current phase/task/launch level, `→` drill in, `←` go back, and
+    `PgUp/PgDn` scroll the selected transcript
   - `s` **steer a running executor** — choose **Stop - wrong approach, report current state**,
     **Run the project checks before finishing**, **Stay strictly within the task brief scope**, or
     **Custom message...** (which opens a text input). The message is queued into that executor's
@@ -185,7 +186,7 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
     recent attempts, model/provider, turns, cost, and changed files.
   - `f` hide/show settled tasks (approved and cancelled) to focus on remaining work
   - `t` switch the selected pane between the live transcript and derived task timeline
-  - `enter` open the executor's full session in your TUI
+  - `enter` open the selected completed executor/reviewer session in your TUI when the drive is idle
 - **Failure and retry actions**: use `/maestro retry T1`, the compact picker, or dashboard retry.
   Running tasks and attempt-capped tasks are refused; capped work needs a successor. Retrying
   accepted or integrated work requires confirmation, and execution retry is isolated even when
@@ -227,7 +228,7 @@ and deep SWE leaderboard (pass@1 / avg cost per run):
 Preset models are provider-qualified (`openai-codex/gpt-5.6-sol`, `anthropic/claude-sonnet-5`),
 so executors always run on that provider and fail fast with a `/login` hint if it is not authed.
 
-All presets set `planGate` and `useWorktrees` to `false`; all set `maxRunCost` to $25.
+All presets set `planGate`, `livePanes`, and `useWorktrees` to `false`; all set `maxRunCost` to $25.
 
 Config files are plain JSON if you prefer editing by hand — user scope
 `~/.pi/agent/maestro.json`, project scope `.pi/maestro.json`. Resolution is defaults, then user,
@@ -305,8 +306,9 @@ whole tier object replacing the earlier object of the same name:
   turn or reports quota/rate-limit exhaustion mid-run; that provider failure is recorded but does
   not consume `maxAttempts`. Other failures after a turn do not fall back. The settings UI has a
   searchable fallback row for every tier and edits the first fallback; edit `fallbacks` in JSON for
-  longer chains. Review configuration accepts the same tier shape, but review runs currently use
-  its primary `model` only.
+  longer chains. Review configuration accepts the same tier shape, and review launches use the same
+  provider-failure fallback rules. Each raw review fallback launch counts toward
+  `maxReviewerLaunches` and remains attached to its logical reviewer.
 - `thinking` — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Per GPT-5.6 guidance: start
   medium, test one level lower, raise only when results show a gain.
 - `tools` — comma-separated allowlist passed to the executor. Every preset's `review` tier defaults
@@ -316,8 +318,8 @@ whole tier object replacing the earlier object of the same name:
 - You can add your own tier names; the orchestrator's planning guidance lists them.
 
 Before an execution dispatch, maestro resolves the primary and fallbacks for every tier used by
-that batch and fails with an actionable message if none are available. Before review, it similarly
-checks the review tier's primary model. This happens before spawning executors.
+that batch and fails with an actionable message if none are available. Before review, it resolves
+that tier's primary and fallback models the same way. This happens before spawning executors.
 
 ### Safety and reconciliation
 
@@ -335,9 +337,9 @@ repository without an initial commit include next-step guidance. `/maestro docto
 confirmation before removing stale/orphaned entries, then rechecks the board and live runs so active
 and recoverable worktrees remain untouched. In non-interactive mode, add `confirm` explicitly.
 
-### Live executor pane
+### Agent sessions
 
-When a drive launches executors, Maestro opens an owner-scoped transcript pane beside the editor on wide terminals. It follows new output without taking focus, so you can keep typing. Press `ctrl+alt+w` to focus the pane, press it again while focused to hide it, and press it once more from the editor to restore it. Inside the pane, use `←/→` to switch agents, `j/k` or `PgUp/PgDn` to scroll, `g/G` for top/follow mode, and `esc` to return focus to the editor. Set `livePanes` to `false` to keep only the compact status widget.
+Use `/maestro agents`, the **Browse agent sessions** control-center action, or `ctrl+alt+w` to open a large, session-like viewer for executor and reviewer history. It includes live and completed launches, rich Pi chat/tool rendering, `←/→` session switching, and `j/k` or `PgUp/PgDn` scrolling. Live sessions also offer steer and follow-up. When opened through `/maestro agents` or the control center, completed sessions can be opened in Pi itself with Enter; `/maestro back` then returns to the owner session. The compact activity widget remains visible while agents run. Set `livePanes` to `true` only if you also want a passive side pane to open automatically; automatic panes are off by default.
 
 ### Commands
 
@@ -360,8 +362,10 @@ When a drive launches executors, Maestro opens an owner-scoped transcript pane b
 /maestro recipe run <name> [JSON]  expand input into a gated plan
 /maestro recipe remove <name> [user|project]  remove only after confirmation
 /maestro discover <taskId> [append|replace]  preview and approve bounded discovery output
-/maestro board            full-screen live dashboard (aliases: dash, dashboard; also ctrl+alt+b)
-ctrl+alt+w                cycle the ambient live pane: visible, focused, hidden
+/maestro board            phase-first project dashboard (aliases: dash, dashboard; also ctrl+alt+b)
+/maestro agents           browse rich live and completed executor/reviewer sessions
+/maestro workflows        browse, inspect, preview, run, save, or remove reusable workflows
+ctrl+alt+w                open or close the agent-session viewer
 /maestro open <taskId>    switch into an executor's session
 /maestro back             switch back to the previous session (after open/reviewer open)
 /maestro config           interactive settings editor (user scope)
@@ -375,8 +379,15 @@ ctrl+alt+w                cycle the ambient live pane: visible, focused, hidden
 /maestro doctor cleanup   confirm removal of rechecked stale/orphaned worktrees
 /maestro history [n]      show the last n audited status changes (default 20)
 /maestro replay [file]    restore an archived board (newest-first picker when omitted)
-/maestro reset            archive the current board, then clear tasks and goal
+/maestro reset [confirm]  archive then clear; prompts in TUI, requires confirm non-interactively
 ```
+
+In non-interactive use, invoke `/maestro reset confirm`; plain `/maestro reset` refuses without
+creating an archive or changing board state.
+
+Approved and cancelled tasks are settled: all-cancelled and mixed approved/cancelled scopes
+complete normally and are eligible for completed-board archival and cleanup. Cancellation never
+counts as an approval or creates review evidence.
 
 Completed drives print a compact outcome summary with approved, failed, cancelled, and blocked
 counts, rounds and attempts, total cost, average cost across billed attempts, and the non-secret

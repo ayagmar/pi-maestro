@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import {
+  type ExtensionCommandContext,
+  initTheme,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
 import {
   applySettingsChange,
   buildModelChoices,
   buildModelPickerChoices,
   filterModelChoices,
+  showSettings,
 } from "../src/settings-ui.js";
+
+initTheme();
 
 function registryWithModels(
   models: Array<{ provider: string; id: string }>
@@ -118,6 +126,48 @@ test("settings model choices retain static menus when no authenticated models ar
   ]);
 });
 
+test("settings model search owns focus only while its picker is active", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-settings-focus-"));
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const context = {
+    cwd,
+    modelRegistry: registryWithModels([{ provider: "openai", id: "gpt-test" }]),
+    ui: {
+      notify: () => {},
+      custom: async (factory: (...args: unknown[]) => unknown) => {
+        const component = factory({ requestRender: () => {} }, theme, {}, () => {}) as {
+          focused: boolean;
+          render(width: number): string[];
+          handleInput(data: string): void;
+        };
+        component.focused = true;
+        component.handleInput("\x1b[B");
+        component.handleInput("\x1b[B");
+        component.handleInput("\r");
+        component.handleInput("\r");
+
+        assert.ok(component.render(100).join("\n").includes(CURSOR_MARKER));
+        component.focused = false;
+        assert.ok(!component.render(100).join("\n").includes(CURSOR_MARKER));
+        component.focused = true;
+        assert.ok(component.render(100).join("\n").includes(CURSOR_MARKER));
+
+        component.handleInput("\x1b");
+        assert.ok(!component.render(100).join("\n").includes(CURSOR_MARKER));
+      },
+    },
+  } as unknown as ExtensionCommandContext;
+
+  try {
+    await showSettings(context, "project");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("model picker changes preserve qualified values, sentinels, and fallback chains", () => {
   let config = structuredClone(DEFAULT_CONFIG);
   const standard = config.tiers.standard;
@@ -138,6 +188,25 @@ test("model picker changes preserve qualified values, sentinels, and fallback ch
   assert.deepEqual(config.tiers.standard?.fallbacks, ["provider-c/last-resort"]);
 });
 
+test("settings cannot persist an impossible effective review configuration", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-settings-invalid-"));
+  try {
+    let config = structuredClone(DEFAULT_CONFIG);
+    config = applySettingsChange(config, "reviewRequiredApprovals", "8");
+    config = applySettingsChange(config, "maxReviewerLaunches", "4");
+
+    assert.equal(config.reviewRequiredApprovals, 8);
+    assert.equal(config.maxReviewerLaunches, 4);
+    assert.throws(
+      () => saveConfig("project", cwd, config),
+      /reviewRequiredApprovals \(8\).*maxReviewerLaunches \(4\)/
+    );
+    assert.equal(existsSync(join(cwd, ".pi", "maestro.json")), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("settings changes preserve existing values and persist provider-qualified selections", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-settings-"));
   try {
@@ -148,7 +217,7 @@ test("settings changes preserve existing values and persist provider-qualified s
     config = applySettingsChange(config, "maxCostPerTask", "$5");
     config = applySettingsChange(config, "statusWaitSeconds", "30");
     config = applySettingsChange(config, "cleanupCompletedTasks", "off");
-    config = applySettingsChange(config, "reviewRequiredApprovals", "4");
+    config = applySettingsChange(config, "reviewRequiredApprovals", "3");
     config = applySettingsChange(config, "maxReviewerLaunches", "3");
     config = applySettingsChange(config, "model:complex", "anthropic/claude-sonnet-5");
     saveConfig("project", cwd, config);

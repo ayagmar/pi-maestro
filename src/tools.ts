@@ -23,9 +23,9 @@ import {
 import { loadConfig } from "./config.js";
 import { COMMAND } from "./constants.js";
 import {
-  resolveDriveDecision,
   type BackgroundDrive,
   type DriveRuntimeController,
+  resolveDriveDecision,
 } from "./drive-controller.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
 import { assertPlanTaskLimit, preflightWorkflow } from "./preflight.js";

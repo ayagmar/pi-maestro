@@ -1,9 +1,14 @@
-import { statSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import { type UserMessage } from "@earendil-works/pi-ai";
 import {
   AssistantMessageComponent,
+  buildSessionContext,
   getMarkdownTheme,
+  type SessionEntry,
   SessionManager,
+  type SessionMessageEntry,
+  sessionEntryToContextMessages,
   type Theme,
   ToolExecutionComponent,
   UserMessageComponent,
@@ -13,8 +18,8 @@ import {
   Input,
   Key,
   matchesKey,
-  truncateToWidth,
   type TUI,
+  truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -36,7 +41,7 @@ import {
 } from "./format.js";
 import { projectRunPhases, projectStatus } from "./status.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
-import { TranscriptTail, type TranscriptItem } from "./transcript.js";
+import { type TranscriptItem, TranscriptTail } from "./transcript.js";
 import {
   type Attempt,
   type Board,
@@ -238,6 +243,8 @@ export interface DashboardOptions {
   bodyHeight?: number;
   /** Live terminal row count. */
   getRows?: () => number;
+  /** Initial information level shown when the dashboard opens. */
+  initialView?: "phase" | "task";
 }
 
 type DashboardFrame = {
@@ -258,7 +265,7 @@ function statusColor(status: TaskStatus): "success" | "error" | "warning" | "acc
   return "muted";
 }
 
-/** Shared transcript projection used by the dashboard and ambient live pane. */
+/** Shared transcript projection used by the dashboard and agent-session viewer. */
 export function styledTranscriptLines(
   theme: Theme,
   items: readonly TranscriptItem[],
@@ -306,6 +313,7 @@ export interface LivePaneLaunch {
   turns: number;
   cost: number;
   lastActivity: string;
+  live?: boolean;
 }
 
 export interface LivePaneOptions {
@@ -315,16 +323,33 @@ export interface LivePaneOptions {
   onCycleVisibility(): void;
   onSteer?(launch: LivePaneLaunch, message: string): void;
   onFollowUp?(launch: LivePaneLaunch, message: string): void;
+  canOpenSession?(launch: LivePaneLaunch): boolean;
+  onOpenSession?(launch: LivePaneLaunch): void;
   height?: number;
   getHeight?: () => number;
   tui?: TUI;
   cwd?: string;
 }
 
+interface SessionFileStat {
+  size: number;
+  device: number;
+  inode: number;
+}
+
 type SessionTranscript = {
   sessionFile: string;
   fileSize: number;
+  device: number;
+  inode: number;
+  previousTail: Buffer;
+  decoder: StringDecoder;
+  lineBuffer: string;
+  entries: SessionEntry[];
+  entriesById: Map<string, SessionEntry>;
+  leafId: string | null;
   container: Container | undefined;
+  pendingTools: Map<string, ToolExecutionComponent>;
   cachedWidth: number | undefined;
   cachedLines: string[] | undefined;
 };
@@ -341,6 +366,25 @@ function stripPromptMarkers(lines: string[]): string[] {
   });
 }
 
+const SESSION_TAIL_BYTES = 4_096;
+
+function readSessionBytes(file: string, offset: number, length: number): Buffer {
+  if (length <= 0) return Buffer.alloc(0);
+  const bytes = Buffer.alloc(length);
+  const descriptor = openSync(file, "r");
+  try {
+    const read = readSync(descriptor, bytes, 0, length, offset);
+    return bytes.subarray(0, read);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function readSessionTail(file: string, size: number): Buffer {
+  const length = Math.min(size, SESSION_TAIL_BYTES);
+  return readSessionBytes(file, size - length, length);
+}
+
 const LIVE_PANE_STATUS: Record<
   LivePaneStatus,
   { glyph: string; color: "warning" | "success" | "accent" }
@@ -351,7 +395,7 @@ const LIVE_PANE_STATUS: Record<
   done: { glyph: "✓", color: "success" },
 };
 
-/** Ambient, bounded transcript follower for active executor and reviewer launches. */
+/** Bounded Pi-style browser for live and recorded executor/reviewer sessions. */
 export class LivePaneComponent {
   private _focused = false;
   private selectedKey: string | undefined;
@@ -377,10 +421,12 @@ export class LivePaneComponent {
     this.steerInput.onSubmit = (value) => this.submitMessage("steer", value);
     this.steerInput.onEscape = () => {
       this.mode = "browse";
+      this.syncInputFocus();
     };
     this.followUpInput.onSubmit = (value) => this.submitMessage("follow_up", value);
     this.followUpInput.onEscape = () => {
       this.mode = "browse";
+      this.syncInputFocus();
     };
     this.timer = setInterval(() => options.requestRender(), REFRESH_MS);
     this.timer.unref();
@@ -392,11 +438,17 @@ export class LivePaneComponent {
 
   set focused(value: boolean) {
     this._focused = value;
-    this.steerInput.focused = value;
-    this.followUpInput.focused = value;
+    this.syncInputFocus();
+  }
+
+  private syncInputFocus(): void {
+    this.steerInput.focused = this._focused && this.mode === "steer";
+    this.followUpInput.focused = this._focused && this.mode === "follow_up";
   }
 
   dispose(): void {
+    this._focused = false;
+    this.syncInputFocus();
     if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = undefined;
@@ -411,6 +463,14 @@ export class LivePaneComponent {
   }
 
   handleInput(data: string): void {
+    try {
+      this.routeInput(data);
+    } finally {
+      this.syncInputFocus();
+    }
+  }
+
+  private routeInput(data: string): void {
     if (!this.focused) return;
     if (matchesKey(data, Key.ctrlAlt("w"))) {
       this.options.onCycleVisibility();
@@ -437,13 +497,32 @@ export class LivePaneComponent {
     }
 
     const launches = this.syncLaunches();
-    if (data === "s" && this.options.onSteer) {
+    const selected = launches.find((launch) => launch.key === this.selectedKey);
+    if (
+      matchesKey(data, Key.enter) &&
+      selected?.live === false &&
+      selected.sessionFile &&
+      this.options.onOpenSession &&
+      (this.options.canOpenSession?.(selected) ?? true)
+    ) {
+      this.options.onOpenSession(selected);
+      return;
+    }
+    if (
+      data === "s" &&
+      this.options.onSteer &&
+      launches.some((launch) => launch.key === this.selectedKey && launch.live !== false)
+    ) {
       this.steerOption = 0;
       this.mode = "steer_templates";
       this.options.requestRender();
       return;
     }
-    if (data === "F" && this.options.onFollowUp) {
+    if (
+      data === "F" &&
+      this.options.onFollowUp &&
+      launches.some((launch) => launch.key === this.selectedKey && launch.live !== false)
+    ) {
       this.mode = "follow_up";
       this.options.requestRender();
       return;
@@ -497,28 +576,38 @@ export class LivePaneComponent {
       1,
       Math.floor(this.options.getHeight?.() ?? this.options.height ?? DEFAULT_DASHBOARD_BODY_HEIGHT)
     );
+    const framed = safeWidth >= 4 && height >= 3;
+    const contentWidth = framed ? safeWidth - 2 : safeWidth;
+    const contentHeight = framed ? height - 2 : height;
     const launches = this.syncLaunches();
+    this.syncInputFocus();
     const selected = launches.find((launch) => launch.key === this.selectedKey);
-    if (!selected) return this.renderSettled(safeWidth, height);
+    if (!selected) {
+      const settled = this.renderSettled(contentWidth, contentHeight);
+      return framed ? this.frameSession(settled, safeWidth, height) : settled;
+    }
 
     const tail = this.tailFor(selected);
     tail.poll();
     const transcript =
-      this.renderSessionTranscript(selected, safeWidth) ??
-      styledTranscriptLines(this.theme, tail.items, safeWidth);
+      this.renderSessionTranscript(selected, contentWidth) ??
+      styledTranscriptLines(this.theme, tail.items, contentWidth);
     if (transcript.length === 0) {
       transcript.push(
-        this.theme.fg("muted", truncateToWidth("Waiting for agent output…", safeWidth))
+        this.theme.fg("muted", truncateToWidth("Waiting for agent output…", contentWidth))
       );
     }
 
-    const header = this.renderHeader(selected, tail.items, safeWidth);
-    const footerRows = height >= 3 ? 1 : 0;
-    const stripRows = launches.length > 1 && height >= 4 ? 1 : 0;
-    const noticeRows = this.settledNotice && height >= 5 ? 1 : 0;
+    const header = this.renderHeader(selected, tail.items, contentWidth);
+    const footerRows = contentHeight >= 3 ? 1 : 0;
+    const stripRows = launches.length > 1 && contentHeight >= 4 ? 1 : 0;
+    const noticeRows = this.settledNotice && contentHeight >= 5 ? 1 : 0;
     const fixedRows = 1 + footerRows + stripRows + noticeRows;
-    const actionLines = this.renderActionControls(safeWidth, Math.max(0, height - fixedRows));
-    const bodyHeight = Math.max(0, height - fixedRows - actionLines.length);
+    const actionLines = this.renderActionControls(
+      contentWidth,
+      Math.max(0, contentHeight - fixedRows)
+    );
+    const bodyHeight = Math.max(0, contentHeight - fixedRows - actionLines.length);
     const maxScroll = Math.max(0, transcript.length - bodyHeight);
     const requestedOffset = this.followMode ? Number.MAX_SAFE_INTEGER : this.scrollOffset;
     this.renderedScrollOffset = Math.min(requestedOffset, maxScroll);
@@ -529,17 +618,52 @@ export class LivePaneComponent {
 
     const lines = [
       header,
-      ...(stripRows ? [this.renderLaunchStrip(launches, safeWidth)] : []),
+      ...(stripRows ? [this.renderLaunchStrip(launches, contentWidth)] : []),
       ...(noticeRows
-        ? [this.theme.fg("success", truncateToWidth(this.settledNotice ?? "", safeWidth))]
+        ? [this.theme.fg("success", truncateToWidth(this.settledNotice ?? "", contentWidth))]
         : []),
       ...body,
       ...actionLines,
       ...(footerRows
-        ? [this.renderFooter(transcript.length, bodyHeight, this.renderedScrollOffset, safeWidth)]
+        ? [
+            this.renderFooter(
+              transcript.length,
+              bodyHeight,
+              this.renderedScrollOffset,
+              contentWidth,
+              selected
+            ),
+          ]
         : []),
     ];
-    return lines.slice(0, height).map((line) => truncateToWidth(line, safeWidth));
+    const content = lines
+      .slice(0, contentHeight)
+      .map((line) => truncateToWidth(line, contentWidth));
+    return framed ? this.frameSession(content, safeWidth, height) : content;
+  }
+
+  private frameSession(lines: string[], width: number, height: number): string[] {
+    const innerWidth = width - 2;
+    const title = truncateToWidth(" Maestro agent sessions ", innerWidth);
+    const top =
+      this.theme.fg("border", "╭") +
+      this.theme.fg("accent", title) +
+      this.theme.fg("border", `${"─".repeat(Math.max(0, innerWidth - visibleWidth(title)))}╮`);
+    const framed = lines.slice(0, height - 2).map((line) => {
+      const content = truncateToWidth(line, innerWidth);
+      return (
+        this.theme.fg("border", "│") +
+        content +
+        " ".repeat(Math.max(0, innerWidth - visibleWidth(content))) +
+        this.theme.fg("border", "│")
+      );
+    });
+    while (framed.length < height - 2) {
+      framed.push(
+        this.theme.fg("border", "│") + " ".repeat(innerWidth) + this.theme.fg("border", "│")
+      );
+    }
+    return [top, ...framed, this.theme.fg("border", `╰${"─".repeat(innerWidth)}╯`)];
   }
 
   private renderSessionTranscript(launch: LivePaneLaunch, width: number): string[] | undefined {
@@ -550,33 +674,31 @@ export class LivePaneComponent {
 
     let transcript = this.sessionTranscripts.get(launch.key);
     if (!transcript || transcript.sessionFile !== sessionFile) {
-      transcript = {
-        sessionFile,
-        fileSize: -1,
-        container: undefined,
-        cachedWidth: undefined,
-        cachedLines: undefined,
-      };
+      transcript = this.emptySessionTranscript(sessionFile);
       this.sessionTranscripts.set(launch.key, transcript);
     }
 
-    let fileSize: number;
+    let file: SessionFileStat;
     try {
-      fileSize = statSync(sessionFile).size;
+      const stats = statSync(sessionFile);
+      file = { size: Number(stats.size), device: Number(stats.dev), inode: Number(stats.ino) };
     } catch {
-      transcript.container = undefined;
-      transcript.fileSize = -1;
-      transcript.cachedWidth = undefined;
-      transcript.cachedLines = undefined;
+      this.resetSessionTranscript(transcript);
       return undefined;
     }
 
-    if (fileSize !== transcript.fileSize) {
-      transcript.fileSize = fileSize;
-      transcript.container = this.loadSessionTranscript(sessionFile, tui, cwd);
-      transcript.cachedWidth = undefined;
-      transcript.cachedLines = undefined;
+    const replaced =
+      transcript.fileSize >= 0 &&
+      (file.device !== transcript.device ||
+        file.inode !== transcript.inode ||
+        file.size < transcript.fileSize ||
+        !this.sessionTailMatches(transcript));
+    if (transcript.fileSize < 0 || replaced) {
+      if (!this.rebuildSessionTranscript(transcript, tui, cwd, file)) return undefined;
+    } else if (file.size > transcript.fileSize) {
+      if (!this.appendSessionTranscript(transcript, tui, cwd, file)) return undefined;
     }
+
     if (!transcript.container) return undefined;
     if (transcript.cachedLines && transcript.cachedWidth === width) {
       return transcript.cachedLines;
@@ -587,61 +709,227 @@ export class LivePaneComponent {
     return transcript.cachedLines;
   }
 
-  private loadSessionTranscript(sessionFile: string, tui: TUI, cwd: string): Container | undefined {
-    try {
-      const session = SessionManager.open(sessionFile);
-      const container = new Container();
-      const pendingTools = new Map<string, ToolExecutionComponent>();
+  private emptySessionTranscript(sessionFile: string): SessionTranscript {
+    return {
+      sessionFile,
+      fileSize: -1,
+      device: -1,
+      inode: -1,
+      previousTail: Buffer.alloc(0),
+      decoder: new StringDecoder("utf8"),
+      lineBuffer: "",
+      entries: [],
+      entriesById: new Map(),
+      leafId: null,
+      container: undefined,
+      pendingTools: new Map(),
+      cachedWidth: undefined,
+      cachedLines: undefined,
+    };
+  }
 
-      for (const message of session.buildSessionContext().messages) {
-        if (message.role === "user") {
-          const text = this.userMessageText(message);
-          if (text) container.addChild(new UserMessageComponent(text, getMarkdownTheme()));
-          continue;
+  private resetSessionTranscript(transcript: SessionTranscript): void {
+    transcript.fileSize = -1;
+    transcript.device = -1;
+    transcript.inode = -1;
+    transcript.previousTail = Buffer.alloc(0);
+    transcript.decoder = new StringDecoder("utf8");
+    transcript.lineBuffer = "";
+    transcript.entries = [];
+    transcript.entriesById = new Map();
+    transcript.leafId = null;
+    transcript.container = undefined;
+    transcript.pendingTools = new Map();
+    transcript.cachedWidth = undefined;
+    transcript.cachedLines = undefined;
+  }
+
+  private sessionTailMatches(transcript: SessionTranscript): boolean {
+    if (transcript.previousTail.length === 0) return true;
+    try {
+      const offset = transcript.fileSize - transcript.previousTail.length;
+      const current = readSessionBytes(
+        transcript.sessionFile,
+        offset,
+        transcript.previousTail.length
+      );
+      return current.equals(transcript.previousTail);
+    } catch {
+      return false;
+    }
+  }
+
+  private rebuildSessionTranscript(
+    transcript: SessionTranscript,
+    tui: TUI,
+    cwd: string,
+    file: SessionFileStat
+  ): boolean {
+    try {
+      const session = SessionManager.open(transcript.sessionFile);
+      transcript.entries = [...session.getEntries()];
+      transcript.entriesById = new Map(transcript.entries.map((entry) => [entry.id, entry]));
+      transcript.leafId = session.getLeafId();
+      const rendered = this.buildSessionTranscript(
+        session.buildSessionContext().messages,
+        tui,
+        cwd
+      );
+      transcript.container = rendered.container;
+      transcript.pendingTools = rendered.pendingTools;
+      transcript.fileSize = file.size;
+      transcript.device = file.device;
+      transcript.inode = file.inode;
+      transcript.previousTail = readSessionTail(transcript.sessionFile, file.size);
+      transcript.decoder = new StringDecoder("utf8");
+      transcript.lineBuffer = "";
+      transcript.cachedWidth = undefined;
+      transcript.cachedLines = undefined;
+      return true;
+    } catch {
+      this.resetSessionTranscript(transcript);
+      return false;
+    }
+  }
+
+  private appendSessionTranscript(
+    transcript: SessionTranscript,
+    tui: TUI,
+    cwd: string,
+    file: SessionFileStat
+  ): boolean {
+    try {
+      const bytes = readSessionBytes(
+        transcript.sessionFile,
+        transcript.fileSize,
+        file.size - transcript.fileSize
+      );
+      transcript.lineBuffer += transcript.decoder.write(bytes);
+      const lines = transcript.lineBuffer.split("\n");
+      transcript.lineBuffer = lines.pop() ?? "";
+      const entries: SessionEntry[] = [];
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const entry = JSON.parse(line) as SessionEntry;
+        if (
+          !entry ||
+          typeof entry !== "object" ||
+          typeof entry.id !== "string" ||
+          (entry.parentId !== null && typeof entry.parentId !== "string")
+        ) {
+          throw new Error("invalid appended session entry");
         }
-        if (message.role === "assistant") {
-          container.addChild(new AssistantMessageComponent(message, true, getMarkdownTheme()));
-          for (const content of message.content) {
-            if (content.type !== "toolCall") continue;
-            const component = new ToolExecutionComponent(
-              content.name,
-              content.id,
-              content.arguments,
-              {},
-              undefined,
+        entries.push(entry);
+      }
+
+      let rebuildProjection = false;
+      for (const entry of entries) {
+        if (entry.parentId !== transcript.leafId) rebuildProjection = true;
+        if (entry.type === "compaction" || entry.type === "branch_summary") {
+          rebuildProjection = true;
+        }
+        transcript.entries.push(entry);
+        transcript.entriesById.set(entry.id, entry);
+        transcript.leafId = entry.id;
+      }
+
+      if (rebuildProjection) {
+        const context = buildSessionContext(
+          transcript.entries,
+          transcript.leafId,
+          transcript.entriesById
+        );
+        const rendered = this.buildSessionTranscript(context.messages, tui, cwd);
+        transcript.container = rendered.container;
+        transcript.pendingTools = rendered.pendingTools;
+      } else if (transcript.container) {
+        for (const entry of entries) {
+          for (const message of sessionEntryToContextMessages(entry)) {
+            this.appendSessionMessage(
+              transcript.container,
+              transcript.pendingTools,
+              message,
               tui,
               cwd
             );
-            container.addChild(component);
-            if (message.stopReason === "aborted" || message.stopReason === "error") {
-              component.updateResult({
-                content: [
-                  {
-                    type: "text",
-                    text:
-                      message.errorMessage ??
-                      (message.stopReason === "aborted" ? "Operation aborted" : "Error"),
-                  },
-                ],
-                isError: true,
-              });
-            } else {
-              pendingTools.set(content.id, component);
-            }
           }
-          continue;
-        }
-        if (message.role === "toolResult") {
-          const component = pendingTools.get(message.toolCallId);
-          if (!component) continue;
-          component.updateResult(message);
-          pendingTools.delete(message.toolCallId);
         }
       }
-      return container;
+
+      transcript.fileSize = file.size;
+      transcript.device = file.device;
+      transcript.inode = file.inode;
+      transcript.previousTail = readSessionTail(transcript.sessionFile, file.size);
+      transcript.cachedWidth = undefined;
+      transcript.cachedLines = undefined;
+      return true;
     } catch {
-      return undefined;
+      return this.rebuildSessionTranscript(transcript, tui, cwd, file);
     }
+  }
+
+  private buildSessionTranscript(
+    messages: SessionMessageEntry["message"][],
+    tui: TUI,
+    cwd: string
+  ): { container: Container; pendingTools: Map<string, ToolExecutionComponent> } {
+    const container = new Container();
+    const pendingTools = new Map<string, ToolExecutionComponent>();
+    for (const message of messages) {
+      this.appendSessionMessage(container, pendingTools, message, tui, cwd);
+    }
+    return { container, pendingTools };
+  }
+
+  private appendSessionMessage(
+    container: Container,
+    pendingTools: Map<string, ToolExecutionComponent>,
+    message: SessionMessageEntry["message"],
+    tui: TUI,
+    cwd: string
+  ): void {
+    if (message.role === "user") {
+      const text = this.userMessageText(message);
+      if (text) container.addChild(new UserMessageComponent(text, getMarkdownTheme()));
+      return;
+    }
+    if (message.role === "assistant") {
+      container.addChild(new AssistantMessageComponent(message, true, getMarkdownTheme()));
+      for (const content of message.content) {
+        if (content.type !== "toolCall") continue;
+        const component = new ToolExecutionComponent(
+          content.name,
+          content.id,
+          content.arguments,
+          {},
+          undefined,
+          tui,
+          cwd
+        );
+        container.addChild(component);
+        if (message.stopReason === "aborted" || message.stopReason === "error") {
+          component.updateResult({
+            content: [
+              {
+                type: "text",
+                text:
+                  message.errorMessage ??
+                  (message.stopReason === "aborted" ? "Operation aborted" : "Error"),
+              },
+            ],
+            isError: true,
+          });
+        } else {
+          pendingTools.set(content.id, component);
+        }
+      }
+      return;
+    }
+    if (message.role !== "toolResult") return;
+    const component = pendingTools.get(message.toolCallId);
+    if (!component) return;
+    component.updateResult(message);
+    pendingTools.delete(message.toolCallId);
   }
 
   private userMessageText(message: UserMessage): string {
@@ -666,11 +954,8 @@ export class LivePaneComponent {
     width: number
   ): string {
     const identity = launch.model ?? launch.provider ?? "model unknown";
-    const title =
-      launch.kind === "review"
-        ? `${launch.taskId} · review · [${identity}]`
-        : `${launch.taskId} · ${launch.title} [${identity}]`;
-    const status = this.launchStatus(items);
+    const title = `${launch.taskId} · ${launch.title} [${identity}]`;
+    const status = this.launchStatus(launch, items);
     const details = LIVE_PANE_STATUS[status];
     const statusText = `${details.glyph} ${status}`;
     const availableTitle = Math.max(1, width - visibleWidth(statusText) - 1);
@@ -680,7 +965,8 @@ export class LivePaneComponent {
     );
   }
 
-  private launchStatus(items: readonly TranscriptItem[]): LivePaneStatus {
+  private launchStatus(launch: LivePaneLaunch, items: readonly TranscriptItem[]): LivePaneStatus {
+    if (launch.live === false) return "done";
     const latest = items.at(-1);
     if (!latest) return "thinking";
     if (latest.kind === "status") return "done";
@@ -693,7 +979,7 @@ export class LivePaneComponent {
       0,
       launches.findIndex((launch) => launch.key === this.selectedKey)
     );
-    const capacity = Math.max(1, Math.floor(width / 14));
+    const capacity = Math.max(1, Math.floor(width / 18));
     const start = Math.min(
       Math.max(0, selectedIndex - Math.floor(capacity / 2)),
       Math.max(0, launches.length - capacity)
@@ -701,7 +987,7 @@ export class LivePaneComponent {
     const visible = launches.slice(start, start + capacity).map((launch) => {
       const selected = launch.key === this.selectedKey;
       const marker = selected ? "▶" : "·";
-      const label = `${marker} ${launch.taskId}`;
+      const label = `${marker} ${launch.taskId} ${launch.kind === "execute" ? "run" : "review"}`;
       return selected ? this.theme.fg("accent", label) : this.theme.fg("dim", label);
     });
     const earlier = start > 0 ? `←${start} ` : "";
@@ -719,7 +1005,8 @@ export class LivePaneComponent {
     transcriptLines: number,
     visibleLines: number,
     offset: number,
-    width: number
+    width: number,
+    selected: LivePaneLaunch
   ): string {
     const first = transcriptLines === 0 ? 0 : offset + 1;
     const last = Math.min(transcriptLines, offset + visibleLines);
@@ -727,8 +1014,16 @@ export class LivePaneComponent {
     const follow = this.followMode
       ? this.theme.fg("success", "● follow")
       : this.theme.fg("dim", "○ paused");
-    const actions = `${bindingLabel("s")} · ${bindingLabel("F")}`;
-    const hints = `←/→ agent · j/k scroll · g/G top/end · ${actions} · esc editor · ctrl+alt+w hide`;
+    const actions = selected.live !== false ? ` · ${bindingLabel("s")} · ${bindingLabel("F")}` : "";
+    const open =
+      selected.live === false && selected.sessionFile
+        ? this.options.onOpenSession
+          ? (this.options.canOpenSession?.(selected) ?? true)
+            ? " · enter open in Pi"
+            : " · open after drive settles"
+          : " · /maestro agents to open in Pi"
+        : "";
+    const hints = `←/→ session · j/k scroll · g/G top/end${actions}${open} · esc close`;
     return this.theme.fg("dim", truncateToWidth(`${position} ${follow} · ${hints}`, width));
   }
 
@@ -827,8 +1122,23 @@ export class LivePaneComponent {
       if (!this.launchOrder.includes(launch.key)) this.launchOrder.push(launch.key);
     }
     if (!this.selectedKey) {
-      this.selectedKey = launches[0]?.key;
+      this.selectedKey =
+        launches.find((launch) => launch.live !== false)?.key ?? launches.at(-1)?.key;
       if (this.selectedKey) this.settledNotice = undefined;
+    }
+
+    const previousSelected = this.selectedKey
+      ? this.previousLaunches.get(this.selectedKey)
+      : undefined;
+    const currentSelected = launches.find((launch) => launch.key === this.selectedKey);
+    const nextLive = launches.find((launch) => launch.live && launch.key !== this.selectedKey);
+    if (previousSelected?.live && currentSelected?.live === false && nextLive) {
+      this.selectedKey = nextLive.key;
+      this.settledNotice = `✓ ${previousSelected.taskId} settled · following ${nextLive.taskId}`;
+      this.followMode = true;
+      this.scrollOffset = Number.MAX_SAFE_INTEGER;
+      this.queuedNotice = undefined;
+      this.mode = "browse";
     }
 
     if (this.selectedKey && !launches.some((launch) => launch.key === this.selectedKey)) {
@@ -861,6 +1171,7 @@ export class LivePaneComponent {
  * Refreshes itself twice a second while open.
  */
 export class Dashboard {
+  private _focused = false;
   private selected = 0;
   private selectedTaskId: string | undefined;
   private navigationLevel: NavigationLevel = "task";
@@ -898,18 +1209,43 @@ export class Dashboard {
       Math.floor(options.bodyHeight ?? DEFAULT_DASHBOARD_BODY_HEIGHT)
     );
     this.frame = this.buildFrame();
+    if (options.initialView === "phase") {
+      this.navigationLevel = "phase";
+      this.phaseIndex = Math.max(
+        0,
+        this.frame.phases.findIndex((phase) => phase.current)
+      );
+    }
     this.steerInput.onSubmit = (value) => this.submitSteer(value);
     this.steerInput.onEscape = () => {
       this.mode = "browse";
+      this.syncInputFocus();
     };
     this.followUpInput.onSubmit = (value) => this.submitFollowUp(value);
     this.followUpInput.onEscape = () => {
       this.mode = "browse";
+      this.syncInputFocus();
     };
     this.timer = setInterval(() => actions.requestRender(), REFRESH_MS);
   }
 
+  get focused(): boolean {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    this._focused = value;
+    this.syncInputFocus();
+  }
+
+  private syncInputFocus(): void {
+    this.steerInput.focused = this._focused && this.mode === "steer";
+    this.followUpInput.focused = this._focused && this.mode === "follow_up";
+  }
+
   dispose(): void {
+    this._focused = false;
+    this.syncInputFocus();
     clearInterval(this.timer);
   }
 
@@ -1034,6 +1370,14 @@ export class Dashboard {
   }
 
   handleInput(data: string): void {
+    try {
+      this.routeInput(data);
+    } finally {
+      this.syncInputFocus();
+    }
+  }
+
+  private routeInput(data: string): void {
     this.frame = this.buildFrame();
     this.frameFresh = true;
     if (this.mode === "steer_templates") {
@@ -1294,6 +1638,7 @@ export class Dashboard {
   }
 
   render(width: number): string[] {
+    this.syncInputFocus();
     if (this.frameFresh) this.frameFresh = false;
     else this.frame = this.buildFrame();
     width = Math.max(1, Math.floor(width));

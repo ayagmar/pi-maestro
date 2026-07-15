@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { TranscriptTail, parseLogLine, toolPreview } from "../src/transcript.js";
+import { parseLogLine, TranscriptTail, toolPreview } from "../src/transcript.js";
 
 test("toolPreview formats bash, paths, and generic args", () => {
   assert.equal(toolPreview("bash", { command: "ls -la" }), "$ ls -la");

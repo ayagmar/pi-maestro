@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -25,6 +24,9 @@ function fixture() {
     thinking: "low" as const,
     startedAt: index,
     usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    reviewLaunches: [
+      { startedAt: index, usage: { input: 0, output: 0, cost: 0, turns: 0 }, exitCode: 0 },
+    ],
     touchedFiles: [],
   }));
   saveBoard(cwd, board);
@@ -228,6 +230,142 @@ test("archive capture includes review logs backed by persisted launch evidence",
       snapshot.entries.some((entry) => entry.file === join(logs, "T1-review-1-launch-1.jsonl")),
       true
     );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("review launch ids retain logs created before logFile persistence", () => {
+  const { cwd, board, task, logs } = fixture();
+  try {
+    const attempt = task.attempts.at(-1);
+    assert.ok(attempt);
+    const launchId = "T1-review-2-1-1";
+    const logFile = join(logs, `${launchId}.jsonl`);
+    attempt.reviewLaunches = [
+      {
+        id: launchId,
+        reviewerIndex: 1,
+        startedAt: 1,
+        usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      },
+    ];
+    writeFileSync(logFile, "review");
+
+    const result = pruneTaskLogs(
+      cwd,
+      task.id,
+      () => board,
+      () => false
+    );
+    assert.equal(
+      result.removed.some((entry) => entry.file === logFile),
+      false
+    );
+    assert.equal(existsSync(logFile), true);
+    assert.equal(
+      inspectLogRetention(cwd, board).find((entry) => entry.file === logFile)?.state,
+      "retained"
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("persisted multi-reviewer log paths survive task and global pruning", () => {
+  const { cwd, board, task, logs } = fixture();
+  try {
+    const attempt = task.attempts.at(-1);
+    assert.ok(attempt);
+    const reviewerLogs = [join(logs, "T1-review-2-1-1.jsonl"), join(logs, "T1-review-2-2-2.jsonl")];
+    attempt.reviewLaunches = reviewerLogs.map((logFile, index) => ({
+      id: `review-${index + 1}`,
+      reviewerIndex: index + 1,
+      logFile,
+      startedAt: index + 1,
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      exitCode: 0,
+    }));
+    for (const logFile of reviewerLogs) writeFileSync(logFile, "review");
+
+    const taskResult = pruneTaskLogs(
+      cwd,
+      task.id,
+      () => board,
+      () => false
+    );
+    assert.equal(
+      taskResult.removed.some((entry) => reviewerLogs.includes(entry.file)),
+      false
+    );
+
+    const snapshot = inspectLogRetention(cwd, board).filter((entry) =>
+      reviewerLogs.includes(entry.file)
+    );
+    const globalResult = pruneStaleLogs(
+      cwd,
+      snapshot,
+      () => board,
+      () => false
+    );
+    assert.equal(globalResult.removed.length, 0);
+    assert.equal(
+      reviewerLogs.every((logFile) => existsSync(logFile)),
+      true
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("unreferenced reviewer logs are stale and deleted", () => {
+  const { cwd, board, logs } = fixture();
+  try {
+    const stale = join(logs, "T1-review-2-9-99.jsonl");
+    writeFileSync(stale, "unreferenced");
+
+    const [entry] = inspectLogRetention(cwd, board).filter((candidate) => candidate.file === stale);
+    assert.equal(entry?.state, "stale");
+    const result = cleanupStaleLogs(
+      cwd,
+      new Set([stale]),
+      () => board,
+      () => false
+    );
+    assert.deepEqual(
+      result.removed.map((candidate) => candidate.file),
+      [stale]
+    );
+    assert.equal(existsSync(stale), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("capture warns when a persisted reviewer log is missing", () => {
+  const { cwd, board, task, logs } = fixture();
+  try {
+    const missing = join(logs, "T1-review-2-1-1.jsonl");
+    const attempt = task.attempts.at(-1);
+    assert.ok(attempt);
+    attempt.reviewLaunches = [
+      {
+        id: "missing-review",
+        reviewerIndex: 1,
+        logFile: missing,
+        startedAt: 1,
+        usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      },
+    ];
+
+    const capture = captureBoardLogs(cwd, board);
+    assert.equal(
+      capture.entries.some((entry) => entry.file === missing),
+      false
+    );
+    assert.deepEqual(capture.warnings, [
+      "could not inspect T1-review-2-1-1.jsonl due to a filesystem error",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

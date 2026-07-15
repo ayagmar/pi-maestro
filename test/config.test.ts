@@ -56,7 +56,7 @@ test("default config has the documented tiers and no model overrides", () => {
   ]);
   assert.equal(DEFAULT_CONFIG.maxParallel, 3);
   assert.equal(DEFAULT_CONFIG.planGate, false);
-  assert.equal(DEFAULT_CONFIG.livePanes, true);
+  assert.equal(DEFAULT_CONFIG.livePanes, false);
   assert.equal(DEFAULT_CONFIG.useWorktrees, false);
   assert.equal(DEFAULT_CONFIG.maxCostPerTask, 5);
   assert.equal(DEFAULT_CONFIG.maxRunCost, 25);
@@ -83,7 +83,7 @@ test("every preset defines all four tiers and keeps review read-only", () => {
       `preset ${preset.name}`
     );
     assert.equal(preset.config.planGate, false, `preset ${preset.name}`);
-    assert.equal(preset.config.livePanes, true, `preset ${preset.name}`);
+    assert.equal(preset.config.livePanes, false, `preset ${preset.name}`);
     assert.equal(preset.config.useWorktrees, false, `preset ${preset.name}`);
     assert.equal(preset.config.maxRunCost, 25, `preset ${preset.name}`);
     assert.equal(preset.config.statusWaitSeconds, 60, `preset ${preset.name}`);
@@ -108,7 +108,7 @@ test("describeConfig lists preset name and every tier", () => {
   assert.match(text, /preset: inherit/);
   assert.match(text, /maxParallel: 3/);
   assert.match(text, /planGate: false/);
-  assert.match(text, /livePanes: true/);
+  assert.match(text, /livePanes: false/);
   assert.match(text, /useWorktrees: false/);
   assert.match(text, /maxRunCost: \$25/);
   assert.match(text, /statusWaitSeconds: 60/);
@@ -277,15 +277,15 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
   );
   assert.match(
     validateConfig({ maxPlanTasks: 8, maxDiscoveryGeneratedTasks: 9 }) ?? "",
-    /maxDiscoveryGeneratedTasks cannot exceed/
+    /maxDiscoveryGeneratedTasks \(9\) cannot exceed maxPlanTasks \(8\)/
   );
   assert.match(
     validateConfig({ maxTotalLaunchesPerRun: 3, maxReviewerLaunches: 4 }) ?? "",
-    /maxReviewerLaunches cannot exceed/
+    /maxReviewerLaunches \(4\) cannot exceed maxTotalLaunchesPerRun \(3\)/
   );
   assert.match(
     validateConfig({ maxPlanTasks: 8, confirmationPlanTasks: 9 }) ?? "",
-    /confirmationPlanTasks cannot exceed/
+    /confirmationPlanTasks \(9\) cannot exceed maxPlanTasks \(8\)/
   );
   assert.match(validateConfig({ tiers: { "": { thinking: "low" } } }) ?? "", /tier names/);
   assert.match(
@@ -296,6 +296,9 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
 
 test("loadConfig preserves and ignores structurally invalid project config", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-config-invalid-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-config-invalid-agent-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
   const directory = join(cwd, ".pi");
   const file = join(directory, "maestro.json");
   try {
@@ -308,7 +311,10 @@ test("loadConfig preserves and ignores structurally invalid project config", () 
       1
     );
   } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
   }
 });
 
@@ -344,6 +350,53 @@ test("saveConfig writes the scope file", () => {
     assert.deepEqual(written, DEFAULT_CONFIG);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects incompatible effective values from individually valid fragments", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-effective-invalid-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-config-effective-agent-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const user = { reviewRequiredApprovals: 8 };
+    const project = { maxReviewerLaunches: 4 };
+    assert.equal(validateConfig(user), undefined);
+    assert.equal(validateConfig(project), undefined);
+    writeFileSync(join(agentDir, "maestro.json"), JSON.stringify(user));
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "maestro.json"), JSON.stringify(project));
+
+    assert.throws(
+      () => loadConfig(cwd),
+      /effective maestro configuration.*reviewRequiredApprovals \(8\).*maxReviewerLaunches \(4\)/i
+    );
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig accepts valid cross-scope override combinations", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-effective-valid-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-config-effective-valid-agent-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFileSync(join(agentDir, "maestro.json"), JSON.stringify({ reviewRequiredApprovals: 8 }));
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "maestro.json"), JSON.stringify({ maxReviewerLaunches: 8 }));
+
+    const loaded = loadConfig(cwd);
+    assert.equal(loaded.reviewRequiredApprovals, 8);
+    assert.equal(loaded.maxReviewerLaunches, 8);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
   }
 });
 

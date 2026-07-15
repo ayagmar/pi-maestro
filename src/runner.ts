@@ -9,9 +9,11 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { type Writable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { KILL_GRACE_MS, LOGS_DIR } from "./constants.js";
 
 const VERIFICATION_KILL_GRACE_MS = 250;
+
 import { type Attempt, type FailureReason, type TierConfig, type Usage } from "./types.js";
 
 export type RunFailureCause = "provider" | "process" | "user_abort" | "cost_cap" | "stalled";
@@ -217,6 +219,7 @@ function compactLogEvent(event: JsonEvent): boolean {
     event.type === "tool_execution_end" ||
     event.type === "agent_start" ||
     event.type === "agent_end" ||
+    event.type === "agent_settled" ||
     event.type === "message_end" ||
     (event.type === "response" && event.command === "get_state")
   );
@@ -382,6 +385,7 @@ export function startExecutor(options: {
     };
     let stderr = "";
     let buffer = "";
+    const stdoutDecoder = new StringDecoder("utf8");
     let lastActivity = "starting…";
     let lastEventAt = Date.now();
     let lastProgressAt = lastEventAt;
@@ -497,8 +501,9 @@ export function startExecutor(options: {
         watchdogSteeredAt = undefined;
       }
 
-      if (event.type === "agent_end") {
-        // Work is done; closing stdin triggers RPC shutdown and session flush.
+      if (event.type === "agent_settled") {
+        // No retry, compaction, or queued continuation remains. Closing stdin
+        // now triggers RPC shutdown and session flush.
         proc.stdin.end();
         setTimeout(() => {
           if (proc.exitCode === null) proc.kill("SIGTERM");
@@ -527,7 +532,7 @@ export function startExecutor(options: {
     };
 
     proc.stdout.on("data", (data: Buffer) => {
-      buffer += data.toString();
+      buffer += stdoutDecoder.write(data);
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) processLine(line);
@@ -539,6 +544,7 @@ export function startExecutor(options: {
 
     proc.on("close", (code) => {
       clearInterval(watchdog);
+      buffer += stdoutDecoder.end();
       if (buffer.trim()) processLine(buffer);
       log.end();
       result.exitCode = code ?? 0;

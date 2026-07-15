@@ -37,8 +37,7 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ],
-    "image": "https://placehold.co/1200x630/png?text=pi-maestro"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import test from "node:test";
 import {
   applyAssistantMessage,
   cappedLogWriter,
   classifyFailure,
   mapWithConcurrencyLimit,
-  redactFailureMessage,
   type RunOutcome,
+  redactFailureMessage,
   runVerification,
   startExecutor,
   touchedFile,
@@ -84,6 +84,7 @@ process.stdin.on("data", (chunk) => {
     console.log(JSON.stringify({ type: "tool_execution_start", toolName: "write", args: { path: "after-cap.ts" } }));
     console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", model: "test/model", usage: { input: 7, output: 3, cost: { total: 0.25 } }, content: [{ type: "text", text: "finished after cap" }] } }));
     console.log(JSON.stringify({ type: "agent_end" }));
+    console.log(JSON.stringify({ type: "agent_settled" }));
   }
 });
 process.stdin.on("end", () => process.exit(0));
@@ -132,7 +133,10 @@ process.stdin.on("data", (chunk) => {
     const command = JSON.parse(line);
     appendFileSync(${JSON.stringify(commandsFile)}, JSON.stringify(command) + "\\n");
     if (command.type === "prompt" && !finishTimer) {
-      finishTimer = setTimeout(() => console.log(JSON.stringify({ type: "agent_end" })), 40);
+      finishTimer = setTimeout(() => {
+        console.log(JSON.stringify({ type: "agent_end" }));
+        console.log(JSON.stringify({ type: "agent_settled" }));
+      }, 40);
     }
   }
 });
@@ -164,6 +168,111 @@ process.stdin.on("end", () => process.exit(0));
       { type: "steer", message: "change direction" },
       { type: "follow_up", message: "then summarize" },
     ]);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("executor remains available through continuation events until agent_settled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-settled-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  const lifecycleFile = join(root, "lifecycle.jsonl");
+  writeFileSync(
+    fakePi,
+    `import { appendFileSync } from "node:fs";
+let buffer = "";
+let settled = false;
+process.on("SIGTERM", () => appendFileSync(${JSON.stringify(lifecycleFile)}, JSON.stringify({ event: "sigterm", settled }) + "\\n"));
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type !== "prompt") continue;
+    console.log(JSON.stringify({ type: "agent_end", willRetry: true }));
+    setTimeout(() => {
+      console.log(JSON.stringify({ type: "auto_retry_start", attempt: 1 }));
+      console.log(JSON.stringify({ type: "agent_start" }));
+      console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "continued after retry" }] } }));
+      settled = true;
+      console.log(JSON.stringify({ type: "agent_settled" }));
+      setTimeout(() => process.exit(0), 10);
+    }, 20);
+  }
+});
+process.stdin.on("end", () => appendFileSync(${JSON.stringify(lifecycleFile)}, JSON.stringify({ event: "stdin-end", settled }) + "\\n"));
+`
+  );
+
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "settled",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+    });
+    const outcome = await run.outcome;
+    const lifecycle = readFileSync(lifecycleFile, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { event: string; settled: boolean });
+
+    assert.equal(outcome.finalReport, "continued after retry");
+    assert.deepEqual(lifecycle, [{ event: "stdin-end", settled: true }]);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("executor decodes a UTF-8 JSON character split across stdout chunks", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-utf8-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type !== "prompt") continue;
+    const event = Buffer.from(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "café" }] } }) + "\\n");
+    const character = Buffer.from("é");
+    const splitAt = event.indexOf(character) + 1;
+    process.stdout.write(event.subarray(0, splitAt));
+    setTimeout(() => {
+      process.stdout.write(event.subarray(splitAt));
+      console.log(JSON.stringify({ type: "agent_end" }));
+      setTimeout(() => console.log(JSON.stringify({ type: "agent_settled" })), 5);
+    }, 5);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "utf8",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+    });
+    const outcome = await run.outcome;
+
+    assert.equal(outcome.finalReport, "café");
   } finally {
     process.argv[1] = originalScript;
     rmSync(root, { recursive: true, force: true });

@@ -214,11 +214,17 @@ export function replaceBoard(cwd: string, board: Board, expectedRevision: number
 
 export function replaceBoardWithArchive(
   cwd: string,
-  replacement: (current: Board) => Board
+  replacement: (current: Board) => Board,
+  expectedRevision: number
 ): string | undefined {
   const lock = acquireBoardLock(cwd);
   try {
     const current = loadBoard(cwd);
+    if ((current.revision ?? 0) !== expectedRevision) {
+      throw new Error(
+        "Cannot replace a stale maestro board; inspect the latest board and confirm again"
+      );
+    }
     const next = replacement(current);
     const archive = archiveBoard(cwd);
     if (current.revision === undefined) delete next.revision;
@@ -431,7 +437,8 @@ export function listArchivedBoards(cwd: string): ArchivedBoard[] {
 
 export function restoreArchivedBoard(
   cwd: string,
-  selectedFile: string
+  selectedFile: string,
+  expectedRevision: number
 ): { archivedCurrent: string | undefined; selectedFile: string } {
   const archiveDirectory = resolve(stateDir(cwd), "archive");
   const file = resolve(
@@ -445,9 +452,11 @@ export function restoreArchivedBoard(
   const board = readArchivedBoard(file);
   if (!board) throw new Error(`Archive is not a valid maestro board: ${file}`);
 
-  const currentRevision = loadBoard(cwd).revision ?? 0;
-  const archivedCurrent = archiveBoard(cwd);
-  replaceBoard(cwd, board, currentRevision);
+  const archivedCurrent = replaceBoardWithArchive(
+    cwd,
+    () => structuredClone(board),
+    expectedRevision
+  );
   return { archivedCurrent, selectedFile: file };
 }
 
@@ -1432,6 +1441,10 @@ export function taskFailureCause(task: Task): FailureKind | undefined {
     : "executor_failure";
 }
 
+export function isTaskSettled(task: Pick<Task, "status">): boolean {
+  return task.status === "approved" || task.status === "cancelled";
+}
+
 export function taskGroup(board: Board, task: Task): TaskGroup {
   if (task.status === "todo" || task.status === "changes_requested") {
     return blockedReason(board, task) ? "blocked" : "ready";
@@ -1549,11 +1562,12 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
   };
 }
 
-export function rejectPlan(cwd: string): string | undefined {
-  const archivePath = archiveBoard(cwd);
-  if (!archivePath) return undefined;
-  replaceBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] }, loadBoard(cwd).revision ?? 0);
-  return archivePath;
+export function rejectPlan(cwd: string, expectedRevision: number): string | undefined {
+  return replaceBoardWithArchive(
+    cwd,
+    () => ({ version: 1, nextTaskNumber: 1, tasks: [] }),
+    expectedRevision
+  );
 }
 
 export function approvePlan(board: Board, availableTiers: Iterable<string>): PlanValidation {

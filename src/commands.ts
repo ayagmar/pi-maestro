@@ -11,6 +11,7 @@ export const MAESTRO_COMMANDS = [
   "pause",
   "resume",
   "abort",
+  "agents",
   "board",
   "dash",
   "dashboard",
@@ -36,9 +37,11 @@ export const MAESTRO_COMMANDS = [
   "doctor cleanup confirm",
   "history",
   "timeline",
+  "workflows",
   "reconcile",
   "replay",
   "reset",
+  "reset confirm",
 ] as const;
 
 export function registerMaestroCommand(

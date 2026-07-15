@@ -30,14 +30,19 @@ Maestro preserves board state, attempts, logs, sessions, Git branches, and dirty
 
 - `/maestro pause` waits for active work to settle and persists resumable ownership.
 - `/maestro abort` signals active work and retains its evidence.
+- `/maestro reset` confirms before archiving or changing state. In non-interactive mode it refuses
+  unless invoked as `/maestro reset confirm`. Replacement uses the exact confirmed board revision
+  and refuses if concurrent work changed it.
 - `/maestro retry <taskId>` uses the same eligibility function as picker/dashboard retry. It refuses
   live or capped work, confirms accepted/integrated work, preserves history, and isolates execution
   retry from the dirty integration checkout.
 - `/maestro timeline [taskId]` derives bounded chronology without model calls.
 - `/maestro reconcile` reports missing review, artifact, integration, verification, or recovery proof without rewriting state.
 - `/maestro simulate` reports deterministic dependency waves; plan approval and drive preflight additionally report concurrency, raw launch upper bounds, verification-profile usage, and whether explicit scale confirmation is required. These reports never invent price estimates.
-- `/maestro back` and dashboard session controls remain available for transcript inspection.
-- `/maestro plan diff|compare <file> [taskId]` and `/maestro recipe preview <name> [JSON]` are
+- `/maestro agents` and `ctrl+alt+w` open the rich executor/reviewer session browser. Live sessions
+  can be steered without switching; opening a completed session in Pi is offered only after the
+  drive and active executors settle. `/maestro back` returns to the previous owner session.
+- `/maestro plan diff <file> [taskId]` and `/maestro recipe preview <name> [JSON]` are
   validated read-only inspections. Their deterministic references identify bounded omitted detail.
 
 The dashboard’s run view always exposes discovery, plan approval, execution, review, integration,

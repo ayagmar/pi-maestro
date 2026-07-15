@@ -1,5 +1,5 @@
 import { readdirSync, statSync, unlinkSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { stateDir } from "./board.js";
 import { LOGS_DIR } from "./constants.js";
 import { type Board } from "./types.js";
@@ -24,10 +24,67 @@ function addWarning(warnings: string[], message: string): void {
   if (warnings.length < MAX_WARNINGS) warnings.push(message);
 }
 
-function logIdentity(name: string): { taskId: string; attempt: number } | undefined {
-  const match = /^(.+?)-(?:attempt|review)-(\d+)(?:-launch-\d+)?\.jsonl$/.exec(name);
+interface LogIdentity {
+  taskId: string;
+  attempt: number;
+}
+
+function logIdentity(name: string): LogIdentity | undefined {
+  const match = /^(.+)-(?:attempt|review)-(\d+)(?:-launch-\d+|-\d+-\d+)?\.jsonl$/.exec(name);
   if (!match?.[1] || !match[2]) return undefined;
   return { taskId: match[1], attempt: Number(match[2]) };
+}
+
+interface ReferencedLog extends LogIdentity {
+  file: string;
+}
+
+function referencedBoardLogs(cwd: string, board: Board): Map<string, ReferencedLog> {
+  const directory = join(stateDir(cwd), LOGS_DIR);
+  const references = new Map<string, ReferencedLog>();
+  const add = (file: string, taskId: string, attempt: number) => {
+    if (!file.endsWith(".jsonl")) return;
+    const absolute = isAbsolute(file) ? resolve(file) : resolve(directory, basename(file));
+    references.set(absolute, { file: absolute, taskId, attempt });
+  };
+
+  for (const task of board.tasks) {
+    for (const attempt of task.attempts) {
+      add(attempt.logFile, task.id, attempt.index);
+
+      const reviewLaunches = attempt.reviewLaunches ?? [];
+      reviewLaunches.forEach((launch, index) => {
+        if (launch.logFile) {
+          add(launch.logFile, task.id, attempt.index);
+          return;
+        }
+        if (launch.id) {
+          // The runner creates this file before the launch's logFile update.
+          add(`${launch.id}.jsonl`, task.id, attempt.index);
+          return;
+        }
+        // Launch records written before id persistence used a numbered filename.
+        add(`${task.id}-review-${attempt.index}-launch-${index + 1}.jsonl`, task.id, attempt.index);
+      });
+
+      // Boards predating launch history retained one unnumbered review log.
+      const hasLegacyReviewEvidence =
+        reviewLaunches.length === 0 &&
+        (attempt.reviewReport !== undefined ||
+          attempt.reviewNotes !== undefined ||
+          attempt.reviewModel !== undefined ||
+          attempt.reviewProvider !== undefined ||
+          attempt.reviewUsage !== undefined ||
+          attempt.reviewSessionFile !== undefined ||
+          attempt.failureReason?.kind === "reviewer_failure" ||
+          attempt.failureReason?.kind === "reviewer_rejection");
+      if (hasLegacyReviewEvidence) {
+        add(`${task.id}-review-${attempt.index}.jsonl`, task.id, attempt.index);
+      }
+    }
+  }
+
+  return references;
 }
 
 /** Classify maestro JSONL logs without modifying state. Files that cannot be inspected are skipped. */
@@ -47,18 +104,22 @@ export function inspectLogRetention(
     return [];
   }
   const tasks = new Map(board.tasks.map((task) => [task.id, task]));
+  const references = referencedBoardLogs(cwd, board);
   const entries: LogRetentionEntry[] = [];
 
   for (const name of names.filter((item) => item.endsWith(".jsonl"))) {
     const file = join(directory, name);
     try {
-      const identity = logIdentity(name);
+      const reference = references.get(resolve(file));
+      const identity = reference ?? logIdentity(name);
       const task = identity ? tasks.get(identity.taskId) : undefined;
       const latestAttempt = task?.attempts.at(-1)?.index ?? task?.attempts.length;
       const isLatest = identity !== undefined && identity.attempt === latestAttempt;
       let state: LogRetentionState = "stale";
       if (identity && liveTaskIds.has(identity.taskId)) state = "active";
-      else if (task && isLatest) state = task.status === "approved" ? "retained" : "active";
+      else if (reference && task && isLatest) {
+        state = task.status === "approved" ? "retained" : "active";
+      }
       entries.push({
         file,
         size: statSync(file).size,
@@ -174,38 +235,21 @@ export interface LogCaptureResult {
 
 /** Capture only files attributable to attempts recorded on this board. */
 export function captureBoardLogs(cwd: string, board: Board): LogCaptureResult {
-  const expectedNames = new Set<string>();
-  for (const task of board.tasks) {
-    for (const attempt of task.attempts) {
-      expectedNames.add(basename(attempt.logFile));
-
-      const reviewLaunches = attempt.reviewLaunches ?? [];
-      for (let launch = 1; launch <= reviewLaunches.length; launch += 1) {
-        expectedNames.add(`${task.id}-review-${attempt.index}-launch-${launch}.jsonl`);
-      }
-
-      // Boards written before launch history was introduced used one unnumbered
-      // review log. Include it only when the attempt persisted evidence of a review.
-      const hasLegacyReviewEvidence =
-        reviewLaunches.length === 0 &&
-        (attempt.reviewReport !== undefined ||
-          attempt.reviewNotes !== undefined ||
-          attempt.reviewModel !== undefined ||
-          attempt.reviewProvider !== undefined ||
-          attempt.reviewUsage !== undefined ||
-          attempt.reviewSessionFile !== undefined ||
-          attempt.failureReason?.kind === "reviewer_failure" ||
-          attempt.failureReason?.kind === "reviewer_rejection");
-      if (hasLegacyReviewEvidence) {
-        expectedNames.add(`${task.id}-review-${attempt.index}.jsonl`);
-      }
-    }
-  }
-
+  const references = referencedBoardLogs(cwd, board);
   const warnings: string[] = [];
   const entries = inspectLogRetention(cwd, board, new Set(), warnings).filter((entry) =>
-    expectedNames.has(basename(entry.file))
+    references.has(resolve(entry.file))
   );
+  const captured = new Set(entries.map((entry) => resolve(entry.file)));
+  const latestAttempts = new Map(
+    board.tasks.map((task) => [task.id, task.attempts.at(-1)?.index ?? task.attempts.length])
+  );
+  for (const reference of references.values()) {
+    if (reference.attempt !== latestAttempts.get(reference.taskId)) continue;
+    if (!captured.has(reference.file)) {
+      addWarning(warnings, warning("could not inspect", reference.file, undefined));
+    }
+  }
   return { entries, warnings };
 }
 

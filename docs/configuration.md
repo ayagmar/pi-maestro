@@ -1,6 +1,8 @@
 # Configuration
 
-Resolution order is defaults, operator user config, then non-executable project settings.
+Resolution order is defaults, operator user config, then non-executable project settings. Maestro
+validates the effective configuration after the merge and reports the incompatible effective values
+instead of clamping them or saving a configuration that cannot execute.
 
 - User: `~/.pi/agent/maestro.json`
 - Project: `<repo>/.pi/maestro.json`
@@ -11,7 +13,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 |---|---:|---|
 | `maxParallel` | 3 | 1–64 |
 | `planGate` | false | Require human plan approval |
-| `livePanes` | true | Show owner-scoped live executor transcripts beside the editor in TUI mode |
+| `livePanes` | false | Automatically open the passive agent pane; sessions remain available on demand |
 | `useWorktrees` | false | Isolate task checkouts |
 | `autoCommit` | true | Commit only attributed task paths |
 | `maxAttempts` | 3 | 1–100 consumed attempts |

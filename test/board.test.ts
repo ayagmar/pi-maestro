@@ -26,15 +26,19 @@ import {
   humanRetryEligibility,
   isRunnable,
   latestArchiveFile,
+  listArchivedBoards,
   loadBoard,
   loadStatusHistory,
   rejectPlan,
+  replaceBoard,
+  replaceBoardWithArchive,
   restoreArchivedBoard,
   saveBoard,
   setStatus,
   taskFailureCause,
   taskGroup,
   transition,
+  updateBoard,
   updateTask,
   validatePlan,
 } from "../src/board.js";
@@ -452,13 +456,87 @@ test("rejectPlan archives the gated plan before clearing the board", () => {
     createTask(board, { title: "First", brief: "a", tier: "standard" });
     saveBoard(cwd, board);
 
-    const archivePath = rejectPlan(cwd);
+    const archivePath = rejectPlan(cwd, loadBoard(cwd).revision ?? 0);
 
     assert.ok(archivePath);
     const archived = JSON.parse(readFileSync(archivePath, "utf-8")) as Board;
     assert.equal(archived.planPending, true);
     assert.equal(archived.tasks[0]?.title, "First");
     assert.deepEqual(loadBoard(cwd).tasks, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("whole-board replacement preserves a concurrent plan and creates no archive", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-board-replace-conflict-"));
+  try {
+    saveBoard(cwd, emptyBoard());
+    const emptyRevision = loadBoard(cwd).revision ?? 0;
+    updateBoard(cwd, (concurrent) => {
+      createTask(concurrent, { title: "Concurrent", brief: "new plan", tier: "standard" });
+    });
+
+    assert.throws(
+      () =>
+        replaceBoard(
+          cwd,
+          { version: 1, nextTaskNumber: 1, goal: "stale goal", tasks: [] },
+          emptyRevision
+        ),
+      /stale maestro board/
+    );
+    assert.equal(loadBoard(cwd).tasks[0]?.title, "Concurrent");
+    assert.equal(listArchivedBoards(cwd).length, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("archived replacement is CAS-safe and archives the exact cleared revision", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-board-archive-cas-"));
+  try {
+    const original = emptyBoard();
+    original.goal = "original";
+    createTask(original, { title: "Original", brief: "work", tier: "standard" });
+    saveBoard(cwd, original);
+    const snapshot = loadBoard(cwd);
+
+    const archive = replaceBoardWithArchive(
+      cwd,
+      () => ({ version: 1, nextTaskNumber: 1, tasks: [] }),
+      snapshot.revision ?? 0
+    );
+
+    assert.ok(archive);
+    const archived = JSON.parse(readFileSync(archive, "utf8")) as Board;
+    assert.equal(archived.revision, snapshot.revision);
+    assert.equal(archived.goal, "original");
+    assert.equal(archived.tasks[0]?.title, "Original");
+    assert.deepEqual(loadBoard(cwd).tasks, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("plan rejection conflicts instead of clearing work added after confirmation", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-reject-plan-conflict-"));
+  try {
+    const board = emptyBoard();
+    board.planPending = true;
+    createTask(board, { title: "Reviewed", brief: "work", tier: "standard" });
+    saveBoard(cwd, board);
+    const reviewedRevision = loadBoard(cwd).revision ?? 0;
+    updateBoard(cwd, (current) => {
+      createTask(current, { title: "Concurrent", brief: "new work", tier: "standard" });
+    });
+
+    assert.throws(() => rejectPlan(cwd, reviewedRevision), /stale maestro board/);
+    assert.deepEqual(
+      loadBoard(cwd).tasks.map((task) => task.title),
+      ["Reviewed", "Concurrent"]
+    );
+    assert.equal(listArchivedBoards(cwd).length, 0);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -714,7 +792,7 @@ test("restoreArchivedBoard makes the selected board live and archives the curren
     createTask(current, { title: "Current", brief: "new work", tier: "complex" });
     saveBoard(cwd, current);
 
-    const restored = restoreArchivedBoard(cwd, selectedFile);
+    const restored = restoreArchivedBoard(cwd, selectedFile, loadBoard(cwd).revision ?? 0);
 
     assert.equal(loadBoard(cwd).tasks[0]?.title, "Archived");
     assert.ok(restored.archivedCurrent);
@@ -742,7 +820,10 @@ test("restoreArchivedBoard rejects malformed and non-Board files without replaci
     for (const [name, contents] of invalidArchives) {
       const file = join(directory, name);
       writeFileSync(file, contents);
-      assert.throws(() => restoreArchivedBoard(cwd, file), /not a valid maestro board/);
+      assert.throws(
+        () => restoreArchivedBoard(cwd, file, loadBoard(cwd).revision ?? 0),
+        /not a valid maestro board/
+      );
       assert.equal(loadBoard(cwd).tasks[0]?.title, "Current");
     }
   } finally {
@@ -778,7 +859,7 @@ test("boards with a stalled attempt stay valid and survive archive/restore", () 
     createTask(current, { title: "Current", brief: "new work", tier: "complex" });
     saveBoard(cwd, current);
 
-    const restored = restoreArchivedBoard(cwd, selectedFile);
+    const restored = restoreArchivedBoard(cwd, selectedFile, loadBoard(cwd).revision ?? 0);
 
     assert.equal(restored.selectedFile, selectedFile);
     const live = loadBoard(cwd);
@@ -843,7 +924,11 @@ test("restoreArchivedBoard rejects invalid optional Attempt fields without repla
       const file = join(directory, `${field}-board.json`);
       writeFileSync(file, JSON.stringify(invalidBoard));
 
-      assert.throws(() => restoreArchivedBoard(cwd, file), /not a valid maestro board/, field);
+      assert.throws(
+        () => restoreArchivedBoard(cwd, file, loadBoard(cwd).revision ?? 0),
+        /not a valid maestro board/,
+        field
+      );
       assert.equal(loadBoard(cwd).tasks[0]?.title, "Current", field);
     }
 
@@ -862,7 +947,7 @@ test("restoreArchivedBoard rejects invalid optional Attempt fields without repla
     const invalidReviewLogFile = join(directory, "review-log-board.json");
     writeFileSync(invalidReviewLogFile, JSON.stringify(invalidReviewLog));
     assert.throws(
-      () => restoreArchivedBoard(cwd, invalidReviewLogFile),
+      () => restoreArchivedBoard(cwd, invalidReviewLogFile, loadBoard(cwd).revision ?? 0),
       /not a valid maestro board/
     );
     assert.equal(loadBoard(cwd).tasks[0]?.title, "Current");

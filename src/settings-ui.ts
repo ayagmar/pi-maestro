@@ -22,6 +22,7 @@ import {
   PRESETS,
   saveConfig,
   THINKING_LEVELS,
+  validateEffectiveConfig,
 } from "./config.js";
 import { type MaestroConfig } from "./types.js";
 
@@ -153,43 +154,19 @@ export function applySettingsChange(
   else if (id === "autoCommit") config.autoCommit = value === "on";
   else if (id === "cleanupCompletedTasks") config.cleanupCompletedTasks = value === "on";
   else if (id === "maxAttempts") config.maxAttempts = Number(value);
-  else if (id === "maxPlanTasks") {
-    config.maxPlanTasks = Number(value);
-    config.maxDiscoveryGeneratedTasks = Math.min(
-      config.maxDiscoveryGeneratedTasks,
-      config.maxPlanTasks
-    );
-    config.confirmationPlanTasks = Math.min(config.confirmationPlanTasks, config.maxPlanTasks);
-  } else if (id === "maxDiscoveryGeneratedTasks") {
+  else if (id === "maxPlanTasks") config.maxPlanTasks = Number(value);
+  else if (id === "maxDiscoveryGeneratedTasks") {
     config.maxDiscoveryGeneratedTasks = Number(value);
-    if (config.maxDiscoveryGeneratedTasks > config.maxPlanTasks) {
-      config.maxPlanTasks = config.maxDiscoveryGeneratedTasks;
-    }
   } else if (id === "maxTotalLaunchesPerRun") {
     config.maxTotalLaunchesPerRun = Number(value);
-    if (config.confirmationTotalLaunches > config.maxTotalLaunchesPerRun) {
-      config.confirmationTotalLaunches = config.maxTotalLaunchesPerRun;
-    }
   } else if (id === "confirmationPlanTasks") {
     config.confirmationPlanTasks = Number(value);
-    if (config.confirmationPlanTasks > config.maxPlanTasks) {
-      config.maxPlanTasks = config.confirmationPlanTasks;
-    }
   } else if (id === "confirmationTotalLaunches") {
     config.confirmationTotalLaunches = Number(value);
-    if (config.confirmationTotalLaunches > config.maxTotalLaunchesPerRun) {
-      config.maxTotalLaunchesPerRun = config.confirmationTotalLaunches;
-    }
   } else if (id === "reviewRequiredApprovals") {
     config.reviewRequiredApprovals = Number(value);
-    if (config.reviewRequiredApprovals > (config.maxReviewerLaunches ?? 4)) {
-      config.maxReviewerLaunches = config.reviewRequiredApprovals;
-    }
   } else if (id === "maxReviewerLaunches") {
     config.maxReviewerLaunches = Number(value);
-    if ((config.reviewRequiredApprovals ?? 2) > config.maxReviewerLaunches) {
-      config.reviewRequiredApprovals = Math.max(2, config.maxReviewerLaunches);
-    }
   } else if (id === "maxCostPerTask") {
     config.maxCostPerTask = value === "off" ? 0 : Number(value.slice(1));
   } else if (id === "maxRunCost") {
@@ -233,6 +210,8 @@ export async function showSettings(
   const persist = () => saveConfig(scope, ctx.cwd, config);
 
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+    let settingsFocused = false;
+    let activeModelInput: Input | undefined;
     const pickerTheme = {
       selectedPrefix: (text: string) => theme.fg("accent", text),
       selectedText: (text: string) => theme.fg("accent", text),
@@ -254,6 +233,13 @@ export async function showSettings(
         preferredProvider
       );
       const input = new Input();
+      activeModelInput = input;
+      input.focused = settingsFocused;
+      const finish = (selectedValue?: string) => {
+        input.focused = false;
+        if (activeModelInput === input) activeModelInput = undefined;
+        close(selectedValue);
+      };
       const titleText = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
       const searchLabel = new Text(theme.fg("muted", " Search by provider or model id:"), 0, 0);
       const hint = new Text(
@@ -283,12 +269,18 @@ export async function showSettings(
         list = new SelectList(items, Math.min(Math.max(items.length, 1), 10), pickerTheme);
         const currentIndex = items.findIndex((item) => item.value === currentValue);
         if (!input.getValue() && currentIndex >= 0) list.setSelectedIndex(currentIndex);
-        list.onSelect = (item) => close(item.value);
-        list.onCancel = () => close();
+        list.onSelect = (item) => finish(item.value);
+        list.onCancel = () => finish();
       };
       rebuildList();
 
       return {
+        get focused() {
+          return input.focused;
+        },
+        set focused(value: boolean) {
+          input.focused = value;
+        },
         render: (width: number) => [
           ...titleText.render(width),
           ...searchLabel.render(width),
@@ -395,10 +387,11 @@ export async function showSettings(
           },
           {
             id: "livePanes",
-            label: "Ambient live panes",
+            label: "Auto-open passive agent pane",
             currentValue: config.livePanes ? "on" : "off",
-            values: ["on", "off"],
-            description: "Show owner-scoped executor transcripts beside the editor.",
+            values: ["off", "on"],
+            description:
+              "Optional. Agent sessions are always available from /maestro agents and the control center.",
           },
           {
             id: "useWorktrees",
@@ -534,7 +527,13 @@ export async function showSettings(
         Math.min(items.length + 2, 15),
         getSettingsListTheme(),
         (id, value) => {
-          config = applySettingsChange(config, id, value);
+          const updated = applySettingsChange(structuredClone(config), id, value);
+          const error = validateEffectiveConfig(updated);
+          if (error) {
+            ctx.ui.notify(`Setting not saved: ${error}`, "warning");
+            return;
+          }
+          config = updated;
           persist();
           items = buildSectionItems(section);
           for (const item of items) list.updateValue(item.id, item.currentValue);
@@ -607,6 +606,13 @@ export async function showSettings(
     );
 
     return {
+      get focused() {
+        return settingsFocused;
+      },
+      set focused(value: boolean) {
+        settingsFocused = value;
+        if (activeModelInput) activeModelInput.focused = value;
+      },
       render: (width: number) => [...container.render(width), ...navigation.render(width)],
       invalidate: () => {
         container.invalidate();

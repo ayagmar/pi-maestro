@@ -17,7 +17,7 @@ export const REVIEW_TOOLS = "read,bash,grep,find,ls";
 export const DEFAULT_CONFIG: MaestroConfig = {
   maxParallel: 3,
   planGate: false,
-  livePanes: true,
+  livePanes: false,
   useWorktrees: false,
   autoCommit: true,
   maxAttempts: 3,
@@ -84,7 +84,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       planGate: false,
-      livePanes: true,
+      livePanes: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -121,7 +121,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 4,
       planGate: false,
-      livePanes: true,
+      livePanes: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -158,7 +158,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 4,
       planGate: false,
-      livePanes: true,
+      livePanes: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -195,7 +195,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       planGate: false,
-      livePanes: true,
+      livePanes: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 3,
@@ -232,7 +232,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       planGate: false,
-      livePanes: true,
+      livePanes: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
@@ -269,7 +269,7 @@ export const PRESETS: Preset[] = [
     config: {
       maxParallel: 3,
       planGate: false,
-      livePanes: true,
+      livePanes: false,
       useWorktrees: false,
       autoCommit: true,
       maxAttempts: 4,
@@ -463,35 +463,35 @@ export function validateConfig(value: unknown): string | undefined {
     typeof maximumLaunches === "number" &&
     requiredApprovals > maximumLaunches
   ) {
-    return "reviewRequiredApprovals cannot exceed maxReviewerLaunches";
+    return `reviewRequiredApprovals (${requiredApprovals}) cannot exceed maxReviewerLaunches (${maximumLaunches})`;
   }
   if (
     typeof config.maxDiscoveryGeneratedTasks === "number" &&
     typeof config.maxPlanTasks === "number" &&
     config.maxDiscoveryGeneratedTasks > config.maxPlanTasks
   ) {
-    return "maxDiscoveryGeneratedTasks cannot exceed maxPlanTasks";
+    return `maxDiscoveryGeneratedTasks (${config.maxDiscoveryGeneratedTasks}) cannot exceed maxPlanTasks (${config.maxPlanTasks})`;
   }
   if (
     typeof config.maxReviewerLaunches === "number" &&
     typeof config.maxTotalLaunchesPerRun === "number" &&
     config.maxReviewerLaunches > config.maxTotalLaunchesPerRun
   ) {
-    return "maxReviewerLaunches cannot exceed maxTotalLaunchesPerRun";
+    return `maxReviewerLaunches (${config.maxReviewerLaunches}) cannot exceed maxTotalLaunchesPerRun (${config.maxTotalLaunchesPerRun})`;
   }
   if (
     typeof config.confirmationPlanTasks === "number" &&
     typeof config.maxPlanTasks === "number" &&
     config.confirmationPlanTasks > config.maxPlanTasks
   ) {
-    return "confirmationPlanTasks cannot exceed maxPlanTasks";
+    return `confirmationPlanTasks (${config.confirmationPlanTasks}) cannot exceed maxPlanTasks (${config.maxPlanTasks})`;
   }
   if (
     typeof config.confirmationTotalLaunches === "number" &&
     typeof config.maxTotalLaunchesPerRun === "number" &&
     config.confirmationTotalLaunches > config.maxTotalLaunchesPerRun
   ) {
-    return "confirmationTotalLaunches cannot exceed maxTotalLaunchesPerRun";
+    return `confirmationTotalLaunches (${config.confirmationTotalLaunches}) cannot exceed maxTotalLaunchesPerRun (${config.maxTotalLaunchesPerRun})`;
   }
   if (
     config.logEvents !== undefined &&
@@ -565,6 +565,18 @@ export function validateConfig(value: unknown): string | undefined {
   return undefined;
 }
 
+export function validateEffectiveConfig(config: MaestroConfig): string | undefined {
+  const error = validateConfig(config);
+  if (error) return error;
+  if (
+    config.defaultVerificationProfile &&
+    !config.verificationProfiles?.[config.defaultVerificationProfile]
+  ) {
+    return `defaultVerificationProfile (${config.defaultVerificationProfile}) must name a configured verification profile`;
+  }
+  return undefined;
+}
+
 function readConfigFile(file: string): Partial<MaestroConfig> | undefined {
   if (!existsSync(file)) return undefined;
   const contents = readFileSync(file, "utf-8");
@@ -590,18 +602,25 @@ export function loadConfig(cwd: string): MaestroConfig {
   const user = readConfigFile(configFile("user", cwd));
   const project = readConfigFile(configFile("project", cwd));
   const trusted = mergeConfig(DEFAULT_CONFIG, user);
-  if (!project) return trusted;
-
-  const { verificationProfiles: _ignoredCommands, ...projectSettings } = project;
-  const selected = projectSettings.defaultVerificationProfile;
-  if (selected && !trusted.verificationProfiles?.[selected]) {
-    delete projectSettings.defaultVerificationProfile;
+  let resolved = trusted;
+  if (project) {
+    const { verificationProfiles: _ignoredCommands, ...projectSettings } = project;
+    const selected = projectSettings.defaultVerificationProfile;
+    if (selected && !trusted.verificationProfiles?.[selected]) {
+      delete projectSettings.defaultVerificationProfile;
+    }
+    resolved = mergeConfig(trusted, projectSettings);
   }
-  return mergeConfig(trusted, projectSettings);
+
+  const error = validateEffectiveConfig(resolved);
+  if (error) throw new Error(`Invalid effective maestro configuration: ${error}`);
+  return resolved;
 }
 
 /** Persist a full config to the given scope file (settings UI writes here). */
 export function saveConfig(scope: ConfigScope, cwd: string, config: MaestroConfig): void {
+  const error = validateEffectiveConfig(config);
+  if (error) throw new Error(`Cannot save invalid effective maestro configuration: ${error}`);
   const file = configFile(scope, cwd);
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
