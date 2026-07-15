@@ -20,23 +20,20 @@ import {
   humanRetryEligibility,
   humanRetryRiskToken,
   latestArchiveFile,
-  listArchivedBoards,
   loadBoard,
   loadStatusHistory,
-  planValidationMessage,
   replaceBoard,
   replaceBoardWithArchive,
   restoreQuarantineNotice,
   sweepDispatchState,
   updateBoard,
   updateTask,
-  validatePlan,
 } from "./board.js";
 import { MaestroCommandDispatcher } from "./command-dispatcher.js";
 import type { RunCommandRuntime, RunCommandSession } from "./command-run-control.js";
 import { pickFromList } from "./command-ui.js";
 import { registerMaestroCommand } from "./commands.js";
-import { loadConfig, resolveTierModels } from "./config.js";
+import { loadConfig } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE } from "./constants.js";
 import {
   Dashboard,
@@ -45,31 +42,22 @@ import {
   type LivePaneLaunch,
 } from "./dashboard.js";
 import {
-  type ActiveDriveControl,
   acknowledgeDeliveredDecision,
   type BackgroundDrive,
-  cleanupCompletedBoard,
   DriveRuntimeController,
   deliverPendingDecision,
-  persistActiveDrive,
   persistDriveDecision,
 } from "./drive-controller.js";
-import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
+import { confirmDriveScale } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { boardUsage, formatBoardProgress } from "./format.js";
 import { notify } from "./handoff.js";
 import { collectLivePaneLaunches } from "./live-pane-launches.js";
 import { manuallyApproveTask } from "./manual-approval.js";
 import { showPlanReview } from "./plan-review-controller.js";
-import { preflightWorkflow } from "./preflight.js";
 import { pruneTaskLogs } from "./retention.js";
+import { startExecutor as defaultStartExecutor, findSessionFile } from "./runner.js";
 import {
-  startExecutor as defaultStartExecutor,
-  findSessionFile,
-  type RunUpdate,
-} from "./runner.js";
-import {
-  assertKnownTaskIds,
   maestroBoardCwd,
   previousBoardSession,
   sessionCanControlDrive,
@@ -88,15 +76,8 @@ export {
 } from "./session-control.js";
 
 import { registerMaestroTools } from "./tools.js";
-import { type Board, type PausedDriveState, type Task, type TierConfig } from "./types.js";
-import {
-  type DriveSummary,
-  driveBoard,
-  formatDriveSummary,
-  lastReport,
-  preflightTaskTiers,
-  type WorkflowRun,
-} from "./workflow.js";
+import { type Board } from "./types.js";
+import { formatDriveSummary, lastReport } from "./workflow.js";
 import { showWorkflowBrowser } from "./workflow-browser.js";
 import { sweepWorktrees } from "./worktree.js";
 
@@ -430,114 +411,6 @@ export default function maestro(
     });
   }
 
-  function applyUpdate(
-    ctx: ExtensionContext,
-    taskId: string,
-    update: RunUpdate,
-    kind: WorkflowRun["kind"],
-    onProgress: () => void
-  ): void {
-    const live = driveController.getLiveRun(taskId, kind);
-    if (live) {
-      live.turns = update.turns;
-      live.cost = update.cost;
-      live.lastActivity = update.lastActivity;
-    }
-    if (runtimeActive) refreshUI(ctx);
-    onProgress();
-  }
-
-  function trackRun(ctx: ExtensionContext, run: WorkflowRun): () => void {
-    if (suppressedAutoPaneDriveId !== currentDriveId()) suppressedAutoPaneDriveId = undefined;
-    driveController.registerLiveRun(run);
-    if (runtimeActive) refreshUI(ctx);
-    // The workflow persists the running state immediately after registration.
-    // Refresh again once that synchronous mutation has completed.
-    queueMicrotask(() => {
-      if (runtimeActive) refreshUI(ctx);
-    });
-    return () => {
-      driveController.removeLiveRun(run);
-      if (runtimeActive) refreshUI(ctx);
-    };
-  }
-
-  async function runDriveWorkflow(
-    ctx: ExtensionContext,
-    taskIds: string[] | undefined,
-    signal: AbortSignal | undefined,
-    reportProgress: (message: string) => void,
-    shouldPause?: () => boolean,
-    humanRetryTaskId?: string,
-    humanRetryExpectedRiskToken?: string,
-    humanRetryOwnerSession?: string
-  ): Promise<DriveSummary> {
-    const config = loadConfig(ctx.cwd);
-    const board = loadBoard(ctx.cwd);
-    const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
-    if (validationError) throw new Error(validationError);
-    assertKnownTaskIds(board, taskIds);
-    const workflowPreflight = preflightWorkflow(board, config, taskIds);
-    if (
-      workflowPreflight.requiresConfirmation &&
-      board.scaleApproval?.signature !== workflowPreflight.signature
-    ) {
-      throw new Error(`Workflow scale confirmation is required (${workflowPreflight.signature}).`);
-    }
-    adoptBoard(ctx);
-
-    const selected = taskIds
-      ? taskIds.map((id) => findTask(board, id)).filter((task): task is Task => task !== undefined)
-      : board.tasks;
-    const unresolved = selected.filter(
-      (task) => task.status !== "approved" || task.id === humanRetryTaskId
-    );
-    const resolvedTiers = board.planPending
-      ? new Map<string, TierConfig>()
-      : preflightTaskTiers(unresolved, config, ctx.modelRegistry, ctx.model?.provider);
-
-    if (!board.planPending && unresolved.length > 0) {
-      const reviewTier: TierConfig = {
-        ...(config.tiers.review ?? { thinking: "high", tools: "read,bash,grep,find,ls" }),
-      };
-      const resolution = resolveTierModels(
-        "review",
-        reviewTier,
-        ctx.modelRegistry,
-        ctx.model?.provider
-      );
-      if (!resolution.ok) throw new Error(resolution.error);
-      const [primary, ...fallbacks] = resolution.modelArgs;
-      if (primary === undefined) delete reviewTier.model;
-      else reviewTier.model = primary;
-      if (fallbacks.length === 0) delete reviewTier.fallbacks;
-      else reviewTier.fallbacks = fallbacks.filter((model): model is string => model !== undefined);
-      resolvedTiers.set("review", reviewTier);
-    }
-
-    const driveOptions: Parameters<typeof driveBoard>[0] = {
-      cwd: ctx.cwd,
-      config,
-      resolvedTiers,
-      startExecutor: dependencies.startExecutor,
-      onUpdate: (taskId, update, kind) => applyUpdate(ctx, taskId, update, kind, () => {}),
-      onRoundUpdate: (round, phase, ids) => {
-        reportProgress(`Round ${round}: ${phase} ${ids.join(", ")}`);
-      },
-      trackRun: (run) => trackRun(ctx, run),
-      isLive: (taskId) => driveController.isTaskLive(taskId),
-      onRetentionWarning: (warning) => notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
-    };
-    if (taskIds) driveOptions.taskIds = taskIds;
-    if (signal) driveOptions.signal = signal;
-    if (shouldPause) driveOptions.shouldPause = shouldPause;
-    if (humanRetryTaskId) driveOptions.humanRetryTaskId = humanRetryTaskId;
-    if (humanRetryExpectedRiskToken)
-      driveOptions.humanRetryExpectedRiskToken = humanRetryExpectedRiskToken;
-    if (humanRetryOwnerSession) driveOptions.humanRetryOwnerSession = humanRetryOwnerSession;
-    return driveBoard(driveOptions);
-  }
-
   function sendDecision(evidence: string, decisionId: string): void {
     if (!runtimeActive) throw new Error("Maestro session runtime is no longer active.");
     pi.sendMessage(
@@ -546,7 +419,19 @@ export default function maestro(
     );
   }
 
-  function startBackgroundDrive(
+  const driveServices = {
+    startExecutor: dependencies.startExecutor,
+    isRuntimeActive: () => runtimeActive,
+    adoptBoard,
+    refreshUI,
+    notify,
+    sendDecision,
+    onRunStarted: () => {
+      if (suppressedAutoPaneDriveId !== currentDriveId()) suppressedAutoPaneDriveId = undefined;
+    },
+  };
+
+  function startDrive(
     ctx: ExtensionContext,
     taskIds: string[] | undefined,
     signal?: AbortSignal,
@@ -554,144 +439,15 @@ export default function maestro(
     humanRetryTaskId?: string,
     humanRetryExpectedRiskToken?: string
   ): BackgroundDrive {
-    if (driveController.hasActive()) throw new Error("An autonomous drive is already active.");
-    validateDriveStart(ctx, taskIds);
-
-    const operation: BackgroundDrive = { promise: Promise.resolve() };
-    const ownerSession = ctx.sessionManager.getSessionFile();
-    if (ownerSession) operation.ownerSession = ownerSession;
-    const driveId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const control: ActiveDriveControl = {
-      id: driveId,
-      cwd: ctx.cwd,
-      pauseRequested: false,
-      abortController: new AbortController(),
-    };
-    if (ownerSession) control.ownerSession = ownerSession;
-    if (taskIds) control.taskIds = taskIds;
-
-    const reserved = persistActiveDrive(ctx.cwd, {
-      id: driveId,
-      ...(ownerSession ? { ownerSession } : {}),
-      ...(taskIds ? { taskIds } : {}),
-      startedAt: Date.now(),
-    });
-    if (!reserved) {
-      throw new Error("Another session already owns an active or paused drive.");
-    }
-    try {
-      driveController.begin(control);
-    } catch (error) {
-      const summary = unexpectedDriveSummary(ctx.cwd, taskIds, error);
-      persistDriveDecision(ctx.cwd, ownerSession, summary, formatDrivePulse(summary), driveId);
-      throw error;
-    }
-    driveController.setBackground(operation);
-    const statusRefresh = setInterval(() => {
-      if (runtimeActive) refreshUI(ctx);
-    }, 1_000);
-    statusRefresh.unref();
-    operation.promise = runControlledDrive(
+    return driveController.startBackgroundDrive(
       ctx,
-      control,
+      taskIds,
+      driveServices,
       signal,
       reportProgress,
       humanRetryTaskId,
-      humanRetryExpectedRiskToken,
-      ownerSession
-    )
-      .then((summary) => {
-        operation.summary = summary;
-        const message = formatDrivePulse(summary).slice(0, 4000);
-        const persisted = persistDriveDecision(ctx.cwd, ownerSession, summary, message, driveId);
-        if (persisted && summary.stoppedBecause.code === "completed") {
-          cleanupCompletedBoard(ctx.cwd);
-          try {
-            const archive = listArchivedBoards(ctx.cwd)[0];
-            if (archive && loadBoard(ctx.cwd).tasks.length === 0) {
-              notify(
-                ctx,
-                `Run complete — board archived to ${basename(archive.file)}. /maestro replay to revisit, /maestro start <goal> for a new run.`
-              );
-            }
-          } catch {
-            // The completion decision is durable; stale session UI must not turn it into an error.
-          }
-        }
-        if (persisted && runtimeActive) {
-          deliverPendingDecision(ctx.cwd, ownerSession, sendDecision);
-        }
-      })
-      .catch((error) => {
-        operation.error = error instanceof Error ? error.message : String(error);
-        try {
-          const summary = unexpectedDriveSummary(ctx.cwd, taskIds, operation.error);
-          const persisted = persistDriveDecision(
-            ctx.cwd,
-            ownerSession,
-            summary,
-            formatDrivePulse(summary),
-            driveId
-          );
-          if (persisted && runtimeActive) {
-            deliverPendingDecision(ctx.cwd, ownerSession, sendDecision);
-          }
-        } catch (persistenceError) {
-          operation.error = `${operation.error}; could not persist internal error: ${String(persistenceError)}`;
-        }
-      })
-      .finally(() => {
-        driveController.finish(control);
-        clearInterval(statusRefresh);
-        if (runtimeActive) refreshUI(ctx);
-      });
-    return driveController.getBackground() ?? operation;
-  }
-
-  function savePausedDrive(cwd: string, pausedDrive: PausedDriveState | undefined): void {
-    updateBoard(cwd, (board) => {
-      if (pausedDrive) board.pausedDrive = pausedDrive;
-      else delete board.pausedDrive;
-      return true;
-    });
-  }
-
-  async function runControlledDrive(
-    ctx: ExtensionContext,
-    control: ActiveDriveControl,
-    signal: AbortSignal | undefined,
-    reportProgress: (message: string) => void,
-    humanRetryTaskId?: string,
-    humanRetryExpectedRiskToken?: string,
-    humanRetryOwnerSession?: string
-  ): Promise<DriveSummary> {
-    const taskIds = control.taskIds;
-
-    const combinedSignal = signal
-      ? AbortSignal.any([signal, control.abortController.signal])
-      : control.abortController.signal;
-    const summary = await runDriveWorkflow(
-      ctx,
-      taskIds,
-      combinedSignal,
-      reportProgress,
-      () => control.pauseRequested,
-      humanRetryTaskId,
-      humanRetryExpectedRiskToken,
-      humanRetryOwnerSession
+      humanRetryExpectedRiskToken
     );
-
-    if (
-      summary.stoppedBecause.code === "paused" ||
-      summary.stoppedBecause.code === "provider_blocked" ||
-      summary.stoppedBecause.code === "escalation_required"
-    ) {
-      const paused: PausedDriveState = {};
-      if (taskIds) paused.taskIds = taskIds;
-      if (control.ownerSession) paused.ownerSession = control.ownerSession;
-      savePausedDrive(ctx.cwd, paused);
-    }
-    return summary;
   }
 
   function sessionContainsDecision(ctx: ExtensionContext, decisionId: string): boolean {
@@ -722,9 +478,7 @@ export default function maestro(
   }
 
   function launchCommandDrive(ctx: ExtensionCommandContext, taskIds: string[] | undefined): void {
-    const operation = startBackgroundDrive(ctx, taskIds, undefined, (message) =>
-      notify(ctx, message)
-    );
+    const operation = startDrive(ctx, taskIds, undefined, (message) => notify(ctx, message));
     void operation.promise.then(() => {
       if (!runtimeActive) return;
       refreshUI(ctx);
@@ -813,7 +567,7 @@ export default function maestro(
     }
 
     notify(ctx, `Retrying ${task.id} in isolated recovery mode…`);
-    const operation = startBackgroundDrive(
+    const operation = startDrive(
       ctx,
       [task.id],
       undefined,
@@ -849,7 +603,7 @@ export default function maestro(
     },
     launchDrive: launchCommandDrive,
     requestRetry: requestHumanRetry,
-    savePausedDrive,
+    savePausedDrive: (cwd, pausedDrive) => driveController.savePausedDrive(cwd, pausedDrive),
   };
   const commandSession: RunCommandSession = {
     adoptBoard,
@@ -868,7 +622,7 @@ export default function maestro(
     adoptBoard,
     refreshUI,
     driveController,
-    startBackgroundDrive,
+    startBackgroundDrive: startDrive,
   });
 
   const commandDispatcher = new MaestroCommandDispatcher(

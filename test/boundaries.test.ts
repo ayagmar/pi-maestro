@@ -239,11 +239,18 @@ test("drive runtime controller is the single owner of live-run state", () => {
   const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
   assert.doesNotMatch(extension, /new (?:Map|Set)<string, WorkflowRun>/);
   assert.doesNotMatch(extension, /liveRuns\.(?:set|delete|clear)/);
+  assert.doesNotMatch(
+    extension,
+    /function runControlledDrive|function runDriveWorkflow|function trackRun|function applyUpdate/
+  );
 
   const controller = files.find((file) => file.name === "drive-controller.ts")?.contents ?? "";
   assert.match(controller, /private readonly liveRuns = new Set<LiveRun>/);
   assert.match(controller, /registerLiveRun/);
   assert.match(controller, /removeLiveRun/);
+  assert.match(controller, /startBackgroundDrive/);
+  assert.match(controller, /private async runControlledDrive/);
+  assert.match(controller, /private async runDriveWorkflow/);
 
   const tools = files.find((file) => file.name === "tools.ts")?.contents ?? "";
   assert.doesNotMatch(tools, /liveRuns: Map<string, WorkflowRun>/);
