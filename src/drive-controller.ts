@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { completionFreshness } from "./artifact-policy.js";
 import {
   archiveBoard,
@@ -18,7 +18,11 @@ import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { truncateText } from "./format.js";
 import { preflightWorkflow } from "./preflight.js";
-import type { ExecutorHandle, RunUpdate, startExecutor as defaultStartExecutor } from "./runner.js";
+import {
+  type startExecutor as defaultStartExecutor,
+  type ExecutorHandle,
+  type RunUpdate,
+} from "./runner.js";
 import { assertKnownTaskIds } from "./session-control.js";
 import {
   type ActiveDriveState,
@@ -28,13 +32,9 @@ import {
   type TaskStatus,
   type TierConfig,
 } from "./types.js";
-import {
-  driveBoard,
-  type DriveSummary,
-  formatDriveSummary,
-  preflightTaskTiers,
-  type WorkflowRun,
-} from "./workflow.js";
+import { driveBoard, preflightTaskTiers } from "./workflow.js";
+import { type DriveSummary, formatDriveSummary } from "./workflow-policy.js";
+import { type WorkflowRun } from "./workflow-runtime.js";
 
 export interface LiveRun {
   taskId: string;
