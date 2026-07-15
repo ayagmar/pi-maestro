@@ -4,6 +4,8 @@ import { completionFreshness } from "./artifact-policy.js";
 import {
   archiveBoard,
   findTask,
+  humanRetryEligibility,
+  humanRetryRiskToken,
   isTaskSettled,
   listArchivedBoards,
   loadBoard,
@@ -12,7 +14,7 @@ import {
   validatePlan,
 } from "./board.js";
 import { loadConfig, resolveTierModels } from "./config.js";
-import { validateDriveStart } from "./drive-preflight.js";
+import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { truncateText } from "./format.js";
 import { preflightWorkflow } from "./preflight.js";
@@ -26,7 +28,13 @@ import {
   type TaskStatus,
   type TierConfig,
 } from "./types.js";
-import { driveBoard, type DriveSummary, preflightTaskTiers, type WorkflowRun } from "./workflow.js";
+import {
+  driveBoard,
+  type DriveSummary,
+  formatDriveSummary,
+  preflightTaskTiers,
+  type WorkflowRun,
+} from "./workflow.js";
 
 export interface LiveRun {
   taskId: string;
@@ -259,6 +267,106 @@ export class DriveRuntimeController {
       if (pausedDrive) board.pausedDrive = pausedDrive;
       else delete board.pausedDrive;
       return true;
+    });
+  }
+
+  async requestHumanRetry(
+    ctx: ExtensionContext,
+    requestedTaskId: string,
+    services: DriveRuntimeServices
+  ): Promise<void> {
+    if (this.hasActive() || this.liveRunCount() > 0) {
+      services.notify(
+        ctx,
+        "Retry not started: an autonomous drive or executor is already running.",
+        "warning"
+      );
+      return;
+    }
+    const previewBoard = loadBoard(ctx.cwd);
+    const task = findTask(previewBoard, requestedTaskId);
+    const ownerSession = ctx.sessionManager.getSessionFile();
+    const eligibility = humanRetryEligibility(previewBoard, requestedTaskId, {
+      maxAttempts: loadConfig(ctx.cwd).maxAttempts,
+      config: loadConfig(ctx.cwd),
+      isLive: (id) => this.isTaskLive(id),
+      ...(ownerSession ? { ownerSession } : {}),
+    });
+    if (!eligibility.eligible || !task) {
+      services.notify(ctx, `Retry not started: ${eligibility.message}`, "warning");
+      return;
+    }
+
+    const riskEvidence = humanRetryRiskToken(task);
+    if (eligibility.requiresConfirmation) {
+      if (!ctx.hasUI) {
+        services.notify(ctx, `Retry not started: ${eligibility.message}`, "warning");
+        return;
+      }
+      const confirmed = await ctx.ui.confirm(
+        "Retry accepted or integrated work?",
+        `${task.id} will run in a fresh isolated worktree. Existing attempts and recovery evidence will be preserved.`
+      );
+      if (!confirmed) {
+        services.notify(ctx, "Retry cancelled; accepted work was not changed.", "warning");
+        return;
+      }
+      const currentBoard = loadBoard(ctx.cwd);
+      const currentTask = findTask(currentBoard, task.id);
+      const currentEligibility = humanRetryEligibility(currentBoard, task.id, {
+        maxAttempts: loadConfig(ctx.cwd).maxAttempts,
+        config: loadConfig(ctx.cwd),
+        isLive: (id) => this.isTaskLive(id),
+        ...(ownerSession ? { ownerSession } : {}),
+      });
+      if (
+        !currentTask ||
+        !currentEligibility.eligible ||
+        humanRetryRiskToken(currentTask) !== riskEvidence
+      ) {
+        services.notify(
+          ctx,
+          "Retry not started: task acceptance or integration evidence changed during confirmation.",
+          "warning"
+        );
+        return;
+      }
+    }
+    if (!(await confirmDriveScale(ctx, [task.id]))) {
+      services.notify(ctx, "Retry not started: workflow scale was not confirmed.", "warning");
+      return;
+    }
+    const confirmedTask = findTask(loadBoard(ctx.cwd), task.id);
+    if (!confirmedTask || humanRetryRiskToken(confirmedTask) !== riskEvidence) {
+      services.notify(
+        ctx,
+        "Retry not started: task acceptance or integration evidence changed; confirm it again.",
+        "warning"
+      );
+      return;
+    }
+
+    services.notify(ctx, `Retrying ${task.id} in isolated recovery mode…`);
+    const operation = this.startBackgroundDrive(
+      ctx,
+      [task.id],
+      services,
+      undefined,
+      (message) => services.notify(ctx, message),
+      task.id,
+      riskEvidence
+    );
+    void operation.promise.then(() => {
+      if (!services.isRuntimeActive()) return;
+      if (operation.summary) {
+        services.notify(
+          ctx,
+          formatDriveSummary(operation.summary),
+          operation.summary.stoppedBecause.code === "completed" ? "info" : "warning"
+        );
+      } else if (operation.error) {
+        services.notify(ctx, operation.error, "error");
+      }
     });
   }
 

@@ -18,7 +18,6 @@ import {
   findTask,
   forceStatus,
   humanRetryEligibility,
-  humanRetryRiskToken,
   latestArchiveFile,
   loadBoard,
   loadStatusHistory,
@@ -48,7 +47,6 @@ import {
   deliverPendingDecision,
   persistDriveDecision,
 } from "./drive-controller.js";
-import { confirmDriveScale } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { boardUsage, formatBoardProgress } from "./format.js";
 import { notify } from "./handoff.js";
@@ -494,99 +492,8 @@ export default function maestro(
     });
   }
 
-  async function requestHumanRetry(ctx: ExtensionContext, requestedTaskId: string): Promise<void> {
-    if (driveController.hasActive() || driveController.liveRunCount() > 0) {
-      notify(
-        ctx,
-        "Retry not started: an autonomous drive or executor is already running.",
-        "warning"
-      );
-      return;
-    }
-    const previewBoard = loadBoard(ctx.cwd);
-    const task = findTask(previewBoard, requestedTaskId);
-    const ownerSession = ctx.sessionManager.getSessionFile();
-    const eligibility = humanRetryEligibility(previewBoard, requestedTaskId, {
-      maxAttempts: loadConfig(ctx.cwd).maxAttempts,
-      config: loadConfig(ctx.cwd),
-      isLive: (id) => driveController.isTaskLive(id),
-      ...(ownerSession ? { ownerSession } : {}),
-    });
-    if (!eligibility.eligible || !task) {
-      notify(ctx, `Retry not started: ${eligibility.message}`, "warning");
-      return;
-    }
-
-    const riskEvidence = humanRetryRiskToken(task);
-    if (eligibility.requiresConfirmation) {
-      if (!ctx.hasUI) {
-        notify(ctx, `Retry not started: ${eligibility.message}`, "warning");
-        return;
-      }
-      const confirmed = await ctx.ui.confirm(
-        "Retry accepted or integrated work?",
-        `${task.id} will run in a fresh isolated worktree. Existing attempts and recovery evidence will be preserved.`
-      );
-      if (!confirmed) {
-        notify(ctx, "Retry cancelled; accepted work was not changed.", "warning");
-        return;
-      }
-      const currentBoard = loadBoard(ctx.cwd);
-      const currentTask = findTask(currentBoard, task.id);
-      const currentEligibility = humanRetryEligibility(currentBoard, task.id, {
-        maxAttempts: loadConfig(ctx.cwd).maxAttempts,
-        config: loadConfig(ctx.cwd),
-        isLive: (id) => driveController.isTaskLive(id),
-        ...(ownerSession ? { ownerSession } : {}),
-      });
-      if (
-        !currentTask ||
-        !currentEligibility.eligible ||
-        humanRetryRiskToken(currentTask) !== riskEvidence
-      ) {
-        notify(
-          ctx,
-          "Retry not started: task acceptance or integration evidence changed during confirmation.",
-          "warning"
-        );
-        return;
-      }
-    }
-    if (!(await confirmDriveScale(ctx, [task.id]))) {
-      notify(ctx, "Retry not started: workflow scale was not confirmed.", "warning");
-      return;
-    }
-    const confirmedTask = findTask(loadBoard(ctx.cwd), task.id);
-    if (!confirmedTask || humanRetryRiskToken(confirmedTask) !== riskEvidence) {
-      notify(
-        ctx,
-        "Retry not started: task acceptance or integration evidence changed; confirm it again.",
-        "warning"
-      );
-      return;
-    }
-
-    notify(ctx, `Retrying ${task.id} in isolated recovery mode…`);
-    const operation = startDrive(
-      ctx,
-      [task.id],
-      undefined,
-      (message) => notify(ctx, message),
-      task.id,
-      riskEvidence
-    );
-    void operation.promise.then(() => {
-      if (!runtimeActive) return;
-      if (operation.summary) {
-        notify(
-          ctx,
-          formatDriveSummary(operation.summary),
-          operation.summary.stoppedBecause.code === "completed" ? "info" : "warning"
-        );
-      } else if (operation.error) {
-        notify(ctx, operation.error, "error");
-      }
-    });
+  function requestRetry(ctx: ExtensionContext, taskId: string): Promise<void> {
+    return driveController.requestHumanRetry(ctx, taskId, driveServices);
   }
 
   const commandRuntime: RunCommandRuntime = {
@@ -602,7 +509,7 @@ export default function maestro(
       driveController.abort();
     },
     launchDrive: launchCommandDrive,
-    requestRetry: requestHumanRetry,
+    requestRetry,
     savePausedDrive: (cwd, pausedDrive) => driveController.savePausedDrive(cwd, pausedDrive),
   };
   const commandSession: RunCommandSession = {
@@ -792,7 +699,7 @@ export default function maestro(
 
     if (!selection) return;
     if (selection.action === "retry") {
-      await requestHumanRetry(ctx, selection.taskId);
+      await requestRetry(ctx, selection.taskId);
       return;
     }
     if (selection.action === "view_report") {
@@ -832,7 +739,7 @@ export default function maestro(
   async function showBoard(ctx: ExtensionCommandContext): Promise<void> {
     await showTaskBrowser(ctx, {
       isLive: (taskId) => driveController.isTaskLive(taskId),
-      requestRetry: requestHumanRetry,
+      requestRetry,
       manuallyApprove: manuallyApproveTask,
       showReport: showTaskReport,
       showReview: showTaskReview,
