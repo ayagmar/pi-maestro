@@ -313,6 +313,18 @@ test("session navigation state lives outside the extension root", () => {
   assert.match(navigator, /sessionSwitchBlocked/);
 });
 
+test("review launch and convergence lifecycle lives outside drive orchestration", () => {
+  const files = sourceFiles();
+  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
+  assert.doesNotMatch(workflow, /launchReviewer|reviewIdentityMatches|reviewLaunches/);
+
+  const review = files.find((file) => file.name === "workflow-review.ts")?.contents ?? "";
+  assert.match(review, /function reviewTask/);
+  assert.match(review, /launchReviewer/);
+  assert.match(review, /convergenceRecord/);
+  assert.match(review, /integrateReviewedCandidate/);
+});
+
 test("executor attempt lifecycle lives outside workflow orchestration", () => {
   const files = sourceFiles();
   const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
