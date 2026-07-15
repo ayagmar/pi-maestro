@@ -126,12 +126,11 @@ export default function maestro(
   // over the shared board file.
   if (process.env.PI_MAESTRO_EXECUTOR === "1") return;
 
-  const liveRuns = new Map<string, WorkflowRun>();
   const driveController = new DriveRuntimeController();
   const sessionNavigator = new SessionNavigator({
     hasActiveDrive: () => driveController.hasActive(),
-    liveRunCount: () => liveRuns.size,
-    isTaskLive: (taskId) => liveRuns.has(taskId),
+    liveRunCount: () => driveController.liveRunCount(),
+    isTaskLive: (taskId) => driveController.isTaskLive(taskId),
   });
   let runtimeActive = true;
   let contextNudgeShown = false;
@@ -193,11 +192,11 @@ export default function maestro(
   }
 
   function livePaneLaunches(ctx: ExtensionContext): LivePaneLaunch[] {
-    return collectLivePaneLaunches(ctx.cwd, liveRuns);
+    return collectLivePaneLaunches(ctx.cwd, driveController.liveRunValues());
   }
 
   function watchedLiveRunCount(): number {
-    return liveRuns.size;
+    return driveController.liveRunCount();
   }
 
   function canShowLivePane(ctx: ExtensionContext): boolean {
@@ -249,15 +248,18 @@ export default function maestro(
             },
             onCycleVisibility: () => cycleLivePane(ctx),
             onSteer: (launch, message) => {
-              liveRuns.get(launch.taskId)?.handle.steer(message);
+              driveController.getLiveRun(launch.taskId)?.handle.steer(message);
             },
             onFollowUp: (launch, message) => {
-              liveRuns.get(launch.taskId)?.handle.followUp(message);
+              driveController.getLiveRun(launch.taskId)?.handle.followUp(message);
             },
             ...(isCommandContext(ctx)
               ? {
                   canOpenSession: () =>
-                    !sessionSwitchBlocked(driveController.hasActive(), liveRuns.size),
+                    !sessionSwitchBlocked(
+                      driveController.hasActive(),
+                      driveController.liveRunCount()
+                    ),
                   onOpenSession: (launch: LivePaneLaunch) => {
                     if (!launch.sessionFile) return;
                     void (async () => {
@@ -375,7 +377,7 @@ export default function maestro(
     // Sessions that never touched this board (fresh /maestro-less chats in
     // the same repo) don't get its status bar. Live runs always show:
     // this process owns them regardless of which session spawned them.
-    const showBoard = sessionOwnsBoard(ctx, board) || liveRuns.size > 0;
+    const showBoard = sessionOwnsBoard(ctx, board) || driveController.liveRunCount() > 0;
     if (board.tasks.length === 0 || !showBoard) {
       ctx.ui.setStatus(COMMAND, undefined);
       ctx.ui.setWidget(COMMAND, undefined);
@@ -384,7 +386,7 @@ export default function maestro(
     }
 
     const progress = formatBoardProgress(board.tasks);
-    const status = projectStatus(board, liveRuns.keys(), loadConfig(ctx.cwd));
+    const status = projectStatus(board, driveController.liveTaskIds(), loadConfig(ctx.cwd));
     const running = status.running;
     const usage = boardUsage(board.tasks);
     const runningPart = running > 0 ? ` · ${running} running` : "";
@@ -407,7 +409,7 @@ export default function maestro(
     }
     ctx.ui.setWorkingMessage(`maestro · ${running} executor(s) · $${usage.cost.toFixed(2)}`);
     ctx.ui.setWidget(COMMAND, (tui, theme) => {
-      const lines = [...liveRuns.values()].map((run) => {
+      const lines = [...driveController.liveRunValues()].map((run) => {
         const task = findTask(board, run.taskId);
         const title = task ? task.title : run.taskId;
         const label = run.kind === "review" ? "reviewing" : "running";
@@ -432,9 +434,10 @@ export default function maestro(
     ctx: ExtensionContext,
     taskId: string,
     update: RunUpdate,
+    kind: WorkflowRun["kind"],
     onProgress: () => void
   ): void {
-    const live = liveRuns.get(taskId);
+    const live = driveController.getLiveRun(taskId, kind);
     if (live) {
       live.turns = update.turns;
       live.cost = update.cost;
@@ -446,7 +449,7 @@ export default function maestro(
 
   function trackRun(ctx: ExtensionContext, run: WorkflowRun): () => void {
     if (suppressedAutoPaneDriveId !== currentDriveId()) suppressedAutoPaneDriveId = undefined;
-    liveRuns.set(run.taskId, run);
+    driveController.registerLiveRun(run);
     if (runtimeActive) refreshUI(ctx);
     // The workflow persists the running state immediately after registration.
     // Refresh again once that synchronous mutation has completed.
@@ -454,7 +457,7 @@ export default function maestro(
       if (runtimeActive) refreshUI(ctx);
     });
     return () => {
-      liveRuns.delete(run.taskId);
+      driveController.removeLiveRun(run);
       if (runtimeActive) refreshUI(ctx);
     };
   }
@@ -517,12 +520,12 @@ export default function maestro(
       config,
       resolvedTiers,
       startExecutor: dependencies.startExecutor,
-      onUpdate: (taskId, update) => applyUpdate(ctx, taskId, update, () => {}),
+      onUpdate: (taskId, update, kind) => applyUpdate(ctx, taskId, update, kind, () => {}),
       onRoundUpdate: (round, phase, ids) => {
         reportProgress(`Round ${round}: ${phase} ${ids.join(", ")}`);
       },
       trackRun: (run) => trackRun(ctx, run),
-      isLive: (taskId) => liveRuns.has(taskId),
+      isLive: (taskId) => driveController.isTaskLive(taskId),
       onRetentionWarning: (warning) => notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
     };
     if (taskIds) driveOptions.taskIds = taskIds;
@@ -738,7 +741,7 @@ export default function maestro(
   }
 
   async function requestHumanRetry(ctx: ExtensionContext, requestedTaskId: string): Promise<void> {
-    if (driveController.hasActive() || liveRuns.size > 0) {
+    if (driveController.hasActive() || driveController.liveRunCount() > 0) {
       notify(
         ctx,
         "Retry not started: an autonomous drive or executor is already running.",
@@ -752,7 +755,7 @@ export default function maestro(
     const eligibility = humanRetryEligibility(previewBoard, requestedTaskId, {
       maxAttempts: loadConfig(ctx.cwd).maxAttempts,
       config: loadConfig(ctx.cwd),
-      isLive: (id) => liveRuns.has(id),
+      isLive: (id) => driveController.isTaskLive(id),
       ...(ownerSession ? { ownerSession } : {}),
     });
     if (!eligibility.eligible || !task) {
@@ -779,7 +782,7 @@ export default function maestro(
       const currentEligibility = humanRetryEligibility(currentBoard, task.id, {
         maxAttempts: loadConfig(ctx.cwd).maxAttempts,
         config: loadConfig(ctx.cwd),
-        isLive: (id) => liveRuns.has(id),
+        isLive: (id) => driveController.isTaskLive(id),
         ...(ownerSession ? { ownerSession } : {}),
       });
       if (
@@ -834,9 +837,9 @@ export default function maestro(
 
   const commandRuntime: RunCommandRuntime = {
     hasActiveDrive: () => driveController.hasActive(),
-    liveRunCount: () => liveRuns.size,
-    liveTaskIds: () => new Set(liveRuns.keys()),
-    isTaskLive: (taskId) => liveRuns.has(taskId),
+    liveRunCount: () => driveController.liveRunCount(),
+    liveTaskIds: () => new Set(driveController.liveTaskIds()),
+    isTaskLive: (taskId) => driveController.isTaskLive(taskId),
     activeOwner: () => driveController.activeOwner(),
     requestPause: () => {
       driveController.requestPause();
@@ -864,7 +867,6 @@ export default function maestro(
     pi,
     adoptBoard,
     refreshUI,
-    liveRuns,
     driveController,
     startBackgroundDrive,
   });
@@ -879,7 +881,7 @@ export default function maestro(
       showAgents: (ctx) => openLivePane(ctx, true),
       showWorkflows: (ctx) =>
         showWorkflowBrowser(ctx, {
-          hasLiveRuns: () => liveRuns.size > 0,
+          hasLiveRuns: () => driveController.liveRunCount() > 0,
           onBoardChanged: () => refreshUI(ctx),
           reviewPlan: showPlan,
         }),
@@ -911,7 +913,8 @@ export default function maestro(
    */
   async function showDashboard(ctx: ExtensionContext): Promise<void> {
     const canSwitchSessions = () =>
-      isCommandContext(ctx) && !sessionSwitchBlocked(driveController.hasActive(), liveRuns.size);
+      isCommandContext(ctx) &&
+      !sessionSwitchBlocked(driveController.hasActive(), driveController.liveRunCount());
     if (ctx.mode !== "tui") {
       if (isCommandContext(ctx)) await showBoard(ctx);
       return;
@@ -923,10 +926,10 @@ export default function maestro(
           {
             getBoard: () => loadBoard(ctx.cwd),
             getConfig: () => loadConfig(ctx.cwd),
-            isLive: (taskId) => liveRuns.has(taskId),
-            liveKind: (taskId) => liveRuns.get(taskId)?.kind,
+            isLive: (taskId) => driveController.isTaskLive(taskId),
+            liveKind: (taskId) => driveController.getLiveRun(taskId)?.kind,
             getLiveRun: (taskId) => {
-              const live = liveRuns.get(taskId);
+              const live = driveController.getLiveRun(taskId);
               if (!live) return undefined;
               return {
                 cost: live.cost,
@@ -935,19 +938,19 @@ export default function maestro(
               };
             },
             liveActivity: (taskId) => {
-              const live = liveRuns.get(taskId);
+              const live = driveController.getLiveRun(taskId);
               if (!live) return undefined;
               const label = live.kind === "review" ? "reviewing" : "running";
               return `${label} · ${live.turns} turns · ${live.lastActivity}`;
             },
             steer: (taskId, message) => {
-              liveRuns.get(taskId)?.handle.steer(message);
+              driveController.getLiveRun(taskId)?.handle.steer(message);
             },
             followUp: (taskId, message) => {
-              liveRuns.get(taskId)?.handle.followUp(message);
+              driveController.getLiveRun(taskId)?.handle.followUp(message);
             },
             abort: (taskId) => {
-              liveRuns.get(taskId)?.handle.abort();
+              driveController.getLiveRun(taskId)?.handle.abort();
             },
             setTaskStatus: (taskId, status) => {
               try {
@@ -967,7 +970,7 @@ export default function maestro(
                   ctx.cwd,
                   taskId,
                   () => loadBoard(ctx.cwd),
-                  (id) => liveRuns.has(id)
+                  (id) => driveController.isTaskLive(id)
                 );
                 for (const warning of cleanup.warnings) {
                   notify(ctx, `Log cleanup warning: ${warning}`, "warning");
@@ -990,7 +993,7 @@ export default function maestro(
               humanRetryEligibility(loadBoard(ctx.cwd), taskId, {
                 maxAttempts: loadConfig(ctx.cwd).maxAttempts,
                 config: loadConfig(ctx.cwd),
-                isLive: (id) => liveRuns.has(id),
+                isLive: (id) => driveController.isTaskLive(id),
                 ...(ctx.sessionManager.getSessionFile()
                   ? { ownerSession: ctx.sessionManager.getSessionFile() }
                   : {}),
@@ -1063,7 +1066,7 @@ export default function maestro(
 
   async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
     await showPlanReview(ctx, {
-      hasLiveRuns: () => liveRuns.size > 0,
+      hasLiveRuns: () => driveController.liveRunCount() > 0,
       onChanged: () => refreshUI(ctx),
       onApproved: () => {
         refreshUI(ctx);
@@ -1074,7 +1077,7 @@ export default function maestro(
 
   async function showBoard(ctx: ExtensionCommandContext): Promise<void> {
     await showTaskBrowser(ctx, {
-      isLive: (taskId) => liveRuns.has(taskId),
+      isLive: (taskId) => driveController.isTaskLive(taskId),
       requestRetry: requestHumanRetry,
       manuallyApprove: manuallyApproveTask,
       showReport: showTaskReport,
@@ -1112,7 +1115,7 @@ export default function maestro(
 
   async function showMaestroHome(ctx: ExtensionCommandContext): Promise<string | null> {
     const board = loadBoard(ctx.cwd);
-    const status = projectStatus(board, liveRuns.keys(), loadConfig(ctx.cwd));
+    const status = projectStatus(board, driveController.liveTaskIds(), loadConfig(ctx.cwd));
     const items: SelectItem[] = [];
     if (board.planPending) {
       items.push({
@@ -1130,7 +1133,7 @@ export default function maestro(
       {
         value: "agents",
         label: "Browse agent sessions",
-        description: `${livePaneLaunches(ctx).length} recorded · ${liveRuns.size} live`,
+        description: `${livePaneLaunches(ctx).length} recorded · ${driveController.liveRunCount()} live`,
       },
       {
         value: "workflows",
@@ -1189,7 +1192,7 @@ export default function maestro(
 
       const board = loadBoard(ctx.cwd);
       if (board.tasks.length === 0 || !sessionOwnsBoard(ctx, board)) return;
-      if (driveController.hasActive() || liveRuns.size > 0) {
+      if (driveController.hasActive() || driveController.liveRunCount() > 0) {
         if (ctx.hasUI)
           ctx.ui.notify("Maestro handoff pending until live work reaches a safe boundary.");
         return;
@@ -1203,7 +1206,7 @@ export default function maestro(
   });
 
   pi.on("session_before_switch", (_event, ctx) => {
-    if (!sessionSwitchBlocked(driveController.hasActive(), liveRuns.size)) return;
+    if (!sessionSwitchBlocked(driveController.hasActive(), driveController.liveRunCount())) return;
     notify(
       ctx,
       `Session switch blocked while maestro work is active. Use /${COMMAND} pause and wait, or /${COMMAND} abort.`,
@@ -1213,7 +1216,7 @@ export default function maestro(
   });
 
   pi.on("session_before_fork", (_event, ctx) => {
-    if (!sessionSwitchBlocked(driveController.hasActive(), liveRuns.size)) return;
+    if (!sessionSwitchBlocked(driveController.hasActive(), driveController.liveRunCount())) return;
     notify(
       ctx,
       `Session fork blocked while maestro work is active. Use /${COMMAND} pause and wait, or /${COMMAND} abort.`,
@@ -1227,7 +1230,7 @@ export default function maestro(
     runtimeActive = true;
     closeLivePane();
     suppressedAutoPaneDriveId = undefined;
-    liveRuns.clear();
+    driveController.clearLiveRuns();
     contextNudgeShown = false;
     // Session switches reload extensions, so switchWithReturn's in-memory
     // reference does not survive. Executor sessions may have a worktree cwd,
@@ -1260,7 +1263,7 @@ export default function maestro(
     if (
       orphanedDrive &&
       !driveController.hasActive() &&
-      liveRuns.size === 0 &&
+      driveController.liveRunCount() === 0 &&
       sessionCanControlDrive(orphanedDrive.ownerSession, currentSession)
     ) {
       const summary = unexpectedDriveSummary(
@@ -1336,9 +1339,9 @@ export default function maestro(
       }
     }
     driveController.shutdown();
-    for (const run of liveRuns.values()) {
+    for (const run of driveController.liveRunValues()) {
       run.handle.abort();
     }
-    liveRuns.clear();
+    driveController.clearLiveRuns();
   });
 }

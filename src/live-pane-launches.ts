@@ -1,12 +1,13 @@
 import { findTask, latestArchiveFile, loadArchivedBoard, loadBoard } from "./board.js";
 import { taskLaunches } from "./dashboard-launches.js";
+import type { LiveRun } from "./drive-controller.js";
 import { type LivePaneLaunch } from "./live-pane.js";
-import { type WorkflowRun } from "./workflow.js";
 
 export function collectLivePaneLaunches(
   cwd: string,
-  liveRuns: ReadonlyMap<string, WorkflowRun>
+  liveRuns: Iterable<LiveRun>
 ): LivePaneLaunch[] {
+  const runs = [...liveRuns];
   const currentBoard = loadBoard(cwd);
   let board = currentBoard;
   let archived = false;
@@ -22,9 +23,7 @@ export function collectLivePaneLaunches(
     }
   }
 
-  const liveByLog = new Map(
-    [...liveRuns.values()].map((run) => [run.handle.attempt.logFile, run] as const)
-  );
+  const liveByLog = new Map(runs.map((run) => [run.handle.attempt.logFile, run] as const));
   const launches = board.tasks.flatMap((task) =>
     taskLaunches(task).map((launch): LivePaneLaunch => {
       const review = launch.review;
@@ -62,7 +61,7 @@ export function collectLivePaneLaunches(
   );
 
   const representedLogs = new Set(launches.map((launch) => launch.logFile));
-  for (const run of liveRuns.values()) {
+  for (const run of runs) {
     const attempt = run.handle.attempt;
     if (representedLogs.has(attempt.logFile)) continue;
     const task = findTask(board, run.taskId);

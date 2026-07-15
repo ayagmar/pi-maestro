@@ -32,13 +32,7 @@ import { assertPlanTaskLimit, preflightWorkflow } from "./preflight.js";
 import { canonicalTaskIds } from "./session-control.js";
 import { formatStatusProjection, projectStatus } from "./status.js";
 import { type Task, type TaskStatus } from "./types.js";
-import {
-  type DriveSummary,
-  formatDriveSummary,
-  snapshot,
-  type TaskSnapshot,
-  type WorkflowRun,
-} from "./workflow.js";
+import { type DriveSummary, formatDriveSummary, snapshot, type TaskSnapshot } from "./workflow.js";
 
 interface MaestroDetails {
   action: string;
@@ -51,7 +45,6 @@ export interface ModelToolRuntime {
   pi: ExtensionAPI;
   adoptBoard(ctx: ExtensionContext): void;
   refreshUI(ctx: ExtensionContext): void;
-  liveRuns: Map<string, WorkflowRun>;
   driveController: DriveRuntimeController;
   startBackgroundDrive(
     ctx: ExtensionContext,
@@ -61,7 +54,7 @@ export interface ModelToolRuntime {
 }
 
 export function registerMaestroTools(runtime: ModelToolRuntime): void {
-  const { pi, adoptBoard, refreshUI, liveRuns, driveController, startBackgroundDrive } = runtime;
+  const { pi, adoptBoard, refreshUI, driveController, startBackgroundDrive } = runtime;
   pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
     name: "maestro_plan",
     label: "Maestro Plan",
@@ -336,7 +329,9 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
               ? truncateText(task.attempts.at(-1)?.reviewNotes ?? "", 500)
               : undefined,
         }));
-        const selectedRuns = [...liveRuns.values()].filter((run) => selectedIds.has(run.taskId));
+        const selectedRuns = [...driveController.liveRunValues()].filter((run) =>
+          selectedIds.has(run.taskId)
+        );
         const live = selectedRuns.map((run) => `${run.taskId}: ${run.lastActivity}`).join("\n");
         const decision =
           board.activeDecision &&
@@ -412,7 +407,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         if (input.intervention === "handoff") {
           pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
         } else {
-          const selectedRuns = [...liveRuns.values()].filter(
+          const selectedRuns = [...driveController.liveRunValues()].filter(
             (run) => !taskIds || taskIds.includes(run.taskId)
           );
           if (selectedRuns.length === 0)
@@ -544,7 +539,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       ) {
         throw new Error(`Unknown verification profile: ${verificationProfile}`);
       }
-      if (liveRuns.has(taskId.trim().toUpperCase())) {
+      if (driveController.isTaskLive(taskId.trim().toUpperCase())) {
         throw new Error(`${taskId} is running. Abort it first or wait for it to finish.`);
       }
       const beforeTask = findTask(loadBoard(ctx.cwd), taskId);

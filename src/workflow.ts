@@ -145,7 +145,7 @@ export interface WorkflowRun {
 }
 
 export type StartExecutor = typeof import("./runner.js").startExecutor;
-export type WorkflowUpdate = (taskId: string, update: RunUpdate) => void;
+export type WorkflowUpdate = (taskId: string, update: RunUpdate, kind: WorkflowRun["kind"]) => void;
 export type TrackRun = (run: WorkflowRun) => () => void;
 
 type DispatchKind = "execute" | "review";
@@ -856,7 +856,7 @@ export async function executeTask(options: {
             if (attempt) attempt.sessionFile = sessionFile;
           });
         }
-        onUpdate(task.id, update);
+        onUpdate(task.id, update, "execute");
       },
     };
     if (signal) runOptions.signal = signal;
@@ -1322,7 +1322,7 @@ export async function reviewTask(options: {
                 if (launch) launch.sessionFile = sessionFile;
               });
             }
-            onUpdate(task.id, update);
+            onUpdate(task.id, update, "review");
           },
         };
         if (signal) runOptions.signal = signal;

@@ -9,6 +9,8 @@ import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
 import {
   cleanupCompletedBoard,
   clearActiveDrive,
+  DriveRuntimeController,
+  type LiveRun,
   deliverPendingDecision,
   persistActiveDrive,
   persistDriveDecision,
@@ -40,6 +42,24 @@ function withBoard(run: (cwd: string) => void): void {
     rmSync(cwd, { recursive: true, force: true });
   }
 }
+
+test("live-run cleanup cannot remove an overlapping replacement run", () => {
+  const controller = new DriveRuntimeController();
+  const executor = { taskId: "T1", kind: "execute" } as unknown as LiveRun;
+  const reviewer = { taskId: "T1", kind: "review" } as unknown as LiveRun;
+
+  controller.registerLiveRun(executor);
+  controller.registerLiveRun(reviewer);
+  assert.equal(controller.liveRunCount(), 2);
+  assert.equal(controller.getLiveRun("T1"), reviewer);
+  assert.equal(controller.getLiveRun("T1", "execute"), executor);
+  assert.equal(controller.getLiveRun("T1", "review"), reviewer);
+
+  controller.removeLiveRun(executor);
+  assert.equal(controller.liveRunCount(), 1);
+  assert.equal(controller.getLiveRun("T1"), reviewer);
+  assert.equal(controller.isTaskLive("T1"), true);
+});
 
 test("updateBoard returns the mutation result and does not persist thrown mutations", () => {
   withBoard((cwd) => {

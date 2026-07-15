@@ -234,6 +234,21 @@ test("workflow and task browsers own their command coordination", () => {
   assert.match(taskBrowser, /pruneTaskLogs/);
 });
 
+test("drive runtime controller is the single owner of live-run state", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /new (?:Map|Set)<string, WorkflowRun>/);
+  assert.doesNotMatch(extension, /liveRuns\.(?:set|delete|clear)/);
+
+  const controller = files.find((file) => file.name === "drive-controller.ts")?.contents ?? "";
+  assert.match(controller, /private readonly liveRuns = new Set<LiveRun>/);
+  assert.match(controller, /registerLiveRun/);
+  assert.match(controller, /removeLiveRun/);
+
+  const tools = files.find((file) => file.name === "tools.ts")?.contents ?? "";
+  assert.doesNotMatch(tools, /liveRuns: Map<string, WorkflowRun>/);
+});
+
 test("drive preflight, summaries, and manual approval live outside the extension root", () => {
   const files = sourceFiles();
   const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";

@@ -20,7 +20,7 @@ Board boundary (src/board.ts)       runner.ts / worktree.ts
 |---|---|---|
 | Board persistence and status history | `src/board.ts` | Other modules use board functions; they do not name the board file. |
 | Pure artifact/fingerprint policy | `src/artifact-policy.ts` | No Pi, TUI, process, runner, or Git imports. |
-| Active drive ownership and durable decisions | `src/drive-controller.ts` | One controller owns active/background drive state. |
+| Active drive ownership, live runs, and durable decisions | `src/drive-controller.ts` | One controller owns active/background drive state and identity-safe executor/reviewer lifetimes. |
 | Child processes and verification process groups | `src/runner.ts` | No other module calls `spawn`. |
 | Git, worktrees, immutable tree identity | `src/worktree.ts` | No other module executes Git. |
 | Composition entry | `src/index.ts` | Re-exports the extension factory only; it owns no runtime state. |

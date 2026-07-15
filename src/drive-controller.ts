@@ -2,8 +2,18 @@ import { completionFreshness } from "./artifact-policy.js";
 import { archiveBoard, isTaskSettled, updateBoard } from "./board.js";
 import { loadConfig } from "./config.js";
 import { truncateText } from "./format.js";
+import type { ExecutorHandle } from "./runner.js";
 import { type ActiveDriveState, type DriveDecision, type TaskStatus } from "./types.js";
 import { type DriveSummary } from "./workflow.js";
+
+export interface LiveRun {
+  taskId: string;
+  kind: "execute" | "review";
+  turns: number;
+  cost: number;
+  lastActivity: string;
+  handle: ExecutorHandle;
+}
 
 export interface ActiveDriveControl {
   id: string;
@@ -27,6 +37,7 @@ const DELIVERY_CLAIM_STALE_MS = 30_000;
 export class DriveRuntimeController {
   private active: ActiveDriveControl | undefined;
   private background: BackgroundDrive | undefined;
+  private readonly liveRuns = new Set<LiveRun>();
 
   hasActive(): boolean {
     return this.active !== undefined;
@@ -71,8 +82,46 @@ export class DriveRuntimeController {
     return this.background;
   }
 
+  registerLiveRun(run: LiveRun): void {
+    this.liveRuns.add(run);
+  }
+
+  removeLiveRun(run: LiveRun): void {
+    this.liveRuns.delete(run);
+  }
+
+  liveRunCount(): number {
+    return this.liveRuns.size;
+  }
+
+  liveTaskIds(): Set<string> {
+    return new Set([...this.liveRuns].map((run) => run.taskId));
+  }
+
+  isTaskLive(taskId: string): boolean {
+    return [...this.liveRuns].some((run) => run.taskId === taskId);
+  }
+
+  getLiveRun(taskId: string, kind?: LiveRun["kind"]): LiveRun | undefined {
+    let match: LiveRun | undefined;
+    for (const run of this.liveRuns) {
+      if (run.taskId === taskId && (kind === undefined || run.kind === kind)) match = run;
+    }
+    return match;
+  }
+
+  liveRunValues(): IterableIterator<LiveRun> {
+    return this.liveRuns.values();
+  }
+
+  clearLiveRuns(): void {
+    this.liveRuns.clear();
+  }
+
   shutdown(): void {
     this.active?.abortController.abort();
+    for (const run of this.liveRuns) run.handle.abort();
+    this.liveRuns.clear();
   }
 }
 
