@@ -24,7 +24,6 @@ import {
   replaceBoard,
   replaceBoardWithArchive,
   restoreQuarantineNotice,
-  sweepDispatchState,
   updateBoard,
   updateTask,
 } from "./board.js";
@@ -33,21 +32,15 @@ import type { RunCommandRuntime, RunCommandSession } from "./command-run-control
 import { pickFromList } from "./command-ui.js";
 import { registerMaestroCommand } from "./commands.js";
 import { loadConfig } from "./config.js";
-import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE } from "./constants.js";
+import { COMMAND, MESSAGE_TYPE } from "./constants.js";
 import {
   Dashboard,
   type DashboardTaskAction,
   LivePaneComponent,
   type LivePaneLaunch,
 } from "./dashboard.js";
-import {
-  acknowledgeDeliveredDecision,
-  type BackgroundDrive,
-  DriveRuntimeController,
-  deliverPendingDecision,
-  persistDriveDecision,
-} from "./drive-controller.js";
-import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
+import { type BackgroundDrive, DriveRuntimeController } from "./drive-controller.js";
+import { ExtensionLifecycleState, registerMaestroLifecycle } from "./extension-lifecycle.js";
 import { boardUsage, formatBoardProgress } from "./format.js";
 import { notify } from "./handoff.js";
 import { collectLivePaneLaunches } from "./live-pane-launches.js";
@@ -55,12 +48,7 @@ import { manuallyApproveTask } from "./manual-approval.js";
 import { showPlanReview } from "./plan-review-controller.js";
 import { pruneTaskLogs } from "./retention.js";
 import { startExecutor as defaultStartExecutor, findSessionFile } from "./runner.js";
-import {
-  maestroBoardCwd,
-  previousBoardSession,
-  sessionCanControlDrive,
-  sessionSwitchBlocked,
-} from "./session-control.js";
+import { sessionSwitchBlocked } from "./session-control.js";
 import { SessionNavigator } from "./session-navigator.js";
 import { projectStatus } from "./status.js";
 import { showTaskBrowser } from "./task-browser.js";
@@ -77,7 +65,6 @@ import { registerMaestroTools } from "./tools.js";
 import { type Board } from "./types.js";
 import { formatDriveSummary, lastReport } from "./workflow.js";
 import { showWorkflowBrowser } from "./workflow-browser.js";
-import { sweepWorktrees } from "./worktree.js";
 
 export { formatPlanReviewMarkdown } from "./plan-review.js";
 export { scrollableTextOffset } from "./scrollable-viewer.js";
@@ -106,13 +93,12 @@ export default function maestro(
   if (process.env.PI_MAESTRO_EXECUTOR === "1") return;
 
   const driveController = new DriveRuntimeController();
+  const lifecycleState = new ExtensionLifecycleState();
   const sessionNavigator = new SessionNavigator({
     hasActiveDrive: () => driveController.hasActive(),
     liveRunCount: () => driveController.liveRunCount(),
     isTaskLive: (taskId) => driveController.isTaskLive(taskId),
   });
-  let runtimeActive = true;
-  let contextNudgeShown = false;
   let livePane: LivePaneRuntime | undefined;
   let suppressedAutoPaneDriveId: string | undefined;
 
@@ -273,7 +259,11 @@ export default function maestro(
               },
           onHandle: (handle) => {
             pane.handle = handle;
-            if (!runtimeActive || livePaneLaunches(ctx).length === 0 || !canShowLivePane(ctx)) {
+            if (
+              !lifecycleState.isActive() ||
+              livePaneLaunches(ctx).length === 0 ||
+              !canShowLivePane(ctx)
+            ) {
               closeLivePane();
               return;
             }
@@ -291,7 +281,7 @@ export default function maestro(
 
     const finish = () => {
       if (livePane === pane) livePane = undefined;
-      if (runtimeActive) refreshUI(ctx);
+      if (lifecycleState.isActive()) refreshUI(ctx);
     };
     void completion.then(finish, finish);
   }
@@ -410,7 +400,7 @@ export default function maestro(
   }
 
   function sendDecision(evidence: string, decisionId: string): void {
-    if (!runtimeActive) throw new Error("Maestro session runtime is no longer active.");
+    if (!lifecycleState.isActive()) throw new Error("Maestro session runtime is no longer active.");
     pi.sendMessage(
       { customType: MESSAGE_TYPE, content: evidence, display: true, details: { decisionId } },
       { triggerTurn: true, deliverAs: "followUp" }
@@ -419,7 +409,7 @@ export default function maestro(
 
   const driveServices = {
     startExecutor: dependencies.startExecutor,
-    isRuntimeActive: () => runtimeActive,
+    isRuntimeActive: () => lifecycleState.isActive(),
     adoptBoard,
     refreshUI,
     notify,
@@ -448,37 +438,10 @@ export default function maestro(
     );
   }
 
-  function sessionContainsDecision(ctx: ExtensionContext, decisionId: string): boolean {
-    const sessionManager = ctx.sessionManager as typeof ctx.sessionManager & {
-      getEntries?: () => unknown[];
-    };
-    if (typeof sessionManager.getEntries !== "function") return false;
-    return sessionManager.getEntries().some((entry) => {
-      if (!entry || typeof entry !== "object") return false;
-      const record = entry as unknown as Record<string, unknown>;
-      const details = record.details;
-      if (
-        details &&
-        typeof details === "object" &&
-        (details as Record<string, unknown>).decisionId === decisionId
-      ) {
-        return true;
-      }
-      const message = record.message;
-      if (!message || typeof message !== "object") return false;
-      const messageDetails = (message as Record<string, unknown>).details;
-      return (
-        !!messageDetails &&
-        typeof messageDetails === "object" &&
-        (messageDetails as Record<string, unknown>).decisionId === decisionId
-      );
-    });
-  }
-
   function launchCommandDrive(ctx: ExtensionCommandContext, taskIds: string[] | undefined): void {
     const operation = startDrive(ctx, taskIds, undefined, (message) => notify(ctx, message));
     void operation.promise.then(() => {
-      if (!runtimeActive) return;
+      if (!lifecycleState.isActive()) return;
       refreshUI(ctx);
       if (operation.summary) {
         notify(
@@ -842,167 +805,17 @@ export default function maestro(
     return container;
   });
 
-  pi.on("turn_end", (_event, ctx) => {
-    if (contextNudgeShown) return;
-
-    try {
-      const usage = ctx.getContextUsage();
-      const config = loadConfig(ctx.cwd);
-      const threshold = (config.handoffContextRatio ?? CONTEXT_NUDGE_PERCENT / 100) * 100;
-      if (!usage || usage.percent === null || threshold <= 0 || usage.percent < threshold) return;
-
-      const board = loadBoard(ctx.cwd);
-      if (board.tasks.length === 0 || !sessionOwnsBoard(ctx, board)) return;
-      if (driveController.hasActive() || driveController.liveRunCount() > 0) {
-        if (ctx.hasUI)
-          ctx.ui.notify("Maestro handoff pending until live work reaches a safe boundary.");
-        return;
-      }
-
-      contextNudgeShown = true;
-      pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
-    } catch {
-      // The turn may belong to a context invalidated by a session switch.
-    }
-  });
-
-  pi.on("session_before_switch", (_event, ctx) => {
-    if (!sessionSwitchBlocked(driveController.hasActive(), driveController.liveRunCount())) return;
-    notify(
-      ctx,
-      `Session switch blocked while maestro work is active. Use /${COMMAND} pause and wait, or /${COMMAND} abort.`,
-      "warning"
-    );
-    return { cancel: true };
-  });
-
-  pi.on("session_before_fork", (_event, ctx) => {
-    if (!sessionSwitchBlocked(driveController.hasActive(), driveController.liveRunCount())) return;
-    notify(
-      ctx,
-      `Session fork blocked while maestro work is active. Use /${COMMAND} pause and wait, or /${COMMAND} abort.`,
-      "warning"
-    );
-    return { cancel: true };
-  });
-
-  pi.on("session_start", (event, ctx) => {
-    commandDispatcher.setCwd(ctx.cwd);
-    runtimeActive = true;
-    closeLivePane();
-    suppressedAutoPaneDriveId = undefined;
-    driveController.clearLiveRuns();
-    contextNudgeShown = false;
-    // Session switches reload extensions, so switchWithReturn's in-memory
-    // reference does not survive. Executor sessions may have a worktree cwd,
-    // while their board and owner session remain linked from the main checkout.
-    const boardCwd = maestroBoardCwd(ctx.cwd);
-    const navigationBoard = loadBoard(boardCwd);
-    const executorSessions = navigationBoard.tasks.flatMap((task) =>
-      task.attempts.flatMap((attempt) =>
-        [attempt.sessionFile, attempt.reviewSessionFile].filter(
-          (sessionFile): sessionFile is string => sessionFile !== undefined
-        )
-      )
-    );
-    sessionNavigator.setPrevious(
-      previousBoardSession(
-        event.previousSessionFile,
-        ctx.sessionManager.getSessionFile(),
-        navigationBoard.ownerSessions,
-        executorSessions
-      )
-    );
-
-    // Recovery is lease-aware: live owners survive extension reloads and only
-    // expired claims are reclaimed with their attempt in one board transaction.
-    const recoveryNotes = sweepDispatchState(boardCwd);
-    for (const note of recoveryNotes) notify(ctx, note, "warning");
-    let recovered = loadBoard(boardCwd);
-    const orphanedDrive = recovered.activeDrive;
-    const currentSession = ctx.sessionManager.getSessionFile();
-    if (
-      orphanedDrive &&
-      !driveController.hasActive() &&
-      driveController.liveRunCount() === 0 &&
-      sessionCanControlDrive(orphanedDrive.ownerSession, currentSession)
-    ) {
-      const summary = unexpectedDriveSummary(
-        boardCwd,
-        orphanedDrive.taskIds,
-        "the owning extension runtime stopped before recording an outcome"
-      );
-      persistDriveDecision(
-        boardCwd,
-        orphanedDrive.ownerSession,
-        summary,
-        formatDrivePulse(summary),
-        orphanedDrive.id
-      );
-      recovered = loadBoard(boardCwd);
-    }
-    const pendingDecision = recovered.activeDecision;
-    if (
-      pendingDecision &&
-      !pendingDecision.deliveredAt &&
-      sessionCanControlDrive(pendingDecision.ownerSession, currentSession) &&
-      sessionContainsDecision(ctx, pendingDecision.id)
-    ) {
-      acknowledgeDeliveredDecision(boardCwd, pendingDecision.id);
-      recovered = loadBoard(boardCwd);
-    }
-    deliverPendingDecision(boardCwd, ctx.sessionManager.getSessionFile(), sendDecision);
-    const knownWorktrees = recovered.tasks.flatMap((task) =>
-      task.attempts.flatMap((attempt) =>
-        attempt.worktreePath && attempt.branch
-          ? [{ worktreePath: attempt.worktreePath, branch: attempt.branch }]
-          : []
-      )
-    );
-    const retained = recovered.tasks
-      .filter((task) => task.status === "ready_for_review" || task.status === "changes_requested")
-      .flatMap((task) => {
-        const attempt = task.attempts.at(-1);
-        return attempt?.worktreePath && attempt.branch
-          ? [{ worktreePath: attempt.worktreePath, branch: attempt.branch }]
-          : [];
-      });
-    try {
-      sweepWorktrees(boardCwd, retained, knownWorktrees);
-    } catch (error) {
-      notify(ctx, `Could not clean stale maestro worktrees: ${String(error)}`, "warning");
-    }
-    refreshUI(ctx);
-  });
-
-  // The before-switch/fork guards normally keep active work in this runtime.
-  // Shutdown still aborts as a final safety net so a forced reload or exit can never orphan it.
-  pi.on("session_shutdown", () => {
-    runtimeActive = false;
-    closeLivePane();
-    const active = driveController.activeOwner();
-    if (active) {
-      try {
-        const summary = unexpectedDriveSummary(
-          active.cwd,
-          active.taskIds,
-          "the extension runtime shut down while the drive was active"
-        );
-        persistDriveDecision(
-          active.cwd,
-          active.ownerSession,
-          summary,
-          formatDrivePulse(summary),
-          active.id
-        );
-      } catch {
-        // The durable active-drive record remains for owner-scoped startup reconciliation.
-      }
-    }
-    driveController.shutdown();
-    for (const run of driveController.liveRunValues()) {
-      run.handle.abort();
-    }
-    driveController.clearLiveRuns();
+  registerMaestroLifecycle(pi, {
+    state: lifecycleState,
+    driveController,
+    setCommandCwd: (cwd) => commandDispatcher.setCwd(cwd),
+    setPreviousSession: (sessionFile) => sessionNavigator.setPrevious(sessionFile),
+    closeLivePane,
+    clearSuppressedPane: () => {
+      suppressedAutoPaneDriveId = undefined;
+    },
+    refreshUI,
+    sessionOwnsBoard,
+    sendDecision,
   });
 }

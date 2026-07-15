@@ -9,7 +9,8 @@
 - `src/runner.ts`: child processes and verification
 - `src/worktree.ts`: all Git operations
 - `src/index.ts`: minimal extension entry point
-- `src/extension.ts`: Pi lifecycle and UI composition
+- `src/extension.ts`: Pi dependency and UI composition
+- `src/extension-lifecycle.ts`: Pi session lifecycle and reload recovery
 - `src/tools.ts`: the three model tool adapters
 - `src/commands.ts`: human slash-command registration
 - `src/command-dispatcher.ts`: human command routing to cohesive command families

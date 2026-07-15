@@ -310,6 +310,22 @@ test("review prompt and convergence policy live outside workflow effects", () =>
   assert.match(policy, /function staleExecutionInputsMessage/);
 });
 
+test("only the lifecycle adapter registers session events", () => {
+  const files = sourceFiles();
+  const sessionRegistration = /\.on\(\s*"session_(?:start|shutdown|before_switch|before_fork)"/;
+  const owners = files
+    .filter((file) => sessionRegistration.test(file.contents))
+    .map((file) => file.name);
+  assert.deepEqual(owners, ["extension-lifecycle.ts"]);
+
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, sessionRegistration);
+  const lifecycle = files.find((file) => file.name === "extension-lifecycle.ts")?.contents ?? "";
+  assert.match(lifecycle, /registerMaestroLifecycle/);
+  assert.match(lifecycle, /sweepDispatchState/);
+  assert.match(lifecycle, /persistDriveDecision/);
+});
+
 test("index is a composition entry point and adapters own registrations", () => {
   const files = sourceFiles();
   const index = files.find((file) => file.name === "index.ts")?.contents ?? "";

@@ -28,7 +28,8 @@ Board boundary (src/board.ts)       runner.ts / worktree.ts
 | Human command registration | `src/commands.ts` | The only module that registers the slash-command surface. |
 | Human command dispatch | `src/command-dispatcher.ts` | Routes command families through explicit runtime, navigation, and view interfaces; family modules own their behavior. |
 | Session replacement | `src/handoff.ts` | The only module allowed to call `newSession()`. |
-| Pi lifecycle and UI wiring | `src/extension.ts` | Composes adapters, controller, workflow, dashboard, shortcuts, and event hooks. |
+| Pi lifecycle events and reload recovery | `src/extension-lifecycle.ts` | The only adapter that registers session lifecycle hooks; it receives narrow runtime, navigation, and UI callbacks. |
+| Pi composition and UI wiring | `src/extension.ts` | Constructs adapters and registers tools, commands, shortcuts, rendering, and lifecycle teardown. |
 
 ## Correctness transactions
 
