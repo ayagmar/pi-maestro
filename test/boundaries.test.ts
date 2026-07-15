@@ -123,6 +123,18 @@ test("dashboard navigation projection lives outside the TUI controller", () => {
   assert.match(navigation, /function stableLaunchSelection/);
 });
 
+test("live pane overlay composition lives outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /new LivePaneComponent|suppressedAutoPaneDriveId/);
+
+  const controller = files.find((file) => file.name === "live-pane-controller.ts")?.contents ?? "";
+  assert.match(controller, /class LivePaneController/);
+  assert.match(controller, /new LivePaneComponent/);
+  assert.match(controller, /suppressedAutoPaneDriveId/);
+  assert.match(controller, /sessionSwitchBlocked/);
+});
+
 test("dashboard session IO lives outside the dashboard controller", () => {
   const dashboard = sourceFiles().find((file) => file.name === "dashboard.ts")?.contents ?? "";
   assert.doesNotMatch(dashboard, /node:fs|SessionManager|buildSessionContext/);

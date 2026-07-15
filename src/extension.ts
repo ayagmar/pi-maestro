@@ -5,13 +5,7 @@ import {
   type ExtensionContext,
   getMarkdownTheme,
 } from "@earendil-works/pi-coding-agent";
-import {
-  Container,
-  Markdown,
-  type OverlayHandle,
-  type SelectItem,
-  Text,
-} from "@earendil-works/pi-tui";
+import { Container, Markdown, type SelectItem, Text } from "@earendil-works/pi-tui";
 import {
   assertTaskNotDispatched,
   consumeQuarantineNotice,
@@ -31,17 +25,12 @@ import { pickFromList } from "./command-ui.js";
 import { registerMaestroCommand } from "./commands.js";
 import { loadConfig } from "./config.js";
 import { COMMAND, MESSAGE_TYPE } from "./constants.js";
-import {
-  Dashboard,
-  type DashboardTaskAction,
-  LivePaneComponent,
-  type LivePaneLaunch,
-} from "./dashboard.js";
+import { Dashboard, type DashboardTaskAction } from "./dashboard.js";
 import { type BackgroundDrive, DriveRuntimeController } from "./drive-controller.js";
 import { ExtensionLifecycleState, registerMaestroLifecycle } from "./extension-lifecycle.js";
 import { boardUsage, formatBoardProgress } from "./format.js";
 import { notify } from "./handoff.js";
-import { collectLivePaneLaunches } from "./live-pane-launches.js";
+import { LivePaneController } from "./live-pane-controller.js";
 import { manuallyApproveTask } from "./manual-approval.js";
 import { showPlanReview } from "./plan-review-controller.js";
 import { pruneTaskLogs } from "./retention.js";
@@ -71,16 +60,6 @@ export interface MaestroDependencies {
   startExecutor: typeof defaultStartExecutor;
 }
 
-interface LivePaneRuntime {
-  handle?: OverlayHandle;
-  component?: LivePaneComponent;
-  done?: () => void;
-  isResponsiveVisible?: () => boolean;
-  closing: boolean;
-}
-
-const livePaneResponsiveVisibility = (width: number): boolean => width >= 100;
-
 export default function maestro(
   pi: ExtensionAPI,
   dependencies: MaestroDependencies = { startExecutor: defaultStartExecutor }
@@ -97,8 +76,13 @@ export default function maestro(
     liveRunCount: () => driveController.liveRunCount(),
     isTaskLive: (taskId) => driveController.isTaskLive(taskId),
   });
-  let livePane: LivePaneRuntime | undefined;
-  let suppressedAutoPaneDriveId: string | undefined;
+  const livePaneController = new LivePaneController({
+    driveController,
+    sessionNavigator,
+    isRuntimeActive: () => lifecycleState.isActive(),
+    sessionOwnsBoard,
+    refreshUI,
+  });
 
   function sessionOwnsBoard(ctx: ExtensionContext, board: Board): boolean {
     if (!board.ownerSessions || board.ownerSessions.length === 0) return true; // legacy board
@@ -150,185 +134,6 @@ export default function maestro(
     }
   }
 
-  function currentDriveId(): string | undefined {
-    return driveController.activeOwner()?.id;
-  }
-
-  function livePaneLaunches(ctx: ExtensionContext): LivePaneLaunch[] {
-    return collectLivePaneLaunches(ctx.cwd, driveController.liveRunValues());
-  }
-
-  function watchedLiveRunCount(): number {
-    return driveController.liveRunCount();
-  }
-
-  function canShowLivePane(ctx: ExtensionContext): boolean {
-    if (ctx.mode !== "tui") return false;
-    return sessionOwnsBoard(ctx, loadBoard(ctx.cwd));
-  }
-
-  function livePaneIsVisible(_width: number): boolean {
-    const pane = livePane;
-    if (!pane?.handle || pane.closing || pane.handle.isHidden()) return false;
-    return pane.isResponsiveVisible?.() ?? true;
-  }
-
-  function closeLivePane(): void {
-    const pane = livePane;
-    if (!pane || pane.closing || !pane.done) return;
-    pane.closing = true;
-    livePane = undefined;
-    pane.done();
-  }
-
-  function openLivePane(ctx: ExtensionContext, focused: boolean): void {
-    if (livePane || !canShowLivePane(ctx)) return;
-    if (livePaneLaunches(ctx).length === 0) {
-      if (focused)
-        notify(ctx, `No Maestro agent sessions yet. Start a drive, then open /${COMMAND} agents.`);
-      return;
-    }
-
-    const pane: LivePaneRuntime = { closing: false };
-    livePane = pane;
-    let completion: Promise<void>;
-    try {
-      completion = ctx.ui.custom<void>(
-        (tui, theme, _keybindings, done) => {
-          pane.done = () => done(undefined);
-          pane.isResponsiveVisible = () =>
-            focused || livePaneResponsiveVisibility(tui.terminal.columns);
-          pane.component = new LivePaneComponent(theme, {
-            getLaunches: () => livePaneLaunches(ctx),
-            getHeight: () => Math.max(1, Math.floor(tui.terminal.rows * 0.8)),
-            requestRender: () => tui.requestRender(),
-            tui,
-            cwd: ctx.cwd,
-            onEscape: () => {
-              if (focused) closeLivePane();
-              else pane.handle?.unfocus();
-              refreshUI(ctx);
-            },
-            onCycleVisibility: () => cycleLivePane(ctx),
-            onSteer: (launch, message) => {
-              driveController.getLiveRun(launch.taskId)?.handle.steer(message);
-            },
-            onFollowUp: (launch, message) => {
-              driveController.getLiveRun(launch.taskId)?.handle.followUp(message);
-            },
-            ...(isCommandContext(ctx)
-              ? {
-                  canOpenSession: () =>
-                    !sessionSwitchBlocked(
-                      driveController.hasActive(),
-                      driveController.liveRunCount()
-                    ),
-                  onOpenSession: (launch: LivePaneLaunch) => {
-                    if (!launch.sessionFile) return;
-                    void (async () => {
-                      const confirmed = await ctx.ui.confirm(
-                        "Open agent session in Pi?",
-                        `Switch to ${launch.taskId}'s ${launch.kind} session? Use /${COMMAND} back to return.`
-                      );
-                      if (!confirmed) return;
-                      closeLivePane();
-                      await sessionNavigator.switchWithReturn(ctx, launch.sessionFile as string);
-                    })();
-                  },
-                }
-              : {}),
-          });
-          return pane.component;
-        },
-        {
-          overlay: true,
-          overlayOptions: focused
-            ? {
-                anchor: "center",
-                width: "92%",
-                maxHeight: "92%",
-                margin: 1,
-              }
-            : {
-                anchor: "right-center",
-                width: "45%",
-                maxHeight: "80%",
-                visible: livePaneResponsiveVisibility,
-              },
-          onHandle: (handle) => {
-            pane.handle = handle;
-            if (
-              !lifecycleState.isActive() ||
-              livePaneLaunches(ctx).length === 0 ||
-              !canShowLivePane(ctx)
-            ) {
-              closeLivePane();
-              return;
-            }
-            if (focused) handle.focus();
-            else handle.unfocus();
-            refreshUI(ctx);
-          },
-        }
-      );
-    } catch {
-      pane.component?.dispose();
-      if (livePane === pane) livePane = undefined;
-      return;
-    }
-
-    const finish = () => {
-      if (livePane === pane) livePane = undefined;
-      if (lifecycleState.isActive()) refreshUI(ctx);
-    };
-    void completion.then(finish, finish);
-  }
-
-  function syncLivePane(ctx: ExtensionContext): void {
-    if (livePane && (!canShowLivePane(ctx) || livePaneLaunches(ctx).length === 0)) {
-      closeLivePane();
-      return;
-    }
-    if (
-      !livePane &&
-      watchedLiveRunCount() > 0 &&
-      loadConfig(ctx.cwd).livePanes &&
-      suppressedAutoPaneDriveId !== currentDriveId()
-    ) {
-      openLivePane(ctx, false);
-    }
-  }
-
-  function cycleLivePane(ctx: ExtensionContext): void {
-    if (!canShowLivePane(ctx)) {
-      notify(
-        ctx,
-        "Agent sessions are available only in the owning interactive TUI session.",
-        "warning"
-      );
-      return;
-    }
-    if (livePane) {
-      if (!livePane.isResponsiveVisible?.()) {
-        suppressedAutoPaneDriveId = currentDriveId();
-        closeLivePane();
-        openLivePane(ctx, true);
-        refreshUI(ctx);
-        return;
-      }
-      if (!livePane.handle?.isFocused()) {
-        livePane.handle?.focus();
-        refreshUI(ctx);
-        return;
-      }
-      suppressedAutoPaneDriveId = currentDriveId();
-      closeLivePane();
-      refreshUI(ctx);
-      return;
-    }
-    openLivePane(ctx, true);
-  }
-
   function refreshUI(ctx: ExtensionContext): void {
     // Executor stdout events outlive session switches; any access on a stale
     // ctx throws. Skip — the next session's events arrive with a live ctx.
@@ -339,7 +144,7 @@ export default function maestro(
     }
     const board = loadBoard(ctx.cwd);
     notifyQuarantine(ctx);
-    syncLivePane(ctx);
+    livePaneController.sync(ctx);
 
     // Sessions that never touched this board (fresh /maestro-less chats in
     // the same repo) don't get its status bar. Live runs always show:
@@ -391,7 +196,7 @@ export default function maestro(
         );
       });
       return {
-        render: () => (livePaneIsVisible(tui.terminal.columns) ? [] : lines),
+        render: () => (livePaneController.isVisible(tui.terminal.columns) ? [] : lines),
         invalidate: () => {},
       };
     });
@@ -412,9 +217,7 @@ export default function maestro(
     refreshUI,
     notify,
     sendDecision,
-    onRunStarted: () => {
-      if (suppressedAutoPaneDriveId !== currentDriveId()) suppressedAutoPaneDriveId = undefined;
-    },
+    onRunStarted: () => livePaneController.onRunStarted(),
   };
 
   function startDrive(
@@ -500,7 +303,7 @@ export default function maestro(
     sessionNavigator,
     {
       showHome: showMaestroHome,
-      showAgents: (ctx) => openLivePane(ctx, true),
+      showAgents: (ctx) => livePaneController.open(ctx, true),
       showWorkflows: (ctx) =>
         showWorkflowBrowser(ctx, {
           hasLiveRuns: () => driveController.liveRunCount() > 0,
@@ -525,7 +328,7 @@ export default function maestro(
 
   pi.registerShortcut("ctrl+alt+w", {
     description: "Open or close Maestro agent sessions",
-    handler: (ctx) => cycleLivePane(ctx),
+    handler: (ctx) => livePaneController.cycle(ctx),
   });
 
   /**
@@ -755,7 +558,7 @@ export default function maestro(
       {
         value: "agents",
         label: "Browse agent sessions",
-        description: `${livePaneLaunches(ctx).length} recorded · ${driveController.liveRunCount()} live`,
+        description: `${livePaneController.launches(ctx).length} recorded · ${driveController.liveRunCount()} live`,
       },
       {
         value: "workflows",
@@ -808,10 +611,8 @@ export default function maestro(
     driveController,
     setCommandCwd: (cwd) => commandDispatcher.setCwd(cwd),
     setPreviousSession: (sessionFile) => sessionNavigator.setPrevious(sessionFile),
-    closeLivePane,
-    clearSuppressedPane: () => {
-      suppressedAutoPaneDriveId = undefined;
-    },
+    closeLivePane: () => livePaneController.close(),
+    clearSuppressedPane: () => livePaneController.clearSuppression(),
     refreshUI,
     sessionOwnsBoard,
     sendDecision,
