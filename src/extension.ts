@@ -149,7 +149,12 @@ export default function maestro(
     }
 
     const progress = formatBoardProgress(board.tasks);
-    const status = projectStatus(board, driveController.liveTaskIds(), loadConfig(ctx.cwd));
+    const status = projectStatus(
+      board,
+      driveController.liveTaskIds(),
+      loadConfig(ctx.cwd),
+      driveController.liveRunKinds()
+    );
     const running = status.running;
     const usage = boardUsage(board.tasks);
     const runningPart = running > 0 ? ` · ${running} running` : "";
@@ -385,7 +390,12 @@ export default function maestro(
 
   async function showMaestroHome(ctx: ExtensionCommandContext): Promise<string | null> {
     const board = loadBoard(ctx.cwd);
-    const status = projectStatus(board, driveController.liveTaskIds(), loadConfig(ctx.cwd));
+    const status = projectStatus(
+      board,
+      driveController.liveTaskIds(),
+      loadConfig(ctx.cwd),
+      driveController.liveRunKinds()
+    );
     const items: SelectItem[] = [];
     if (board.planPending) {
       items.push({

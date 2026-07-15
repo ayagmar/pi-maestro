@@ -1228,6 +1228,55 @@ test("dashboard derives legacy launches and drills down through phase, task, and
   }
 });
 
+test("dashboard phase roadmap explains state and preserves the drilled phase breadcrumb", () => {
+  const task = makeTask({
+    status: "running",
+    attempts: [
+      {
+        index: 1,
+        logFile: "attempt.log",
+        thinking: "low",
+        startedAt: 1,
+        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+        reviewReport: "VERDICT: APPROVE",
+        touchedFiles: [],
+      },
+    ],
+  });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  try {
+    dashboard.handleInput("\x1b[D");
+    dashboard.handleInput("\x1b[B");
+    const phase = dashboard.render(120).join("\n");
+    assert.match(phase, /review · 1 · retained evidence/);
+    assert.match(phase, /Independent reviewers inspect completed attempts/);
+    assert.match(phase, /Next: Inspect retained task and launch evidence/);
+
+    dashboard.handleInput("\x1b[C");
+    assert.match(dashboard.render(120).join("\n"), /Run › review › T1/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard header names a live reviewer phase", () => {
+  const task = makeTask({ status: "ready_for_review" });
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [task] };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => true,
+      liveKind: () => "review",
+    })
+  );
+  try {
+    assert.match(dashboard.render(140)[0] ?? "", /running · review · 1 running/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
 test("constrained phase and launch panes keep later selections visible", () => {
   const attempts = [1, 2, 3].map((index) => ({
     index,

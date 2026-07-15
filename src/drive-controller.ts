@@ -138,6 +138,10 @@ export class DriveRuntimeController {
     return new Set([...this.liveRuns].map((run) => run.taskId));
   }
 
+  liveRunKinds(): Map<string, LiveRun["kind"]> {
+    return new Map([...this.liveRuns].map((run) => [run.taskId, run.kind] as const));
+  }
+
   isTaskLive(taskId: string): boolean {
     return [...this.liveRuns].some((run) => run.taskId === taskId);
   }

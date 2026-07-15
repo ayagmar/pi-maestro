@@ -351,7 +351,8 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           projectStatus(
             projectedBoard,
             selectedRuns.map((run) => run.taskId),
-            loadConfig(ctx.cwd)
+            loadConfig(ctx.cwd),
+            new Map(selectedRuns.map((run) => [run.taskId, run.kind] as const))
           )
         );
         return {

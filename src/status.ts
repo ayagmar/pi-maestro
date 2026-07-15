@@ -23,6 +23,8 @@ export interface PhaseProjection {
   current: boolean;
 }
 
+export type LiveTaskKinds = ReadonlyMap<string, "execute" | "review">;
+
 const PHASE_LABELS: Record<RunPhase, string> = {
   discovery: "discovery",
   plan_approval: "plan approval",
@@ -204,7 +206,8 @@ export interface StatusProjection {
 export function projectStatus(
   board: Board,
   liveTaskIds: Iterable<string> | undefined = undefined,
-  config?: MaestroConfig
+  config?: MaestroConfig,
+  liveKinds?: LiveTaskKinds
 ): StatusProjection {
   const liveIds = liveTaskIds ? [...liveTaskIds] : [];
   const live = new Set(liveIds);
@@ -247,7 +250,7 @@ export function projectStatus(
   };
   const phase = projectRunPhases(
     board,
-    new Map(liveIds.map((taskId) => [taskId, "execute"] as const)),
+    liveKinds ?? new Map(liveIds.map((taskId) => [taskId, "execute"] as const)),
     config
   ).find((candidate) => candidate.current)?.label;
   if (board.tasks.length === 0) return { code: "empty", phase: "empty", ...base };
@@ -264,7 +267,7 @@ export function projectStatus(
       ...base,
     };
   }
-  if (approved + cancelled === board.tasks.length) {
+  if (approved + cancelled === board.tasks.length && staleApproved.size === 0) {
     return { code: "complete", phase: "complete", ...base };
   }
   if (runnable > 0 || reviewable > 0)

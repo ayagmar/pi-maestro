@@ -47,7 +47,7 @@ import {
   taskUsage,
 } from "./format.js";
 import { styledTranscriptLines } from "./live-pane.js";
-import { projectRunPhases, projectStatus } from "./status.js";
+import { type PhaseProjection, projectRunPhases, projectStatus, type RunPhase } from "./status.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
 import { TranscriptTail } from "./transcript.js";
 import {
@@ -132,6 +132,50 @@ const GROUP_LABELS: Record<TaskGroup, string> = {
   cancelled: "cancelled",
 };
 
+const PHASE_DESCRIPTIONS: Record<RunPhase, string> = {
+  discovery: "Read-only investigation is shaping bounded executable tasks.",
+  plan_approval: "The task contract is gated for human review before work starts.",
+  execution: "Ready tasks are dispatched after their approved dependencies settle.",
+  review: "Independent reviewers inspect completed attempts and their artifact evidence.",
+  integration: "Reviewed task artifacts are committed or merged into the main tree.",
+  verification: "Trusted project checks validate the integrated result.",
+  recovery: "A pause, decision, failure, stale result, or unresolved finding needs attention.",
+  complete: "Every task is settled and reusable completion evidence is current.",
+};
+
+function phaseStateLabel(phase: PhaseProjection): string {
+  if (phase.current && phase.id === "recovery") return "needs attention";
+  if (phase.current) return "current";
+  if (phase.taskIds.length > 0) return "retained evidence";
+  return "no evidence";
+}
+
+function phaseTaskSummary(board: Board, phase: PhaseProjection): string {
+  if (phase.taskIds.length === 0) return "0 tasks";
+  const counts = new Map<TaskGroup, number>();
+  for (const taskId of phase.taskIds) {
+    const task = findTask(board, taskId);
+    if (!task) continue;
+    const group = taskGroup(board, task);
+    counts.set(group, (counts.get(group) ?? 0) + 1);
+  }
+  const groups = [...counts].map(([group, count]) => `${count} ${GROUP_LABELS[group]}`);
+  return `${phase.taskIds.length} task(s)${groups.length > 0 ? ` · ${groups.join(" · ")}` : ""}`;
+}
+
+function phaseNextAction(phase: PhaseProjection): string {
+  if (!phase.current) {
+    return phase.taskIds.length > 0
+      ? "Inspect retained task and launch evidence; the run is currently in another phase."
+      : "No action is required for this phase.";
+  }
+  if (phase.id === "plan_approval") return "Review and approve the contract with /maestro plan.";
+  if (phase.id === "recovery") return "Inspect the decision or blockers before resuming the drive.";
+  if (phase.id === "complete") return "Review the outcome or start a new goal.";
+  if (phase.id === "review") return "Monitor reviewers or inspect completed attempt evidence.";
+  return "Drill into the phase tasks to inspect progress and the next runnable work.";
+}
+
 const MANUAL_STATUS_OPTIONS: readonly TaskStatus[] = [
   "todo",
   "ready_for_review",
@@ -159,6 +203,7 @@ type DashboardFrame = {
   config: MaestroConfig | undefined;
   grouped: ReturnType<typeof groupTasks>;
   phases: ReturnType<typeof projectRunPhases>;
+  liveKinds: Map<string, "execute" | "review">;
   staleTaskIds: Set<string>;
   liveRuns: Map<string, { cost: number; turns: number; lastActivity: string }>;
 };
@@ -287,6 +332,7 @@ export class Dashboard {
       config,
       grouped: groupTasks(board),
       phases: projectRunPhases(board, liveKinds, config),
+      liveKinds,
       staleTaskIds,
       liveRuns,
     };
@@ -321,6 +367,11 @@ export class Dashboard {
 
   private phases() {
     return this.frame.phases;
+  }
+
+  private activePhase(): PhaseProjection | undefined {
+    if (this.phaseScoped) return this.phases()[this.phaseIndex];
+    return this.phases().find((phase) => phase.current);
   }
 
   private selectedLaunch(): DashboardLaunch | undefined {
@@ -670,7 +721,8 @@ export class Dashboard {
     const status = projectStatus(
       board,
       board.tasks.filter((task) => this.actions.isLive(task.id)).map((task) => task.id),
-      this.frame.config
+      this.frame.config,
+      this.frame.liveKinds
     );
     const running = status.running;
     const hiddenCount = this.tasksBeforeDoneFilter().filter(
@@ -679,7 +731,7 @@ export class Dashboard {
     const doneFilterPart = this.hideDone ? ` · hiding ${hiddenCount} done` : "";
     const statusFilterPart = this.filter === "all" ? "" : ` · filter: ${GROUP_LABELS[this.filter]}`;
     const completed = status.code === "complete" ? " · board complete" : "";
-    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${status.code} · ${running} running · $${usage.cost.toFixed(4)}${completed}${statusFilterPart}${doneFilterPart} `;
+    const title = ` ⚡ maestro dashboard · ${board.tasks.length} task(s) · ${status.code} · ${status.phase} · ${running} running · $${usage.cost.toFixed(4)}${completed}${statusFilterPart}${doneFilterPart} `;
     lines.push(theme.fg("accent", truncateToWidth(title + "─".repeat(width), width)));
 
     for (let i = 0; i < bodyHeight; i++) {
@@ -711,12 +763,14 @@ export class Dashboard {
     return visibleSelectionWindow(this.phases(), this.phaseIndex, height).map(
       ({ item: phase, index }) => {
         const marker = index === this.phaseIndex ? "▶ " : "  ";
-        const current = phase.current ? " · current" : "";
+        const state = phaseStateLabel(phase);
         const text = truncateToWidth(
-          `${marker}${index + 1}. ${phase.label} · ${phase.taskIds.length} task(s)${current}`,
+          `${marker}${index + 1}. ${phase.label} · ${phase.taskIds.length} · ${state}`,
           width
         );
-        return index === this.phaseIndex ? this.theme.fg("accent", text) : text;
+        if (index === this.phaseIndex) return this.theme.fg("accent", text);
+        if (phase.current && phase.id === "recovery") return this.theme.fg("warning", text);
+        return phase.current ? this.theme.fg("accent", text) : this.theme.fg("dim", text);
       }
     );
   }
@@ -745,16 +799,16 @@ export class Dashboard {
     const phase = this.phases()[this.phaseIndex];
     if (!phase) return [];
     const board = this.frame.board;
+    const state = phaseStateLabel(phase);
     const lines = [
       this.theme.bold(truncateToWidth(`Run › ${phase.label}`, width)),
       this.theme.fg(
-        phase.current ? "accent" : "dim",
-        truncateToWidth(phase.current ? "Current workflow phase" : "Durable evidence phase", width)
+        phase.current && phase.id === "recovery" ? "warning" : phase.current ? "accent" : "dim",
+        truncateToWidth(state, width)
       ),
-      truncateToWidth(
-        `${phase.taskIds.length} task(s): ${phase.taskIds.join(", ") || "none"}`,
-        width
-      ),
+      ...wrapText(PHASE_DESCRIPTIONS[phase.id], width),
+      truncateToWidth(phaseTaskSummary(board, phase), width),
+      truncateToWidth(`Tasks: ${phase.taskIds.join(", ") || "none"}`, width),
     ];
     if (phase.id === "recovery" && board.activeDecision) {
       lines.push(
@@ -775,6 +829,7 @@ export class Dashboard {
         )
       );
     }
+    lines.push(truncateToWidth(`Next: ${phaseNextAction(phase)}`, width));
     lines.push(this.theme.fg("dim", "→ inspect tasks · ↑↓ choose phase"));
     return lines.slice(0, height);
   }
@@ -929,7 +984,7 @@ export class Dashboard {
     const attempts = `${task.attempts.length} attempt${task.attempts.length === 1 ? "" : "s"}`;
     const group = GROUP_LABELS[taskGroup(board, task)];
     const heading = `${STATUS_GLYPHS[task.status]} ${task.id} · ${STATUS_LABELS[task.status]} · ${task.tier}`;
-    const phase = this.phases().find((candidate) => candidate.current)?.label ?? "execution";
+    const phase = this.activePhase()?.label ?? "execution";
     const launch = this.navigationLevel === "launch" ? this.selectedLaunch() : undefined;
     const breadcrumb = launch
       ? `Run › ${phase} › ${task.id} › ${launch.label}`
@@ -1019,7 +1074,7 @@ export class Dashboard {
     const attempt = selectedLaunch?.attempt ?? task.attempts.at(-1);
     const review = selectedLaunch?.review;
     const latestReview = selectedLaunch ? review : attempt?.reviewLaunches?.at(-1);
-    const phase = this.phases().find((candidate) => candidate.current)?.label ?? "execution";
+    const phase = this.activePhase()?.label ?? "execution";
 
     const logFile = selectedLaunch
       ? selectedLaunch.kind === "review"

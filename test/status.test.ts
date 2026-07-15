@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTask } from "../src/board.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
 import {
   formatStatusProjection,
   projectRunPhases,
@@ -21,6 +22,30 @@ test("status projection uses one deterministic phase and accounting model", () =
   const complete = projectStatus(board);
   assert.equal(complete.code, "complete");
   assert.match(formatStatusProjection(complete), /complete · 1 approved · 0 cancelled/);
+});
+
+test("stale approved work is blocked instead of reported complete", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const stale = createTask(board, { title: "Stale", brief: "old work", tier: "standard" });
+  stale.status = "approved";
+
+  const status = projectStatus(board, undefined, DEFAULT_CONFIG);
+
+  assert.equal(status.code, "blocked");
+  assert.equal(status.phase, "recovery");
+  assert.equal(status.approved, 0);
+  assert.equal(status.blocked, 1);
+});
+
+test("status projection distinguishes live review from live execution", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const task = createTask(board, { title: "Review", brief: "inspect work", tier: "standard" });
+  task.status = "ready_for_review";
+
+  const status = projectStatus(board, [task.id], undefined, new Map([[task.id, "review"]]));
+
+  assert.equal(status.code, "running");
+  assert.equal(status.phase, "review");
 });
 
 test("all-cancelled and mixed settled boards agree on complete status and phase", () => {
