@@ -13,12 +13,7 @@ import {
   type SelectItem,
   Text,
 } from "@earendil-works/pi-tui";
-import {
-  artifactFindings,
-  captureApprovedProvenance,
-  completionFreshness,
-  pathsOutsideWriteScope,
-} from "./artifact-policy.js";
+import { completionFreshness } from "./artifact-policy.js";
 import {
   assertTaskNotDispatched,
   consumeQuarantineNotice,
@@ -36,7 +31,6 @@ import {
   replaceBoardWithArchive,
   restoreArchivedBoard,
   restoreQuarantineNotice,
-  scopedDependencyGapsWithConfig,
   sweepDispatchState,
   updateBoard,
   updateTask,
@@ -50,7 +44,7 @@ import {
   loadConfig,
   resolveTierModels,
 } from "./config.js";
-import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE, REPORT_PREVIEW_LINES } from "./constants.js";
+import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE } from "./constants.js";
 import {
   Dashboard,
   type DashboardTaskAction,
@@ -74,6 +68,8 @@ import {
   persistActiveDrive,
   persistDriveDecision,
 } from "./drive-controller.js";
+import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
+import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import {
   boardUsage,
   formatBoardProgress,
@@ -83,6 +79,7 @@ import {
 } from "./format.js";
 import { notify, runHandoff } from "./handoff.js";
 import { collectLivePaneLaunches } from "./live-pane-launches.js";
+import { manuallyApproveTask } from "./manual-approval.js";
 import { showPlanReview } from "./plan-review-controller.js";
 import {
   comparePlans,
@@ -90,7 +87,7 @@ import {
   formatPlanComparison,
   importPlan,
 } from "./plan-serialization.js";
-import { formatWorkflowPreflight, preflightWorkflow } from "./preflight.js";
+import { preflightWorkflow } from "./preflight.js";
 import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
 import {
   expandRecipe,
@@ -142,7 +139,6 @@ import {
   lastReport,
   preflightTaskTiers,
   simulatePlan,
-  snapshot,
   type WorkflowRun,
 } from "./workflow.js";
 import { showWorkflowBrowser } from "./workflow-browser.js";
@@ -150,7 +146,6 @@ import {
   cleanupManagedWorktrees,
   inspectGit,
   inspectManagedWorktrees,
-  snapshotArtifact,
   sweepWorktrees,
   worktreeExists,
 } from "./worktree.js";
@@ -512,69 +507,6 @@ export default function maestro(
     };
   }
 
-  function manuallyApproveTask(ctx: ExtensionContext, taskId: string): Task {
-    const initialBoard = loadBoard(ctx.cwd);
-    const initialTask = findTask(initialBoard, taskId);
-    if (!initialTask) throw new Error(`Unknown task id: ${taskId}`);
-    assertTaskNotDispatched(initialTask);
-    if (initialTask.status !== "ready_for_review") {
-      throw new Error("Manual approval requires a task that is ready for review.");
-    }
-    const attempt = initialTask.attempts.at(-1);
-    if (!attempt?.finalReport?.trim() || attempt.endedAt === undefined) {
-      throw new Error("Manual approval requires a completed attempt with a final report.");
-    }
-    const findings = artifactFindings(initialTask, attempt);
-    if (findings && findings.length > 0) {
-      throw new Error(`Manual approval refused: ${findings[0]?.message ?? "artifact is unsafe"}`);
-    }
-    const candidateTree =
-      (initialTask.writePaths?.length ?? 0) > 0
-        ? (() => {
-            if (attempt.touchedFiles.length === 0) {
-              throw new Error("Manual approval requires nonempty attributable Git changes.");
-            }
-            const outsideScope = pathsOutsideWriteScope(initialTask, attempt);
-            if (outsideScope.length > 0) {
-              throw new Error(
-                `Manual approval refused changes outside write scope: ${outsideScope.join(", ")}`
-              );
-            }
-            const artifact = snapshotArtifact(
-              attempt.worktreePath ?? ctx.cwd,
-              attempt.touchedFiles
-            );
-            if (!artifact) throw new Error("Manual approval requires a scoped Git artifact.");
-            return artifact;
-          })()
-        : undefined;
-    const attemptIdentity = `${attempt.index}:${attempt.logFile}:${attempt.startedAt}`;
-
-    return updateBoard(ctx.cwd, (board) => {
-      const task = findTask(board, taskId);
-      const freshAttempt = task?.attempts.at(-1);
-      if (
-        !task ||
-        task.updatedAt !== initialTask.updatedAt ||
-        !freshAttempt ||
-        `${freshAttempt.index}:${freshAttempt.logFile}:${freshAttempt.startedAt}` !==
-          attemptIdentity
-      ) {
-        throw new Error("Manual approval became stale while inspecting Git; retry it.");
-      }
-      assertTaskNotDispatched(task);
-      if (candidateTree) task.provenance = { candidateTree, capturedAt: Date.now() };
-      const proof = captureApprovedProvenance(board, task, loadConfig(ctx.cwd));
-      if (!proof)
-        throw new Error("Manual approval requires an authoritative artifact or final report.");
-      forceStatus(task, "approved");
-      task.approvalKind = "manual";
-      task.verificationSummary = "accepted manually with versioned artifact proof";
-      task.approvedProvenance = proof;
-      return task;
-    });
-  }
-
   async function runDriveWorkflow(
     ctx: ExtensionContext,
     taskIds: string[] | undefined,
@@ -657,58 +589,6 @@ export default function maestro(
       { customType: MESSAGE_TYPE, content: evidence, display: true, details: { decisionId } },
       { triggerTurn: true, deliverAs: "followUp" }
     );
-  }
-
-  function validateDriveStart(ctx: ExtensionContext, taskIds: string[] | undefined): void {
-    const board = loadBoard(ctx.cwd);
-    const config = loadConfig(ctx.cwd);
-    const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
-    if (validationError) throw new Error(validationError);
-    assertKnownTaskIds(board, taskIds);
-    if (board.planPending) throw new Error("Plan approval is pending.");
-    const preflight = preflightWorkflow(board, config, taskIds);
-    if (preflight.requiresConfirmation && board.scaleApproval?.signature !== preflight.signature) {
-      throw new Error(
-        `Workflow scale confirmation is required (${preflight.signature}); use the human /${COMMAND} drive command to inspect and confirm preflight.`
-      );
-    }
-    if (!taskIds) return;
-
-    const gaps = scopedDependencyGapsWithConfig(board, taskIds, config);
-    if (gaps.length > 0) {
-      throw new Error(
-        `Scoped drive omits unresolved dependencies: ${gaps
-          .map((gap) => `${gap.taskId} requires ${gap.dependencyId}`)
-          .join(", ")}`
-      );
-    }
-  }
-
-  async function confirmDriveScale(
-    ctx: ExtensionContext,
-    taskIds: string[] | undefined
-  ): Promise<boolean> {
-    const board = loadBoard(ctx.cwd);
-    const config = loadConfig(ctx.cwd);
-    const preflight = preflightWorkflow(board, config, taskIds);
-    if (!preflight.requiresConfirmation || board.scaleApproval?.signature === preflight.signature) {
-      return true;
-    }
-    notify(ctx, formatWorkflowPreflight(preflight), "warning");
-    if (!ctx.hasUI) return false;
-    const confirmed = await ctx.ui.confirm(
-      "Confirm workflow scale?",
-      `${preflight.taskCount} tasks and up to ${preflight.totalLaunchUpperBound} raw launches (${preflight.signature}).`
-    );
-    if (!confirmed) return false;
-    updateBoard(ctx.cwd, (fresh) => {
-      const current = preflightWorkflow(fresh, loadConfig(ctx.cwd), taskIds);
-      if (current.signature !== preflight.signature) {
-        throw new Error("Workflow changed after preflight; inspect and confirm it again.");
-      }
-      fresh.scaleApproval = { signature: current.signature, confirmedAt: Date.now() };
-    });
-    return true;
   }
 
   function startBackgroundDrive(
@@ -857,24 +737,6 @@ export default function maestro(
       savePausedDrive(ctx.cwd, paused);
     }
     return summary;
-  }
-
-  function unexpectedDriveSummary(
-    cwd: string,
-    taskIds: string[] | undefined,
-    error: unknown
-  ): DriveSummary {
-    const board = loadBoard(cwd);
-    const selected = board.tasks.filter((task) => !taskIds || taskIds.includes(task.id));
-    return {
-      rounds: 0,
-      tasks: selected.map((task) => snapshot(task)),
-      stoppedBecause: {
-        code: "error",
-        message: `Drive stopped with an internal error: ${error instanceof Error ? error.message : String(error)}`,
-        taskIds: selected.map((task) => task.id),
-      },
-    };
   }
 
   function sessionContainsDecision(ctx: ExtensionContext, decisionId: string): boolean {
@@ -1026,43 +888,6 @@ export default function maestro(
     driveController,
     startBackgroundDrive,
   });
-
-  function formatDrivePulse(summary: DriveSummary): string {
-    const base = formatDriveSummary(summary);
-    const code = summary.stoppedBecause.code;
-    if (code === "no_progress") {
-      return `${summary.stoppedBecause.message}\n\n${base}`;
-    }
-    if (code === "provider_blocked") {
-      return `${base}\n\nChoose a recovery: configure another fallback in /maestro config then /maestro resume, or maestro_update the task, or ask the user if the block is a cost/quota decision. Do not blindly retry the same provider.`;
-    }
-    if (code === "escalation_required") {
-      return `${base}\n\nChoose one: maestro_update to raise the tier or rewrite the brief, maestro_plan to split the task, cancel it, or ask the user when scope/cost judgment is required, then /maestro resume. Do not blindly retry or raise maxAttempts.`;
-    }
-    if (code === "review_disagreement") {
-      return `${base}\n\nResolve the disagreement deliberately: use maestro_update to change the task reviewPolicy, or split/cancel the task after inspecting both retained reviewer reports. Then start maestro_drive for the corrected scope.`;
-    }
-    if (code === "reviewer_failure") {
-      return `${base}\n\nInspect the retained reviewer launch and artifact/verification evidence, correct the operational cause, then start maestro_drive for the affected task. Operational failures do not count as reviewer rejection or disagreement.`;
-    }
-    if (code === "attempt_cap") {
-      return `${base}\n\nThe capped predecessor cannot run again because its consumed attempts remain. Create a narrowly scoped successor with maestro_plan and set supersedesTaskId to the capped task. Maestro atomically preserves the predecessor as cancelled and rewires downstream dependencies. Then start maestro_drive for the successor and rewired dependents. Do not perform cancellation/rewiring as separate calls or raise maxAttempts.`;
-    }
-    if (code === "stale_completion") {
-      return `${base}\n\nThe approved proof is stale or legacy and cannot satisfy dependencies. Use the human Retry control for an isolated rerun, or create a scoped successor when the old work must remain retained. Inspect the fingerprint reason before changing the contract or configuration.`;
-    }
-    if (code === "blocked") {
-      return `${base}\n\nChoose one: maestro_update the brief/tier, maestro_plan to split, cancel the task, or ask the user. Do not raise the project maxAttempts to force another retry.`;
-    }
-    return base;
-  }
-
-  function _getReportPreview(board: Board, taskId: string): string {
-    const task = findTask(board, taskId);
-    const report = task ? lastReport(task) : undefined;
-    if (!report) return "";
-    return `\nReport:\n${truncateText(report, REPORT_PREVIEW_LINES)}`;
-  }
 
   const COMPLETION_CACHE_MS = 2_000;
   let boardCompletionCache: { cwd: string; expiresAt: number; board: Board } | undefined;

@@ -148,6 +148,26 @@ test("workflow and task browsers own their command coordination", () => {
   assert.match(taskBrowser, /pruneTaskLogs/);
 });
 
+test("drive preflight, summaries, and manual approval live outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(
+    extension,
+    /function validateDriveStart|function confirmDriveScale|function formatDrivePulse|function manuallyApproveTask/
+  );
+
+  const preflight = files.find((file) => file.name === "drive-preflight.ts")?.contents ?? "";
+  assert.match(preflight, /function validateDriveStart/);
+  assert.match(preflight, /function confirmDriveScale/);
+
+  const summary = files.find((file) => file.name === "drive-summary.ts")?.contents ?? "";
+  assert.match(summary, /function formatDrivePulse/);
+
+  const approval = files.find((file) => file.name === "manual-approval.ts")?.contents ?? "";
+  assert.match(approval, /captureApprovedProvenance/);
+  assert.match(approval, /snapshotArtifact/);
+});
+
 test("index is a composition entry point and adapters own registrations", () => {
   const files = sourceFiles();
   const index = files.find((file) => file.name === "index.ts")?.contents ?? "";
