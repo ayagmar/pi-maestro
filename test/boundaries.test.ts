@@ -115,12 +115,17 @@ test("dashboard navigation projection lives outside the TUI controller", () => {
   const dashboard = files.find((file) => file.name === "dashboard.ts")?.contents ?? "";
   assert.match(dashboard, /stableTaskSelection/);
   assert.match(dashboard, /stableLaunchSelection/);
-  assert.doesNotMatch(dashboard, /tasks\.findIndex\(\(task\) => task\.id === this\.selectedTaskId/);
+  assert.doesNotMatch(
+    dashboard,
+    /tasks\.findIndex\(\(task\) => task\.id === this\.selectedTaskId|function taskListWindow/
+  );
 
   const navigation = files.find((file) => file.name === "dashboard-navigation.ts")?.contents ?? "";
   assert.match(navigation, /function visibleDashboardTasks/);
   assert.match(navigation, /function stableTaskSelection/);
   assert.match(navigation, /function stableLaunchSelection/);
+  assert.match(navigation, /function taskListWindow/);
+  assert.match(navigation, /function visibleSelectionWindow/);
 });
 
 test("live pane overlay composition lives outside the extension root", () => {

@@ -35,7 +35,9 @@ import {
   type DashboardFilter,
   stableLaunchSelection,
   stableTaskSelection,
+  taskListWindow,
   visibleDashboardTasks,
+  visibleSelectionWindow,
 } from "./dashboard-navigation.js";
 import {
   boardUsage,
@@ -712,15 +714,17 @@ export class Dashboard {
   }
 
   private renderPhaseList(width: number, height: number): string[] {
-    return visibleWindow(this.phases(), this.phaseIndex, height).map(({ item: phase, index }) => {
-      const marker = index === this.phaseIndex ? "▶ " : "  ";
-      const current = phase.current ? " · current" : "";
-      const text = truncateToWidth(
-        `${marker}${index + 1}. ${phase.label} · ${phase.taskIds.length} task(s)${current}`,
-        width
-      );
-      return index === this.phaseIndex ? this.theme.fg("accent", text) : text;
-    });
+    return visibleSelectionWindow(this.phases(), this.phaseIndex, height).map(
+      ({ item: phase, index }) => {
+        const marker = index === this.phaseIndex ? "▶ " : "  ";
+        const current = phase.current ? " · current" : "";
+        const text = truncateToWidth(
+          `${marker}${index + 1}. ${phase.label} · ${phase.taskIds.length} task(s)${current}`,
+          width
+        );
+        return index === this.phaseIndex ? this.theme.fg("accent", text) : text;
+      }
+    );
   }
 
   private renderLaunchList(width: number, height: number): string[] {
@@ -730,15 +734,17 @@ export class Dashboard {
     if (launches.length === 0) {
       return [this.theme.fg("muted", "No launches yet."), this.theme.fg("dim", "← tasks")];
     }
-    return visibleWindow(launches, this.launchIndex, height).map(({ item: launch, index }) => {
-      const marker = index === this.launchIndex ? "▶ " : "  ";
-      const usage = launch.review?.usage ?? executorUsage(launch.attempt);
-      const text = truncateToWidth(
-        `${marker}${launch.label} · ${usage.turns}t · $${usage.cost.toFixed(4)}`,
-        width
-      );
-      return index === this.launchIndex ? this.theme.fg("accent", text) : text;
-    });
+    return visibleSelectionWindow(launches, this.launchIndex, height).map(
+      ({ item: launch, index }) => {
+        const marker = index === this.launchIndex ? "▶ " : "  ";
+        const usage = launch.review?.usage ?? executorUsage(launch.attempt);
+        const text = truncateToWidth(
+          `${marker}${launch.label} · ${usage.turns}t · $${usage.cost.toFixed(4)}`,
+          width
+        );
+        return index === this.launchIndex ? this.theme.fg("accent", text) : text;
+      }
+    );
   }
 
   private renderSelectedPhase(width: number, height: number): string[] {
@@ -1188,53 +1194,4 @@ export class Dashboard {
     );
     return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
   }
-}
-
-interface TaskListWindow {
-  start: number;
-  end: number;
-  showTop: boolean;
-  showBottom: boolean;
-}
-
-function taskListWindow(taskCount: number, selected: number, height: number): TaskListWindow {
-  const selectedIndex = Math.min(Math.max(0, selected), taskCount - 1);
-  let bestStart = selectedIndex;
-  let bestEnd = selectedIndex + 1;
-  let bestTaskCount = 0;
-  let bestDistanceFromCenter = Number.POSITIVE_INFINITY;
-
-  for (let start = 0; start <= selectedIndex; start += 1) {
-    for (let end = selectedIndex + 1; end <= taskCount; end += 1) {
-      const markerRows = (start > 0 ? 1 : 0) + (end < taskCount ? 1 : 0);
-      const visibleTasks = end - start;
-      if (markerRows + visibleTasks * 2 > height + 1) continue;
-
-      const distanceFromCenter = Math.abs(selectedIndex - (start + end - 1) / 2);
-      if (
-        visibleTasks > bestTaskCount ||
-        (visibleTasks === bestTaskCount && distanceFromCenter < bestDistanceFromCenter)
-      ) {
-        bestStart = start;
-        bestEnd = end;
-        bestTaskCount = visibleTasks;
-        bestDistanceFromCenter = distanceFromCenter;
-      }
-    }
-  }
-
-  let showTop = bestStart > 0;
-  let showBottom = bestEnd < taskCount;
-  while (Number(showTop) + Number(showBottom) + 1 > height) {
-    if (showBottom) showBottom = false;
-    else showTop = false;
-  }
-  return { start: bestStart, end: bestEnd, showTop, showBottom };
-}
-
-function visibleWindow<T>(items: readonly T[], selected: number, height: number) {
-  const start = Math.max(0, Math.min(selected - Math.floor(height / 2), items.length - height));
-  return items
-    .slice(start, start + height)
-    .map((item, offset) => ({ item, index: start + offset }));
 }
