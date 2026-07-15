@@ -134,6 +134,21 @@ test("plan command UI and mutations live outside the extension root", () => {
   assert.match(planReview, /approvePlan\(/);
 });
 
+test("recipe and discovery commands live outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(
+    extension,
+    /expandRecipe|resolveRecipe|buildDiscoveryBoard|parseDiscoveryOutput/
+  );
+
+  const commands = files.find((file) => file.name === "command-recipes.ts")?.contents ?? "";
+  assert.match(commands, /function handleRecipeCommand/);
+  assert.match(commands, /function handleDiscoveryCommand/);
+  assert.match(commands, /buildDiscoveryBoard/);
+  assert.match(commands, /expandRecipe/);
+});
+
 test("workflow and task browsers own their command coordination", () => {
   const files = sourceFiles();
   const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
