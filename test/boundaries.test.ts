@@ -313,6 +313,21 @@ test("session navigation state lives outside the extension root", () => {
   assert.match(navigator, /sessionSwitchBlocked/);
 });
 
+test("candidate integration transactions live outside workflow orchestration", () => {
+  const files = sourceFiles();
+  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
+  assert.doesNotMatch(
+    workflow,
+    /prepareWorktreeIntegration|prepareMainTreeIntegration|promotePreparedIntegration|mainTreeOperationTails/
+  );
+
+  const integration = files.find((file) => file.name === "workflow-integration.ts")?.contents ?? "";
+  assert.match(integration, /function integrateReviewedCandidate/);
+  assert.match(integration, /prepareWorktreeIntegration/);
+  assert.match(integration, /prepareMainTreeIntegration/);
+  assert.match(integration, /mainTreeOperationTails/);
+});
+
 test("review prompt and convergence policy live outside workflow effects", () => {
   const files = sourceFiles();
   const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";

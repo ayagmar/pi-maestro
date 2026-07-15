@@ -22,6 +22,7 @@ Board boundary (src/board.ts)       runner.ts / worktree.ts
 | Pure artifact/fingerprint policy | `src/artifact-policy.ts` | No Pi, TUI, process, runner, or Git imports. |
 | Active drive ownership, live runs, and durable decisions | `src/drive-controller.ts` | One controller owns active/background drive state and identity-safe executor/reviewer lifetimes. |
 | Child processes and verification process groups | `src/runner.ts` | No other module calls `spawn`. |
+| Reviewed candidate integration transaction | `src/workflow-integration.ts` | Serializes prepared worktree/main-tree promotion and post-integration verification. |
 | Git, worktrees, immutable tree identity | `src/worktree.ts` | No other module executes Git. |
 | Composition entry | `src/index.ts` | Re-exports the extension factory only; it owns no runtime state. |
 | Model tool schemas, execution adapters, and rendering | `src/tools.ts` | Registers exactly the three model-facing tools. |

@@ -1,7 +1,4 @@
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
 import { type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
   artifactFindings,
@@ -84,24 +81,16 @@ export {
 } from "./workflow-stop-policy.js";
 
 import {
-  artifactMatchesCommit,
   captureDiff,
   changedPaths,
-  commitTree,
   createWorktree,
-  headCommit,
-  mainTreeIdentityMatches,
-  prepareMainTreeIntegration,
-  prepareWorktreeIntegration,
-  promotePreparedIntegration,
-  promotePreparedMainTreeIntegration,
-  removePreparedIntegration,
   removeUnreferencedCleanWorktree,
   removeWorktree,
   snapshotArtifact,
   type WorktreeRef,
   worktreeExists,
 } from "./worktree.js";
+import { integrateReviewedCandidate, removeIntegratedWorktree } from "./workflow-integration.js";
 
 export {
   type AttemptSnapshot,
@@ -116,24 +105,6 @@ export {
   snapshot,
   type TaskSnapshot,
 } from "./workflow-policy.js";
-
-const mainTreeOperationTails = new Map<string, Promise<void>>();
-
-async function serializeMainTreeOperation<T>(cwd: string, operation: () => T): Promise<T> {
-  const previous = mainTreeOperationTails.get(cwd) ?? Promise.resolve();
-  const result = previous.then(operation);
-  const tail = result.then(
-    () => {},
-    () => {}
-  );
-  mainTreeOperationTails.set(cwd, tail);
-
-  try {
-    return await result;
-  } finally {
-    if (mainTreeOperationTails.get(cwd) === tail) mainTreeOperationTails.delete(cwd);
-  }
-}
 
 export interface WorkflowRun {
   taskId: string;
@@ -1540,208 +1511,29 @@ export async function reviewTask(options: {
     let integratedCommit: string | undefined;
     let integratedTree: string | undefined;
     let integrationVerification: Awaited<ReturnType<typeof runVerification>> | undefined;
-    const fingerprintBeforeIntegration = verdict?.approved
-      ? taskFingerprint(loadBoard(cwd), task, runtimeConfig())
-      : undefined;
-    if (verdict?.approved && !fingerprintBeforeIntegration) {
-      mechanicalFailure = "Approved completion fingerprint inputs are unavailable.";
-      verdict = undefined;
-    }
-    if (verdict?.approved && worktree) {
-      const verificationStateDir = mkdtempSync(join(tmpdir(), "maestro-verification-"));
-      try {
-        await serializeMainTreeOperation(cwd, async () => {
-          const prepared = prepareWorktreeIntegration(cwd, worktree, taskCommitMessage(task));
-          try {
-            if (
-              !candidateTree ||
-              !artifactMatchesCommit(
-                prepared.tempRef.worktreePath,
-                candidateTree,
-                prepared.integratedCommit,
-                candidatePaths
-              )
-            ) {
-              throw new Error("prepared integration does not contain the reviewed candidate tree");
-            }
-            const heldTask = findTask(loadBoard(cwd), task.id);
-            if (!heldTask || !reviewIdentityMatches(heldTask)) {
-              throw new Error("review identity changed before prepared integration verification");
-            }
-            if (configuredProfile) {
-              integrationVerification = await runVerification({
-                cwd: prepared.tempRef.worktreePath,
-                stateDir: verificationStateDir,
-                name: `${task.id}-integrated`,
-                command: configuredProfile.command,
-                timeoutSeconds: configuredProfile.timeoutSeconds,
-                ...(signal ? { signal } : {}),
-              });
-            }
-            if (
-              headCommit(prepared.tempRef.worktreePath) !== prepared.integratedCommit ||
-              changedPaths(prepared.tempRef.worktreePath).length > 0
-            ) {
-              throw new Error("post-integration verification mutated the prepared checkout");
-            }
-            if (integrationVerification && !integrationVerification.ok) {
-              throw new Error(
-                `post-integration verification ${task.verificationProfile} failed or was interrupted`
-              );
-            }
-            const currentTask = findTask(loadBoard(cwd), task.id);
-            if (!currentTask || !reviewIdentityMatches(currentTask)) {
-              throw new Error("review identity changed before integration promotion");
-            }
-            const currentFingerprint = taskFingerprint(
-              loadBoard(cwd),
-              currentTask,
-              runtimeConfig()
-            );
-            if (
-              !currentFingerprint ||
-              currentFingerprint.fingerprint !== fingerprintBeforeIntegration?.fingerprint
-            ) {
-              throw new Error("task, config, or dependency fingerprint changed before promotion");
-            }
-            if (!mainTreeIdentityMatches(cwd, prepared.mainIdentity)) {
-              throw new Error("main checkout changed before integration promotion");
-            }
-            const promoted = promotePreparedIntegration(cwd, prepared);
-            if (!promoted.ok) {
-              throw new Error(promoted.error ?? "prepared integration promotion failed");
-            }
-            integratedCommit = prepared.integratedCommit;
-            integratedTree = prepared.integratedTree;
-          } finally {
-            removePreparedIntegration(cwd, prepared);
-          }
-        });
-      } catch (error) {
-        mergeConflict = `Approved review could not be integrated safely because of a git conflict or transaction check. Recovery worktree: ${worktree.worktreePath}\nBranch: ${worktree.branch}\n${error instanceof Error ? error.message : String(error)}`;
-        mechanicalFailure = mergeConflict;
-        verdict = { approved: false, notes: mergeConflict };
-      } finally {
-        if (integrationVerification) {
-          const directory = join(stateDir(cwd), "verification");
-          mkdirSync(directory, { recursive: true });
-          const logFile = join(directory, basename(integrationVerification.logFile));
-          copyFileSync(integrationVerification.logFile, logFile);
-          integrationVerification = { ...integrationVerification, logFile };
-        }
-        rmSync(verificationStateDir, { recursive: true, force: true });
-      }
-    } else if (verdict?.approved && autoCommit) {
-      const files = reviewedAttempt?.touchedFiles ?? [];
-      const verificationStateDir = mkdtempSync(join(tmpdir(), "maestro-verification-"));
-      try {
-        await serializeMainTreeOperation(cwd, async () => {
-          if (!candidateTree || snapshotArtifact(cwd, files) !== candidateTree) {
-            throw new Error(
-              "Candidate artifact changed after review; the unreviewed working files were left untouched."
-            );
-          }
-          const prepared = prepareMainTreeIntegration(cwd, candidateTree, taskCommitMessage(task));
-          try {
-            if (
-              !artifactMatchesCommit(
-                prepared.tempRef.worktreePath,
-                candidateTree,
-                prepared.integratedCommit,
-                files
-              )
-            ) {
-              throw new Error("prepared commit does not contain the reviewed candidate tree");
-            }
-            const heldTask = findTask(loadBoard(cwd), task.id);
-            if (!heldTask || !reviewIdentityMatches(heldTask)) {
-              throw new Error("review identity changed before prepared commit verification");
-            }
-            if (configuredProfile) {
-              integrationVerification = await runVerification({
-                cwd: prepared.tempRef.worktreePath,
-                stateDir: verificationStateDir,
-                name: `${task.id}-integrated`,
-                command: configuredProfile.command,
-                timeoutSeconds: configuredProfile.timeoutSeconds,
-                ...(signal ? { signal } : {}),
-              });
-            }
-            if (
-              headCommit(prepared.tempRef.worktreePath) !== prepared.integratedCommit ||
-              changedPaths(prepared.tempRef.worktreePath).length > 0
-            ) {
-              throw new Error("post-review verification mutated the prepared commit checkout");
-            }
-            if (integrationVerification && !integrationVerification.ok) {
-              throw new Error(
-                `post-review verification ${task.verificationProfile} failed or was interrupted`
-              );
-            }
-            const currentTask = findTask(loadBoard(cwd), task.id);
-            if (!currentTask || !reviewIdentityMatches(currentTask)) {
-              throw new Error("review identity changed before main-tree promotion");
-            }
-            const currentFingerprint = taskFingerprint(
-              loadBoard(cwd),
-              currentTask,
-              runtimeConfig()
-            );
-            if (
-              !currentFingerprint ||
-              currentFingerprint.fingerprint !== fingerprintBeforeIntegration?.fingerprint
-            ) {
-              throw new Error("task, config, or dependency fingerprint changed before promotion");
-            }
-            if (!mainTreeIdentityMatches(cwd, prepared.mainIdentity)) {
-              throw new Error(
-                "main checkout changed after review; the immutable reviewed commit was not promoted"
-              );
-            }
-            const promoted = promotePreparedMainTreeIntegration(cwd, prepared, files);
-            if (!promoted.ok) {
-              throw new Error(promoted.error ?? "prepared main-tree promotion failed");
-            }
-            integratedCommit = prepared.integratedCommit;
-            integratedTree = prepared.integratedTree;
-          } finally {
-            removePreparedIntegration(cwd, prepared);
-          }
-        });
-      } catch (error) {
-        mechanicalFailure = `The reviewed artifact could not be committed: ${error instanceof Error ? error.message : String(error)}`;
-      } finally {
-        if (integrationVerification) {
-          const directory = join(stateDir(cwd), "verification");
-          mkdirSync(directory, { recursive: true });
-          const logFile = join(directory, basename(integrationVerification.logFile));
-          copyFileSync(integrationVerification.logFile, logFile);
-          integrationVerification = { ...integrationVerification, logFile };
-        }
-        rmSync(verificationStateDir, { recursive: true, force: true });
-      }
+    if (verdict?.approved) {
+      const integration = await integrateReviewedCandidate({
+        cwd,
+        task,
+        candidateTree,
+        candidatePaths,
+        worktree,
+        autoCommit,
+        requiresIntegration,
+        configuredProfile,
+        fingerprintBeforeIntegration: taskFingerprint(loadBoard(cwd), task, runtimeConfig()),
+        signal,
+        reviewIdentityMatches,
+        runtimeConfig,
+      });
+      mergeConflict = integration.mergeConflict;
+      integratedCommit = integration.integratedCommit;
+      integratedTree = integration.integratedTree;
+      integrationVerification = integration.verification;
+      mechanicalFailure = integration.mechanicalFailure;
       if (mechanicalFailure) verdict = { approved: false, notes: mechanicalFailure };
-    } else if (verdict?.approved && requiresIntegration) {
-      mechanicalFailure = "Automated approval requires a proven integration commit.";
-      verdict = { approved: false, notes: mechanicalFailure };
     }
 
-    if (verdict?.approved && integratedCommit) {
-      integratedTree = commitTree(cwd, integratedCommit);
-      if (
-        candidateTree &&
-        !artifactMatchesCommit(cwd, candidateTree, integratedCommit, candidatePaths)
-      ) {
-        mechanicalFailure = "Integrated commit does not contain the reviewed candidate tree.";
-        verdict = { approved: false, notes: mechanicalFailure };
-      }
-    }
-
-    if (verdict?.approved && requiresIntegration && (!candidateTree || !integratedCommit)) {
-      mechanicalFailure =
-        "Automated approval requires an authoritative Git artifact and proven integration.";
-      verdict = { approved: false, notes: mechanicalFailure };
-    }
     if (mechanicalFailure) {
       convergence = convergenceRecord(
         reviewPolicy,
@@ -1941,7 +1733,7 @@ export async function reviewTask(options: {
     }
     if (result.status === "approved") {
       if (worktree) {
-        await serializeMainTreeOperation(cwd, () => removeWorktree(cwd, worktree));
+        await removeIntegratedWorktree(cwd, worktree);
       }
     }
     if (outcome.aborted) {
