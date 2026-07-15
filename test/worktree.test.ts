@@ -7,6 +7,7 @@ import test from "node:test";
 import { taskFingerprint } from "../src/artifact-policy.js";
 import { createTask, findTask, forceStatus, loadBoard, saveBoard } from "../src/board.js";
 import { loadConfig } from "../src/config.js";
+import { manuallyApproveTask } from "../src/manual-approval.js";
 import { MAX_INJECTED_CONTEXT_LENGTH } from "../src/prompts.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/types.js";
@@ -17,11 +18,14 @@ import {
   cleanupManagedWorktrees,
   createWorktree,
   inspectManagedWorktrees,
+  parkInactiveWorktrees,
   prepareMainTreeIntegration,
   promotePreparedMainTreeIntegration,
   removePreparedIntegration,
+  restoreWorktree,
   snapshotArtifact,
   sweepWorktrees,
+  worktreeRecoveryExists,
   worktreeRef,
 } from "../src/worktree.js";
 
@@ -256,7 +260,8 @@ test("trusted verifier mutation invalidates the candidate before review", async 
     );
     assert.equal(reviewerStarts, 0);
     assert.match(result.note ?? "", /changed during trusted verification/);
-    assert.equal(existsSync(ref.worktreePath), true);
+    assert.equal(existsSync(ref.worktreePath), false);
+    assert.notEqual(git(cwd, "branch", "--list", ref.branch), "");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -325,6 +330,76 @@ test("startup sweep preserves dirty and branch-ahead orphan worktrees", () => {
     );
     assert.equal(existsSync(stale.worktreePath), false);
     assert.equal(git(cwd, "branch", "--list", stale.branch), "");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("idle worktrees are checkpointed, removed, and restored only when needed", () => {
+  const cwd = repository();
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const task = createTask(board, { title: "Task", brief: "Change it", tier: "standard" });
+    forceStatus(task, "failed");
+    const ref = createWorktree(cwd, task.id, 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "recoverable work\n");
+    task.attempts.push(attempt(ref.worktreePath, ref.branch));
+
+    const parking = parkInactiveWorktrees(cwd, board);
+
+    assert.deepEqual(parking.warnings, []);
+    assert.deepEqual(parking.parked, [ref]);
+    assert.equal(existsSync(ref.worktreePath), false);
+    assert.notEqual(git(cwd, "branch", "--list", ref.branch), "");
+    assert.equal(worktreeRecoveryExists(cwd, ref), true);
+    assert.doesNotMatch(git(cwd, "worktree", "list", "--porcelain"), new RegExp(ref.worktreePath));
+
+    restoreWorktree(cwd, ref);
+    assert.equal(readFileSync(join(ref.worktreePath, "shared.txt"), "utf-8"), "recoverable work\n");
+    assert.equal(changedPaths(ref.worktreePath).length, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("orphan parking uses the branch registered by Git", () => {
+  const cwd = repository();
+  try {
+    const worktreePath = join(cwd, ".pi", "maestro", "worktrees", "recovered-task");
+    const branch = "recovery/recovered-task";
+    git(cwd, "worktree", "add", "-b", branch, worktreePath, "HEAD");
+    writeFileSync(join(worktreePath, "shared.txt"), "recovered work\n");
+
+    const parking = parkInactiveWorktrees(cwd, {
+      version: 1,
+      nextTaskNumber: 1,
+      tasks: [],
+    });
+
+    assert.deepEqual(parking.warnings, []);
+    assert.equal(parking.parked[0]?.branch, branch);
+    assert.equal(existsSync(worktreePath), false);
+    assert.notEqual(git(cwd, "branch", "--list", branch), "");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("idle clean worktrees and branches are removed completely", () => {
+  const cwd = repository();
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const task = createTask(board, { title: "Task", brief: "No changes", tier: "standard" });
+    forceStatus(task, "cancelled");
+    const ref = createWorktree(cwd, task.id, 1);
+    task.attempts.push(attempt(ref.worktreePath, ref.branch));
+
+    const parking = parkInactiveWorktrees(cwd, board);
+
+    assert.deepEqual(parking.warnings, []);
+    assert.deepEqual(parking.removed, [ref]);
+    assert.equal(existsSync(ref.worktreePath), false);
+    assert.equal(git(cwd, "branch", "--list", ref.branch), "");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -526,6 +601,36 @@ test("cleanup rechecks live and newly recoverable worktrees before removal", () 
   }
 });
 
+test("manual approval parks its completed worktree", () => {
+  const cwd = repository();
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const task = createTask(board, {
+      title: "Manual task",
+      brief: "Change the file",
+      tier: "standard",
+      writePaths: ["shared.txt"],
+      successCriteria: ["shared.txt changes"],
+    });
+    forceStatus(task, "ready_for_review");
+    const ref = createWorktree(cwd, task.id, 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "manual change\n");
+    const completed = attempt(ref.worktreePath, ref.branch);
+    completed.endedAt = Date.now();
+    task.attempts.push(completed);
+    saveBoard(cwd, board);
+
+    const approved = manuallyApproveTask({ cwd } as never, task.id);
+
+    assert.equal(approved.status, "approved");
+    assert.equal(approved.approvalKind, "manual");
+    assert.equal(existsSync(ref.worktreePath), false);
+    assert.notEqual(git(cwd, "branch", "--list", ref.branch), "");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("approved review uses its worktree, merges it, then removes worktree and branch", async () => {
   const cwd = repository();
   try {
@@ -536,6 +641,9 @@ test("approved review uses its worktree, merges it, then removes worktree and br
     const board = { ...loadBoard(cwd), tasks: [task] };
     recordExecutionFingerprint(cwd, board, task);
     saveBoard(cwd, board);
+    const parking = parkInactiveWorktrees(cwd, board);
+    assert.deepEqual(parking.warnings, []);
+    assert.equal(existsSync(ref.worktreePath), false);
     writeFileSync(join(cwd, "staged.txt"), "user staged\n");
     git(cwd, "add", "staged.txt");
     writeFileSync(join(cwd, "unstaged.txt"), "user unstaged\n");
@@ -601,7 +709,7 @@ test("post-integration verification may create ignored disposable output", async
   }
 });
 
-test("failed post-integration verification retains the recovery worktree", async () => {
+test("failed post-integration verification parks the recovery worktree", async () => {
   const cwd = repository();
   try {
     const task = readyTask(cwd);
@@ -653,7 +761,7 @@ test("failed post-integration verification retains the recovery worktree", async
     assert.deepEqual(readFileSync(join(cwd, "staged.txt")), stagedBytes);
     assert.deepEqual(readFileSync(join(cwd, "unstaged.txt")), unstagedBytes);
     assert.deepEqual(readFileSync(join(cwd, "untracked.txt")), untrackedBytes);
-    assert.equal(existsSync(ref.worktreePath), true);
+    assert.equal(existsSync(ref.worktreePath), false);
     assert.notEqual(git(cwd, "branch", "--list", ref.branch), "");
     assertNoPreparedIntegration(cwd);
   } finally {
@@ -744,8 +852,8 @@ test("merge conflict aborts and retains recoverable worktree metadata and notes"
       persisted?.reviewNotes ?? "",
       new RegExp(ref.worktreePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     );
-    assert.equal(existsSync(ref.worktreePath), true);
-    assert.equal(git(cwd, "branch", "--list", ref.branch).trim(), `+ ${ref.branch}`);
+    assert.equal(existsSync(ref.worktreePath), false);
+    assert.equal(git(cwd, "branch", "--list", ref.branch).trim(), ref.branch);
     assert.equal(existsSync(join(cwd, ".git", "MERGE_HEAD")), false);
     assert.equal(readFileSync(join(cwd, "shared.txt"), "utf-8"), "main change\n");
     assert.equal(git(cwd, "rev-parse", "HEAD"), originalHead);

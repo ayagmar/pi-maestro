@@ -33,6 +33,7 @@ import { canonicalTaskIds } from "./session-control.js";
 import { formatStatusProjection, projectStatus } from "./status.js";
 import { type Task, type TaskStatus } from "./types.js";
 import { type DriveSummary, formatDriveSummary, snapshot, type TaskSnapshot } from "./workflow.js";
+import { parkInactiveWorktrees } from "./worktree.js";
 
 interface MaestroDetails {
   action: string;
@@ -204,6 +205,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         if (preflightWorkflow(board, config).requiresConfirmation) board.planPending = true;
         return { created, supersessions, planPending: board.planPending };
       });
+      const worktreeWarning = parkIdleToolWorktrees(ctx.cwd, driveController);
       adoptBoard(ctx);
       refreshUI(ctx);
 
@@ -221,7 +223,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         content: [
           {
             type: "text",
-            text: `Created ${created.length} task(s):\n${lines.join("\n")}${replacement}${approval}`,
+            text: `Created ${created.length} task(s):\n${lines.join("\n")}${replacement}${approval}${worktreeWarning}`,
           },
         ],
         details: { action: "plan", tasks: created.map((task) => snapshot(task)) },
@@ -589,11 +591,13 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         }
       });
       if (!updated) throw new Error(`Unknown task: ${taskId}`);
+      const worktreeWarning = parkIdleToolWorktrees(ctx.cwd, driveController);
       refreshUI(ctx);
-      const text =
+      const text = `${
         wasInFlight && editsContractField
           ? `Updated: ${taskLine(updated)}\nWarning: $${costSoFar.toFixed(4)} of in-flight attempt/review cost was invalidated with invalidateInFlight: true; ${updated.id} needs re-execution under the new contract.`
-          : `Updated: ${taskLine(updated)}`;
+          : `Updated: ${taskLine(updated)}`
+      }${worktreeWarning}`;
       return {
         content: [{ type: "text", text }],
         details: { action: "update", tasks: [snapshot(updated)] },
@@ -621,6 +625,14 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
     },
     renderResult: renderTaskListResult,
   });
+}
+
+function parkIdleToolWorktrees(cwd: string, driveController: DriveRuntimeController): string {
+  const liveTaskIds = new Set([...driveController.liveRunValues()].map((run) => run.taskId));
+  const parking = parkInactiveWorktrees(cwd, loadBoard(cwd), liveTaskIds);
+  return parking.warnings.length > 0
+    ? `\nWarning: Some idle worktrees could not be cleaned: ${parking.warnings.join("; ")}`
+    : "";
 }
 
 function applyTaskSupersession(

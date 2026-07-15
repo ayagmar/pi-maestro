@@ -43,14 +43,14 @@ import { reviewTask } from "./workflow-review.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
 import {
   createWorktree,
+  parkInactiveWorktrees,
   removeUnreferencedCleanWorktree,
   removeWorktree,
+  restoreWorktree,
   type WorktreeRef,
-  worktreeExists,
 } from "./worktree.js";
 
 export { executeTask } from "./workflow-execution.js";
-export { reviewTask } from "./workflow-review.js";
 export {
   type AttemptSnapshot,
   calculateSchedulingWave,
@@ -64,6 +64,7 @@ export {
   snapshot,
   type TaskSnapshot,
 } from "./workflow-policy.js";
+export { reviewTask } from "./workflow-review.js";
 export type {
   StartExecutor,
   TrackRun,
@@ -299,15 +300,11 @@ export async function driveBoard(options: {
               task.id.toUpperCase() !== humanRetryId &&
               task.status === "changes_requested" &&
               previous?.worktreePath &&
-              previous.branch &&
-              worktreeExists({
-                worktreePath: previous.worktreePath,
-                branch: previous.branch,
-              })
+              previous.branch
                 ? { worktreePath: previous.worktreePath, branch: previous.branch }
                 : undefined;
             if (retained) {
-              worktrees.set(task.id, retained);
+              worktrees.set(task.id, restoreWorktree(cwd, retained));
             } else if (isolateBatch) {
               const ref = createWorktree(cwd, task.id, task.attempts.length + 1);
               created.push(ref);
@@ -594,6 +591,15 @@ export async function driveBoard(options: {
       code: "error",
       message: error instanceof Error ? error.message : String(error),
     });
+  } finally {
+    const liveTaskIds = new Set(
+      selectedTasks()
+        .filter((task) => isLive(task.id))
+        .map((task) => task.id)
+    );
+    const parking = parkInactiveWorktrees(cwd, loadBoard(cwd), liveTaskIds);
+    for (const warning of parking.warnings)
+      options.onRetentionWarning?.(`Worktree cleanup: ${warning}`);
   }
 
   return finish({

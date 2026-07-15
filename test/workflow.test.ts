@@ -1507,7 +1507,16 @@ test("human execution retry is isolated from a dirty main tree when worktrees ar
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.attempts.length, 2);
     assert.equal(persisted?.attempts[0]?.finalReport, "old failure");
-    assert.ok(persisted?.attempts[1]?.worktreePath);
+    const parkedAttempt = persisted?.attempts[1];
+    assert.ok(parkedAttempt?.worktreePath);
+    assert.equal(existsSync(parkedAttempt.worktreePath), false);
+    assert.notEqual(
+      execFileSync("git", ["branch", "--list", parkedAttempt.branch ?? ""], {
+        cwd,
+        encoding: "utf-8",
+      }),
+      ""
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

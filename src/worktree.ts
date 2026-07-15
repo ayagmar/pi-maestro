@@ -4,6 +4,7 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
@@ -11,7 +12,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { STATE_DIR } from "./constants.js";
 import { MAX_INJECTED_CONTEXT_LENGTH } from "./prompts.js";
 import { type Board, type Task } from "./types.js";
@@ -66,6 +67,12 @@ export interface WorktreeCleanupResult {
   confirmed: boolean;
   removed: ManagedWorktreeInspection[];
   preserved: ManagedWorktreeInspection[];
+}
+
+export interface WorktreeParkingResult {
+  parked: WorktreeRef[];
+  removed: WorktreeRef[];
+  warnings: string[];
 }
 
 function gitOutput(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
@@ -139,6 +146,44 @@ export function createWorktree(mainCwd: string, taskId: string, attempt: number)
 
 export function worktreeExists(ref: WorktreeRef): boolean {
   return existsSync(ref.worktreePath);
+}
+
+export function worktreeRecoveryExists(mainCwd: string, ref: WorktreeRef): boolean {
+  return worktreeExists(ref) || branchExists(mainCwd, ref.branch);
+}
+
+function branchExists(mainCwd: string, branch: string): boolean {
+  return git(mainCwd, ["branch", "--list", branch]) !== "";
+}
+
+function registeredBranch(mainCwd: string, worktreePath: string): string | undefined {
+  try {
+    const target = resolve(worktreePath);
+    let currentPath: string | undefined;
+    for (const line of gitOutput(mainCwd, ["worktree", "list", "--porcelain"]).split("\n")) {
+      if (line.startsWith("worktree ")) {
+        currentPath = resolve(line.slice("worktree ".length));
+      } else if (currentPath === target && line.startsWith("branch refs/heads/")) {
+        return line.slice("branch refs/heads/".length);
+      }
+    }
+  } catch {
+    // An unregistered or non-Git path has no authoritative branch mapping.
+  }
+  return undefined;
+}
+
+/** Restore a parked task checkout from its durable Maestro branch. */
+export function restoreWorktree(mainCwd: string, ref: WorktreeRef): WorktreeRef {
+  if (worktreeExists(ref)) return ref;
+  if (!branchExists(mainCwd, ref.branch)) {
+    throw new Error(`Recovery branch is missing: ${ref.branch}`);
+  }
+
+  git(mainCwd, ["worktree", "prune"]);
+  mkdirSync(dirname(ref.worktreePath), { recursive: true });
+  git(mainCwd, ["worktree", "add", ref.worktreePath, ref.branch]);
+  return ref;
 }
 
 function changedPathsFromPorcelain(output: string): string[] {
@@ -454,16 +499,44 @@ export function mergeWorktree(mainCwd: string, ref: WorktreeRef, message?: strin
 }
 
 export function removeWorktree(mainCwd: string, ref: WorktreeRef): void {
+  const branch = registeredBranch(mainCwd, ref.worktreePath) ?? ref.branch;
   if (existsSync(ref.worktreePath)) {
     git(mainCwd, ["worktree", "remove", "--force", ref.worktreePath]);
   } else {
     git(mainCwd, ["worktree", "prune"]);
   }
   try {
-    git(mainCwd, ["branch", "-D", ref.branch]);
+    git(mainCwd, ["branch", "-D", branch]);
   } catch {
     // Already absent is the desired idempotent state.
   }
+}
+
+/**
+ * Checkpoint recoverable edits on the task branch and remove the physical checkout.
+ * Branches with no work beyond main are removed as well.
+ */
+export function parkWorktree(mainCwd: string, ref: WorktreeRef): "parked" | "removed" | "absent" {
+  if (!worktreeExists(ref)) {
+    git(mainCwd, ["worktree", "prune"]);
+    return "absent";
+  }
+
+  const branch = registeredBranch(mainCwd, ref.worktreePath) ?? ref.branch;
+  const effectiveRef = { ...ref, branch };
+  if (changedPaths(ref.worktreePath).length > 0) {
+    commitAll(ref.worktreePath, `chore(maestro): checkpoint ${branch}`);
+  }
+  git(mainCwd, ["worktree", "remove", "--force", ref.worktreePath]);
+  git(mainCwd, ["worktree", "prune"]);
+
+  if (orphanHasRecoverableWork(mainCwd, effectiveRef.worktreePath, branch)) return "parked";
+  try {
+    git(mainCwd, ["branch", "-D", branch]);
+  } catch {
+    // An already absent branch is fully cleaned.
+  }
+  return "removed";
 }
 
 export function removeUnreferencedCleanWorktree(
@@ -543,13 +616,15 @@ export function inspectManagedWorktrees(
         reason = `${task.id} can continue from this checkout`;
       }
 
-      if (
+      if (!exists && branchExists(mainCwd, attempt.branch)) {
+        reason = `${reason}; checkout is parked on ${attempt.branch}`;
+      } else if (
         !exists &&
         (state === "active" || state === "recoverable" || state === "retained-conflict")
       ) {
-        reason = `${reason}; checkout is missing and cannot be recovered here`;
+        reason = `${reason}; checkout is missing and recovery branch is missing`;
       } else if (!exists) {
-        reason = `${reason}; checkout is missing, only the branch/registration remains`;
+        reason = `${reason}; checkout is missing, only stale metadata remains`;
       }
 
       const candidate: ManagedWorktreeInspection = {
@@ -579,7 +654,7 @@ export function inspectManagedWorktrees(
       if (!entry.isDirectory()) continue;
       const worktreePath = resolve(root, entry.name);
       if (byPath.has(worktreePath)) continue;
-      const branch = `maestro/${entry.name}`;
+      const branch = registeredBranch(mainCwd, worktreePath) ?? `maestro/${entry.name}`;
       const recoverable = orphanHasRecoverableWork(mainCwd, worktreePath, branch);
       byPath.set(worktreePath, {
         ref: { worktreePath, branch },
@@ -592,9 +667,58 @@ export function inspectManagedWorktrees(
     }
   }
 
+  let parkedBranches: string[] = [];
+  try {
+    parkedBranches = git(mainCwd, ["branch", "--list", "maestro/*"])
+      .split("\n")
+      .map((line) => line.replace(/^[+* ]+/, "").trim())
+      .filter(Boolean);
+  } catch {
+    // A non-Git project cannot have managed task branches.
+  }
+  for (const branch of parkedBranches) {
+    const worktreePath = resolve(root, branch.slice("maestro/".length));
+    if (byPath.has(worktreePath)) continue;
+    const recoverable = orphanHasRecoverableWork(mainCwd, worktreePath, branch);
+    byPath.set(worktreePath, {
+      ref: { worktreePath, branch },
+      state: recoverable ? "recoverable" : "orphaned",
+      exists: false,
+      reason: recoverable
+        ? "parked recovery branch has no live board metadata"
+        : "parked branch has no live board metadata or unique work",
+    });
+  }
+
   return [...byPath.values()].sort((left, right) =>
     left.ref.worktreePath.localeCompare(right.ref.worktreePath)
   );
+}
+
+/** Park every non-live managed checkout while retaining recoverable work on its branch. */
+export function parkInactiveWorktrees(
+  mainCwd: string,
+  board: Board,
+  liveTaskIds: ReadonlySet<string> = new Set()
+): WorktreeParkingResult {
+  const parked: WorktreeRef[] = [];
+  const removed: WorktreeRef[] = [];
+  const warnings: string[] = [];
+
+  for (const entry of inspectManagedWorktrees(mainCwd, board, liveTaskIds)) {
+    if (entry.state === "active" || !entry.exists) continue;
+    try {
+      const result = parkWorktree(mainCwd, entry.ref);
+      if (result === "parked") parked.push(entry.ref);
+      if (result === "removed") removed.push(entry.ref);
+    } catch (error) {
+      warnings.push(
+        `${entry.ref.worktreePath}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  return { parked, removed, warnings };
 }
 
 /**
@@ -653,7 +777,10 @@ export function sweepWorktrees(
     if (!entry.isDirectory()) continue;
     const worktreePath = join(root, entry.name);
     if (retainedPaths.has(resolve(worktreePath))) continue;
-    const ref = { worktreePath, branch: `maestro/${entry.name}` };
+    const ref = {
+      worktreePath,
+      branch: registeredBranch(mainCwd, worktreePath) ?? `maestro/${entry.name}`,
+    };
     if (orphanHasRecoverableWork(mainCwd, ref.worktreePath, ref.branch)) continue;
     removeWorktree(mainCwd, ref);
   }

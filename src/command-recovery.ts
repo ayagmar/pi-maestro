@@ -18,7 +18,11 @@ import {
   inspectLogRetention,
   pruneStaleLogs,
 } from "./retention.js";
-import { cleanupManagedWorktrees, inspectManagedWorktrees } from "./worktree.js";
+import {
+  cleanupManagedWorktrees,
+  inspectManagedWorktrees,
+  parkInactiveWorktrees,
+} from "./worktree.js";
 
 export interface RecoveryCommandRuntime {
   hasLiveRuns(): boolean;
@@ -219,6 +223,10 @@ export async function handleResetCommand(
   const archivedLogs = captureBoardLogs(ctx.cwd, board);
   for (const warning of archivedLogs.warnings) {
     reportReset(`Log cleanup warning: ${warning}`, "warning");
+  }
+  const parking = parkInactiveWorktrees(ctx.cwd, board, runtime.liveTaskIds());
+  for (const warning of parking.warnings) {
+    reportReset(`Worktree cleanup warning: ${warning}`, "warning");
   }
   let archivePath: string | undefined;
   try {

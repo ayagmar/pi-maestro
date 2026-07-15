@@ -1,6 +1,6 @@
 # Operations and recovery
 
-Maestro preserves board state, attempts, logs, sessions, Git branches, and dirty recovery worktrees. Prefer `/maestro timeline`, `/maestro board`, `/maestro doctor`, and `/maestro reconcile` before changing state.
+Maestro preserves board state, attempts, logs, sessions, and checkpoint branches. Physical task checkouts exist only during active execution, review, or inspection. Prefer `/maestro timeline`, `/maestro board`, `/maestro doctor`, and `/maestro reconcile` before changing state.
 
 | State or failure | Safe action | Preserved evidence |
 |---|---|---|
@@ -14,8 +14,8 @@ Maestro preserves board state, attempts, logs, sessions, Git branches, and dirty
 | `cost_cap` / `budget_blocked` | Inspect `/maestro costs`; explicitly change scope or operator config. | Usage and prompt accounting. |
 | `launch_limit` | Inspect retained launches, narrow the scope, or explicitly start another bounded drive. | Every executor and reviewer launch attempted by the drive. |
 | `stale_completion` | Inspect the component reason, then `/maestro retry <taskId>` or create a successor. | Legacy approval, prior artifact, provenance, attempts, and dependency identities. |
-| `user_abort` / `aborted` | Resume or explicitly retry only after checking partial work. | Attempt and worktree. |
-| Merge conflict | Resolve in the reported recovery worktree/branch, or create a focused successor. | Branch, checkout, and conflict notes. |
+| `user_abort` / `aborted` | Resume or explicitly retry only after checking partial work. | Attempt metadata and a checkpoint branch; the idle checkout is removed. |
+| Merge conflict | Retry or inspect the reported recovery branch; Maestro restores its checkout only while work resumes. | Checkpoint branch and conflict notes. |
 | Candidate verification failure | Fix in the task checkout and retry review. | Verification log and immutable pre-check identity. |
 | Integrated verification failure | Inspect the recorded commit and retained checkout; no automatic rollback is claimed. | Integrated commit, branch, checkout, and verification log. |
 | `paused` | The owning session uses `/maestro resume`; another session must not take ownership. | Paused scope and owner. |
@@ -55,6 +55,6 @@ no live controller/executor is reconciled into one bounded internal-error decisi
 are owner-scoped: failed notification remains pending, a foreign session cannot consume it, and an
 already appended owner message is acknowledged without duplication.
 
-Never reset, clean, or force-remove a recovery checkout merely to make status green. An empty changed-path list never means “stage everything.”
+Idle Maestro checkouts are checkpointed on their task branch and removed automatically. They are restored at the recorded path only while execution, review, or manual inspection resumes. Never delete a recovery branch merely to make status green. An empty changed-path list never means “stage everything.”
 
 Multi-review policies require one bounded `CRITERION N: PASS|FAIL — evidence` line per success criterion. Provider, process, artifact, merge, commit, and verification failures are operational failures: they do not count as reviewer disagreement or increment rejection escalation. Raw fallback launches remain attached to the same logical reviewer index, and launch caps prevent indefinite review retries.

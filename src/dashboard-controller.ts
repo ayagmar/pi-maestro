@@ -23,6 +23,7 @@ import { pruneTaskLogs } from "./retention.js";
 import { findSessionFile } from "./runner.js";
 import { sessionSwitchBlocked } from "./session-control.js";
 import { type SessionNavigator } from "./session-navigator.js";
+import { parkInactiveWorktrees } from "./worktree.js";
 
 export interface DashboardControllerDependencies {
   driveController: DriveRuntimeController;
@@ -88,6 +89,14 @@ export async function showDashboard(
             } catch (error) {
               notify(ctx, error instanceof Error ? error.message : String(error), "warning");
               return;
+            }
+            const parking = parkInactiveWorktrees(
+              ctx.cwd,
+              loadBoard(ctx.cwd),
+              new Set([...driveController.liveRunValues()].map((run) => run.taskId))
+            );
+            for (const warning of parking.warnings) {
+              notify(ctx, `Worktree cleanup warning: ${warning}`, "warning");
             }
             if (status === "approved") {
               const cleanup = pruneTaskLogs(

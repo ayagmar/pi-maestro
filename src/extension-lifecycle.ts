@@ -17,7 +17,7 @@ import {
   sessionSwitchBlocked,
 } from "./session-control.js";
 import { type Board } from "./types.js";
-import { sweepWorktrees } from "./worktree.js";
+import { parkInactiveWorktrees, sweepWorktrees } from "./worktree.js";
 
 export class ExtensionLifecycleState {
   private active = true;
@@ -173,6 +173,11 @@ export function registerMaestroLifecycle(
       ctx.sessionManager.getSessionFile(),
       dependencies.sendDecision
     );
+
+    const parking = parkInactiveWorktrees(boardCwd, recovered);
+    for (const warning of parking.warnings) {
+      notify(ctx, `Could not clean idle maestro worktree: ${warning}`, "warning");
+    }
 
     const knownWorktrees = recovered.tasks.flatMap((task) =>
       task.attempts.flatMap((attempt) =>

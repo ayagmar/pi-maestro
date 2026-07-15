@@ -7,7 +7,7 @@ import {
 import { assertTaskNotDispatched, findTask, forceStatus, loadBoard, updateBoard } from "./board.js";
 import { loadConfig } from "./config.js";
 import { type Task } from "./types.js";
-import { snapshotArtifact } from "./worktree.js";
+import { parkWorktree, restoreWorktree, snapshotArtifact } from "./worktree.js";
 
 export function manuallyApproveTask(ctx: ExtensionContext, taskId: string): Task {
   const initialBoard = loadBoard(ctx.cwd);
@@ -25,6 +25,11 @@ export function manuallyApproveTask(ctx: ExtensionContext, taskId: string): Task
   if (findings && findings.length > 0) {
     throw new Error(`Manual approval refused: ${findings[0]?.message ?? "artifact is unsafe"}`);
   }
+  const worktree =
+    attempt.worktreePath && attempt.branch
+      ? { worktreePath: attempt.worktreePath, branch: attempt.branch }
+      : undefined;
+  if (worktree) restoreWorktree(ctx.cwd, worktree);
   const candidateTree =
     (initialTask.writePaths?.length ?? 0) > 0
       ? (() => {
@@ -43,6 +48,7 @@ export function manuallyApproveTask(ctx: ExtensionContext, taskId: string): Task
         })()
       : undefined;
   const attemptIdentity = `${attempt.index}:${attempt.logFile}:${attempt.startedAt}`;
+  if (worktree) parkWorktree(ctx.cwd, worktree);
 
   return updateBoard(ctx.cwd, (board) => {
     const task = findTask(board, taskId);

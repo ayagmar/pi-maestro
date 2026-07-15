@@ -47,7 +47,7 @@ Normal settlement atomically replaces that record with one bounded completion or
 shutdown reconciles an owner-scoped orphan into one internal-error decision, and durable delivery
 claims prevent concurrent sessions from consuming the same wakeup.
 
-A candidate is identified by a complete immutable Git tree, including untracked task files. Bounded diffs are presentation only. Approval provenance separately records candidate tree, review time, integrated commit/tree, and trusted verification.
+A candidate is identified by a complete immutable Git tree, including untracked task files. Bounded diffs are presentation only. Approval provenance separately records candidate tree, review time, integrated commit/tree, and trusted verification. Task worktrees exist only while an executor, reviewer, or manual inspection needs the checkout. At idle boundaries, recoverable changes are checkpointed on the task branch and the checkout is removed; review and retry restore it from that branch. Clean idle branches are deleted.
 
 Approved provenance also stores a versioned canonical task fingerprint and kind-aware dependency
 artifact identities. The fingerprint covers the effective brief and criteria, normalized paths,
@@ -64,7 +64,7 @@ approval, execution, review, integration, verification, recovery, and complete. 
 launch navigation reads persisted attempts, review launches, artifact identities, verification, and
 recovery references. Its timer only invalidates rendering; it never sends a message to a model.
 
-Verification commands come only from operator-owned user config. Repository config may select a known profile but cannot define executable commands. Unix verification uses a process group with TERM/KILL escalation. Failed integrated verification retains recovery worktrees.
+Verification commands come only from operator-owned user config. Repository config may select a known profile but cannot define executable commands. Unix verification uses a process group with TERM/KILL escalation. Failed integrated verification retains a checkpoint branch while its idle checkout is parked.
 
 ## Why exactly three model tools
 

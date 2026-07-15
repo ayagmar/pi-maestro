@@ -257,9 +257,13 @@ export async function executeTask(options: {
     if (outcome.errorMessage) run.attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
     run.attempt.exitCode = outcome.exitCode;
     run.attempt.usage = { ...outcome.usage };
+    const priorWorktreeFiles =
+      worktree && task.attempts.at(-1)?.branch === worktree.branch
+        ? (task.attempts.at(-1)?.touchedFiles ?? [])
+        : [];
     run.attempt.touchedFiles =
       worktree && worktreeExists(worktree)
-        ? changedPaths(worktree.worktreePath)
+        ? [...new Set([...priorWorktreeFiles, ...changedPaths(worktree.worktreePath)])].sort()
         : [...outcome.touchedFiles];
 
     const status: TaskStatus = outcome.aborted

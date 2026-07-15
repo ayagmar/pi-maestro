@@ -33,7 +33,7 @@ The two full checks must report the same test count. Also run `pnpm run typechec
 
 Bug fixes should add a behavioral regression test. Registration assertions do not replace behavior tests. Never delete or narrow tests to make a gate pass.
 
-Preserve dirty trees, stashes, branches, logs, archives, and recovery worktrees. Never make an empty path list stage or commit all dirty files.
+Preserve dirty trees, stashes, checkpoint branches, logs, and archives. Maestro task checkouts are ephemeral: checkpoint recoverable task edits before parking an idle checkout, and restore it only for active work. Never make an empty path list stage or commit all dirty files.
 
 ## Extending contracts safely
 

@@ -15,7 +15,7 @@ import { showSettings } from "./settings-ui.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
 import { type Board } from "./types.js";
 import { simulatePlan } from "./workflow.js";
-import { worktreeExists } from "./worktree.js";
+import { worktreeRecoveryExists } from "./worktree.js";
 
 export async function handleConfigCommand(
   ctx: ExtensionCommandContext,
@@ -99,7 +99,10 @@ export function handleReconcileCommand(ctx: ExtensionCommandContext): void {
     const attempt = task.attempts.at(-1);
     if (
       attempt?.worktreePath &&
-      !worktreeExists({ worktreePath: attempt.worktreePath, branch: attempt.branch ?? "" })
+      !worktreeRecoveryExists(ctx.cwd, {
+        worktreePath: attempt.worktreePath,
+        branch: attempt.branch ?? "",
+      })
     ) {
       warnings.push(`${task.id}: recorded recovery worktree is missing`);
     }

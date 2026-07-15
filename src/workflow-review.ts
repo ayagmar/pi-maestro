@@ -40,7 +40,7 @@ import {
   staleExecutionInputsMessage,
 } from "./workflow-review-policy.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
-import { snapshotArtifact } from "./worktree.js";
+import { parkWorktree, restoreWorktree, snapshotArtifact, type WorktreeRef } from "./worktree.js";
 
 export async function reviewTask(options: {
   cwd: string;
@@ -81,6 +81,7 @@ export async function reviewTask(options: {
     trackRun,
     humanRetry = false,
     humanRetryOwnerSession,
+    onRetentionWarning,
   } = options;
   const board = loadBoard(cwd);
   const validationError = planValidationMessage(validatePlan(board, availableTiers));
@@ -141,6 +142,7 @@ export async function reviewTask(options: {
     return snapshot(dispatch?.task ?? task, dispatch?.note ?? "review dispatch declined");
   }
 
+  let worktree: WorktreeRef | undefined;
   try {
     const task = dispatch.task;
     const report = lastReport(task);
@@ -161,7 +163,14 @@ export async function reviewTask(options: {
       throw new Error(`Unknown verification profile: ${effectiveProfileName}`);
     }
     const candidatePaths = latestAttempt?.touchedFiles ?? [];
-    const candidateCwd = latestAttempt?.worktreePath ?? cwd;
+    worktree =
+      latestAttempt?.worktreePath && latestAttempt.branch
+        ? restoreWorktree(cwd, {
+            worktreePath: latestAttempt.worktreePath,
+            branch: latestAttempt.branch,
+          })
+        : undefined;
+    const candidateCwd = worktree?.worktreePath ?? cwd;
     const claimedAttemptIndex = latestAttempt?.index;
     const claimedTaskContract = JSON.stringify({
       title: task.title,
@@ -286,10 +295,6 @@ export async function reviewTask(options: {
       return snapshot(updated ?? task, notes);
     }
     const reviewedAttempt = task.attempts.at(-1);
-    const worktree =
-      reviewedAttempt?.worktreePath && reviewedAttempt.branch
-        ? { worktreePath: reviewedAttempt.worktreePath, branch: reviewedAttempt.branch }
-        : undefined;
     const models = [tier.model, ...(tier.fallbacks ?? [])];
     const reviewLaunches: ReviewLaunch[] = [];
     const priorReviewLaunchCount = reviewedAttempt?.reviewLaunches?.length ?? 0;
@@ -829,5 +834,14 @@ export async function reviewTask(options: {
     return snapshot(result, truncateText(verdict.notes, 10));
   } finally {
     lifecycle.release();
+    if (worktree) {
+      try {
+        parkWorktree(cwd, worktree);
+      } catch (error) {
+        onRetentionWarning?.(
+          `Worktree cleanup: ${worktree.worktreePath}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
   }
 }
