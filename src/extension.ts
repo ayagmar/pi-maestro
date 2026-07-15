@@ -41,6 +41,17 @@ import {
   handleTimelineCommand,
 } from "./command-inspection.js";
 import { handlePlanCommand } from "./command-plans.js";
+import {
+  handleAbortCommand,
+  handleDriveCommand,
+  handleHandoffCommand,
+  handlePauseCommand,
+  handleResumeCommand,
+  handleRetryCommand,
+  handleStartCommand,
+  type RunCommandRuntime,
+  type RunCommandSession,
+} from "./command-run-control.js";
 import { handleDiscoveryCommand, handleRecipeCommand } from "./command-recipes.js";
 import {
   handleDoctorCommand,
@@ -50,12 +61,7 @@ import {
 } from "./command-recovery.js";
 import { pickFromList } from "./command-ui.js";
 import { parseCommand, registerMaestroCommand } from "./commands.js";
-import {
-  describeConfig,
-  describeTiersForPlanning,
-  loadConfig,
-  resolveTierModels,
-} from "./config.js";
+import { loadConfig, resolveTierModels } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MESSAGE_TYPE } from "./constants.js";
 import {
   Dashboard,
@@ -76,13 +82,12 @@ import {
 import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { boardUsage, formatBoardProgress } from "./format.js";
-import { notify, runHandoff } from "./handoff.js";
+import { notify } from "./handoff.js";
 import { collectLivePaneLaunches } from "./live-pane-launches.js";
 import { manuallyApproveTask } from "./manual-approval.js";
 import { showPlanReview } from "./plan-review-controller.js";
 import { preflightWorkflow } from "./preflight.js";
-import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
-import { captureBoardLogs, pruneStaleLogs, pruneTaskLogs } from "./retention.js";
+import { pruneTaskLogs } from "./retention.js";
 import {
   startExecutor as defaultStartExecutor,
   findSessionFile,
@@ -90,7 +95,6 @@ import {
 } from "./runner.js";
 import {
   assertKnownTaskIds,
-  canonicalTaskIds,
   maestroBoardCwd,
   previousBoardSession,
   sessionCanControlDrive,
@@ -119,7 +123,7 @@ import {
   type WorkflowRun,
 } from "./workflow.js";
 import { showWorkflowBrowser } from "./workflow-browser.js";
-import { inspectGit, sweepWorktrees } from "./worktree.js";
+import { sweepWorktrees } from "./worktree.js";
 
 export { formatPlanReviewMarkdown } from "./plan-review.js";
 export { scrollableTextOffset } from "./scrollable-viewer.js";
@@ -854,6 +858,33 @@ export default function maestro(
     });
   }
 
+  const commandRuntime: RunCommandRuntime = {
+    hasActiveDrive: () => driveController.hasActive(),
+    liveRunCount: () => liveRuns.size,
+    isTaskLive: (taskId) => liveRuns.has(taskId),
+    activeOwner: () => driveController.activeOwner(),
+    requestPause: () => {
+      driveController.requestPause();
+    },
+    abort: () => {
+      driveController.abort();
+    },
+    launchDrive: launchCommandDrive,
+    requestRetry: requestHumanRetry,
+    savePausedDrive,
+  };
+  const commandSession: RunCommandSession = {
+    adoptBoard,
+    onBoardChanged: refreshUI,
+    startOrchestrator: (ctx, goal, briefing) => {
+      nameSessionAfterGoal(ctx, goal, "maestro");
+      pi.sendMessage(
+        { customType: MESSAGE_TYPE, content: briefing, display: true },
+        { triggerTurn: true }
+      );
+    },
+  };
+
   registerMaestroTools({
     pi,
     adoptBoard,
@@ -876,218 +907,28 @@ export default function maestro(
 
       try {
         switch (subcommand) {
-          case "start": {
-            if (!rest) {
-              notify(ctx, "Usage: /maestro start <goal>", "warning");
-              return;
-            }
-            if (liveRuns.size > 0) {
-              notify(
-                ctx,
-                "Executors are still running. Abort them before starting a new goal.",
-                "warning"
-              );
-              return;
-            }
-            const config = loadConfig(ctx.cwd);
-            const git = inspectGit(ctx.cwd);
-            if (!git.ok && (config.autoCommit || config.useWorktrees)) {
-              notify(
-                ctx,
-                `Git repo not ready: ${git.summary}. Commits will fail — run /maestro doctor, or disable autoCommit/useWorktrees in /maestro config.`,
-                "warning"
-              );
-            }
-            let board = loadBoard(ctx.cwd);
-            // A new goal is a new run: archive the previous board instead of
-            // piling tasks from different goals onto one endless list.
-            if (board.tasks.length > 0) {
-              const previousRevision = board.revision ?? 0;
-              const archivedLogs = captureBoardLogs(ctx.cwd, board);
-              for (const warning of archivedLogs.warnings) {
-                notify(ctx, `Log cleanup warning: ${warning}`, "warning");
-              }
-              board = { version: 1, nextTaskNumber: 1, tasks: [], goal: rest };
-              let archivePath: string | undefined;
-              try {
-                archivePath = replaceBoardWithArchive(
-                  ctx.cwd,
-                  () => structuredClone(board),
-                  previousRevision
-                );
-              } catch (error) {
-                notify(
-                  ctx,
-                  `${error instanceof Error ? error.message : String(error)}. Inspect the current board and start again.`,
-                  "warning"
-                );
-                return;
-              }
-              if (archivePath) {
-                const cleanup = pruneStaleLogs(
-                  ctx.cwd,
-                  archivedLogs.entries,
-                  () => loadBoard(ctx.cwd),
-                  (id) => liveRuns.has(id),
-                  archivedLogs.warnings
-                );
-                if (cleanup.warnings.length > 0) {
-                  notify(
-                    ctx,
-                    `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`,
-                    "warning"
-                  );
-                }
-                notify(ctx, `Previous board archived: ${archivePath}`);
-              }
-            } else {
-              board.goal = rest;
-              try {
-                replaceBoard(ctx.cwd, board, board.revision ?? 0);
-              } catch (error) {
-                notify(
-                  ctx,
-                  `${error instanceof Error ? error.message : String(error)}. Inspect the current board and start again.`,
-                  "warning"
-                );
-                return;
-              }
-            }
-            adoptBoard(ctx);
-            refreshUI(ctx);
-            nameSessionAfterGoal(ctx, rest, "maestro");
-            pi.sendMessage(
-              {
-                customType: MESSAGE_TYPE,
-                content: buildOrchestratorBriefing(
-                  rest,
-                  describeTiersForPlanning(loadConfig(ctx.cwd)),
-                  loadConfig(ctx.cwd).planGate
-                ),
-                display: true,
-              },
-              { triggerTurn: true }
-            );
+          case "start":
+            await handleStartCommand(ctx, rest, commandRuntime, commandSession);
             return;
-          }
           case "back": {
             await sessionNavigator.back(ctx);
             return;
           }
-          case "drive": {
-            if (driveController.hasActive() || liveRuns.size > 0) {
-              notify(ctx, "An autonomous drive or executor batch is already running.", "warning");
-              return;
-            }
-            const requestedTaskIds = rest ? rest.split(/[\s,]+/).filter(Boolean) : undefined;
-            let taskIds: string[] | undefined;
-            try {
-              taskIds = canonicalTaskIds(loadBoard(ctx.cwd), requestedTaskIds);
-              if (loadBoard(ctx.cwd).planPending) throw new Error("Plan approval is pending.");
-              if (!(await confirmDriveScale(ctx, taskIds))) {
-                notify(ctx, "Drive not started: workflow scale was not confirmed.", "warning");
-                return;
-              }
-              validateDriveStart(ctx, taskIds);
-            } catch (error) {
-              notify(ctx, `Drive not started: ${String(error)}`, "warning");
-              return;
-            }
-            notify(ctx, `Driving ${taskIds?.join(", ") ?? "the whole board"}…`);
-            launchCommandDrive(ctx, taskIds);
+          case "drive":
+            await handleDriveCommand(ctx, rest, commandRuntime);
             return;
-          }
-          case "retry": {
-            if (!rest || restParts.length !== 1) {
-              notify(ctx, `Usage: /${COMMAND} retry <taskId>`, "warning");
-              return;
-            }
-            await requestHumanRetry(ctx, rest);
+          case "retry":
+            await handleRetryCommand(ctx, rest, restParts, commandRuntime);
             return;
-          }
-          case "pause": {
-            const currentSession = ctx.sessionManager.getSessionFile();
-            if (!driveController.hasActive()) {
-              const paused = loadBoard(ctx.cwd).pausedDrive;
-              notify(
-                ctx,
-                paused ? "Autonomous drive is already paused." : "No autonomous drive is active.",
-                "warning"
-              );
-              return;
-            }
-            const activeOwner = driveController.activeOwner();
-            if (
-              activeOwner?.cwd !== ctx.cwd ||
-              !sessionCanControlDrive(activeOwner.ownerSession, currentSession)
-            ) {
-              notify(ctx, "Only the session that started this drive may pause it.", "warning");
-              return;
-            }
-            driveController.requestPause();
-            notify(ctx, "Pause requested. Active executors will finish; no new batch will start.");
+          case "pause":
+            handlePauseCommand(ctx, commandRuntime);
             return;
-          }
-          case "resume": {
-            const board = loadBoard(ctx.cwd);
-            const paused = board.pausedDrive;
-            if (!paused) {
-              notify(ctx, "No paused autonomous drive to resume.", "warning");
-              return;
-            }
-            if (driveController.hasActive() || liveRuns.size > 0) {
-              notify(ctx, "Executors are already running.", "warning");
-              return;
-            }
-            if (!sessionCanControlDrive(paused.ownerSession, ctx.sessionManager.getSessionFile())) {
-              notify(ctx, "Only the session that paused this drive may resume it.", "warning");
-              return;
-            }
-            let taskIds: string[] | undefined;
-            try {
-              taskIds = canonicalTaskIds(board, paused.taskIds);
-              if (board.planPending) throw new Error("Plan approval is pending.");
-              if (!(await confirmDriveScale(ctx, taskIds))) {
-                notify(ctx, "Drive not resumed: workflow scale was not confirmed.", "warning");
-                return;
-              }
-              validateDriveStart(ctx, taskIds);
-            } catch (error) {
-              notify(ctx, `Drive not resumed: ${String(error)}`, "warning");
-              return;
-            }
-            notify(ctx, `Resuming ${taskIds?.join(", ") ?? "the whole board"}…`);
-            launchCommandDrive(ctx, taskIds);
+          case "resume":
+            await handleResumeCommand(ctx, commandRuntime);
             return;
-          }
-          case "abort": {
-            const currentSession = ctx.sessionManager.getSessionFile();
-            if (driveController.hasActive()) {
-              const activeOwner = driveController.activeOwner();
-              if (
-                activeOwner?.cwd !== ctx.cwd ||
-                !sessionCanControlDrive(activeOwner.ownerSession, currentSession)
-              ) {
-                notify(ctx, "Only the session that started this drive may abort it.", "warning");
-                return;
-              }
-              driveController.abort();
-              notify(ctx, "Abort requested for the drive and its active executors.", "warning");
-              return;
-            }
-            const paused = loadBoard(ctx.cwd).pausedDrive;
-            if (!paused) {
-              notify(ctx, "No active or paused autonomous drive to abort.", "warning");
-              return;
-            }
-            if (!sessionCanControlDrive(paused.ownerSession, currentSession)) {
-              notify(ctx, "Only the session that paused this drive may abort it.", "warning");
-              return;
-            }
-            savePausedDrive(ctx.cwd, undefined);
-            notify(ctx, "Paused autonomous drive aborted. No executors were running.", "warning");
+          case "abort":
+            handleAbortCommand(ctx, commandRuntime);
             return;
-          }
           case "plan":
             await handlePlanCommand(ctx, restParts, {
               hasLiveRuns: () => liveRuns.size > 0,
@@ -1152,39 +993,9 @@ export default function maestro(
               onBoardChanged: () => refreshUI(ctx),
             });
             return;
-          case "handoff": {
-            const board = loadBoard(ctx.cwd);
-            if (board.tasks.length === 0) {
-              notify(ctx, "Nothing to hand off — the board is empty.", "warning");
-              return;
-            }
-            if (liveRuns.size > 0) {
-              notify(
-                ctx,
-                `${liveRuns.size} executor(s) still running — switching sessions would abort them. Wait or abort them first.`,
-                "warning"
-              );
-              return;
-            }
-            if (ctx.hasUI) {
-              const ok = await ctx.ui.confirm(
-                "Hand off to a fresh orchestrator?",
-                "Starts a new session where a supervisor drives run/review from the board alone, without this session's planning context. The current session stays on disk (/resume to revisit)."
-              );
-              if (!ok) return;
-            }
-            await runHandoff({
-              ctx,
-              briefing: buildSupervisorBriefing(
-                board.goal,
-                board.tasks,
-                describeTiersForPlanning(loadConfig(ctx.cwd))
-              ),
-              goal: board.goal ?? "maestro run",
-              adoptBoard,
-            });
+          case "handoff":
+            await handleHandoffCommand(ctx, commandRuntime, commandSession);
             return;
-          }
           case "history":
             handleHistoryCommand(ctx, rest);
             return;

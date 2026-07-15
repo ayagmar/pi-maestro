@@ -134,6 +134,23 @@ test("plan command UI and mutations live outside the extension root", () => {
   assert.match(planReview, /approvePlan\(/);
 });
 
+test("run-control commands live outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(
+    extension,
+    /buildOrchestratorBriefing|buildSupervisorBriefing|canonicalTaskIds/
+  );
+
+  const commands = files.find((file) => file.name === "command-run-control.ts")?.contents ?? "";
+  assert.match(commands, /function handleStartCommand/);
+  assert.match(commands, /function handleDriveCommand/);
+  assert.match(commands, /function handlePauseCommand/);
+  assert.match(commands, /function handleResumeCommand/);
+  assert.match(commands, /function handleAbortCommand/);
+  assert.match(commands, /function handleHandoffCommand/);
+});
+
 test("plan file commands live outside the extension root", () => {
   const files = sourceFiles();
   const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
