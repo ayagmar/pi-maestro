@@ -134,6 +134,18 @@ test("plan command UI and mutations live outside the extension root", () => {
   assert.match(planReview, /approvePlan\(/);
 });
 
+test("plan file commands live outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /exportPlan|importPlan|comparePlans/);
+
+  const commands = files.find((file) => file.name === "command-plans.ts")?.contents ?? "";
+  assert.match(commands, /function handlePlanCommand/);
+  assert.match(commands, /exportPlan/);
+  assert.match(commands, /importPlan/);
+  assert.match(commands, /comparePlans/);
+});
+
 test("recovery commands own cleanup, replay, history, and reset workflows", () => {
   const files = sourceFiles();
   const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
