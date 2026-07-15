@@ -8,15 +8,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
-  Editor,
-  type EditorTheme,
-  Input,
-  Key,
   Markdown,
-  matchesKey,
   type OverlayHandle,
   type SelectItem,
-  SelectList,
   Text,
 } from "@earendil-works/pi-tui";
 import {
@@ -26,8 +20,6 @@ import {
   pathsOutsideWriteScope,
 } from "./artifact-policy.js";
 import {
-  applyPlanTaskEdits,
-  approvePlan,
   assertTaskNotDispatched,
   consumeQuarantineNotice,
   findTask,
@@ -40,7 +32,6 @@ import {
   loadBoard,
   loadStatusHistory,
   planValidationMessage,
-  rejectPlan,
   replaceBoard,
   replaceBoardWithArchive,
   restoreArchivedBoard,
@@ -51,6 +42,7 @@ import {
   updateTask,
   validatePlan,
 } from "./board.js";
+import { pickFromList } from "./command-ui.js";
 import { parseCommand, registerMaestroCommand } from "./commands.js";
 import {
   describeConfig,
@@ -94,7 +86,7 @@ import {
 } from "./format.js";
 import { notify, runHandoff } from "./handoff.js";
 import { collectLivePaneLaunches } from "./live-pane-launches.js";
-import { formatPlanReviewMarkdown } from "./plan-review.js";
+import { showPlanReview } from "./plan-review-controller.js";
 import {
   comparePlans,
   exportPlan,
@@ -2361,460 +2353,14 @@ export default function maestro(
     return "switchSession" in ctx;
   }
 
-  async function showPlanOverview(ctx: ExtensionCommandContext, board: Board): Promise<void> {
-    await showScrollableMarkdown(
-      ctx,
-      "Maestro Plan · review",
-      formatPlanReviewMarkdown(board, loadConfig(ctx.cwd))
-    );
-  }
-
   async function showPlan(ctx: ExtensionCommandContext): Promise<void> {
-    if (liveRuns.size > 0) {
-      notify(
-        ctx,
-        "Executors are still running. Finish or abort them before reviewing a plan.",
-        "warning"
-      );
-      return;
-    }
-
-    while (true) {
-      const board = loadBoard(ctx.cwd);
-      if (board.tasks.length === 0) {
-        notify(ctx, "Board is empty. Plan tasks with maestro_plan.", "warning");
-        return;
-      }
-      if (!board.planPending) {
-        notify(ctx, "No plan is awaiting approval.");
-        return;
-      }
-
-      const editable = board.tasks.filter(
-        (task) => task.status === "todo" || task.status === "cancelled"
-      );
-      const items: SelectItem[] = [
-        {
-          value: "overview",
-          label: "Review plan …",
-          description: "Read-only overview of every task",
-        },
-        ...editable.map((task) => ({
-          value: `task:${task.id}`,
-          label: `${task.id} ${task.title} [${task.tier}]${task.status === "cancelled" ? " · CANCELLED" : ""}`,
-          description: `deps: ${task.dependsOn.join(", ") || "none"} · ${task.successCriteria?.length ?? 0} criteria · writes: ${task.writePaths?.join(", ") || "none"} · ${truncateText(task.brief, 1)}`,
-        })),
-      ];
-      items.push(
-        {
-          value: "approve",
-          label: "Approve plan",
-          description: "Validate the complete plan, then allow execution",
-        },
-        {
-          value: "reject",
-          label: "Reject plan",
-          description: "Archive and clear this board",
-        }
-      );
-
-      const choice = await pickFromList(ctx, "Maestro Plan · awaiting approval", items);
-      if (!choice) return;
-      if (choice === "overview") {
-        await showPlanOverview(ctx, board);
-        continue;
-      }
-      if (choice.startsWith("task:")) {
-        await editPlanTask(ctx, choice.slice("task:".length));
-        continue;
-      }
-      if (choice === "approve") {
-        const fresh = loadBoard(ctx.cwd);
-        const config = loadConfig(ctx.cwd);
-        const validationError = planValidationMessage(
-          validatePlan(fresh, Object.keys(config.tiers))
-        );
-        if (validationError) {
-          notify(ctx, `${validationError}\nEdit the listed tasks before approving.`, "error");
-          continue;
-        }
-        const preflight = preflightWorkflow(fresh, config);
-        notify(
-          ctx,
-          formatWorkflowPreflight(preflight),
-          preflight.requiresConfirmation ? "warning" : "info"
-        );
-        if (preflight.requiresConfirmation) {
-          const confirmed =
-            ctx.hasUI &&
-            (await ctx.ui.confirm(
-              "Confirm workflow scale?",
-              `${preflight.taskCount} tasks and up to ${preflight.totalLaunchUpperBound} raw launches (${preflight.signature}).`
-            ));
-          if (!confirmed) {
-            notify(ctx, "Plan remains gated; workflow scale was not confirmed.", "warning");
-            continue;
-          }
-        }
-        try {
-          updateBoard(ctx.cwd, (current) => {
-            const currentConfig = loadConfig(ctx.cwd);
-            const currentValidationError = planValidationMessage(
-              validatePlan(current, Object.keys(currentConfig.tiers))
-            );
-            if (currentValidationError) throw new Error(currentValidationError);
-            const currentPreflight = preflightWorkflow(current, currentConfig);
-            if (
-              preflight.requiresConfirmation &&
-              currentPreflight.signature !== preflight.signature
-            ) {
-              throw new Error("Workflow changed after preflight confirmation.");
-            }
-            if (!preflight.requiresConfirmation && currentPreflight.requiresConfirmation) {
-              throw new Error("Workflow now requires explicit scale confirmation.");
-            }
-            if (currentPreflight.requiresConfirmation) {
-              current.scaleApproval = {
-                signature: currentPreflight.signature,
-                confirmedAt: Date.now(),
-              };
-            }
-            approvePlan(current, Object.keys(currentConfig.tiers));
-          });
-        } catch (error) {
-          notify(
-            ctx,
-            `${error instanceof Error ? error.message : String(error)} Inspect and confirm the plan again; it remains gated.`,
-            "warning"
-          );
-          return;
-        }
+    await showPlanReview(ctx, {
+      hasLiveRuns: () => liveRuns.size > 0,
+      onChanged: () => refreshUI(ctx),
+      onApproved: () => {
         refreshUI(ctx);
-        notify(ctx, "Plan approved. Executors may now be started with maestro_drive.");
         labelCurrentEntry(ctx, "maestro: plan approved");
-        return;
-      }
-
-      if (!ctx.hasUI) {
-        notify(ctx, "Plan rejection requires the interactive UI.", "warning");
-        continue;
-      }
-      const ok = await ctx.ui.confirm(
-        "Reject plan?",
-        `Archive and clear all ${board.tasks.length} task(s)?`
-      );
-      if (!ok) continue;
-      let archivePath: string | undefined;
-      try {
-        archivePath = rejectPlan(ctx.cwd, board.revision ?? 0);
-      } catch (error) {
-        notify(
-          ctx,
-          `${error instanceof Error ? error.message : String(error)}. Inspect and confirm the plan rejection again.`,
-          "warning"
-        );
-        return;
-      }
-      if (!archivePath) {
-        notify(ctx, "Could not archive the board; rejection cancelled.", "error");
-        return;
-      }
-      refreshUI(ctx);
-      notify(ctx, `Plan rejected. Board archived at ${archivePath}`);
-      return;
-    }
-  }
-
-  async function editPlanTask(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
-    const task = findTask(loadBoard(ctx.cwd), taskId);
-    if (!task) return;
-    try {
-      assertTaskNotDispatched(task);
-    } catch (error) {
-      notify(ctx, error instanceof Error ? error.message : String(error), "warning");
-      return;
-    }
-    const draft = structuredClone(task);
-    const tiers = Object.keys(loadConfig(ctx.cwd).tiers);
-
-    while (true) {
-      const action = await pickFromList(ctx, `${draft.id} · edit planned task`, [
-        { value: "viewBrief", label: "View brief (read-only)" },
-        { value: "title", label: `Title · ${draft.title}` },
-        { value: "brief", label: `Edit brief · ${truncateText(draft.brief, 3)}` },
-        { value: "tier", label: `Tier · ${draft.tier}` },
-        {
-          value: "dependencies",
-          label: `Dependencies · ${draft.dependsOn.join(", ") || "none"}`,
-          description: "Comma- or space-separated task ids",
-        },
-        {
-          value: "criteria",
-          label: `Success criteria · ${draft.successCriteria?.length ?? 0}`,
-          description: (draft.successCriteria ?? []).join(" · "),
-        },
-        {
-          value: "writePaths",
-          label: `Write scope · ${draft.writePaths?.length ?? 0} path(s)`,
-          description: (draft.writePaths ?? []).join(" · "),
-        },
-        { value: "commitMessage", label: `Commit message · ${draft.commitMessage ?? "auto"}` },
-        { value: "verification", label: `Verification · ${draft.verificationProfile ?? "none"}` },
-        { value: "reviewPolicy", label: `Review policy · ${draft.reviewPolicy ?? "single"}` },
-        {
-          value: "cancellation",
-          label: `Cancellation · ${draft.status === "cancelled" ? "cancelled" : "active"}`,
-        },
-        { value: "save", label: "Save changes", description: "Validate and update the board" },
-        { value: "cancel", label: "Cancel editing", description: "Discard all draft changes" },
-      ]);
-      if (!action || action === "cancel") return;
-
-      if (action === "viewBrief") {
-        await showScrollableText(ctx, `${draft.id} · brief`, draft.brief.split("\n"));
-        continue;
-      }
-      if (action === "title") {
-        const value = await editPlanText(ctx, "Task title", draft.title, false);
-        if (value !== null) {
-          try {
-            applyPlanTaskEdits(draft, { title: value }, tiers);
-          } catch (error) {
-            notify(ctx, error instanceof Error ? error.message : String(error), "error");
-          }
-        }
-        continue;
-      }
-      if (action === "brief") {
-        const value = await editPlanText(ctx, "Task brief", draft.brief, true);
-        if (value !== null) {
-          try {
-            applyPlanTaskEdits(draft, { brief: value }, tiers);
-          } catch (error) {
-            notify(ctx, error instanceof Error ? error.message : String(error), "error");
-          }
-        }
-        continue;
-      }
-      if (action === "writePaths") {
-        const value = await editPlanText(
-          ctx,
-          "Write scope (one path per line)",
-          (draft.writePaths ?? []).join("\n"),
-          true
-        );
-        if (value !== null)
-          applyPlanTaskEdits(
-            draft,
-            {
-              writePaths: value
-                .split("\n")
-                .map((item) => item.trim())
-                .filter(Boolean),
-            },
-            tiers
-          );
-        continue;
-      }
-      if (action === "commitMessage") {
-        const value = await editPlanText(ctx, "Commit message", draft.commitMessage ?? "", false);
-        if (value !== null) applyPlanTaskEdits(draft, { commitMessage: value }, tiers);
-        continue;
-      }
-      if (action === "tier") {
-        const tier = await pickFromList(
-          ctx,
-          "Task tier",
-          tiers.map((name) => ({ value: name, label: name }))
-        );
-        if (tier) applyPlanTaskEdits(draft, { tier }, tiers);
-        continue;
-      }
-      if (action === "dependencies") {
-        const value = await editPlanText(ctx, "Dependencies", draft.dependsOn.join(", "), false);
-        if (value !== null) {
-          applyPlanTaskEdits(draft, { dependsOn: value.split(/[\s,]+/) }, tiers);
-        }
-        continue;
-      }
-      if (action === "criteria") {
-        const value = await editPlanText(
-          ctx,
-          "Success criteria (one per line)",
-          (draft.successCriteria ?? []).join("\n"),
-          true
-        );
-        if (value !== null) {
-          try {
-            applyPlanTaskEdits(
-              draft,
-              {
-                successCriteria: value
-                  .split("\n")
-                  .map((item) => item.trim())
-                  .filter(Boolean),
-              },
-              tiers
-            );
-          } catch (error) {
-            notify(ctx, error instanceof Error ? error.message : String(error), "error");
-          }
-        }
-        continue;
-      }
-      if (action === "verification") {
-        const config = loadConfig(ctx.cwd);
-        const profile = await pickFromList(ctx, "Verification profile", [
-          { value: "", label: "None" },
-          ...Object.keys(config.verificationProfiles ?? {}).map((name) => ({
-            value: name,
-            label: name,
-          })),
-        ]);
-        if (profile !== undefined && profile !== null) {
-          applyPlanTaskEdits(draft, { verificationProfile: profile }, tiers);
-        }
-        continue;
-      }
-      if (action === "reviewPolicy") {
-        const reviewPolicy = await pickFromList(ctx, "Review policy", [
-          { value: "single", label: "Single reviewer" },
-          { value: "confirm", label: "Independent confirmations" },
-          { value: "find-and-refute", label: "Find and refute" },
-        ]);
-        if (reviewPolicy) {
-          applyPlanTaskEdits(
-            draft,
-            { reviewPolicy: reviewPolicy as "single" | "confirm" | "find-and-refute" },
-            tiers
-          );
-        }
-        continue;
-      }
-      if (action === "cancellation") {
-        const state = await pickFromList(ctx, "Cancellation state", [
-          { value: "active", label: "Active" },
-          { value: "cancelled", label: "Cancelled" },
-        ]);
-        if (state) applyPlanTaskEdits(draft, { cancelled: state === "cancelled" }, tiers);
-        continue;
-      }
-
-      const candidate = structuredClone(loadBoard(ctx.cwd));
-      const candidateTask = findTask(candidate, draft.id);
-      if (!candidateTask) return;
-      applyPlanTaskEdits(
-        candidateTask,
-        {
-          title: draft.title,
-          brief: draft.brief,
-          tier: draft.tier,
-          dependsOn: draft.dependsOn,
-          ...(draft.writePaths !== undefined ? { writePaths: draft.writePaths } : {}),
-          commitMessage: draft.commitMessage ?? "",
-          ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
-          verificationProfile: draft.verificationProfile ?? "",
-          reviewPolicy: draft.reviewPolicy ?? "single",
-          cancelled: draft.status === "cancelled",
-        },
-        tiers
-      );
-      const validation = validatePlan(candidate, tiers);
-      const validationError = planValidationMessage({
-        missingDependencies: validation.missingDependencies.filter(
-          (missing) => missing.taskId === draft.id
-        ),
-        dependencyCycles: validation.dependencyCycles.filter((cycle) => cycle.includes(draft.id)),
-        invalidTiers: validation.invalidTiers.filter((invalid) => invalid.taskId === draft.id),
-      });
-      if (validationError) {
-        notify(ctx, `${validationError}\nChanges were not saved.`, "error");
-        continue;
-      }
-      try {
-        updateTask(ctx.cwd, draft.id, (fresh) => {
-          assertTaskNotDispatched(fresh);
-          applyPlanTaskEdits(
-            fresh,
-            {
-              title: draft.title,
-              brief: draft.brief,
-              tier: draft.tier,
-              dependsOn: draft.dependsOn,
-              ...(draft.writePaths !== undefined ? { writePaths: draft.writePaths } : {}),
-              commitMessage: draft.commitMessage ?? "",
-              ...(draft.successCriteria ? { successCriteria: draft.successCriteria } : {}),
-              verificationProfile: draft.verificationProfile ?? "",
-              reviewPolicy: draft.reviewPolicy ?? "single",
-              cancelled: draft.status === "cancelled",
-            },
-            tiers
-          );
-        });
-      } catch (error) {
-        notify(ctx, error instanceof Error ? error.message : String(error), "warning");
-        return;
-      }
-      refreshUI(ctx);
-      notify(ctx, `${draft.id} plan changes saved.`);
-      return;
-    }
-  }
-
-  async function editPlanText(
-    ctx: ExtensionCommandContext,
-    title: string,
-    value: string,
-    multiline: boolean
-  ): Promise<string | null> {
-    return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
-      const hint = new Text(
-        theme.fg(
-          "dim",
-          multiline
-            ? "enter save · esc cancel · use \\ + enter for newline"
-            : "enter save · esc cancel"
-        ),
-        1,
-        0
-      );
-      const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
-      const editorTheme: EditorTheme = {
-        borderColor: (text) => theme.fg("accent", text),
-        selectList: {
-          selectedPrefix: (text) => theme.fg("accent", text),
-          selectedText: (text) => theme.fg("accent", text),
-          description: (text) => theme.fg("muted", text),
-          scrollInfo: (text) => theme.fg("dim", text),
-          noMatch: (text) => theme.fg("warning", text),
-        },
-      };
-      const field = multiline ? new Editor(tui, editorTheme) : new Input();
-      if (field instanceof Editor) field.setText(value);
-      else field.setValue(value);
-      field.onSubmit = (next) => done(next);
-      if (field instanceof Input) field.onEscape = () => done(null);
-
-      return {
-        render: (width: number) => [
-          ...heading.render(width),
-          ...field.render(width),
-          ...hint.render(width),
-        ],
-        invalidate: () => {
-          heading.invalidate();
-          field.invalidate();
-          hint.invalidate();
-        },
-        handleInput: (data: string) => {
-          if (field instanceof Editor && matchesKey(data, Key.escape)) {
-            done(null);
-            return;
-          }
-          field.handleInput(data);
-          tui.requestRender();
-        },
-      };
+      },
     });
   }
 
@@ -3256,36 +2802,6 @@ export default function maestro(
         notify(ctx, error instanceof Error ? error.message : String(error), "error");
       }
     }
-  }
-
-  async function pickFromList(
-    ctx: ExtensionCommandContext,
-    title: string,
-    items: SelectItem[]
-  ): Promise<string | null> {
-    return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
-      const container = new Container();
-      container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
-      const list = new SelectList(items, Math.min(items.length, 12), {
-        selectedPrefix: (t) => theme.fg("accent", t),
-        selectedText: (t) => theme.fg("accent", t),
-        description: (t) => theme.fg("muted", t),
-        scrollInfo: (t) => theme.fg("dim", t),
-        noMatch: (t) => theme.fg("warning", t),
-      });
-      list.onSelect = (item) => done(item.value);
-      list.onCancel = () => done(null);
-      container.addChild(list);
-      container.addChild(new Text(theme.fg("dim", "↑↓ navigate · enter select · esc close"), 1, 0));
-      return {
-        render: (width: number) => container.render(width),
-        invalidate: () => container.invalidate(),
-        handleInput: (data: string) => {
-          list.handleInput(data);
-          tui.requestRender();
-        },
-      };
-    });
   }
 
   // ------------------------------------------------------------ rendering

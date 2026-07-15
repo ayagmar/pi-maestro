@@ -117,6 +117,23 @@ test("dashboard session IO lives outside the dashboard controller", () => {
   assert.match(livePane, /SessionManager/);
 });
 
+test("plan command UI and mutations live outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /applyPlanTaskEdits|new SelectList|new Editor|approvePlan\(/);
+
+  const commandUi = files.find((file) => file.name === "command-ui.ts")?.contents ?? "";
+  assert.match(commandUi, /new SelectList/);
+  assert.match(commandUi, /new Editor/);
+
+  const planEditor = files.find((file) => file.name === "plan-task-editor.ts")?.contents ?? "";
+  assert.match(planEditor, /applyPlanTaskEdits/);
+
+  const planReview =
+    files.find((file) => file.name === "plan-review-controller.ts")?.contents ?? "";
+  assert.match(planReview, /approvePlan\(/);
+});
+
 test("index is a composition entry point and adapters own registrations", () => {
   const files = sourceFiles();
   const index = files.find((file) => file.name === "index.ts")?.contents ?? "";
