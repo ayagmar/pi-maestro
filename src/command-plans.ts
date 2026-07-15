@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { loadBoard, replaceBoard, replaceBoardWithArchive } from "./board.js";
 import { loadConfig } from "./config.js";
 import { COMMAND } from "./constants.js";
@@ -11,7 +11,7 @@ import {
   formatPlanComparison,
   importPlan,
 } from "./plan-serialization.js";
-import type { Board } from "./types.js";
+import { type Board } from "./types.js";
 
 export interface PlanCommandRuntime {
   hasLiveRuns(): boolean;

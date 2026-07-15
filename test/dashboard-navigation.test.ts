@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTask, groupTasks } from "../src/board.js";
+import { type DashboardLaunch } from "../src/dashboard-launches.js";
 import {
   stableLaunchSelection,
   stableTaskSelection,
   visibleDashboardTasks,
 } from "../src/dashboard-navigation.js";
-import type { DashboardLaunch } from "../src/dashboard-launches.js";
-import type { Board } from "../src/types.js";
+import { type Board } from "../src/types.js";
 
 function taskBoard(): Board {
   const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };

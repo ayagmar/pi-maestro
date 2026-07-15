@@ -1,14 +1,17 @@
-import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  type ExtensionCommandContext,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { loadBoard, replaceBoard, replaceBoardWithArchive } from "./board.js";
 import { describeTiersForPlanning, loadConfig } from "./config.js";
 import { COMMAND } from "./constants.js";
+import { type ActiveDriveControl } from "./drive-controller.js";
 import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { notify, runHandoff } from "./handoff.js";
 import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
 import { captureBoardLogs, pruneStaleLogs } from "./retention.js";
 import { canonicalTaskIds, sessionCanControlDrive } from "./session-control.js";
-import type { ActiveDriveControl } from "./drive-controller.js";
-import type { PausedDriveState } from "./types.js";
+import { type PausedDriveState } from "./types.js";
 import { inspectGit } from "./worktree.js";
 
 export interface RunCommandRuntime {

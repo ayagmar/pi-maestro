@@ -1,11 +1,11 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadBoard, sweepDispatchState } from "./board.js";
 import { loadConfig } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT } from "./constants.js";
 import {
   acknowledgeDeliveredDecision,
+  type DriveRuntimeController,
   deliverPendingDecision,
-  DriveRuntimeController,
   persistDriveDecision,
 } from "./drive-controller.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
@@ -16,7 +16,7 @@ import {
   sessionCanControlDrive,
   sessionSwitchBlocked,
 } from "./session-control.js";
-import type { Board } from "./types.js";
+import { type Board } from "./types.js";
 import { sweepWorktrees } from "./worktree.js";
 
 export class ExtensionLifecycleState {

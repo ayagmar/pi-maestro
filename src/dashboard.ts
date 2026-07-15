@@ -31,8 +31,8 @@ import {
 
 import { type DashboardLaunch, taskLaunches } from "./dashboard-launches.js";
 import {
-  type DashboardFilter,
   DASHBOARD_FILTERS,
+  type DashboardFilter,
   stableLaunchSelection,
   stableTaskSelection,
   visibleDashboardTasks,

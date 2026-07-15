@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
   listArchivedBoards,
   loadBoard,

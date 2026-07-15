@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { findTask, loadBoard, replaceBoardWithArchive, updateBoard } from "./board.js";
 import { loadConfig } from "./config.js";
 import { COMMAND } from "./constants.js";

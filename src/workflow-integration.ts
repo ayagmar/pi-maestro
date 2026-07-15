@@ -4,7 +4,7 @@ import { basename, join } from "node:path";
 import { taskFingerprint } from "./artifact-policy.js";
 import { findTask, loadBoard, stateDir } from "./board.js";
 import { runVerification } from "./runner.js";
-import type { MaestroConfig, Task, VerificationProfile } from "./types.js";
+import { type MaestroConfig, type Task, type VerificationProfile } from "./types.js";
 import { taskCommitMessage } from "./workflow-review-policy.js";
 import {
   artifactMatchesCommit,

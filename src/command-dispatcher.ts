@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { MaestroCommandCompletions } from "./command-completions.js";
 import {
   handleConfigCommand,

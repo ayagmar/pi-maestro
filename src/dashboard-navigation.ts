@@ -1,5 +1,5 @@
-import type { DashboardLaunch } from "./dashboard-launches.js";
-import type { Task, TaskGroup } from "./types.js";
+import { type DashboardLaunch } from "./dashboard-launches.js";
+import { type Task, type TaskGroup } from "./types.js";
 
 export type DashboardFilter = "all" | TaskGroup;
 

@@ -1,4 +1,4 @@
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { completionFreshness } from "./artifact-policy.js";
 import {
   findTask,
@@ -13,7 +13,7 @@ import { notify } from "./handoff.js";
 import { assertKnownTaskIds } from "./session-control.js";
 import { showSettings } from "./settings-ui.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
-import type { Board } from "./types.js";
+import { type Board } from "./types.js";
 import { simulatePlan } from "./workflow.js";
 import { worktreeExists } from "./worktree.js";
 

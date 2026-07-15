@@ -1,6 +1,6 @@
 import { findTask, latestArchiveFile, loadArchivedBoard, loadBoard } from "./board.js";
 import { taskLaunches } from "./dashboard-launches.js";
-import type { LiveRun } from "./drive-controller.js";
+import { type LiveRun } from "./drive-controller.js";
 import { type LivePaneLaunch } from "./live-pane.js";
 
 export function collectLivePaneLaunches(

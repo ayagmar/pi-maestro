@@ -21,14 +21,12 @@ import {
   latestArchiveFile,
   loadBoard,
   loadStatusHistory,
-  replaceBoard,
-  replaceBoardWithArchive,
   restoreQuarantineNotice,
   updateBoard,
   updateTask,
 } from "./board.js";
 import { MaestroCommandDispatcher } from "./command-dispatcher.js";
-import type { RunCommandRuntime, RunCommandSession } from "./command-run-control.js";
+import { type RunCommandRuntime, type RunCommandSession } from "./command-run-control.js";
 import { pickFromList } from "./command-ui.js";
 import { registerMaestroCommand } from "./commands.js";
 import { loadConfig } from "./config.js";
