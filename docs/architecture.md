@@ -32,6 +32,7 @@ Board boundary (src/board.ts)       runner.ts / worktree.ts
 | Human command dispatch | `src/command-dispatcher.ts` | Routes command families through explicit runtime, navigation, and view interfaces; family modules own their behavior. |
 | Session replacement | `src/handoff.ts` | The only module allowed to call `newSession()`. |
 | Pi lifecycle events and reload recovery | `src/extension-lifecycle.ts` | The only adapter that registers session lifecycle hooks; it receives narrow runtime, navigation, and UI callbacks. |
+| Dashboard overlay and task actions | `src/dashboard-controller.ts` | Owns dashboard construction, action wiring, session routing, and status mutation adapters. |
 | Live agent pane overlay and focus | `src/live-pane-controller.ts` | Owns pane creation, suppression, focus, session actions, and stale-context-safe settlement. |
 | Pi composition and UI wiring | `src/extension.ts` | Constructs adapters and registers tools, commands, shortcuts, rendering, and lifecycle teardown. |
 

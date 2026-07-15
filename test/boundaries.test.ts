@@ -140,6 +140,18 @@ test("dashboard navigation projection lives outside the TUI controller", () => {
   assert.match(navigation, /function visibleSelectionWindow/);
 });
 
+test("dashboard overlay action wiring lives outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /new Dashboard|DashboardTaskAction|findSessionFile/);
+
+  const controller = files.find((file) => file.name === "dashboard-controller.ts")?.contents ?? "";
+  assert.match(controller, /function showDashboard/);
+  assert.match(controller, /new Dashboard/);
+  assert.match(controller, /manuallyApproveTask/);
+  assert.match(controller, /findSessionFile/);
+});
+
 test("live pane overlay composition lives outside the extension root", () => {
   const files = sourceFiles();
   const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
