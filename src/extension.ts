@@ -260,6 +260,7 @@ export default function maestro(
     hasActiveDrive: () => driveController.hasActive(),
     liveRunCount: () => driveController.liveRunCount(),
     liveTaskIds: () => new Set(driveController.liveTaskIds()),
+    liveRunKinds: () => driveController.liveRunKinds(),
     isTaskLive: (taskId) => driveController.isTaskLive(taskId),
     activeOwner: () => driveController.activeOwner(),
     requestPause: () => {

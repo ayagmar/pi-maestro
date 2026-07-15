@@ -28,6 +28,7 @@ export interface RecoveryCommandRuntime {
   hasLiveRuns(): boolean;
   isTaskLive(taskId: string): boolean;
   liveTaskIds(): Set<string>;
+  liveRunKinds(): Map<string, "execute" | "review">;
   onBoardChanged(): void;
 }
 
@@ -38,7 +39,10 @@ export async function handleDoctorCommand(
 ): Promise<void> {
   const liveTaskIds = runtime.liveTaskIds();
   if (restParts[0]?.toLowerCase() !== "cleanup") {
-    notify(ctx, buildDoctorReport(ctx.cwd, ctx.modelRegistry, ctx.model, liveTaskIds));
+    notify(
+      ctx,
+      buildDoctorReport(ctx.cwd, ctx.modelRegistry, ctx.model, liveTaskIds, runtime.liveRunKinds())
+    );
     return;
   }
 

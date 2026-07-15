@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { type ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { createTask, saveBoard } from "../src/board.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { buildDoctorReport } from "../src/diagnostics.js";
 import { createWorktree } from "../src/worktree.js";
@@ -36,6 +37,28 @@ test("doctor reports config, effective settings, inherited models, and git guida
     assert.match(report, /primary: available via authenticated-provider\/current-model/);
     assert.match(report, /not a git repository with an initial commit/);
     assert.doesNotMatch(report, /api.?key\s*[:=]/i);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("doctor reports the live reviewer phase", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-doctor-"));
+  try {
+    const board = { version: 1 as const, nextTaskNumber: 1, tasks: [] };
+    const task = createTask(board, { title: "Review", brief: "inspect", tier: "standard" });
+    task.status = "ready_for_review";
+    saveBoard(cwd, board);
+
+    const report = buildDoctorReport(
+      cwd,
+      fakeRegistry([]),
+      undefined,
+      new Set([task.id]),
+      new Map([[task.id, "review"]])
+    );
+
+    assert.match(report, /Status: running · review/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

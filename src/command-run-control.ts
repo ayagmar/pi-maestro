@@ -18,6 +18,7 @@ export interface RunCommandRuntime {
   hasActiveDrive(): boolean;
   liveRunCount(): number;
   liveTaskIds(): Set<string>;
+  liveRunKinds(): Map<string, "execute" | "review">;
   isTaskLive(taskId: string): boolean;
   activeOwner(): Pick<ActiveDriveControl, "id" | "cwd" | "ownerSession" | "taskIds"> | undefined;
   requestPause(): void;

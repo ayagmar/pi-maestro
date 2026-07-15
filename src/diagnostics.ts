@@ -9,7 +9,7 @@ import {
   resolveTierModel,
   validateConfig,
 } from "./config.js";
-import { formatStatusProjection, projectStatus } from "./status.js";
+import { formatStatusProjection, type LiveTaskKinds, projectStatus } from "./status.js";
 import { inspectGit, inspectManagedWorktrees } from "./worktree.js";
 
 function unresolvedDecisionWarnings(
@@ -46,7 +46,8 @@ export function buildDoctorReport(
   cwd: string,
   modelRegistry: ModelRegistry,
   preferredModel?: { provider: string; id: string },
-  liveTaskIds: ReadonlySet<string> = new Set()
+  liveTaskIds: ReadonlySet<string> = new Set(),
+  liveKinds?: LiveTaskKinds
 ): string {
   const userFile = configFile("user", cwd);
   const projectFile = configFile("project", cwd);
@@ -62,7 +63,7 @@ export function buildDoctorReport(
   const lines = [
     "Maestro doctor",
     "",
-    `Status: ${formatStatusProjection(projectStatus(board, liveTaskIds))}`,
+    `Status: ${formatStatusProjection(projectStatus(board, liveTaskIds, undefined, liveKinds))}`,
     ...(decisionWarnings.length > 0
       ? ["", "Decision warnings:", ...decisionWarnings.map((warning) => `  ${warning}`)]
       : []),

@@ -177,6 +177,7 @@ export class MaestroCommandDispatcher {
     return {
       ...this.mutationRuntime(ctx),
       liveTaskIds: () => this.runtime.liveTaskIds(),
+      liveRunKinds: () => this.runtime.liveRunKinds(),
     };
   }
 
