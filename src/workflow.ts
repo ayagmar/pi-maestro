@@ -7,7 +7,6 @@ import {
   taskFingerprint,
 } from "./artifact-policy.js";
 import {
-  claimTaskDispatch,
   findTask,
   forceStatus,
   humanRetryEligibility,
@@ -16,8 +15,6 @@ import {
   isTaskSettled,
   loadBoard,
   planValidationMessage,
-  releaseTaskDispatch,
-  renewTaskDispatch,
   stateDir,
   transition,
   updateTask,
@@ -90,6 +87,7 @@ import {
   type WorktreeRef,
   worktreeExists,
 } from "./worktree.js";
+import { claimDispatchLifecycle } from "./workflow-dispatch.js";
 import { integrateReviewedCandidate, removeIntegratedWorktree } from "./workflow-integration.js";
 
 export {
@@ -118,34 +116,6 @@ export interface WorkflowRun {
 export type StartExecutor = typeof import("./runner.js").startExecutor;
 export type WorkflowUpdate = (taskId: string, update: RunUpdate, kind: WorkflowRun["kind"]) => void;
 export type TrackRun = (run: WorkflowRun) => () => void;
-
-type DispatchKind = "execute" | "review";
-
-function claimDispatchLifecycle(
-  cwd: string,
-  taskId: string,
-  kind: DispatchKind,
-  dispatchable: Parameters<typeof claimTaskDispatch>[3]
-) {
-  const dispatch = claimTaskDispatch(cwd, taskId, kind, dispatchable);
-  if (!dispatch?.claimed) return { dispatch };
-
-  const renewal = setInterval(() => {
-    renewTaskDispatch(cwd, taskId, dispatch.claimId);
-  }, 10_000);
-  renewal.unref();
-  let closed = false;
-
-  return {
-    dispatch,
-    release: () => {
-      if (closed) return;
-      closed = true;
-      clearInterval(renewal);
-      releaseTaskDispatch(cwd, taskId, dispatch.claimId);
-    },
-  };
-}
 
 export type DriveRoundPhase = "run" | "review";
 export type DriveRoundUpdate = (round: number, phase: DriveRoundPhase, taskIds: string[]) => void;

@@ -313,6 +313,18 @@ test("session navigation state lives outside the extension root", () => {
   assert.match(navigator, /sessionSwitchBlocked/);
 });
 
+test("dispatch claims and lease renewal live outside workflow orchestration", () => {
+  const files = sourceFiles();
+  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
+  assert.doesNotMatch(workflow, /claimTaskDispatch|renewTaskDispatch|releaseTaskDispatch/);
+
+  const dispatch = files.find((file) => file.name === "workflow-dispatch.ts")?.contents ?? "";
+  assert.match(dispatch, /function claimDispatchLifecycle/);
+  assert.match(dispatch, /claimTaskDispatch/);
+  assert.match(dispatch, /renewTaskDispatch/);
+  assert.match(dispatch, /releaseTaskDispatch/);
+});
+
 test("candidate integration transactions live outside workflow orchestration", () => {
   const files = sourceFiles();
   const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
