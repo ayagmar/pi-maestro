@@ -110,6 +110,18 @@ test("pure policy modules do not import Pi, TUI, process, runner, or Git adapter
   assert.deepEqual(violations, []);
 });
 
+test("dashboard help and footer rendering live outside the controller", () => {
+  const files = sourceFiles();
+  const dashboard = files.find((file) => file.name === "dashboard.ts")?.contents ?? "";
+  assert.doesNotMatch(dashboard, /for \(const binding of DASHBOARD_BINDINGS\)|bindingLabel\(/);
+
+  const rendering = files.find((file) => file.name === "dashboard-render.ts")?.contents ?? "";
+  assert.match(rendering, /function renderDashboardHelp/);
+  assert.match(rendering, /function renderDashboardFooter/);
+  assert.match(rendering, /DASHBOARD_BINDINGS/);
+  assert.match(rendering, /bindingLabel\(/);
+});
+
 test("dashboard navigation projection lives outside the TUI controller", () => {
   const files = sourceFiles();
   const dashboard = files.find((file) => file.name === "dashboard.ts")?.contents ?? "";

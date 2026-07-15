@@ -9,8 +9,6 @@ import {
   taskGroup,
 } from "./board.js";
 import {
-  bindingLabel,
-  DASHBOARD_BINDINGS,
   DEFAULT_DASHBOARD_BODY_HEIGHT,
   REFRESH_MS,
   STEER_OPTIONS,
@@ -39,6 +37,7 @@ import {
   visibleDashboardTasks,
   visibleSelectionWindow,
 } from "./dashboard-navigation.js";
+import { renderDashboardFooter, renderDashboardHelp } from "./dashboard-render.js";
 import {
   boardUsage,
   formatCostSummary,
@@ -699,12 +698,7 @@ export class Dashboard {
   }
 
   private renderHelp(width: number, height: number): string[] {
-    const lines = [this.theme.bold("Dashboard help")];
-    for (const binding of DASHBOARD_BINDINGS) {
-      lines.push(`${binding.context.padEnd(12)} ${binding.key.padEnd(12)} ${binding.description}`);
-    }
-    lines.push(this.theme.fg("dim", "Press any key to close help"));
-    return lines.map((line) => truncateToWidth(line, width)).slice(0, height);
+    return renderDashboardHelp(this.theme, width, height);
   }
 
   private renderNavigation(tasks: Task[], board: Board, width: number, height: number): string[] {
@@ -1148,50 +1142,23 @@ export class Dashboard {
   }
 
   private renderFooter(width: number): string {
-    const theme = this.theme;
     const task = this.selectedTask();
-    if (this.mode === "confirm_abort" && this.pendingConfirm) {
-      return theme.fg(
-        "error",
-        ` Abort ${this.pendingConfirm.taskId}? Press y to confirm, any other key to cancel `
-      );
-    }
-    if (this.mode === "confirm_accept" && this.pendingConfirm) {
-      return theme.fg(
-        "warning",
-        ` Approve ${this.pendingConfirm.taskId} without review? Press y to confirm, any other key to cancel `
-      );
-    }
-    if (this.navigationLevel === "phase") {
-      const parts = [bindingLabel("↑↓"), bindingLabel("←→"), bindingLabel("esc")];
-      return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
-    }
     const live = task ? this.actions.isLive(task.id) : false;
-    const parts = [
-      bindingLabel("?"),
-      ...(this.frame.board.planPending ? ["plan gated · /maestro plan to review"] : []),
-      bindingLabel("↑↓"),
-      bindingLabel("esc"),
-      bindingLabel("PgUp/PgDn"),
-    ];
-    if (live) parts.push(bindingLabel("s"), bindingLabel("F"), bindingLabel("x"));
-    else if (task) {
-      if (lastAttemptReport(task)) parts.push(bindingLabel("p"));
-      if (task.attempts.at(-1)?.reviewReport) parts.push(bindingLabel("v"));
-      if (this.actions.hasExecutorSession(task.id)) parts.push(bindingLabel("enter"));
-      if (this.actions.hasReviewerSession(task.id)) parts.push(bindingLabel("O"));
-      if (task.status === "ready_for_review") parts.push(bindingLabel("a"));
-      if (isManualStatusEligible(task, false)) parts.push(bindingLabel("m"));
-      if (this.actions.retryEligibility(task.id).eligible) parts.push(bindingLabel("r"));
-    }
-    const groupFilter = this.filter === "all" ? "all" : GROUP_LABELS[this.filter];
-    parts.push(
-      `${bindingLabel("g")} (${groupFilter})`,
-      bindingLabel("t"),
-      bindingLabel("e"),
-      bindingLabel("f"),
-      bindingLabel("←→")
-    );
-    return theme.fg("dim", truncateToWidth(` ${parts.join(" · ")} `, width));
+    return renderDashboardFooter(this.theme, width, {
+      mode: this.mode,
+      ...(this.pendingConfirm ? { pendingTaskId: this.pendingConfirm.taskId } : {}),
+      navigationLevel: this.navigationLevel,
+      planPending: this.frame.board.planPending === true,
+      live,
+      hasTask: task !== undefined,
+      canViewReport: Boolean(!live && task && lastAttemptReport(task)),
+      canViewReview: Boolean(!live && task?.attempts.at(-1)?.reviewReport),
+      canOpenExecutor: Boolean(!live && task && this.actions.hasExecutorSession(task.id)),
+      canOpenReviewer: Boolean(!live && task && this.actions.hasReviewerSession(task.id)),
+      canApprove: !live && task?.status === "ready_for_review",
+      canSetManualStatus: Boolean(!live && task && isManualStatusEligible(task, false)),
+      canRetry: Boolean(!live && task && this.actions.retryEligibility(task.id).eligible),
+      groupFilter: this.filter === "all" ? "all" : GROUP_LABELS[this.filter],
+    });
   }
 }
