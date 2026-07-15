@@ -79,9 +79,6 @@ import {
   formatBoardProgress,
   formatCostSummary,
   formatStatusHistory,
-  formatUsage,
-  STATUS_LABELS,
-  taskLine,
   truncateText,
 } from "./format.js";
 import { notify, runHandoff } from "./handoff.js";
@@ -115,7 +112,6 @@ import {
   findSessionFile,
   type RunUpdate,
 } from "./runner.js";
-import { showScrollableMarkdown, showScrollableText } from "./scrollable-viewer.js";
 import {
   assertKnownTaskIds,
   canonicalTaskIds,
@@ -126,6 +122,7 @@ import {
 } from "./session-control.js";
 import { showSettings } from "./settings-ui.js";
 import { projectStatus } from "./status.js";
+import { showTaskBrowser } from "./task-browser.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
 
 export {
@@ -137,13 +134,7 @@ export {
 } from "./session-control.js";
 
 import { registerMaestroTools } from "./tools.js";
-import {
-  type Board,
-  type PausedDriveState,
-  type Task,
-  type TaskStatus,
-  type TierConfig,
-} from "./types.js";
+import { type Board, type PausedDriveState, type Task, type TierConfig } from "./types.js";
 import {
   type DriveSummary,
   driveBoard,
@@ -154,6 +145,7 @@ import {
   snapshot,
   type WorkflowRun,
 } from "./workflow.js";
+import { showWorkflowBrowser } from "./workflow-browser.js";
 import {
   cleanupManagedWorktrees,
   inspectGit,
@@ -1606,7 +1598,11 @@ export default function maestro(
             openLivePane(ctx, true);
             return;
           case "workflows":
-            await showWorkflowBrowser(ctx);
+            await showWorkflowBrowser(ctx, {
+              hasLiveRuns: () => liveRuns.size > 0,
+              onBoardChanged: () => refreshUI(ctx),
+              reviewPlan: showPlan,
+            });
             return;
           case "board":
           case "dash":
@@ -2365,131 +2361,19 @@ export default function maestro(
   }
 
   async function showBoard(ctx: ExtensionCommandContext): Promise<void> {
-    const board = loadBoard(ctx.cwd);
-    if (board.tasks.length === 0) {
-      notify(ctx, "Board is empty. Use /maestro start <goal> or ask the model to plan tasks.");
-      return;
-    }
-
-    const items: SelectItem[] = board.tasks.map((task) => ({
-      value: task.id,
-      label: taskLine(task),
-      description: truncateText(task.brief, 1),
-    }));
-
-    const taskId = await pickFromList(
-      ctx,
-      `Maestro Board · ${formatUsage(boardUsage(board.tasks))}`,
-      items
-    );
-    if (!taskId) return;
-    await showTaskActions(ctx, taskId);
-  }
-
-  async function showTaskActions(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
-    const board = loadBoard(ctx.cwd);
-    const task = findTask(board, taskId);
-    if (!task) return;
-
-    const actions: SelectItem[] = [{ value: "report", label: "View last report" }];
-    if (task.attempts.at(-1)?.reviewReport) {
-      actions.push({ value: "review", label: "View review verdict" });
-    }
-    if (task.attempts.length > 0) {
-      actions.push({
-        value: "open",
-        label: "Open executor session",
-        description: "Switch this TUI into the executor's session",
-      });
-    }
-    if (task.attempts.at(-1)?.reviewSessionFile) {
-      actions.push({
-        value: "open-review",
-        label: "Open reviewer session",
-        description: "Switch this TUI into the reviewer's session",
-      });
-    }
-    const retry = humanRetryEligibility(board, task.id, {
-      maxAttempts: loadConfig(ctx.cwd).maxAttempts,
-      config: loadConfig(ctx.cwd),
-      isLive: (id) => liveRuns.has(id),
-      ...(ctx.sessionManager.getSessionFile()
-        ? { ownerSession: ctx.sessionManager.getSessionFile() }
-        : {}),
+    await showTaskBrowser(ctx, {
+      isLive: (taskId) => liveRuns.has(taskId),
+      requestRetry: requestHumanRetry,
+      manuallyApprove: manuallyApproveTask,
+      showReport: showTaskReport,
+      showReview: showTaskReview,
+      openExecutor: openTaskSession,
+      openReviewer: openReviewerSession,
+      onStatusChanged: (current, taskId, status) => {
+        refreshUI(current);
+        if (status === "approved") labelCurrentEntry(current, `maestro: ${taskId} approved`);
+      },
     });
-    if (retry.eligible) {
-      actions.push({ value: "retry", label: "Retry failed work", description: retry.message });
-    }
-    if (!(["approved", "failed", "cancelled"] as TaskStatus[]).includes(task.status)) {
-      for (const status of [
-        "todo",
-        "ready_for_review",
-        "changes_requested",
-        "approved",
-        "cancelled",
-      ] as TaskStatus[]) {
-        if (status !== task.status) {
-          actions.push({ value: `status:${status}`, label: `Mark as ${STATUS_LABELS[status]}` });
-        }
-      }
-    }
-
-    const action = await pickFromList(
-      ctx,
-      `${task.id} ${task.title} · ${STATUS_LABELS[task.status]}`,
-      actions
-    );
-    if (!action) return;
-
-    if (action === "report") {
-      showTaskReport(ctx.cwd, task.id);
-      return;
-    }
-    if (action === "review") {
-      showTaskReview(ctx.cwd, task.id);
-      return;
-    }
-    if (action === "open") {
-      await openTaskSession(ctx, task.id);
-      return;
-    }
-    if (action === "open-review") {
-      await openReviewerSession(ctx, task.id);
-      return;
-    }
-    if (action === "retry") {
-      await requestHumanRetry(ctx, task.id);
-      return;
-    }
-    if (action.startsWith("status:")) {
-      const status = action.slice("status:".length) as TaskStatus;
-      try {
-        if (status === "approved") manuallyApproveTask(ctx, task.id);
-        else {
-          updateTask(ctx.cwd, task.id, (fresh) => {
-            assertTaskNotDispatched(fresh);
-            forceStatus(fresh, status);
-          });
-        }
-      } catch (error) {
-        notify(ctx, error instanceof Error ? error.message : String(error), "warning");
-        return;
-      }
-      if (status === "approved") {
-        const cleanup = pruneTaskLogs(
-          ctx.cwd,
-          task.id,
-          () => loadBoard(ctx.cwd),
-          (id) => liveRuns.has(id)
-        );
-        for (const warning of cleanup.warnings) {
-          notify(ctx, `Log cleanup warning: ${warning}`, "warning");
-        }
-      }
-      refreshUI(ctx);
-      notify(ctx, `${task.id} → ${STATUS_LABELS[status]}`);
-      if (status === "approved") labelCurrentEntry(ctx, `maestro: ${task.id} approved`);
-    }
   }
 
   function showTaskReport(cwd: string, taskId: string): void {
@@ -2624,184 +2508,6 @@ export default function maestro(
     if (choice !== "start") return choice;
     const goal = await ctx.ui.input("Start a new Maestro goal", "Describe the outcome you want");
     return goal?.trim() ? `start ${goal.trim()}` : null;
-  }
-
-  function workflowMarkdown(listing: ReturnType<typeof loadRecipeListings>[number]): string {
-    if (listing.error || !listing.recipe) {
-      return `# ${listing.name}\n\n**Invalid workflow**\n\n${listing.error ?? "Recipe could not be loaded."}\n\n\`${listing.file}\``;
-    }
-    const recipe = listing.recipe;
-    const tasks = recipe.tasks
-      .map(
-        (task, index) =>
-          `## ${index + 1}. ${task.title}\n\n**Tier:** ${task.tier}  \n**Dependencies:** ${task.dependsOn?.join(", ") || "None"}  \n**Writes:** ${task.writePaths?.map((path) => `\`${path}\``).join(", ") || "None"}\n\n${task.brief}`
-      )
-      .join("\n\n");
-    return [
-      `# ${recipe.name}`,
-      recipe.description ?? "Reusable Maestro workflow",
-      "",
-      `**Scope:** ${listing.scope}  `,
-      `**File:** \`${listing.file}\`  `,
-      `**Inputs:** ${Object.keys(recipe.inputs ?? {}).join(", ") || "None"}`,
-      "",
-      tasks,
-    ].join("\n");
-  }
-
-  async function showWorkflowBrowser(ctx: ExtensionCommandContext): Promise<void> {
-    while (true) {
-      const listings = loadRecipeListings(ctx.cwd);
-      const board = loadBoard(ctx.cwd);
-      const items: SelectItem[] = [
-        ...(board.tasks.length > 0
-          ? [
-              {
-                value: "save",
-                label: "Save board as workflow",
-                description: `${board.tasks.length} task(s)`,
-              },
-            ]
-          : []),
-        ...listings.map((listing) => ({
-          value: `workflow:${listing.name}`,
-          label: listing.name,
-          description: listing.error
-            ? `INVALID · ${listing.error}`
-            : `${listing.scope} · ${listing.recipe?.description ?? `${listing.recipe?.tasks.length ?? 0} task(s)`}`,
-        })),
-      ];
-      if (items.length === 0) {
-        notify(
-          ctx,
-          `No workflows yet. Build a plan, then save it from /${COMMAND} workflows.`,
-          "warning"
-        );
-        return;
-      }
-
-      const choice = await pickFromList(ctx, "Maestro workflows", items);
-      if (!choice) return;
-      if (choice === "save") {
-        const name = await ctx.ui.input("Workflow name", "for example: implement-feature");
-        if (!name?.trim()) continue;
-        const scope = await pickFromList(ctx, "Save workflow", [
-          {
-            value: "project",
-            label: "This project",
-            description: "Share the workflow with this repository",
-          },
-          {
-            value: "user",
-            label: "All my projects",
-            description: "Keep the workflow in your user-level Maestro library",
-          },
-        ]);
-        if (scope !== "project" && scope !== "user") continue;
-        try {
-          const file = saveRecipeFromBoard(scope, ctx.cwd, name.trim(), loadBoard(ctx.cwd));
-          notify(ctx, `Saved ${scope} workflow “${name.trim()}” to ${file}.`);
-        } catch (error) {
-          notify(ctx, error instanceof Error ? error.message : String(error), "error");
-        }
-        continue;
-      }
-
-      const name = choice.slice("workflow:".length);
-      const listing = listings.find((candidate) => candidate.name === name);
-      if (!listing) continue;
-      const action = await pickFromList(ctx, `Workflow · ${name}`, [
-        {
-          value: "inspect",
-          label: "View workflow",
-          description: "Rendered tasks, inputs, and scope",
-        },
-        {
-          value: "preview",
-          label: "Preview on current board",
-          description: "Expand inputs without changing anything",
-        },
-        {
-          value: "run",
-          label: "Create plan from workflow",
-          description: "Expansion remains gated for approval",
-        },
-        {
-          value: "remove",
-          label: "Remove workflow",
-          description: `Delete the ${listing.scope} definition after confirmation`,
-        },
-      ]);
-      if (!action) continue;
-      if (action === "inspect") {
-        await showScrollableMarkdown(ctx, `Workflow · ${name}`, workflowMarkdown(listing));
-        continue;
-      }
-      if (listing.error || !listing.recipe) {
-        notify(ctx, listing.error ?? "Workflow is invalid.", "error");
-        continue;
-      }
-      if (action === "remove") {
-        const confirmed = await ctx.ui.confirm(
-          "Remove workflow?",
-          `Permanently remove ${listing.scope} workflow “${name}”?`
-        );
-        if (confirmed && removeRecipe(listing.scope, ctx.cwd, name)) {
-          notify(ctx, `Removed workflow “${name}”.`);
-        }
-        continue;
-      }
-
-      const rawInput = await ctx.ui.input(
-        action === "run" ? "Run workflow" : "Preview workflow",
-        Object.keys(listing.recipe.inputs ?? {}).length > 0
-          ? `JSON values for: ${Object.keys(listing.recipe.inputs ?? {}).join(", ")}`
-          : "Optional JSON input; leave empty for none"
-      );
-      if (rawInput === undefined) continue;
-      try {
-        const config = loadConfig(ctx.cwd);
-        const expanded = expandRecipe(
-          listing.recipe,
-          parseRecipeInput(rawInput.trim() || undefined),
-          Object.keys(config.tiers),
-          Object.keys(config.verificationProfiles ?? {}),
-          config.maxPlanTasks
-        );
-        if (action === "preview") {
-          await showScrollableText(
-            ctx,
-            `Workflow preview · ${name}`,
-            formatPlanComparison(
-              comparePlans(board, expanded, config),
-              `/${COMMAND} workflows`
-            ).split("\n")
-          );
-          continue;
-        }
-        if (liveRuns.size > 0) {
-          notify(ctx, "Executors are still running. Workflow run cancelled.", "warning");
-          continue;
-        }
-        if (board.tasks.length > 0) {
-          const confirmed = await ctx.ui.confirm(
-            "Create plan from workflow?",
-            `Archive ${board.tasks.length} current task(s), then create “${name}”?`
-          );
-          if (!confirmed) continue;
-        }
-        replaceBoardWithArchive(ctx.cwd, () => structuredClone(expanded), board.revision ?? 0);
-        refreshUI(ctx);
-        notify(
-          ctx,
-          `Created ${expanded.tasks.length} task(s) from “${name}”. Review the plan next.`
-        );
-        await showPlan(ctx);
-        return;
-      } catch (error) {
-        notify(ctx, error instanceof Error ? error.message : String(error), "error");
-      }
-    }
   }
 
   // ------------------------------------------------------------ rendering

@@ -134,6 +134,20 @@ test("plan command UI and mutations live outside the extension root", () => {
   assert.match(planReview, /approvePlan\(/);
 });
 
+test("workflow and task browsers own their command coordination", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /workflowMarkdown|showTaskActions/);
+
+  const workflowBrowser = files.find((file) => file.name === "workflow-browser.ts")?.contents ?? "";
+  assert.match(workflowBrowser, /saveRecipeFromBoard/);
+  assert.match(workflowBrowser, /replaceBoardWithArchive/);
+
+  const taskBrowser = files.find((file) => file.name === "task-browser.ts")?.contents ?? "";
+  assert.match(taskBrowser, /humanRetryEligibility/);
+  assert.match(taskBrowser, /pruneTaskLogs/);
+});
+
 test("index is a composition entry point and adapters own registrations", () => {
   const files = sourceFiles();
   const index = files.find((file) => file.name === "index.ts")?.contents ?? "";
