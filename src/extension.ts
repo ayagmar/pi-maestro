@@ -118,6 +118,7 @@ import {
   sessionCanControlDrive,
   sessionSwitchBlocked,
 } from "./session-control.js";
+import { SessionNavigator } from "./session-navigator.js";
 import { showSettings } from "./settings-ui.js";
 import { projectStatus } from "./status.js";
 import { showTaskBrowser } from "./task-browser.js";
@@ -179,11 +180,14 @@ export default function maestro(
 
   const liveRuns = new Map<string, WorkflowRun>();
   const driveController = new DriveRuntimeController();
+  const sessionNavigator = new SessionNavigator({
+    hasActiveDrive: () => driveController.hasActive(),
+    liveRunCount: () => liveRuns.size,
+    isTaskLive: (taskId) => liveRuns.has(taskId),
+  });
   let runtimeActive = true;
   let contextNudgeShown = false;
   const commandCompletions = new MaestroCommandCompletions(process.cwd());
-  /** Session we switched away from when opening an executor session (for /maestro back). */
-  let previousSession: string | undefined;
   let livePane: LivePaneRuntime | undefined;
   let suppressedAutoPaneDriveId: string | undefined;
 
@@ -316,7 +320,7 @@ export default function maestro(
                       );
                       if (!confirmed) return;
                       closeLivePane();
-                      await switchWithReturn(ctx, launch.sessionFile as string);
+                      await sessionNavigator.switchWithReturn(ctx, launch.sessionFile as string);
                     })();
                   },
                 }
@@ -998,13 +1002,7 @@ export default function maestro(
             return;
           }
           case "back": {
-            if (!previousSession) {
-              notify(ctx, "No session to go back to. Use /resume to pick one.", "warning");
-              return;
-            }
-            const target = previousSession;
-            previousSession = ctx.sessionManager.getSessionFile();
-            await ctx.switchSession(target);
+            await sessionNavigator.back(ctx);
             return;
           }
           case "drive": {
@@ -1402,7 +1400,7 @@ export default function maestro(
               notify(ctx, "Usage: /maestro open <taskId>", "warning");
               return;
             }
-            await openTaskSession(ctx, rest);
+            await sessionNavigator.openTask(ctx, rest);
             return;
           }
           case "config": {
@@ -2092,10 +2090,10 @@ export default function maestro(
       return;
     }
     if (selection.action === "open_executor") {
-      await openTaskSession(ctx, selection.taskId);
+      await sessionNavigator.openTask(ctx, selection.taskId);
       return;
     }
-    await openReviewerSession(ctx, selection.taskId);
+    await sessionNavigator.openReviewer(ctx, selection.taskId);
   }
 
   function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
@@ -2120,8 +2118,8 @@ export default function maestro(
       manuallyApprove: manuallyApproveTask,
       showReport: showTaskReport,
       showReview: showTaskReview,
-      openExecutor: openTaskSession,
-      openReviewer: openReviewerSession,
+      openExecutor: (current, taskId) => sessionNavigator.openTask(current, taskId),
+      openReviewer: (current, taskId) => sessionNavigator.openReviewer(current, taskId),
       onStatusChanged: (current, taskId, status) => {
         refreshUI(current);
         if (status === "approved") labelCurrentEntry(current, `maestro: ${taskId} approved`);
@@ -2149,61 +2147,6 @@ export default function maestro(
       content: `## ${task.id} ${task.title} — review verdict\n\n${review}`,
       display: true,
     });
-  }
-
-  async function openReviewerSession(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
-    const task = findTask(loadBoard(ctx.cwd), taskId);
-    const reviewSession = task?.attempts.at(-1)?.reviewSessionFile;
-    if (reviewSession) await switchWithReturn(ctx, reviewSession);
-  }
-
-  async function openTaskSession(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
-    const board = loadBoard(ctx.cwd);
-    const task = findTask(board, taskId);
-    if (!task) {
-      notify(ctx, `Unknown task: ${taskId}`, "error");
-      return;
-    }
-    if (liveRuns.has(task.id)) {
-      // The executor process owns that session file while running; attaching
-      // the TUI to it would fork history. The dashboard tails it live instead.
-      notify(
-        ctx,
-        `${task.id} is still running — watch it live in /${COMMAND} board (s to steer, x to abort). The session opens here once it finishes.`,
-        "warning"
-      );
-      return;
-    }
-    const attempt = task.attempts.at(-1);
-    const sessionFile = attempt ? findSessionFile(attempt) : undefined;
-    if (!sessionFile) {
-      notify(ctx, `${task.id} has no executor session yet.`, "warning");
-      return;
-    }
-    const ok = await ctx.ui.confirm(
-      `Open executor session for ${task.id}?`,
-      `This switches the current TUI into the executor's session. Use /${COMMAND} back to return here.`
-    );
-    if (!ok) return;
-    await switchWithReturn(ctx, sessionFile);
-  }
-
-  /** Switch sessions, remembering where we came from for /maestro back. */
-  async function switchWithReturn(
-    ctx: ExtensionCommandContext,
-    sessionFile: string
-  ): Promise<void> {
-    if (sessionSwitchBlocked(driveController.hasActive(), liveRuns.size)) {
-      notify(
-        ctx,
-        `Pause the autonomous drive and wait for active executors before switching sessions. Use /${COMMAND} abort to stop them immediately.`,
-        "warning"
-      );
-      return;
-    }
-    const current = ctx.sessionManager.getSessionFile();
-    const result = await ctx.switchSession(sessionFile);
-    if (!result.cancelled && current) previousSession = current;
   }
 
   async function showMaestroHome(ctx: ExtensionCommandContext): Promise<string | null> {
@@ -2337,11 +2280,13 @@ export default function maestro(
         )
       )
     );
-    previousSession = previousBoardSession(
-      event.previousSessionFile,
-      ctx.sessionManager.getSessionFile(),
-      navigationBoard.ownerSessions,
-      executorSessions
+    sessionNavigator.setPrevious(
+      previousBoardSession(
+        event.previousSessionFile,
+        ctx.sessionManager.getSessionFile(),
+        navigationBoard.ownerSessions,
+        executorSessions
+      )
     );
 
     // Recovery is lease-aware: live owners survive extension reloads and only

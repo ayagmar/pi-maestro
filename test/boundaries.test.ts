@@ -179,6 +179,17 @@ test("command completion caching lives outside the extension root", () => {
   assert.match(completions, /loadRecipeListings/);
 });
 
+test("session navigation state lives outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /let previousSession|function switchWithReturn/);
+
+  const navigator = files.find((file) => file.name === "session-navigator.ts")?.contents ?? "";
+  assert.match(navigator, /class SessionNavigator/);
+  assert.match(navigator, /private previousSession/);
+  assert.match(navigator, /sessionSwitchBlocked/);
+});
+
 test("index is a composition entry point and adapters own registrations", () => {
   const files = sourceFiles();
   const index = files.find((file) => file.name === "index.ts")?.contents ?? "";
