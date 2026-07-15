@@ -168,6 +168,17 @@ test("drive preflight, summaries, and manual approval live outside the extension
   assert.match(approval, /snapshotArtifact/);
 });
 
+test("command completion caching lives outside the extension root", () => {
+  const files = sourceFiles();
+  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
+  assert.doesNotMatch(extension, /completionBoard|completionRecipes|COMPLETION_CACHE_MS/);
+
+  const completions = files.find((file) => file.name === "command-completions.ts")?.contents ?? "";
+  assert.match(completions, /class MaestroCommandCompletions/);
+  assert.match(completions, /loadBoard/);
+  assert.match(completions, /loadRecipeListings/);
+});
+
 test("index is a composition entry point and adapters own registrations", () => {
   const files = sourceFiles();
   const index = files.find((file) => file.name === "index.ts")?.contents ?? "";

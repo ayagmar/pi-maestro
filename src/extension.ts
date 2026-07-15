@@ -36,6 +36,7 @@ import {
   updateTask,
   validatePlan,
 } from "./board.js";
+import { MaestroCommandCompletions } from "./command-completions.js";
 import { pickFromList } from "./command-ui.js";
 import { parseCommand, registerMaestroCommand } from "./commands.js";
 import {
@@ -180,7 +181,7 @@ export default function maestro(
   const driveController = new DriveRuntimeController();
   let runtimeActive = true;
   let contextNudgeShown = false;
-  let activeCwd = process.cwd();
+  const commandCompletions = new MaestroCommandCompletions(process.cwd());
   /** Session we switched away from when opening an executor session (for /maestro back). */
   let previousSession: string | undefined;
   let livePane: LivePaneRuntime | undefined;
@@ -889,48 +890,10 @@ export default function maestro(
     startBackgroundDrive,
   });
 
-  const COMPLETION_CACHE_MS = 2_000;
-  let boardCompletionCache: { cwd: string; expiresAt: number; board: Board } | undefined;
-  let recipeCompletionCache:
-    | { cwd: string; expiresAt: number; recipes: ReturnType<typeof loadRecipeListings> }
-    | undefined;
-
-  function completionBoard(): Board {
-    const now = Date.now();
-    if (
-      !boardCompletionCache ||
-      boardCompletionCache.cwd !== activeCwd ||
-      boardCompletionCache.expiresAt <= now
-    ) {
-      boardCompletionCache = {
-        cwd: activeCwd,
-        expiresAt: now + COMPLETION_CACHE_MS,
-        board: loadBoard(activeCwd),
-      };
-    }
-    return boardCompletionCache.board;
-  }
-
-  function completionRecipes(): ReturnType<typeof loadRecipeListings> {
-    const now = Date.now();
-    if (
-      !recipeCompletionCache ||
-      recipeCompletionCache.cwd !== activeCwd ||
-      recipeCompletionCache.expiresAt <= now
-    ) {
-      recipeCompletionCache = {
-        cwd: activeCwd,
-        expiresAt: now + COMPLETION_CACHE_MS,
-        recipes: loadRecipeListings(activeCwd),
-      };
-    }
-    return recipeCompletionCache.recipes;
-  }
-
   registerMaestroCommand(
     pi,
     async (args, ctx) => {
-      activeCwd = ctx.cwd;
+      commandCompletions.setCwd(ctx.cwd);
       let { subcommand, rest, restParts } = parseCommand(args);
       if (!subcommand && ctx.mode === "tui") {
         const selected = await showMaestroHome(ctx);
@@ -1966,42 +1929,7 @@ export default function maestro(
         notifyQuarantine(ctx);
       }
     },
-    (prefix) => {
-      const normalized = prefix.toLowerCase();
-      const taskCommand = ["retry", "open", "drive", "discover", "timeline"].find((command) =>
-        normalized.startsWith(`${command} `)
-      );
-      if (taskCommand) {
-        const trailingSeparator = /[\s,]$/.test(prefix);
-        const parts = prefix.split(/[\s,]+/).filter((part) => part.length > 0);
-        const query = trailingSeparator ? "" : (parts.at(-1)?.toLowerCase() ?? "");
-        const idParts = trailingSeparator ? parts.slice(1) : parts.slice(1, -1);
-        const precedingIds = taskCommand === "drive" ? idParts : [];
-        const precedingIdsLower = new Set(precedingIds.map((id) => id.toLowerCase()));
-        return completionBoard()
-          .tasks.filter(
-            (task) =>
-              task.id.toLowerCase().startsWith(query) &&
-              !precedingIdsLower.has(task.id.toLowerCase())
-          )
-          .map((task) => ({
-            value: `${taskCommand} ${[...precedingIds, task.id].join(" ")}`,
-            label: task.id,
-            description: task.title,
-          }));
-      }
-      const recipeMatch = prefix.match(/^recipe\s+(run|inspect|preview|remove)\s+(.*)$/i);
-      if (!recipeMatch) return [];
-      const action = recipeMatch[1]?.toLowerCase();
-      const query = recipeMatch[2]?.toLowerCase() ?? "";
-      return completionRecipes()
-        .filter((recipe) => recipe.name.toLowerCase().startsWith(query))
-        .map((recipe) => ({
-          value: `recipe ${action} ${recipe.name}`,
-          label: recipe.name,
-          description: recipe.scope,
-        }));
-    }
+    (prefix) => commandCompletions.complete(prefix)
   );
 
   pi.registerShortcut("ctrl+alt+b", {
@@ -2391,7 +2319,7 @@ export default function maestro(
   });
 
   pi.on("session_start", (event, ctx) => {
-    activeCwd = ctx.cwd;
+    commandCompletions.setCwd(ctx.cwd);
     runtimeActive = true;
     closeLivePane();
     suppressedAutoPaneDriveId = undefined;
