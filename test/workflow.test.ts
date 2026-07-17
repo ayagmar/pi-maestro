@@ -1667,6 +1667,36 @@ test("successful execution persists ready_for_review", async () => {
   }
 });
 
+test("report-only investigations are reviewable with automatic commits enabled", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-no-file-auto-commit-"));
+  try {
+    saveConfig("project", cwd, config);
+    const { board, task } = boardWithTask("ready_for_review");
+    task.brief = "Read-only investigation with no-file changes";
+    task.writePaths = [];
+    task.attempts.push(attempt("Investigation complete"));
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      autoCommit: true,
+      startExecutor: executor({ finalReport: "VERDICT: APPROVE" }),
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.status, "approved", result.note);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.approvedProvenance?.artifact.kind, "report");
+    assert.equal(persisted?.integratedCommit, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("review refuses execution inputs changed in config after dispatch", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-fingerprint-config-race-"));
   try {

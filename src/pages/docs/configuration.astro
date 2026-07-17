@@ -1,0 +1,30 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="configuration">
+  <article class="prose">
+    <p>Configuration resolves in this order: built-in defaults, operator-owned user config, then non-executable project settings. Files are plain JSON.</p>
+    <div class="table-wrap"><table><thead><tr><th>Scope</th><th>Path</th><th>What it can do</th></tr></thead><tbody><tr><td>User</td><td><code>~/.pi/agent/maestro.json</code></td><td>Own models, fallbacks, limits, and trusted verification commands.</td></tr><tr><td>Project</td><td><code>.pi/maestro.json</code></td><td>Tune project behavior and select a known user verification profile.</td></tr></tbody></table></div>
+    <h2>Useful defaults</h2>
+    <div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead><tbody><tr><td><code>maxParallel</code></td><td>3</td><td>Maximum executor or reviewer processes at once.</td></tr><tr><td><code>planGate</code></td><td>false</td><td>Require human approval before the first drive.</td></tr><tr><td><code>useWorktrees</code></td><td>false</td><td>Give every runnable task an isolated Git checkout.</td></tr><tr><td><code>autoCommit</code></td><td>true</td><td>Commit approved attributed work as one conventional commit.</td></tr><tr><td><code>maxAttempts</code></td><td>3</td><td>Consumed execution attempts per task.</td></tr><tr><td><code>maxCostPerTask</code></td><td>$5</td><td>Abort an attempt after its billed cost exceeds the cap.</td></tr><tr><td><code>maxRunCost</code></td><td>$25</td><td>Gate new batches after the recorded run total reaches the cap.</td></tr><tr><td><code>statusWaitSeconds</code></td><td>60</td><td>Interval for mechanical progress pulses; zero disables waiting.</td></tr></tbody></table></div>
+    <h2>Preset and tier model selection</h2>
+    <p>The interactive settings editor is available at <code>/maestro config</code> (user scope) and <code>/maestro config project</code>. Presets define per-tier models and thinking levels; qualified model patterns such as <code>openai-codex/gpt-5.6-sol</code> pin a provider.</p>
+    <div class="code-block"><button class="copy-button" type="button">Copy</button><pre><code>&#123;
+  "maxParallel": 4,
+  "planGate": true,
+  "tiers": &#123;
+    "standard": &#123; "model": "gpt-5.6-sol", "thinking": "medium" &#125;,
+    "review": &#123; "model": "gpt-5.6-sol", "thinking": "medium", "tools": "read,bash,grep,find,ls" &#125;
+  &#125;
+&#125;</code></pre></div>
+    <h2>Trusted verification</h2>
+    <p>Only user config may define executable verification profiles. A project can select one by name; a repository cannot smuggle a command into the workflow.</p>
+    <div class="code-block"><button class="copy-button" type="button">Copy</button><pre><code>&#123;
+  "verificationProfiles": &#123;
+    "check": &#123; "command": "pnpm run check", "timeoutSeconds": 300 &#125;
+  &#125;,
+  "defaultVerificationProfile": "check"
+&#125;</code></pre></div>
+    <div class="callout"><strong>Important boundary</strong><p>Verification commands are arbitrary local code. They must be trusted operator choices, cannot mutate candidate files, and run in a dedicated process group with bounded output.</p></div>
+  </article>
+</DocsLayout>

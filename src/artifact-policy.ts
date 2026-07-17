@@ -23,11 +23,17 @@ function tierIdentity(tier: TierConfig | undefined): object | undefined {
 }
 
 function authoritativeArtifact(task: Task): ApprovedProvenance["artifact"] | undefined {
-  if ((task.writePaths?.length ?? 0) > 0) {
+  const latestAttempt = task.attempts.at(-1);
+  // Empty write scope normally means a report-only investigation. If an
+  // executor nevertheless changed files, keep the approval proof anchored to
+  // the Git artifact rather than silently treating those edits as report text.
+  const hasFileWork =
+    (task.writePaths?.length ?? 0) > 0 || (latestAttempt?.touchedFiles.length ?? 0) > 0;
+  if (hasFileWork) {
     const tree = task.provenance?.candidateTree;
     return tree ? { kind: "git-tree", identity: tree } : undefined;
   }
-  const report = task.attempts.at(-1)?.finalReport;
+  const report = latestAttempt?.finalReport;
   return report ? { kind: "report", identity: digest(report) } : undefined;
 }
 

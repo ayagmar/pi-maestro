@@ -64,6 +64,15 @@ approval, execution, review, integration, verification, recovery, and complete. 
 launch navigation reads persisted attempts, review launches, artifact identities, verification, and
 recovery references. Its timer only invalidates rendering; it never sends a message to a model.
 
+## Child-session storage boundary
+
+`runner.ts` gives every raw executor and reviewer launch a unique `--session-dir` beneath
+`<default-project-session-dir>/.maestro/`. The execution cwd may be an ephemeral worktree, but the
+storage root is derived from the main Maestro project cwd. Pi's ordinary session picker is
+non-recursive, so managed children remain outside `/resume`; board references and Maestro's agent
+browser open their exact files. Recursive usage scanners still traverse the nested JSONL transcripts.
+This separates session discoverability from accounting without changing Pi's session format.
+
 Verification commands come only from operator-owned user config. Repository config may select a known profile but cannot define executable commands. Unix verification uses a process group with TERM/KILL escalation. Failed integrated verification retains a checkpoint branch while its idle checkout is parked.
 
 ## Why exactly three model tools

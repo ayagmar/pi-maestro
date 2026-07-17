@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   applyAssistantMessage,
   cappedLogWriter,
   classifyFailure,
   mapWithConcurrencyLimit,
+  projectSessionDir,
   type RunOutcome,
   redactFailureMessage,
   runVerification,
@@ -113,6 +115,120 @@ process.stdin.on("end", () => process.exit(0));
     assert.equal(outcome.exitCode, 0);
   } finally {
     process.argv[1] = originalScript;
+  }
+});
+
+test("executor sessions are nested under the main project Pi directory and hidden from resume", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-sessions-"));
+  const projectCwd = join(root, "project");
+  const worktreeCwd = join(root, "worktree");
+  const fakePi = join(root, "fake-pi.mjs");
+  const argsFile = join(root, "args.json");
+  mkdirSync(projectCwd, { recursive: true });
+  mkdirSync(worktreeCwd, { recursive: true });
+  writeFileSync(
+    fakePi,
+    `import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+const args = process.argv.slice(2);
+const sessionDir = args[args.indexOf("--session-dir") + 1];
+mkdirSync(sessionDir, { recursive: true });
+const sessionFile = join(sessionDir, "child.jsonl");
+writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: "child", timestamp: "2026-01-01T00:00:00.000Z", cwd: process.cwd() }) + "\\n");
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "get_state") console.log(JSON.stringify({ type: "response", command: "get_state", success: true, data: { sessionFile } }));
+    if (command.type === "prompt") console.log(JSON.stringify({ type: "agent_settled" }));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const sessionRoot = projectSessionDir(projectCwd);
+    mkdirSync(sessionRoot, { recursive: true });
+    writeFileSync(
+      join(sessionRoot, "human.jsonl"),
+      `${JSON.stringify({ type: "session", version: 3, id: "human", timestamp: "2026-01-01T00:00:00.000Z", cwd: projectCwd })}\n`
+    );
+
+    const run = startExecutor({
+      stateDir: join(projectCwd, ".pi", "maestro"),
+      runId: "../../escape reviewer",
+      cwd: worktreeCwd,
+      projectCwd,
+      prompt: "run",
+      tier: { thinking: "low" },
+    });
+    await run.outcome;
+
+    assert.ok(run.attempt.sessionDir);
+    assert.equal(dirname(run.attempt.sessionDir), join(sessionRoot, ".maestro"));
+    assert.match(
+      relative(join(sessionRoot, ".maestro"), run.attempt.sessionDir),
+      /^escape-reviewer-[0-9a-f-]+$/u
+    );
+    assert.equal(dirname(run.attempt.sessionFile ?? ""), run.attempt.sessionDir);
+
+    const invocationArgs = JSON.parse(readFileSync(argsFile, "utf8")) as string[];
+    const sessionDirIndex = invocationArgs.indexOf("--session-dir");
+    assert.notEqual(sessionDirIndex, -1);
+    assert.equal(invocationArgs[sessionDirIndex + 1], run.attempt.sessionDir);
+
+    const visibleSessions = await SessionManager.list(projectCwd);
+    assert.deepEqual(
+      visibleSessions.map((session) => session.id),
+      ["human"]
+    );
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("executor signal termination is recorded as a process failure", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-signal-"));
+  const fakePi = join(root, "signal-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `process.stdin.on("data", (chunk) => {
+  for (const line of chunk.toString().split("\\n")) {
+    if (line && JSON.parse(line).type === "prompt") process.kill(process.pid, "SIGTERM");
+  }
+});
+`
+  );
+
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "signal",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.failureCause, "process");
+    assert.equal(outcome.failureReason?.kind, "executor_failure");
+    assert.match(outcome.errorMessage ?? "", /terminated by SIGTERM/);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

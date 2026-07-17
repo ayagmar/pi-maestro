@@ -1652,6 +1652,16 @@ export function normalizeTaskContract(input: {
   return { writePaths, ...(successCriteria ? { successCriteria } : {}) };
 }
 
+export function normalizeExistingTaskContract(
+  task: Pick<Task, "brief" | "writePaths" | "successCriteria">
+): { writePaths: string[]; successCriteria?: string[] } {
+  return normalizeTaskContract({
+    brief: task.brief,
+    ...(task.writePaths === undefined ? {} : { writePaths: task.writePaths }),
+    ...(task.successCriteria === undefined ? {} : { successCriteria: task.successCriteria }),
+  });
+}
+
 function writePathsOverlap(left: string, right: string): boolean {
   if (left === right) return true;
   if (left.endsWith("/**")) return right.startsWith(left.slice(0, -2));

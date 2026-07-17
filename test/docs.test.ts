@@ -110,6 +110,22 @@ test("configuration docs match runtime defaults and commands remain documented",
   assert.doesNotMatch(read("docs/operations.md"), /plan compare/);
 });
 
+test("documentation explains nested agent sessions and resume navigation", () => {
+  const readme = read("README.md");
+  const operations = read("docs/operations.md");
+  const architecture = read("docs/architecture.md");
+  const siteOperations = read("src/pages/docs/operations.astro");
+
+  for (const content of [readme, operations, siteOperations]) {
+    assert.match(content, /\.maestro.*launch/is);
+    assert.match(content, /\/maestro back/is);
+    assert.match(content, /usage.*recurs|recurs.*usage/is);
+  }
+  assert.match(architecture, /unique `--session-dir`/i);
+  assert.match(architecture, /ordinary session picker is\s+non-recursive/i);
+  assert.doesNotMatch(readme, /\/resume` and usage reports include them/i);
+});
+
 test("documentation matches review fallback, reset, and settled-task behavior", () => {
   const readme = read("README.md");
   assert.match(readme, /review launches use the same\s+provider-failure fallback rules/i);

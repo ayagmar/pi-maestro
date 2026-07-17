@@ -2064,6 +2064,51 @@ test("maestro_update does not warn when editing a todo task", async () => {
   );
 });
 
+test("maestro_update preserves task contracts and plan validity", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Bounded task",
+        brief: "Implement bounded work",
+        tier: "standard",
+        writePaths: ["src/bounded.ts"],
+        successCriteria: ["Bounded work passes"],
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const update = tools.get("maestro_update");
+      assert.ok(update);
+
+      await assert.rejects(
+        update.execute(
+          "invalid-contract",
+          { taskId: "T1", writePaths: [] },
+          undefined,
+          undefined,
+          ctx
+        ),
+        /empty writePaths requires/
+      );
+      assert.deepEqual(findTask(loadBoard(cwd), "T1")?.writePaths, ["src/bounded.ts"]);
+
+      await assert.rejects(
+        update.execute(
+          "invalid-dependency",
+          { taskId: "T1", dependsOn: ["T99"] },
+          undefined,
+          undefined,
+          ctx
+        ),
+        /T1 references unknown dependency/
+      );
+      assert.deepEqual(findTask(loadBoard(cwd), "T1")?.dependsOn, []);
+    }
+  );
+});
+
 test("maestro_plan requires bounded write scope except explicit no-file work", async () => {
   await withBoard(
     () => {},

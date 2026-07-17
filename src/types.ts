@@ -64,9 +64,9 @@ export interface ReviewConvergence {
 
 export interface Attempt {
   index: number;
-  /** Session file in pi's default session storage, reported by the executor via get_state. */
+  /** Nested Pi session file reported by the executor via get_state. */
   sessionFile?: string;
-  /** Legacy (pre-0.2): custom per-attempt session dir inside the project. */
+  /** Pi session directory for this raw launch; also supports legacy per-attempt directories. */
   sessionDir?: string;
   logFile: string;
   model?: string;

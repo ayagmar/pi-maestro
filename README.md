@@ -42,8 +42,9 @@ you ──▶ orchestrator (SOTA model, your session)
   provider, and usage record is retained; disagreement and operational failure stop once with an
   actionable decision instead of retrying indefinitely.
 - **Deterministic and observable.** Task state lives in `.pi/maestro/board.json`; audit history
-  and raw event logs live beside it. Executor sessions use pi's normal session storage, and you
-  can switch your TUI into any completed executor session.
+  and raw event logs live beside it. Executor sessions are nested under pi's normal project
+  session directory: recursive usage accounting still sees them, while the ordinary `/resume`
+  picker stays focused on human sessions. You can switch the TUI into any completed agent session.
 
 ## Install
 
@@ -347,7 +348,11 @@ and recoverable worktrees remain untouched. In non-interactive mode, add `confir
 
 ### Agent sessions
 
-Use `/maestro agents`, the **Browse agent sessions** control-center action, or `ctrl+alt+w` to open a large, session-like viewer for executor and reviewer history. It includes live and completed launches, rich Pi chat/tool rendering, `←/→` session switching, and `j/k` or `PgUp/PgDn` scrolling. Live sessions also offer steer and follow-up. When opened through `/maestro agents` or the control center, completed sessions can be opened in Pi itself with Enter; `/maestro back` then returns to the owner session. The compact activity widget remains visible while agents run. Set `livePanes` to `true` only if you also want a passive side pane to open automatically; automatic panes are off by default.
+Use `/maestro agents`, the **Browse agent sessions** control-center action, or `ctrl+alt+w` to open a large, session-like viewer for executor and reviewer history. It includes live and completed launches, rich Pi chat/tool rendering, `←/→` session switching, and `j/k` or `PgUp/PgDn` scrolling. Live sessions also offer steer and follow-up. When opened through `/maestro agents` or the control center, completed sessions can be opened in Pi itself with Enter; `/maestro back` then returns to the owner session.
+
+Each raw launch writes its full transcript beneath Pi's normal per-project session directory at `.maestro/<launch>/`. Pi's ordinary `/resume` picker does not recurse into that namespace, but recursive usage tools still include its token and cost records. A child opened in Pi uses its launch directory as the active session directory, so use `/maestro back`—not `/resume`—to return to the owner session. Sessions produced by older Maestro releases remain in their original top-level location until migrated or removed separately.
+
+The compact activity widget remains visible while agents run. Set `livePanes` to `true` only if you also want a passive side pane to open automatically; automatic panes are off by default.
 
 ### Commands
 
@@ -451,10 +456,12 @@ Maestro is not a sandbox, CI service, analytics database, or generic plugin syst
   preserved as `board.json.corrupt-<timestamp>` before maestro recovers with an empty board;
   invalid user or project config is preserved beside it as `maestro.json.corrupt-<timestamp>` and
   that scope falls back to lower-precedence configuration.
-- Executors are `pi --mode rpc` child processes. Their sessions persist in pi's default
-  session storage (so `/resume` and usage reports include them; each attempt records its
-  session file on the board) under descriptive, numbered attempt/review names, with raw event logs
-  under `.pi/maestro/logs/`. The
+- Executors are `pi --mode rpc` child processes. Each raw launch receives a unique
+  `--session-dir` under Pi's default per-project session directory at `.maestro/<launch>/`.
+  The nested transcript stays available through `/maestro agents` and exact board references;
+  recursive usage reports include it without adding it to Pi's ordinary `/resume` list. Attempts
+  retain descriptive, numbered names and their exact session path, with raw event logs under
+  `.pi/maestro/logs/`. The
   `.pi/maestro/` state dir gitignores itself — runtime state never floods your git status.
   RPC mode is what makes mid-run steering and clean aborts possible. Executor-side extension
   dialogs (e.g. permission gates) are auto-cancelled so headless runs can never hang.

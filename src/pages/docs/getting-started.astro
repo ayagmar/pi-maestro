@@ -1,0 +1,25 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="getting-started">
+  <article class="prose">
+    <p>Pi Maestro is a Pi package. It adds an orchestrator/advisor layer to the session you already use: the model plans, fresh Pi processes execute, independent reviewers verify, and the board keeps the evidence.</p>
+    <h2>Install</h2>
+    <div class="code-block"><button class="copy-button" type="button" data-copy="pi install git:github.com/ayagmar/pi-maestro">Copy</button><pre><code><span class="code-prefix">$</span> pi install git:github.com/ayagmar/pi-maestro</code></pre></div>
+    <p>For a local checkout, use <code>pi install /path/to/pi-maestro</code>. The package targets Node.js 22 or 24 and the Pi 0.80.x package line.</p>
+    <h2>Check the environment</h2>
+    <p>Open the project control center and choose <strong>Check setup and recovery</strong>. Or run the diagnostic directly:</p>
+    <div class="code-block"><button class="copy-button" type="button" data-copy="/maestro doctor">Copy</button><pre><code><span class="code-prefix">$</span> /maestro doctor</code></pre></div>
+    <p>The report checks effective configuration, authenticated model and fallback resolution, Git readiness, and managed worktrees. It never prints API keys. Missing authentication, invalid JSON, and a repository without an initial commit include next steps.</p>
+    <h2>Run a first goal</h2>
+    <div class="code-block"><button class="copy-button" type="button" data-copy="/maestro start migrate the auth module to the new session API and add tests">Copy</button><pre><code><span class="code-prefix">$</span> /maestro start migrate the auth module to the new session API and add tests</code></pre></div>
+    <p>The current session receives a briefing and can call the three model-facing tools:</p>
+    <ul><li><code>maestro_plan</code> creates self-contained tasks with criteria and bounded write scopes.</li><li><code>maestro_update</code> refines, cancels, or replaces planned work.</li><li><code>maestro_drive</code> starts, inspects, and advances the execution/review loop.</li></ul>
+    <h2>Approve, then drive</h2>
+    <p>With <code>planGate</code> enabled, planning and execution are intentionally separate:</p>
+    <ol><li>Inspect the plan with <code>/maestro plan</code>.</li><li>Open full briefs and edit title, tier, dependencies, criteria, write scope, review policy, verification profile, or commit message.</li><li>Choose <strong>Approve plan</strong>, then run <code>/maestro drive</code>.</li></ol>
+    <div class="callout"><strong>First-run advice</strong><p>Give each task one clear outcome, one bounded write scope, and one to twelve observable success criteria. If a task is investigation-only, make the scope explicit with <code>writePaths: []</code>.</p></div>
+    <h2>Keep an eye on the board</h2>
+    <p><code>/maestro board</code> opens the phase-first dashboard. <code>/maestro timeline</code> shows bounded chronological evidence without waking a model. When a drive is active, the footer and live widget show task, turns, current tool, and billed cost.</p>
+  </article>
+</DocsLayout>

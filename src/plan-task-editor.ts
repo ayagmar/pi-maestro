@@ -4,6 +4,7 @@ import {
   assertTaskNotDispatched,
   findTask,
   loadBoard,
+  normalizeExistingTaskContract,
   planValidationMessage,
   updateTask,
   validatePlan,
@@ -13,6 +14,31 @@ import { loadConfig } from "./config.js";
 import { truncateText } from "./format.js";
 import { notify } from "./handoff.js";
 import { showScrollableText } from "./scrollable-viewer.js";
+
+function taskPlanValidationError(
+  board: ReturnType<typeof loadBoard>,
+  taskId: string,
+  tiers: string[]
+): string | undefined {
+  const validation = validatePlan(board, tiers);
+  return planValidationMessage({
+    missingDependencies: validation.missingDependencies.filter(
+      (missing) => missing.taskId === taskId
+    ),
+    dependencyCycles: validation.dependencyCycles.filter((cycle) => cycle.includes(taskId)),
+    invalidTiers: validation.invalidTiers.filter((invalid) => invalid.taskId === taskId),
+    ...(validation.writePathOverlaps
+      ? {
+          writePathOverlaps: validation.writePathOverlaps.filter(
+            (overlap) => overlap.leftTaskId === taskId || overlap.rightTaskId === taskId
+          ),
+        }
+      : {}),
+    ...(validation.contractErrors
+      ? { contractErrors: validation.contractErrors.filter((error) => error.taskId === taskId) }
+      : {}),
+  });
+}
 
 export async function showPlanTaskEditor(
   ctx: ExtensionCommandContext,
@@ -213,20 +239,19 @@ export async function showPlanTaskEditor(
       },
       tiers
     );
-    const validation = validatePlan(candidate, tiers);
-    const validationError = planValidationMessage({
-      missingDependencies: validation.missingDependencies.filter(
-        (missing) => missing.taskId === draft.id
-      ),
-      dependencyCycles: validation.dependencyCycles.filter((cycle) => cycle.includes(draft.id)),
-      invalidTiers: validation.invalidTiers.filter((invalid) => invalid.taskId === draft.id),
-    });
+    if (candidateTask.writePaths !== undefined) {
+      const contract = normalizeExistingTaskContract(candidateTask);
+      candidateTask.writePaths = contract.writePaths;
+      if (contract.successCriteria) candidateTask.successCriteria = contract.successCriteria;
+      else delete candidateTask.successCriteria;
+    }
+    const validationError = taskPlanValidationError(candidate, draft.id, tiers);
     if (validationError) {
       notify(ctx, `${validationError}\nChanges were not saved.`, "error");
       continue;
     }
     try {
-      updateTask(ctx.cwd, draft.id, (fresh) => {
+      updateTask(ctx.cwd, draft.id, (fresh, board) => {
         assertTaskNotDispatched(fresh);
         applyPlanTaskEdits(
           fresh,
@@ -244,6 +269,14 @@ export async function showPlanTaskEditor(
           },
           tiers
         );
+        if (fresh.writePaths !== undefined) {
+          const freshContract = normalizeExistingTaskContract(fresh);
+          fresh.writePaths = freshContract.writePaths;
+          if (freshContract.successCriteria) fresh.successCriteria = freshContract.successCriteria;
+          else delete fresh.successCriteria;
+        }
+        const freshValidationError = taskPlanValidationError(board, fresh.id, tiers);
+        if (freshValidationError) throw new Error(freshValidationError);
       });
     } catch (error) {
       notify(ctx, error instanceof Error ? error.message : String(error), "warning");

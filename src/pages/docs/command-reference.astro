@@ -1,0 +1,18 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="command-reference">
+  <article class="prose">
+    <p>Human-operated controls keep status, simulation, pause, abort, recovery, and browsing out of the model's choice space. Invoke them with <code>/maestro</code>.</p>
+    <h2>Plan and drive</h2>
+    <div class="table-wrap"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody><tr><td><code>start &lt;goal&gt;</code></td><td>Brief the orchestrator to create a new plan.</td></tr><tr><td><code>handoff</code></td><td>Continue execution and review in a fresh supervising session.</td></tr><tr><td><code>plan</code></td><td>Inspect, edit, approve, or reject a pending plan.</td></tr><tr><td><code>drive [taskIds]</code></td><td>Run, review, verify, and integrate ready work.</td></tr><tr><td><code>retry &lt;taskId&gt;</code></td><td>Deliberately retry eligible work with safety checks.</td></tr><tr><td><code>pause</code> / <code>resume</code></td><td>Stop before the next batch, then continue the same scope.</td></tr><tr><td><code>abort</code></td><td>Abort active executors or discard a paused drive.</td></tr></tbody></table></div>
+    <h2>Inspect and intervene</h2>
+    <div class="table-wrap"><table><thead><tr><th>Command</th><th>Purpose</th></tr></thead><tbody><tr><td><code>board</code></td><td>Open the phase-first project dashboard. Aliases: <code>dash</code>, <code>dashboard</code>.</td></tr><tr><td><code>agents</code></td><td>Browse live and completed executor/reviewer sessions.</td></tr><tr><td><code>open &lt;taskId&gt;</code> / <code>back</code></td><td>Switch into a persisted agent session and return to the owner session.</td></tr><tr><td><code>timeline [taskId]</code></td><td>Show bounded chronological evidence without model calls.</td></tr><tr><td><code>history [n]</code></td><td>Show the last audited status changes.</td></tr><tr><td><code>costs</code></td><td>Show billed attempts, models, providers, and context accounting.</td></tr><tr><td><code>simulate [taskIds]</code></td><td>Preview dependency waves, concurrency, caps, and blockers.</td></tr><tr><td><code>reconcile</code></td><td>Report missing provenance or recovery evidence without rewriting state.</td></tr></tbody></table></div>
+    <h2>Recipes, workflows, and discovery</h2>
+    <p>Reusable plans can be inspected, previewed, saved, run, or removed through <code>recipe list</code>, <code>recipe inspect &lt;name&gt;</code>, <code>recipe preview &lt;name&gt;</code>, <code>recipe save &lt;name&gt;</code>, <code>recipe run &lt;name&gt;</code>, and <code>recipe remove &lt;name&gt;</code>. The <code>workflows</code> browser exposes the same lifecycle for reusable workflow definitions.</p>
+    <p><code>discover &lt;taskId&gt; [append|replace]</code> previews bounded read-only discovery output before explicit approval adds ordinary tasks. Discovery never starts generated work directly.</p>
+    <h2>Configuration and recovery</h2>
+    <p><code>config</code>, <code>config project</code>, and <code>config show</code> manage effective settings. <code>doctor</code> diagnoses models, authentication, Git, and worktrees; <code>doctor cleanup</code> offers a confirmation before removing rechecked stale/orphaned entries. <code>replay [file]</code> restores an archived board, while <code>reset confirm</code> archives then clears state in non-interactive use.</p>
+    <div class="callout"><strong>Keyboard shortcuts</strong><p><code>ctrl+alt+b</code> opens the dashboard. <code>ctrl+alt+w</code> opens or closes the agent-session viewer. The dashboard uses <code>?</code> for its full keybinding guide.</p></div>
+  </article>
+</DocsLayout>

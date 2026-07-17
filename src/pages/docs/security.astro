@@ -1,0 +1,17 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="security">
+  <article class="prose">
+    <p>Pi Maestro is an orchestration extension, not a sandbox. Its strongest guarantees are observability, attribution, bounded execution, and recoverability—not isolation from code that already runs as your user.</p>
+    <h2>Trust boundaries</h2>
+    <ul><li>Executors run local Pi processes with the current user's permissions.</li><li>Operator-selected verification commands run arbitrary local code in a dedicated process group.</li><li>Git worktrees isolate edits and preserve recovery, but they do not contain malicious code.</li><li>Repository configuration cannot define verification commands.</li><li>Installed extensions and user configuration are trusted local code and can access the system.</li></ul>
+    <h2>What Maestro protects</h2>
+    <p>Explicit write paths prevent independent plans from accidentally scheduling the same scope. Immutable Git tree identities preserve what was reviewed. Artifact checks, review evidence, integration provenance, verification logs, and recovery references stay attached to the task. Runtime state is stored under <code>.pi/maestro/</code> and ignored by Git.</p>
+    <h2>Operating on untrusted repositories</h2>
+    <p>Do not treat Maestro as a security boundary for untrusted code. Review task briefs, repository instructions, package scripts, extension configuration, and verification profiles before running. Use worktrees for attribution and recovery, and keep verification profiles operator-owned.</p>
+    <h2>Reporting a vulnerability</h2>
+    <p>Do not open a public issue for a suspected vulnerability. Use GitHub's <strong>Report a vulnerability</strong> flow to create a private advisory. Include the affected Maestro and Node versions, the smallest reproducible configuration or board state, the impact, required access, and redacted logs.</p>
+    <div class="callout"><strong>Supported line</strong><p>Until 1.0.0, only the latest published 0.1.x release receives security fixes. Upgrade to the newest patch before reporting or reproducing an issue.</p></div>
+  </article>
+</DocsLayout>

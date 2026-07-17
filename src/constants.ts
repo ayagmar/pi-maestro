@@ -6,6 +6,8 @@ export const STATE_ENTRY_TYPE = "maestro:event";
 /** All maestro state lives under this directory, relative to the project cwd. */
 export const STATE_DIR = ".pi/maestro";
 export const LOGS_DIR = "logs";
+/** Hidden child-session namespace inside Pi's normal per-project session directory. */
+export const SESSION_NAMESPACE = ".maestro";
 
 export const PROJECT_CONFIG_FILE = ".pi/maestro.json";
 export const USER_CONFIG_FILE = "maestro.json";

@@ -35,3 +35,5 @@ coverage/
 
 # Maestro run state (in consumer projects)
 .pi/maestro/
+
+.astro/

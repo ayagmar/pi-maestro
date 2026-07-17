@@ -1,0 +1,14 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="changelog">
+  <article class="prose">
+    <p>Release notes for the Pi Maestro 0.1.x line. Before 1.0.0, only the latest published 0.1.x release receives fixes.</p>
+    <h2>0.1.0</h2>
+    <h3>Orchestration</h3><ul><li>Added plan, run, review, update, status, and drive tools for dependency-aware workflows.</li><li>Added optional plan approval and autonomous run/review/retry driving.</li></ul>
+    <h3>Executors</h3><ul><li>Added fresh-context RPC child sessions with live steering and abort support.</li><li>Added ordered model fallbacks, including quota-aware retries that do not consume the task attempt cap.</li><li>Added per-attempt and whole-run cost caps.</li></ul>
+    <h3>Git</h3><ul><li>Added one automatic commit per approved task.</li><li>Added optional worktree isolation for parallel tasks, with merge-then-delete cleanup after approval.</li><li>Made physical task checkouts ephemeral: recoverable idle work is checkpointed on its task branch and restored only for retry, review, or inspection.</li></ul>
+    <h3>Observability</h3><ul><li>Added a phase-first live dashboard with steering templates, status filters, task and launch drill-down, and explicit current/attention/evidence phase states.</li><li>Persisted review verdicts, task status history, and descriptive numbered attempt and review session names.</li><li>Added board archiving and replay.</li></ul>
+    <h3>Configuration and release safety</h3><ul><li>Added built-in presets, an interactive settings editor, user/project scopes, and primary/fallback model selection.</li><li>Added Node.js 22 and 24 CI coverage, bounded compatibility with Pi 0.80.x, packed-artifact smoke testing, and a security policy.</li></ul>
+  </article>
+</DocsLayout>

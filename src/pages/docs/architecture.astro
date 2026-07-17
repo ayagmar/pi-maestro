@@ -1,0 +1,20 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="architecture">
+  <article class="prose">
+    <p>Pi Maestro separates deterministic policy, persisted state, runtime adapters, and UI. The result is intentionally boring at the boundaries—and easier to test, inspect, and recover.</p>
+    <div class="architecture-diagram"><div class="arch-row"><span>COMPOSE</span><div><code>src/index.ts</code> → <code>src/extension.ts</code></div></div><div class="arch-row"><span>UI / TOOLS</span><div><code>tools.ts</code> · <code>commands.ts</code> · <code>dashboard.ts</code></div></div><div class="arch-row"><span>DRIVE</span><div><code>drive-controller.ts</code> → <code>workflow.ts</code></div></div><div class="arch-row"><span>BOUNDARIES</span><div><code>board.ts</code> · <code>runner.ts</code> · <code>worktree.ts</code></div></div><div class="arch-row"><span>DURABLE STATE</span><div><code>.pi/maestro/board.json</code> · history · logs · archives</div></div></div>
+    <h2>Ownership boundaries</h2>
+    <div class="table-wrap"><table><thead><tr><th>Concern</th><th>Owner</th><th>Rule</th></tr></thead><tbody><tr><td>Board persistence and history</td><td><code>board.ts</code></td><td>Other modules use board functions; they do not name the board file.</td></tr><tr><td>Child processes</td><td><code>runner.ts</code></td><td>No other module calls <code>spawn</code>.</td></tr><tr><td>Git and worktrees</td><td><code>worktree.ts</code></td><td>No other module executes Git.</td></tr><tr><td>Executor dispatch</td><td><code>workflow-execution.ts</code></td><td>Owns launch fallback, attempt consumption, and finalization.</td></tr><tr><td>Review convergence</td><td><code>workflow-review.ts</code></td><td>Owns reviewer evidence, convergence, and settlement.</td></tr><tr><td>Integration transaction</td><td><code>workflow-integration.ts</code></td><td>Serializes promotion, commit/merge, and verification.</td></tr><tr><td>Pi lifecycle</td><td><code>extension-lifecycle.ts</code></td><td>The only adapter that registers session lifecycle hooks.</td></tr><tr><td>Composition</td><td><code>extension.ts</code></td><td>Wires Pi, tools, commands, UI, navigation, and teardown.</td></tr></tbody></table></div>
+    <h2>Correctness transactions</h2>
+    <p>Execution claims a task before launch. Review ownership remains claimed through reviewer settlement, immutable artifact checks, integration, trusted verification, and final board persistence. Claims renew while active and release in a <code>finally</code> path; ownership checks stop a replacement claim from being cleared.</p>
+    <p>A candidate is identified by a complete immutable Git tree, including untracked task files. Bounded diffs are presentation only. Approval provenance separately records candidate tree, review time, integrated commit/tree, and trusted verification.</p>
+    <h2>Child-session storage boundary</h2>
+    <p><code>runner.ts</code> gives every raw executor and reviewer launch a unique <code>--session-dir</code> beneath the main project's default Pi session directory at <code>.maestro/&lt;launch&gt;/</code>. Worktree execution changes the session header's working directory, not this storage root.</p>
+    <p>Pi's ordinary session picker is non-recursive, while usage accounting can recurse through the same JSONL tree. Maestro's board and agent browser retain exact paths, separating transcript discoverability from cost accounting without changing Pi's session format.</p>
+    <h2>Why exactly three model tools?</h2>
+    <p>The model API is deliberately limited to <code>maestro_plan</code>, <code>maestro_update</code>, and <code>maestro_drive</code>. Planning, correction, and driving cover model decisions without exposing status, simulation, pause, abort, or recovery as extra choices. Human commands and dashboard controls provide those operational surfaces.</p>
+    <div class="callout"><strong>Boundary worth preserving</strong><p>When adding capability, prefer an operational command or dashboard action. A new model tool changes the agent's choice space and should require a strong reason.</p></div>
+  </article>
+</DocsLayout>

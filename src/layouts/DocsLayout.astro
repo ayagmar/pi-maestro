@@ -1,0 +1,31 @@
+---
+import BaseLayout from "./BaseLayout.astro";
+import { docs, getDoc } from "../data/docs";
+
+interface Props { slug: string; title?: string; description?: string; }
+const { slug, title, description } = Astro.props;
+const doc = getDoc(slug);
+const groups = [...new Set(docs.map((item) => item.group))];
+const path = Astro.url.pathname;
+---
+<BaseLayout title={title ?? doc.title} description={description ?? doc.description} eyebrow="Documentation" isDocs>
+  <div class="docs-shell shell">
+    <aside class="docs-sidebar" aria-label="Documentation navigation">
+      <div class="docs-sidebar-top"><span class="mono-label">PI MAESTRO / DOCS</span><p>Operational notes for building, running, and trusting reviewed execution.</p></div>
+      <nav>
+        {groups.map((group) => <div class="docs-nav-group"><h2>{group}</h2>{docs.filter((item) => item.group === group).map((item) => <a class:list={{ active: item.slug === slug }} href={`/docs/${item.slug}/`}><span>{item.title}</span>{item.slug === slug && <span aria-hidden="true">→</span>}</a>)}</div>)}
+      </nav>
+      <a class="docs-sidebar-github" href="https://github.com/ayagmar/pi-maestro" rel="noreferrer"><span class="github-dot" aria-hidden="true"></span> View source on GitHub ↗</a>
+    </aside>
+    <section class="docs-content">
+      <div class="docs-mobile-bar"><span class="mono-label">DOCS</span><label for="docs-select" class="sr-only">Choose a documentation page</label><select id="docs-select" onchange="if (this.value) window.location.href=this.value">{docs.map((item) => <option value={`/docs/${item.slug}/`} selected={item.slug === slug}>{item.title}</option>)}</select></div>
+      <div class="breadcrumb"><a href="/docs/">Docs</a><span>/</span><span>{doc.group}</span></div>
+      <header class="docs-hero"><span class="mono-label">{doc.group}</span><h1>{doc.title}</h1><p>{doc.description}</p></header>
+      <slot />
+      <nav class="docs-next" aria-label="Related documentation">
+        {docs[docs.findIndex((item) => item.slug === slug) - 1] && <a href={`/docs/${docs[docs.findIndex((item) => item.slug === slug) - 1]!.slug}/`}><span>← Previous</span><strong>{docs[docs.findIndex((item) => item.slug === slug) - 1]!.title}</strong></a>}
+        {docs[docs.findIndex((item) => item.slug === slug) + 1] && <a class="next" href={`/docs/${docs[docs.findIndex((item) => item.slug === slug) + 1]!.slug}/`}><span>Next →</span><strong>{docs[docs.findIndex((item) => item.slug === slug) + 1]!.title}</strong></a>}
+      </nav>
+    </section>
+  </div>
+</BaseLayout>

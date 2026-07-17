@@ -1,0 +1,20 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="operations">
+  <article class="prose">
+    <p>Maestro treats interruption as a state to preserve, not a reason to erase evidence. The board, attempts, logs, sessions, and checkpoint branches stay available for inspection.</p>
+    <h2>Routine controls</h2>
+    <div class="table-wrap"><table><thead><tr><th>Control</th><th>Use it to</th></tr></thead><tbody><tr><td><code>/maestro board</code></td><td>Open the phase-first dashboard and drill from run to task to launch.</td></tr><tr><td><code>/maestro agents</code></td><td>Browse rich executor and reviewer sessions; steer live work when needed.</td></tr><tr><td><code>/maestro pause</code></td><td>Let active executors finish, then stop before starting another batch.</td></tr><tr><td><code>/maestro resume</code></td><td>Continue a paused scope from fresh persisted board state.</td></tr><tr><td><code>/maestro abort</code></td><td>Signal active work to stop while retaining attempt evidence.</td></tr><tr><td><code>/maestro retry T1</code></td><td>Deliberately retry eligible failed or changes-requested work.</td></tr><tr><td><code>/maestro timeline</code></td><td>Read bounded chronological evidence without waking a model.</td></tr><tr><td><code>/maestro reconcile</code></td><td>Report missing artifact, review, integration, verification, or recovery proof.</td></tr></tbody></table></div>
+    <h2>When a run stops</h2>
+    <div class="table-wrap"><table><thead><tr><th>Stop reason</th><th>Safe next action</th></tr></thead><tbody><tr><td>Provider blocked</td><td>Authenticate or configure an available fallback, then resume.</td></tr><tr><td>Reviewer rejection</td><td>Read the finding checklist; refine the brief, criteria, tier, or split.</td></tr><tr><td>Attempt cap</td><td>Create a narrow successor with <code>supersedesTaskId</code>; do not raise the cap to force another attempt.</td></tr><tr><td>Stalled</td><td>Inspect the session/log, steer once, abort, or refine before retrying.</td></tr><tr><td>Cost or launch limit</td><td>Inspect <code>/maestro costs</code>, narrow scope, or change operator config deliberately.</td></tr><tr><td>Integrated verification failure</td><td>Inspect the recorded commit and retained checkout; there is no automatic rollback claim.</td></tr></tbody></table></div>
+    <h2>Agent-session storage</h2>
+    <p>Every executor and reviewer launch keeps its full transcript beneath Pi's normal per-project session directory at <code>.maestro/&lt;launch&gt;/</code>. Pi's ordinary <code>/resume</code> picker does not recurse into that namespace, so human sessions stay fast and focused. Recursive usage scanners still include the nested JSONL records.</p>
+    <p><code>/maestro agents</code> and <code>/maestro open &lt;taskId&gt;</code> follow the exact path stored on the board. After opening a child in Pi, use <code>/maestro back</code> rather than <code>/resume</code>; the child treats its launch directory as the active session directory. Sessions from older Maestro releases remain at their original top-level paths until migrated or removed separately.</p>
+    <h2>Recovery evidence</h2>
+    <p>When worktrees are enabled, idle task checkouts are checkpointed on their task branch and removed. A retry or review restores the checkout only for active work. A dirty or branch-ahead worktree is classified as recoverable; use <code>/maestro doctor cleanup</code> only after inspecting what it contains.</p>
+    <blockquote><p>Never delete a recovery branch just to make the status green. It is the attribution trail for work that stopped between execution and approval.</p></blockquote>
+    <h2>Handoff and ownership</h2>
+    <p>Large plans can hand off the supervisor with <code>/maestro handoff</code>. The planning session remains recoverable; the new session starts from the board. Sessions that did not start or drive the board stay visually clean, even when they share the repository.</p>
+  </article>
+</DocsLayout>

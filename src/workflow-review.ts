@@ -200,9 +200,16 @@ export async function reviewTask(options: {
         commitMessage: fresh.commitMessage,
       }) === claimedTaskContract;
     // Legacy/injected workflow harnesses may not provide a Git integration surface.
-    // Every production auto-commit or worktree review requires full provenance.
-    const requiresIntegration = Boolean(latestAttempt?.worktreePath || autoCommit);
+    // File-backed auto-commit or worktree reviews require full provenance;
+    // report-only investigations use their retained final report as evidence.
     const candidateTree = snapshotArtifact(candidateCwd, candidatePaths);
+    // A no-file investigation is complete when its report is reviewed; it
+    // does not need a synthetic Git commit merely because autoCommit or
+    // worktrees are enabled. File changes still require authoritative
+    // artifact and integration proof.
+    const requiresIntegration = Boolean(
+      candidateTree && (latestAttempt?.worktreePath || autoCommit)
+    );
     if (candidateTree) {
       const capturedAt = Date.now();
       task.provenance = { candidateTree, capturedAt };
@@ -352,6 +359,7 @@ export async function reviewTask(options: {
           stateDir: stateDir(cwd),
           runId: launchId,
           cwd: worktree?.worktreePath ?? cwd,
+          projectCwd: cwd,
           prompt: reviewPrompt,
           tier: launchTier,
           sessionLabel: sessionLabel(task, "review", task.attempts.length),

@@ -52,6 +52,11 @@
   },
   "overrides": [
     {
+      "includes": ["**/*.astro"],
+      "formatter": { "enabled": false },
+      "linter": { "enabled": false }
+    },
+    {
       "includes": ["test/**/*.ts"],
       "linter": {
         "rules": {

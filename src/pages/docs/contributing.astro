@@ -1,0 +1,21 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="contributing">
+  <article class="prose">
+    <p>Keep the extension readable and local. Each module owns one boundary, and behavioral tests are the proof that a change works.</p>
+    <h2>Repository map</h2>
+    <ul><li><code>src/board.ts</code> — persisted board boundary</li><li><code>src/workflow.ts</code> — execution and review orchestration</li><li><code>src/artifact-policy.ts</code> — pure artifact checks</li><li><code>src/drive-controller.ts</code> — drive ownership and decisions</li><li><code>src/runner.ts</code> — child processes and verification</li><li><code>src/worktree.ts</code> — all Git operations</li><li><code>src/tools.ts</code> — the three model tool adapters</li><li><code>src/commands.ts</code> — human slash-command registration</li><li><code>test/boundaries.test.ts</code> — enforced architecture ownership</li></ul>
+    <h2>Verify changes</h2>
+    <div class="code-block"><button class="copy-button" type="button" data-copy="pnpm run check">Copy</button><pre><code><span class="code-prefix">$</span> pnpm run check</code></pre></div>
+    <p>The full check runs typechecking, source and packed smoke tests, tests, lint, and formatting. Before finalizing, also run the focused behavioral tests, then run the full check twice. Both runs should report the same test count.</p>
+    <div class="code-block"><pre><code><span class="code-prefix">$</span> pnpm run typecheck
+<span class="code-prefix">$</span> pnpm test
+<span class="code-prefix">$</span> pnpm run lint
+<span class="code-prefix">$</span> pnpm run format:check
+<span class="code-prefix">$</span> git diff --check</code></pre></div>
+    <h2>Changing a contract</h2>
+    <p>When adding a config key, update defaults, merge/validation, settings, doctor, documentation, and config tests. When adding a persisted field, keep legacy boards loadable and add round-trip and corrupt-board tests. When adding a stop kind, update types, decisions, formatting, docs, and behavioral routing tests.</p>
+    <blockquote><p>Never delete or narrow tests to make a gate pass. Preserve dirty trees, stashes, checkpoint branches, logs, and archives.</p></blockquote>
+  </article>
+</DocsLayout>

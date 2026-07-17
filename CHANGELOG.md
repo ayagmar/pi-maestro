@@ -9,6 +9,7 @@
 
 ### Executors
 
+- Nested fresh-context executor and reviewer transcripts under Pi's normal project session root so recursive usage accounting includes them without crowding `/resume`.
 - Added fresh-context RPC child sessions with live steering and abort support.
 - Added ordered model fallbacks, including quota-aware retries that do not consume the task attempt cap.
 - Added per-attempt and whole-run cost caps.

@@ -45,6 +45,26 @@ Maestro preserves board state, attempts, logs, sessions, and checkpoint branches
 - `/maestro plan diff <file> [taskId]` and `/maestro recipe preview <name> [JSON]` are
   validated read-only inspections. Their deterministic references identify bounded omitted detail.
 
+## Agent-session storage
+
+Every raw executor and reviewer launch gets a unique directory beneath Pi's normal per-project
+session directory:
+
+```text
+~/.pi/agent/sessions/<encoded-project>/.maestro/<launch>/<session>.jsonl
+```
+
+Pi's ordinary `/resume` picker reads only top-level session files, so these child transcripts do not
+crowd or slow the human session list. `/maestro agents` and `/maestro open <taskId>` use the exact
+session path recorded on the board, and `/maestro back` returns to the owner session. After opening
+a child in Pi, use `/maestro back` rather than `/resume`: the child treats its launch directory as
+the active session directory.
+
+The transcript remains inside Pi's normal root. Usage tools that recursively discover Pi JSONL files
+continue to include every child request; tools that only inspect top-level files must opt into the
+`.maestro` namespace. Older Maestro sessions are not moved automatically and remain in their prior
+location until migrated or removed separately.
+
 The dashboard’s run view always exposes discovery, plan approval, execution, review, integration,
 verification, recovery, and complete. Drill into a phase, task, then launch for prompt accounting,
 recent tool activity, final reports, model/provider, usage, findings, artifact/integration identity,

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   createWriteStream,
   existsSync,
@@ -7,10 +8,11 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { type Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
-import { KILL_GRACE_MS, LOGS_DIR } from "./constants.js";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { KILL_GRACE_MS, LOGS_DIR, SESSION_NAMESPACE } from "./constants.js";
 
 const VERIFICATION_KILL_GRACE_MS = 250;
 
@@ -205,6 +207,36 @@ export interface ExecutorHandle {
   abort(): void;
 }
 
+function safeSessionDirectoryLabel(runId: string): string {
+  const label = runId
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "")
+    .slice(0, 64);
+  return label || "run";
+}
+
+/** Mirror Pi's public default per-project session layout under its configured agent directory. */
+export function projectSessionDir(projectCwd: string): string {
+  const resolvedCwd = resolve(projectCwd);
+  const safePath = `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+  return join(getAgentDir(), "sessions", safePath);
+}
+
+/**
+ * Allocate one private Pi session directory per raw executor/reviewer launch.
+ * Pi's picker lists only JSONL files directly in the project session directory,
+ * while recursive usage scanners still discover this nested transcript.
+ */
+export function createExecutorSessionDir(projectCwd: string, runId: string): string {
+  const directory = join(
+    projectSessionDir(projectCwd),
+    SESSION_NAMESPACE,
+    `${safeSessionDirectoryLabel(runId)}-${randomUUID()}`
+  );
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return directory;
+}
+
 function piInvocation(args: string[]): { command: string; args: string[] } {
   const currentScript = process.argv[1];
   if (currentScript && existsSync(currentScript)) {
@@ -296,14 +328,17 @@ export function touchedFile(event: JsonEvent, cwd: string): string | undefined {
  * Spawn a fresh-context pi executor as a child process in RPC mode.
  *
  * RPC mode (vs plain JSON print mode) lets the caller steer or abort the
- * executor mid-run via stdin commands. The session is persisted under
- * stateDir/sessions/<runId> so the user can attach to it later, and every
- * stdout event is mirrored to stateDir/logs/<runId>.jsonl for live tailing.
+ * executor mid-run via stdin commands. Its transcript is nested beneath Pi's
+ * normal per-project session directory so usage scanners retain it without
+ * adding the child to Pi's ordinary /resume list. Every stdout event is also
+ * mirrored to stateDir/logs/<runId>.jsonl for live tailing.
  */
 export function startExecutor(options: {
   stateDir: string;
   runId: string;
   cwd: string;
+  /** Main project cwd used to group sessions when cwd is an ephemeral worktree. */
+  projectCwd?: string;
   prompt: string;
   tier: TierConfig;
   /** Human-readable session name shown in pi's session picker (e.g. "T3 · add replay command"). */
@@ -323,9 +358,11 @@ export function startExecutor(options: {
   const logFile = join(options.stateDir, LOGS_DIR, `${options.runId}.jsonl`);
   mkdirSync(dirname(logFile), { recursive: true });
 
+  const sessionDir = createExecutorSessionDir(options.projectCwd ?? options.cwd, options.runId);
   const attempt: Attempt = {
     index: 0,
     logFile,
+    sessionDir,
     thinking: options.tier.thinking,
     startedAt: Date.now(),
     usage: { input: 0, output: 0, cost: 0, turns: 0 },
@@ -337,9 +374,9 @@ export function startExecutor(options: {
     if (provider !== undefined) attempt.provider = provider;
   }
 
-  // Sessions go to pi's default storage so /resume and usage reports see them;
-  // the file path comes back via get_state and is stored on the attempt.
-  const args = ["--mode", "rpc", "--thinking", options.tier.thinking];
+  // Sessions stay under Pi's normal root for recursive usage accounting, but
+  // one level below the files indexed by the ordinary /resume picker.
+  const args = ["--mode", "rpc", "--session-dir", sessionDir, "--thinking", options.tier.thinking];
   if (options.tier.model) args.push("--model", options.tier.model);
   if (options.tier.tools) args.push("--tools", options.tier.tools);
 
@@ -354,16 +391,17 @@ export function startExecutor(options: {
     env: { ...process.env, PI_MAESTRO_EXECUTOR: "1" },
   });
 
-  const send = (command: Record<string, unknown>) => {
-    if (proc.stdin.writable) proc.stdin.write(`${JSON.stringify(command)}\n`);
-  };
-
   let abortCause: "user_abort" | "cost_cap" | "stalled" | undefined;
+  const send = (command: Record<string, unknown>) => {
+    if (proc.stdin.writable && !proc.stdin.writableEnded && !proc.stdin.destroyed) {
+      proc.stdin.write(`${JSON.stringify(command)}\n`);
+    }
+  };
   const abortWithCause = (cause: "user_abort" | "cost_cap" | "stalled") => {
     if (abortCause) return;
     abortCause = cause;
     send({ type: "abort" });
-    proc.stdin.end();
+    if (!proc.stdin.writableEnded) proc.stdin.end();
     setTimeout(() => {
       if (proc.exitCode === null) proc.kill("SIGTERM");
     }, KILL_GRACE_MS).unref();
@@ -422,6 +460,12 @@ export function startExecutor(options: {
       Math.max(10, Math.min(1000, idleMs / 4 || 1000))
     );
     watchdog.unref();
+    let settled = false;
+
+    const cleanup = () => {
+      clearInterval(watchdog);
+      options.signal?.removeEventListener("abort", abort);
+    };
 
     const processLine = (line: string) => {
       if (!line.trim()) return;
@@ -463,7 +507,7 @@ export function startExecutor(options: {
       if (event.type === "response" && event.command === "prompt" && event.success === false) {
         result.errorMessage = event.error ?? "executor rejected the prompt";
         result.failureCause = "provider";
-        proc.stdin.end();
+        if (!proc.stdin.writableEnded) proc.stdin.end();
         setTimeout(() => {
           if (proc.exitCode === null) proc.kill("SIGTERM");
         }, KILL_GRACE_MS).unref();
@@ -504,7 +548,7 @@ export function startExecutor(options: {
       if (event.type === "agent_settled") {
         // No retry, compaction, or queued continuation remains. Closing stdin
         // now triggers RPC shutdown and session flush.
-        proc.stdin.end();
+        if (!proc.stdin.writableEnded) proc.stdin.end();
         setTimeout(() => {
           if (proc.exitCode === null) proc.kill("SIGTERM");
         }, KILL_GRACE_MS).unref();
@@ -542,12 +586,18 @@ export function startExecutor(options: {
       stderr += data.toString();
     });
 
-    proc.on("close", (code) => {
-      clearInterval(watchdog);
+    proc.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       buffer += stdoutDecoder.end();
       if (buffer.trim()) processLine(buffer);
       log.end();
-      result.exitCode = code ?? 0;
+      result.exitCode = code ?? 1;
+      if (code === null && !result.errorMessage && !abortCause) {
+        result.errorMessage = `executor terminated by ${signal ?? "an unknown signal"}`;
+        result.failureCause = "process";
+      }
       if (result.errorMessage && result.exitCode === 0) result.exitCode = 1;
       // Auth exists at preflight but tokens can be expired or out of quota;
       // the provider error alone doesn't tell the user how to recover.
@@ -577,7 +627,9 @@ export function startExecutor(options: {
     });
 
     proc.on("error", (error) => {
-      clearInterval(watchdog);
+      if (settled) return;
+      settled = true;
+      cleanup();
       log.end();
       result.exitCode = 1;
       result.errorMessage = redactFailureMessage(error.message);

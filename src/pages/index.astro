@@ -1,0 +1,67 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+<BaseLayout title="Orchestrate the work. Keep the proof." description="Pi Maestro adds an orchestrator/advisor layer to Pi: fresh-context executors, independent review, and visible evidence.">
+  <section class="hero">
+    <div class="shell hero-grid">
+      <div class="hero-copy">
+        <span class="mono-label">The control room for Pi</span>
+        <h1>Orchestrate the work. Keep the proof.</h1>
+        <p class="hero-lede">Pi Maestro turns a goal into bounded tasks, sends each one to a fresh-context executor, and brings the result back for independent review before approval.</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="/docs/getting-started/">Install Pi Maestro <span aria-hidden="true">→</span></a>
+          <a class="button button-quiet" href="/docs/how-it-works/">See how it works <span aria-hidden="true">↗</span></a>
+        </div>
+        <p class="hero-note">Works inside your existing Pi session · no new control plane</p>
+      </div>
+      <div class="workflow-stage" aria-label="Illustrated Maestro project board showing tasks in running, review, and approved states">
+        <div class="stage-chrome"><span class="stage-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>.pi/maestro/board.json</span><span>LIVE</span></div>
+        <div class="stage-goal"><span class="stage-label">Current goal</span><p>migrate the auth module to the new session API</p></div>
+        <div class="stage-task-list">
+          <div class="stage-task"><span class="stage-status">T1</span><span><strong>Map the existing session boundary</strong><small>executor · 4 turns</small></span><span class="stage-status">RUNNING</span></div>
+          <div class="stage-task"><span class="stage-status">T2</span><span><strong>Port the adapter and tests</strong><small>executor · 8 turns</small></span><span class="stage-status review">REVIEW</span></div>
+          <div class="stage-task"><span class="stage-status">T3</span><span><strong>Verify the integration contract</strong><small>reviewer · fresh context</small></span><span class="stage-status approved">APPROVED</span></div>
+        </div>
+        <div class="stage-bottom"><span>⚡ maestro 2/3 · 1 running</span><strong>review required</strong></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section-tight">
+    <div class="shell">
+      <div class="section-intro">
+        <div><div class="signal-rule"></div><span class="mono-label">What changes</span></div>
+        <div><h2>Delegation without the fog.</h2><p>Pi stays intentionally small. Maestro adds a concrete orchestration pattern without turning your session into a black box.</p></div>
+      </div>
+      <div class="roles-grid">
+        <article class="role"><span class="role-mark" aria-hidden="true">AD</span><h3>Advisor</h3><p>Your current model decomposes the goal, writes self-contained briefs, and makes the judgment calls that need context.</p></article>
+        <article class="role"><span class="role-mark" aria-hidden="true">EX</span><h3>Executors</h3><p>Cheap, fresh-context Pi processes work in parallel within explicit write scopes and task budgets.</p></article>
+        <article class="role"><span class="role-mark" aria-hidden="true">RV</span><h3>Reviewers</h3><p>An independent read-only reviewer checks criteria and evidence before work can become approved.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section-dark">
+    <div class="shell">
+      <div class="section-intro"><div><div class="signal-rule"></div><span class="mono-label">One loop, eight phases</span></div><div><h2>The board remembers what the chat forgets.</h2><p>Every decision is persisted beside the repository. The dashboard projects discovery, plan approval, execution, review, integration, verification, recovery, and completion from evidence already on disk.</p></div></div>
+      <div class="evidence-strip"><p>Routine progress stays out of the orchestrator's context. Decision points come back as short, bounded evidence.</p><div class="evidence-list"><span>board.json</span><span>history.jsonl</span><span>event logs</span><span>Pi sessions</span><span>checkpoint branches</span></div></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="shell flow-layout">
+      <div class="flow-copy"><div class="signal-rule"></div><span class="mono-label">The handoff</span><h2>Fresh context is a feature.</h2><p>Planning can be noisy. Execution should not inherit every dead end. Each task brief carries its goal, constraints, criteria, verification, and approved dependency reports—nothing else.</p><p><a href="/docs/architecture/">Read the ownership model →</a></p></div>
+      <div class="flow-list">
+        <article class="flow-step"><span class="flow-index">01</span><div><h3>Plan</h3><p>Define the task contract: scope, criteria, dependencies, tier, and commit message.</p></div><span class="flow-arrow" aria-hidden="true">↘</span></article>
+        <article class="flow-step"><span class="flow-index">02</span><div><h3>Dispatch</h3><p>Start independent RPC child sessions with model fallbacks and per-attempt cost limits.</p></div><span class="flow-arrow" aria-hidden="true">↘</span></article>
+        <article class="flow-step"><span class="flow-index">03</span><div><h3>Review</h3><p>Give the completed candidate and bounded evidence to a fresh, read-only reviewer.</p></div><span class="flow-arrow" aria-hidden="true">↘</span></article>
+        <article class="flow-step"><span class="flow-index">04</span><div><h3>Approve or recover</h3><p>Integrate only after artifact checks and trusted verification. Preserve recovery evidence when it stops.</p></div><span class="flow-arrow" aria-hidden="true">→</span></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="install-band section-tight">
+    <div class="shell install-layout"><div><h2>Start with the command you already know.</h2><p>Install the extension, open the control center, and let the current Pi session make the first plan.</p></div><div class="install-command code-block"><button class="copy-button" type="button" data-copy="pi install git:github.com/ayagmar/pi-maestro">Copy</button><pre><code><span class="code-prefix">$</span> pi install git:github.com/ayagmar/pi-maestro
+<span class="code-prefix">$</span> /maestro start add tests for the board recovery path</code></pre></div></div>
+  </section>
+</BaseLayout>

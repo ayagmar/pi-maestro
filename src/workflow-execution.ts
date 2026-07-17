@@ -163,6 +163,7 @@ export async function executeTask(options: {
       stateDir: stateDir(cwd),
       runId: `${task.id}-attempt-${attemptIndex}`,
       cwd: worktree?.worktreePath ?? cwd,
+      projectCwd: cwd,
       prompt,
       tier: attemptTier,
       sessionLabel: sessionLabel(task, "attempt", attemptIndex),

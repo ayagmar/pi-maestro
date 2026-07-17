@@ -13,6 +13,7 @@ import {
   findTask,
   forceStatus,
   loadBoard,
+  normalizeExistingTaskContract,
   normalizeTaskContract,
   normalizeWritePaths,
   planValidationMessage,
@@ -76,11 +77,14 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             description:
               "Repository-relative files or directory/** scopes this task may change. Use [] only for explicit investigation/no-file work.",
           }),
-          successCriteria: Type.Array(Type.String({ maxLength: 500 }), {
-            minItems: 1,
-            maxItems: 12,
-            description: "Explicit observable outcomes the executor and reviewer must verify.",
-          }),
+          successCriteria: Type.Optional(
+            Type.Array(Type.String({ maxLength: 500 }), {
+              minItems: 1,
+              maxItems: 12,
+              description:
+                "Explicit observable outcomes; optional for explicit investigation/no-file work.",
+            })
+          ),
           discovery: Type.Optional(
             Type.Object({
               allowedWritePaths: Type.Array(Type.String(), {
@@ -558,6 +562,8 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         reviewPolicy !== undefined ||
         dependsOn !== undefined ||
         commitMessage !== undefined;
+      const editsTaskContract =
+        brief !== undefined || writePaths !== undefined || successCriteria !== undefined;
       const costSoFar = beforeTask ? snapshot(beforeTask).cost : 0;
       if (wasInFlight && editsContractField && !invalidateInFlight) {
         throw new Error(
@@ -583,13 +589,17 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           },
           Object.keys(config.tiers)
         );
-        if (supersedesTaskId) {
-          applyTaskSupersession(board, fresh, supersedesTaskId);
-          const validationError = planValidationMessage(
-            validatePlan(board, Object.keys(config.tiers))
-          );
-          if (validationError) throw new Error(validationError);
+        if (editsTaskContract) {
+          const contract = normalizeExistingTaskContract(fresh);
+          fresh.writePaths = contract.writePaths;
+          if (contract.successCriteria) fresh.successCriteria = contract.successCriteria;
+          else delete fresh.successCriteria;
         }
+        if (supersedesTaskId) applyTaskSupersession(board, fresh, supersedesTaskId);
+        const validationError = planValidationMessage(
+          validatePlan(board, Object.keys(config.tiers))
+        );
+        if (validationError) throw new Error(validationError);
       });
       if (!updated) throw new Error(`Unknown task: ${taskId}`);
       const worktreeWarning = parkIdleToolWorktrees(ctx.cwd, driveController);

@@ -1,0 +1,12 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { docs } from "../../data/docs";
+---
+<BaseLayout title="Documentation" description="Install, operate, understand, and extend Pi Maestro." isDocs>
+  <div class="shell docs-index">
+    <header class="docs-index-hero"><div><span class="mono-label">Pi Maestro / Documentation</span><h1>Run the system with confidence.</h1></div><div class="docs-index-aside"><strong>New here?</strong><p>Start with the installation guide, then read how the advisor, executors, and reviewers share responsibility.</p><a class="text-link" href="/docs/getting-started/">Open getting started →</a></div></header>
+    <div class="docs-grid">
+      {docs.map((doc) => <a class="docs-card" href={`/docs/${doc.slug}/`}><div><span class="mono-label">{doc.group}</span><h2>{doc.title}</h2><p>{doc.description}</p></div><div class="docs-card-foot"><span>Read guide</span><span aria-hidden="true">↗</span></div></a>)}
+    </div>
+  </div>
+</BaseLayout>

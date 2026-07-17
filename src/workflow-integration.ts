@@ -70,7 +70,7 @@ export async function integrateReviewedCandidate(
   }
 
   let result: ReviewedCandidateIntegration;
-  if (worktree) {
+  if (worktree && candidateTree) {
     result = await integrateWorktreeCandidate({
       cwd,
       task,
@@ -83,7 +83,7 @@ export async function integrateReviewedCandidate(
       reviewIdentityMatches,
       runtimeConfig,
     });
-  } else if (autoCommit) {
+  } else if (autoCommit && candidateTree) {
     result = await integrateMainTreeCandidate({
       cwd,
       task,

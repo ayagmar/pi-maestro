@@ -1,0 +1,23 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+---
+<DocsLayout slug="how-it-works">
+  <article class="prose">
+    <p>Maestro makes the orchestration boundary explicit. The expensive model stays in the supervising session, while routine implementation starts in fresh contexts that receive only the brief they need.</p>
+    <h2>Four roles, one accountable loop</h2>
+    <div class="architecture-diagram">
+      <div class="arch-row"><span>YOU</span><div>Set the goal, approve a plan when the gate is on, and intervene when evidence calls for judgment.</div></div>
+      <div class="arch-row"><span>ADVISOR</span><div>Plans tasks, chooses tiers, carries approved dependency reports, and receives bounded decisions.</div></div>
+      <div class="arch-row"><span>EXECUTOR</span><div>A separate <code>pi --mode rpc</code> process works from a fresh context, explicit scope, and normal Pi tools.</div></div>
+      <div class="arch-row"><span>REVIEWER</span><div>An independent, read-only context checks the candidate against every criterion and emits a strict verdict.</div></div>
+    </div>
+    <h2>The lifecycle</h2>
+    <ol><li><strong>Plan.</strong> The board receives task contracts with dependency edges, criteria, write paths, tier, and optional trusted verification.</li><li><strong>Claim.</strong> The drive claims a task before launching. Claims renew while work is active and release in a <code>finally</code> path.</li><li><strong>Execute.</strong> Independent tasks run in parallel up to <code>maxParallel</code>. Provider fallbacks apply only to failures before useful model work or quota exhaustion.</li><li><strong>Review.</strong> A reviewer receives a bounded report and candidate evidence. The default review tier uses <code>read,bash,grep,find,ls</code>.</li><li><strong>Integrate.</strong> Artifact checks, Git provenance, optional commit/merge, and trusted verification complete the approval transaction.</li><li><strong>Decide.</strong> Approval, requested changes, a provider block, an attempt cap, or another stop reason becomes one bounded wakeup for the owning session.</li></ol>
+    <h2>Fresh context, bounded evidence</h2>
+    <p>Executors do not stream their raw transcripts back to the orchestrator. They produce short reports and status pulses. Approved dependency reports and retry findings are injected with explicit truncation limits. This keeps context available for judgment instead of replaying typing noise.</p>
+    <blockquote><p>The board is durable; the chat is disposable. A handoff can start a fresh supervising session from goal, tasks, tiers, and evidence alone.</p></blockquote>
+    <h2>Review policies</h2>
+    <ul><li><strong>single:</strong> one independent reviewer, the default.</li><li><strong>confirm:</strong> fresh independent approvals up to <code>reviewRequiredApprovals</code>.</li><li><strong>find-and-refute:</strong> one reviewer finds issues and a separate confirmer/refuter tests those findings.</li></ul>
+    <p>Reviewers must end with <code>VERDICT: APPROVE</code> or <code>VERDICT: REQUEST_CHANGES</code>. Anything else remains ready for review.</p>
+  </article>
+</DocsLayout>
