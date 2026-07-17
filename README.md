@@ -1,5 +1,9 @@
 # pi-maestro
 
+[![MIT licensed](https://img.shields.io/badge/license-MIT-d9a520.svg)](LICENSE)
+[![Node.js 22 or 24](https://img.shields.io/badge/node-22%20%7C%2024-2f6f44.svg)](package.json)
+[![Pi 0.80.x](https://img.shields.io/badge/pi-0.80.x-243746.svg)](https://github.com/badlogic/pi-mono)
+
 Orchestrator/executor workflows for [pi](https://github.com/badlogic/pi-mono).
 
 The model in your interactive session becomes the **orchestrator**: it plans a goal into small
@@ -441,11 +445,11 @@ approvals remain visible but are never silently reused; changed inputs show a co
 stale reason and require retry, manual migration acceptance, or a successor. Plan edits, recipes,
 discovery output, retry, status, and dashboard projections all use this same freshness policy.
 
-with the current board. `/maestro recipe preview` uses the exact recipe resolver and expansion path.
-All three report added, removed, and changed task contracts plus fingerprint, dependency-wave,
-concurrency, launch-bound, and verification-profile effects. They never write the board or archive;
-bounded reports include a deterministic reference and task-specific follow-up command when detail
-is omitted.
+`/maestro plan diff` validates a versioned export before comparing it with the current board.
+`/maestro recipe preview` uses the exact recipe resolver and expansion path. Both report added,
+removed, and changed task contracts plus fingerprint, dependency-wave, concurrency, launch-bound,
+and verification-profile effects. They never write the board or archive; bounded reports include a
+deterministic reference and task-specific follow-up command when detail is omitted.
 
 Maestro is not a sandbox, CI service, analytics database, or generic plugin system. Executors can edit files within the permissions of the local account. Verification profiles execute arbitrary operator-selected local commands; repository config cannot define those commands. Git worktrees and immutable objects provide attribution and recovery, not protection from malicious local code.
 
@@ -513,4 +517,5 @@ pi -e ./src/index.ts
 
 ## License
 
-MIT
+Pi Maestro is free and open-source software released under the [MIT License](LICENSE). Use it,
+modify it, share it, and build something excellent.
