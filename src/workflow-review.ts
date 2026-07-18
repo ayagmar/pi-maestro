@@ -51,6 +51,9 @@ export async function reviewTask(options: {
   autoCommit?: boolean;
   logEvents?: "compact" | "full" | undefined;
   maxLogBytes?: number | undefined;
+  watchdogIdleSeconds?: number | undefined;
+  watchdogWarningTurns?: number | undefined;
+  watchdogTerminationTurns?: number | undefined;
   reviewRequiredApprovals?: number;
   maxReviewerLaunches?: number;
   availableTiers?: Iterable<string>;
@@ -72,6 +75,9 @@ export async function reviewTask(options: {
     autoCommit,
     logEvents,
     maxLogBytes,
+    watchdogIdleSeconds,
+    watchdogWarningTurns,
+    watchdogTerminationTurns,
     reviewRequiredApprovals = 2,
     maxReviewerLaunches = 4,
     availableTiers,
@@ -83,6 +89,10 @@ export async function reviewTask(options: {
     humanRetryOwnerSession,
     onRetentionWarning,
   } = options;
+  const effectiveWatchdogIdleSeconds = tier.watchdogIdleSeconds ?? watchdogIdleSeconds;
+  const effectiveWatchdogWarningTurns = tier.watchdogWarningTurns ?? watchdogWarningTurns;
+  const effectiveWatchdogTerminationTurns =
+    tier.watchdogTerminationTurns ?? watchdogTerminationTurns;
   const board = loadBoard(cwd);
   const validationError = planValidationMessage(validatePlan(board, availableTiers));
   if (validationError) throw new Error(validationError);
@@ -366,6 +376,15 @@ export async function reviewTask(options: {
           runKind: "review",
           ...(logEvents === undefined ? {} : { logEvents }),
           ...(maxLogBytes === undefined ? {} : { maxLogBytes }),
+          ...(effectiveWatchdogIdleSeconds === undefined
+            ? {}
+            : { watchdogIdleSeconds: effectiveWatchdogIdleSeconds }),
+          ...(effectiveWatchdogWarningTurns === undefined
+            ? {}
+            : { watchdogWarningTurns: effectiveWatchdogWarningTurns }),
+          ...(effectiveWatchdogTerminationTurns === undefined
+            ? {}
+            : { watchdogTerminationTurns: effectiveWatchdogTerminationTurns }),
           onUpdate: (update) => {
             const sessionFile = update.sessionFile;
             if (sessionFile) {

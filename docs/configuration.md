@@ -35,7 +35,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `handoffContextRatio` | 0.68 | 0–1; 0 disables |
 | `cleanupCompletedTasks` | true | Archive then clear settled boards |
 
-`tiers` must define valid thinking levels. The built-in tiers are `trivial`, `standard`, `complex`, and read-only `review`.
+`tiers` must define valid thinking levels. The built-in tiers are `trivial`, `standard`, `complex`, and read-only `review`. Each tier may set `watchdogIdleSeconds` (0–86400), `watchdogWarningTurns` (0–10000), and `watchdogTerminationTurns` (0–10000); those values override the corresponding global watchdog thresholds only for launches on that tier. Omitted tier fields inherit the global values, including on the `review` tier.
 
 Tasks may select `reviewPolicy: "single" | "confirm" | "find-and-refute"`. `single` is the legacy default. `confirm` requires the configured number of fresh independent approvals. `find-and-refute` runs one finder and one independent confirmer/refuter.
 

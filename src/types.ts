@@ -325,6 +325,12 @@ export interface TierConfig {
   thinking: string;
   /** Comma-separated tool allowlist passed to the executor. Omit for all tools. */
   tools?: string;
+  /** Per-tier override for seconds without executor events before watchdog steering. */
+  watchdogIdleSeconds?: number;
+  /** Per-tier override for turns without meaningful progress before watchdog steering. */
+  watchdogWarningTurns?: number;
+  /** Per-tier override for additional no-progress turns before termination. */
+  watchdogTerminationTurns?: number;
 }
 
 export interface VerificationProfile {

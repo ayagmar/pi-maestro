@@ -294,6 +294,33 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
     validateConfig({ tiers: { bad: { thinking: "extreme", fallbacks: [3] } } }) ?? "",
     /thinking/
   );
+  assert.equal(
+    validateConfig({
+      tiers: {
+        patient: {
+          thinking: "high",
+          watchdogIdleSeconds: 0,
+          watchdogWarningTurns: 25,
+          watchdogTerminationTurns: 8,
+        },
+      },
+    }),
+    undefined
+  );
+  assert.match(
+    validateConfig({ tiers: { bad: { thinking: "low", watchdogIdleSeconds: -1 } } }) ?? "",
+    /tier bad watchdogIdleSeconds/
+  );
+  assert.match(
+    validateConfig({ tiers: { bad: { thinking: "low", watchdogWarningTurns: "many" } } }) ?? "",
+    /tier bad watchdogWarningTurns/
+  );
+  assert.match(
+    validateConfig({
+      tiers: { bad: { thinking: "low", watchdogTerminationTurns: Number.POSITIVE_INFINITY } },
+    }) ?? "",
+    /tier bad watchdogTerminationTurns/
+  );
 });
 
 test("loadConfig preserves and ignores structurally invalid project config", () => {

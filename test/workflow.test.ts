@@ -2287,6 +2287,80 @@ test("nonzero-turn failures do not use a configured fallback", async () => {
   }
 });
 
+test("executor tier watchdog thresholds override global run options", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-tier-watchdog-executor-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let launched: Parameters<StartExecutor>[0] | undefined;
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier: {
+        thinking: "low",
+        watchdogIdleSeconds: 7,
+        watchdogWarningTurns: 8,
+        watchdogTerminationTurns: 9,
+      },
+      config: {
+        ...config,
+        watchdogIdleSeconds: 70,
+        watchdogWarningTurns: 80,
+        watchdogTerminationTurns: 90,
+      },
+      startExecutor: (options) => {
+        launched = options;
+        return executor({ finalReport: "done" })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(launched?.watchdogIdleSeconds, 7);
+    assert.equal(launched?.watchdogWarningTurns, 8);
+    assert.equal(launched?.watchdogTerminationTurns, 9);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("review tier watchdog thresholds override global run options", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-tier-watchdog-review-test-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    task.attempts.push(attempt("executor report"));
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
+    let launched: Parameters<StartExecutor>[0] | undefined;
+    await reviewTask({
+      cwd,
+      task,
+      tier: {
+        thinking: "high",
+        watchdogIdleSeconds: 11,
+        watchdogWarningTurns: 12,
+        watchdogTerminationTurns: 13,
+      },
+      watchdogIdleSeconds: 110,
+      watchdogWarningTurns: 120,
+      watchdogTerminationTurns: 130,
+      startExecutor: (options) => {
+        launched = options;
+        return executor({ finalReport: "VERDICT: APPROVE" })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(launched?.watchdogIdleSeconds, 11);
+    assert.equal(launched?.watchdogWarningTurns, 12);
+    assert.equal(launched?.watchdogTerminationTurns, 13);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("synchronous reviewer spawn failure is persisted without creating an execute attempt", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   try {

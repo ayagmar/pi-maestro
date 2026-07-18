@@ -167,6 +167,10 @@ export async function executeTask(options: {
       ? `${basePrompt}\n\n${discoveryInstructions(task.discovery.allowedWritePaths)}`
       : basePrompt;
     const promptContext = accountPromptContext(prompt);
+    const watchdogIdleSeconds = tier.watchdogIdleSeconds ?? config.watchdogIdleSeconds;
+    const watchdogWarningTurns = tier.watchdogWarningTurns ?? config.watchdogWarningTurns;
+    const watchdogTerminationTurns =
+      tier.watchdogTerminationTurns ?? config.watchdogTerminationTurns;
     // Without a worktree the executor mutates the shared checkout directly.
     // Tool events under-report bash mutations (sed -i, git apply, codegen),
     // so attribute changes by content against a pre-run Git baseline instead.
@@ -181,15 +185,9 @@ export async function executeTask(options: {
       sessionLabel: sessionLabel(task, "attempt", attemptIndex),
       ...(config.logEvents === undefined ? {} : { logEvents: config.logEvents }),
       ...(config.maxLogBytesPerRun === undefined ? {} : { maxLogBytes: config.maxLogBytesPerRun }),
-      ...(config.watchdogIdleSeconds === undefined
-        ? {}
-        : { watchdogIdleSeconds: config.watchdogIdleSeconds }),
-      ...(config.watchdogWarningTurns === undefined
-        ? {}
-        : { watchdogWarningTurns: config.watchdogWarningTurns }),
-      ...(config.watchdogTerminationTurns === undefined
-        ? {}
-        : { watchdogTerminationTurns: config.watchdogTerminationTurns }),
+      ...(watchdogIdleSeconds === undefined ? {} : { watchdogIdleSeconds }),
+      ...(watchdogWarningTurns === undefined ? {} : { watchdogWarningTurns }),
+      ...(watchdogTerminationTurns === undefined ? {} : { watchdogTerminationTurns }),
       runKind: isReadOnlyTask(task) ? "investigation" : "implementation",
       onUpdate: (update) => {
         const sessionFile = update.sessionFile;

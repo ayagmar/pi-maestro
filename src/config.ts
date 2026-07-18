@@ -560,6 +560,23 @@ export function validateConfig(value: unknown): string | undefined {
           !tier.fallbacks.every((item) => typeof item === "string"))
       )
         return `tier ${name} fallbacks must be strings`;
+      const watchdogRanges: Record<string, [number, number]> = {
+        watchdogIdleSeconds: [0, 86_400],
+        watchdogWarningTurns: [0, 10_000],
+        watchdogTerminationTurns: [0, 10_000],
+      };
+      for (const [key, [minimum, maximum]] of Object.entries(watchdogRanges)) {
+        const candidate = tier[key];
+        if (candidate === undefined) continue;
+        if (
+          typeof candidate !== "number" ||
+          !Number.isFinite(candidate) ||
+          candidate < minimum ||
+          candidate > maximum
+        ) {
+          return `tier ${name} ${key} must be a finite number from ${minimum} to ${maximum}`;
+        }
+      }
     }
   }
   return undefined;
@@ -680,7 +697,14 @@ export function saveConfig(scope: ConfigScope, cwd: string, config: MaestroConfi
 export function describeTier(tier: TierConfig): string {
   const model = tier.model ?? "(pi default model)";
   const tools = tier.tools ? ` tools=${tier.tools}` : "";
-  return `${model} thinking=${tier.thinking}${tools}`;
+  const watchdog = [
+    tier.watchdogIdleSeconds === undefined ? "" : ` idle=${tier.watchdogIdleSeconds}s`,
+    tier.watchdogWarningTurns === undefined ? "" : ` warn=${tier.watchdogWarningTurns}t`,
+    tier.watchdogTerminationTurns === undefined
+      ? ""
+      : ` terminate=${tier.watchdogTerminationTurns}t`,
+  ].join("");
+  return `${model} thinking=${tier.thinking}${tools}${watchdog}`;
 }
 
 export function describeConfig(config: MaestroConfig): string {

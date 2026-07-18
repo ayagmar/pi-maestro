@@ -491,6 +491,9 @@ export async function driveBoard(options: {
             if (config.logEvents !== undefined) reviewOptions.logEvents = config.logEvents;
             if (config.maxLogBytesPerRun !== undefined)
               reviewOptions.maxLogBytes = config.maxLogBytesPerRun;
+            reviewOptions.watchdogIdleSeconds = config.watchdogIdleSeconds;
+            reviewOptions.watchdogWarningTurns = config.watchdogWarningTurns;
+            reviewOptions.watchdogTerminationTurns = config.watchdogTerminationTurns;
             if (options.onRetentionWarning)
               reviewOptions.onRetentionWarning = options.onRetentionWarning;
             if (signal) reviewOptions.signal = signal;
