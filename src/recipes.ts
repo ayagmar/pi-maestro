@@ -26,6 +26,7 @@ const TASK_KEYS = new Set([
   "id",
   "title",
   "brief",
+  "kind",
   "tier",
   "dependsOn",
   "writePaths",
@@ -134,6 +135,7 @@ export function saveRecipeFromBoard(
       id: task.id,
       title: task.title,
       brief: task.brief,
+      ...(contract.kind ? { kind: contract.kind } : {}),
       tier: task.tier,
       dependsOn: [...task.dependsOn],
       writePaths: contract.writePaths,
@@ -231,6 +233,7 @@ export function expandRecipe(
     createTask(board, {
       title: task.title,
       brief: task.brief,
+      ...(task.kind ? { kind: task.kind } : {}),
       tier: task.tier,
       dependsOn: [],
       writePaths: task.writePaths,
@@ -331,6 +334,9 @@ function parseTask(value: unknown): RecipeTask {
   ) {
     throw new Error("Recipe task reviewPolicy is invalid.");
   }
+  if (value.kind !== undefined && value.kind !== "investigation") {
+    throw new Error("Recipe task kind is invalid.");
+  }
   if (
     value.discovery !== undefined &&
     (!isRecord(value.discovery) ||
@@ -377,6 +383,7 @@ function expandTask(task: RecipeTask, input: Record<string, RecipeInputValue>): 
     id: expand(task.id),
     title: expand(task.title),
     brief: expand(task.brief),
+    ...(task.kind ? { kind: task.kind } : {}),
     tier: expand(task.tier),
     dependsOn: task.dependsOn.map(expand),
     writePaths: task.writePaths.map(expand),

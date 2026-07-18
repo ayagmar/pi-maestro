@@ -246,7 +246,9 @@ All presets set `planGate`, `livePanes`, and `useWorktrees` to `false`; all set 
 Config files are plain JSON if you prefer editing by hand — user scope
 `~/.pi/agent/maestro.json`, project scope `.pi/maestro.json`. Resolution is defaults, then user,
 then project. Top-level fields merge by key; `tiers` merge by tier name, with the later scope's
-whole tier object replacing the earlier object of the same name:
+whole tier object replacing the earlier object of the same name. Project config is honored only
+for projects the user told pi to trust; in an untrusted project every setting stays at the
+trusted user/default value:
 
 ```json
 {
@@ -336,7 +338,7 @@ that tier's primary and fallback models the same way. This happens before spawni
 
 ### Safety and reconciliation
 
-When worktrees are enabled, every attempt—including a single task—runs in an isolated checkout. Once no executor or reviewer is using it, Maestro checkpoints recoverable edits on the task branch and removes the physical checkout. Review or retry restores that checkout only for the duration of active work; clean idle branches are deleted too. Git status is authoritative for staged, unstaged, and untracked paths; an empty path list never broadens a commit. New executable tasks require 1–12 explicit `successCriteria` plus bounded `writePaths`; read-only/no-file investigations may use an empty scope. Declared paths prevent independent overlapping plans and make unpredicted changes visible to the reviewer. They are scheduling guidance rather than an automatic rejection boundary; the reviewer decides whether a deviation is necessary and safe. Scoped drives reject omitted unresolved dependencies instead of silently expanding scope. Review feedback is retained as a bounded, deduplicated finding checklist. Reviewed approvals record an authoritative immutable Git tree plus separate review, integration-commit, and trusted-verification provenance. Bounded diffs are presentation context only; dashboard acceptance records `approvalKind: "manual"` instead.
+When worktrees are enabled, every attempt—including a single task—runs in an isolated checkout. Once no executor or reviewer is using it, Maestro checkpoints recoverable edits on the task branch and removes the physical checkout. Review or retry restores that checkout only for the duration of active work; clean idle branches are deleted too. Git status is authoritative for staged, unstaged, and untracked paths; an empty path list never broadens a commit. New executable tasks require 1–12 explicit `successCriteria` plus bounded `writePaths`; explicit `kind: "investigation"` tasks (read-only/no-file work) use an empty scope, get investigation-appropriate watchdog progress detection, and legacy investigation-phrased briefs remain accepted. Declared paths prevent independent overlapping plans and make unpredicted changes visible to the reviewer. They are scheduling guidance rather than an automatic rejection boundary; the reviewer decides whether a deviation is necessary and safe. Scoped drives reject omitted unresolved dependencies instead of silently expanding scope. Review feedback is retained as a bounded, deduplicated finding checklist. Reviewed approvals record an authoritative immutable Git tree plus separate review, integration-commit, and trusted-verification provenance. Bounded diffs are presentation context only; dashboard acceptance records `approvalKind: "manual"` instead.
 
 Trusted verification commands are arbitrary local code and may be defined only in the operator-owned user config (`~/.pi/agent/maestro.json`) with `verificationProfiles` entries shaped as `{ "command": "pnpm test", "timeoutSeconds": 300 }`. Repository `.pi/maestro.json` may select a known user profile with `defaultVerificationProfile`, but repository-defined commands and unknown selections are ignored. Task briefs and model instructions are never executed. Verification runs in a dedicated process group on Unix; timeout or abort sends TERM followed by KILL, bounds captured output, and logs under `.pi/maestro/verification/`. Candidate mutation invalidates review. Failed post-integration verification retains a checkpoint branch as recovery evidence while parking the idle checkout; successful approval removes both checkout and task branch only after provenance is persisted.
 
@@ -451,7 +453,7 @@ removed, and changed task contracts plus fingerprint, dependency-wave, concurren
 and verification-profile effects. They never write the board or archive; bounded reports include a
 deterministic reference and task-specific follow-up command when detail is omitted.
 
-Maestro is not a sandbox, CI service, analytics database, or generic plugin system. Executors can edit files within the permissions of the local account. Verification profiles execute arbitrary operator-selected local commands; repository config cannot define those commands. Git worktrees and immutable objects provide attribution and recovery, not protection from malicious local code.
+Maestro is not a sandbox, CI service, analytics database, or generic plugin system. Executors can edit files within the permissions of the local account. Verification profiles execute arbitrary operator-selected local commands; repository config cannot define those commands, and untrusted projects cannot contribute any configuration at all (budgets, attempt caps, tier models, and tool lists stay at trusted values). Git worktrees and immutable objects provide attribution and recovery, not protection from malicious local code.
 
 ## How it stays deterministic
 

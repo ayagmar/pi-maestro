@@ -363,6 +363,7 @@ export async function reviewTask(options: {
           prompt: reviewPrompt,
           tier: launchTier,
           sessionLabel: sessionLabel(task, "review", task.attempts.length),
+          runKind: "review",
           ...(logEvents === undefined ? {} : { logEvents }),
           ...(maxLogBytes === undefined ? {} : { maxLogBytes }),
           onUpdate: (update) => {

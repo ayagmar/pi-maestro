@@ -207,6 +207,65 @@ export function changedPaths(cwd: string): string[] {
   return changedPathsFromPorcelain(output);
 }
 
+export interface ChangeBaseline {
+  /** Immutable tree of HEAD plus every path dirty when the baseline was captured. */
+  tree: string;
+  paths: string[];
+}
+
+/** Maestro's own runtime state must never be attributed to an executor. */
+function isMaestroStatePath(path: string): boolean {
+  return (
+    path === ".pi/maestro.json" ||
+    path.startsWith(`${STATE_DIR}/`) ||
+    path.startsWith(".pi/maestro-recipes/")
+  );
+}
+
+/**
+ * Capture a Git-authoritative snapshot of the checkout before an executor
+ * runs directly in it, so its changes can later be attributed by content
+ * instead of trusting tool-call reporting (which misses bash mutations).
+ */
+export function captureChangeBaseline(cwd: string): ChangeBaseline | undefined {
+  try {
+    const paths = changedPaths(cwd).filter((path) => !isMaestroStatePath(path));
+    const tree = paths.length === 0 ? commitTree(cwd, "HEAD") : snapshotArtifact(cwd, paths);
+    return tree ? { tree, paths } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Paths whose content differs from the baseline snapshot: files created,
+ * modified, deleted, or reverted by whatever ran since the baseline,
+ * regardless of which tool performed the mutation.
+ */
+export function changedPathsSinceBaseline(
+  cwd: string,
+  baseline: ChangeBaseline
+): string[] | undefined {
+  try {
+    const current = changedPaths(cwd).filter((path) => !isMaestroStatePath(path));
+    const paths = [...new Set([...baseline.paths, ...current])];
+    const tree = paths.length === 0 ? commitTree(cwd, "HEAD") : snapshotArtifact(cwd, paths);
+    if (!tree) return undefined;
+    const output = gitOutput(cwd, ["diff", "--name-only", "-z", baseline.tree, tree]);
+    return [
+      ...new Set(
+        output
+          .split("\0")
+          .filter(Boolean)
+          .map((path) => path.replaceAll("\\", "/"))
+          .filter((path) => !isMaestroStatePath(path))
+      ),
+    ].sort();
+  } catch {
+    return undefined;
+  }
+}
+
 /** Exact Git-visible main-tree identity used to fail closed before promotion. */
 function captureMainTreeIdentity(cwd: string, env?: NodeJS.ProcessEnv): MainTreeIdentity {
   const porcelain = gitOutput(
@@ -218,7 +277,12 @@ function captureMainTreeIdentity(cwd: string, env?: NodeJS.ProcessEnv): MainTree
       "--untracked-files=all",
       "--",
       ".",
+      // Maestro's own runtime state, project config, and recipes are not
+      // reviewed artifacts; editing them mid-review must not fail promotion
+      // with a spurious "main checkout changed".
       `:(exclude)${STATE_DIR}/**`,
+      ":(exclude).pi/maestro.json",
+      ":(exclude).pi/maestro-recipes/**",
     ],
     env
   );

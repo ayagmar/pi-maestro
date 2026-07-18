@@ -143,15 +143,43 @@ export function inspectBoardStorage(cwd: string): { boardBytes: number; archiveC
   };
 }
 
+interface BoardCacheEntry {
+  identity: string;
+  board: Board;
+}
+
+const boardCache = new Map<string, BoardCacheEntry>();
+
+/** Exact file identity (inode + size + mtime ns) so a cached parse can never go stale silently. */
+function fileIdentity(file: string): string | undefined {
+  try {
+    const stat = statSync(file, { bigint: true });
+    return `${stat.ino}-${stat.size}-${stat.mtimeNs}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export function loadBoard(cwd: string): Board {
   const file = boardFile(cwd);
-  if (!existsSync(file)) return structuredClone(EMPTY_BOARD);
+  const identity = fileIdentity(file);
+  if (identity === undefined) {
+    boardCache.delete(file);
+    return structuredClone(EMPTY_BOARD);
+  }
+  const cached = boardCache.get(file);
+  if (cached && cached.identity === identity) return structuredClone(cached.board);
   const contents = readFileSync(file, "utf-8");
   try {
     const value: unknown = JSON.parse(contents);
     if (!isBoard(value)) throw new Error("board has an invalid structure");
+    // Re-stat after the read: cache only when the identity did not move mid-read.
+    if (fileIdentity(file) === identity) {
+      boardCache.set(file, { identity, board: structuredClone(value) });
+    }
     return value;
   } catch {
+    boardCache.delete(file);
     quarantineNotice = quarantineCorruptBoard(file);
     return structuredClone(EMPTY_BOARD);
   }
@@ -248,6 +276,28 @@ function saveBoardUnlocked(cwd: string, board: Board): void {
   const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
   writeFileSync(tmp, `${JSON.stringify(board, null, 2)}\n`, "utf-8");
   renameSync(tmp, file);
+  const identity = fileIdentity(file);
+  if (identity) boardCache.set(file, { identity, board: structuredClone(board) });
+  else boardCache.delete(file);
+}
+
+/**
+ * Kernel-reported process start identity, so a recycled PID cannot masquerade
+ * as a live lock owner. Linux-only; other platforms return undefined and keep
+ * the conservative liveness-only check.
+ */
+function processStartId(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const closeParen = stat.lastIndexOf(")");
+    if (closeParen < 0) return undefined;
+    const fields = stat.slice(closeParen + 2).split(" ");
+    // Field 22 (starttime) is index 19 after the (pid, comm) prefix.
+    const startTicks = fields[19];
+    return startTicks && /^\d+$/.test(startTicks) ? startTicks : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function acquireBoardLock(cwd: string): BoardLock {
@@ -258,13 +308,19 @@ function acquireBoardLock(cwd: string): BoardLock {
   for (let tries = 0; tries < BOARD_LOCK_RETRIES; tries += 1) {
     try {
       const fd = openSync(file, "wx");
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, token }));
+      const start = processStartId(process.pid);
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, token, ...(start ? { start } : {}) }));
       return { fd, file, token };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const staleOwner = staleLockOwner(file);
       if (staleOwner && reclaimStaleLock(file, staleOwner)) continue;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      // Board critical sections are read-modify-write of one JSON file and
+      // complete in single-digit milliseconds. Spin briefly at fine
+      // granularity so typical contention resolves in ≤1ms of blocking,
+      // then back off to 10ms slices for the pathological long-hold case.
+      const waitMs = tries < 20 ? 1 : 10;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
     }
   }
   throw new Error("Timed out waiting for maestro board lock");
@@ -279,13 +335,19 @@ function staleLockOwner(file: string): StaleLockOwner | undefined {
     const stat = statSync(file);
     if (Date.now() - stat.mtimeMs <= BOARD_LOCK_STALE_MS) return undefined;
     const contents = readFileSync(file, "utf-8");
-    const owner = JSON.parse(contents) as { pid?: unknown; token?: unknown };
+    const owner = JSON.parse(contents) as { pid?: unknown; token?: unknown; start?: unknown };
     if (typeof owner.pid === "number") {
-      try {
-        process.kill(owner.pid, 0);
-        return undefined;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") return undefined;
+      const currentStart = processStartId(owner.pid);
+      const recordedStart = typeof owner.start === "string" ? owner.start : undefined;
+      const pidRecycled =
+        recordedStart !== undefined && currentStart !== undefined && recordedStart !== currentStart;
+      if (!pidRecycled) {
+        try {
+          process.kill(owner.pid, 0);
+          return undefined;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") return undefined;
+        }
       }
     }
     const token = typeof owner.token === "string" ? owner.token : "invalid";
@@ -565,6 +627,7 @@ function isTask(value: unknown): value is Task {
     typeof value.id === "string" &&
     typeof value.title === "string" &&
     typeof value.brief === "string" &&
+    (value.kind === undefined || value.kind === "investigation") &&
     typeof value.tier === "string" &&
     statuses.includes(value.status as TaskStatus) &&
     Array.isArray(value.dependsOn) &&
@@ -909,6 +972,7 @@ export function createTask(
   input: {
     title: string;
     brief: string;
+    kind?: "investigation";
     tier: string;
     commitMessage?: string;
     dependsOn?: string[];
@@ -930,6 +994,7 @@ export function createTask(
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
+  if (input.kind === "investigation") task.kind = "investigation";
   if (input.commitMessage) task.commitMessage = input.commitMessage;
   if (input.writePaths) task.writePaths = normalizeWritePaths(input.writePaths);
   if (input.successCriteria) task.successCriteria = normalizeSuccessCriteria(input.successCriteria);
@@ -1237,13 +1302,16 @@ export interface HumanRetryEligibility {
 }
 
 export function humanRetryRiskToken(task: Task): string {
+  // updatedAt is deliberately excluded: an unrelated board touch between the
+  // user's confirmation and dispatch must not invalidate the confirmed retry.
+  // Acceptance and integration evidence changes still do.
   return JSON.stringify({
     status: task.status,
     approvalKind: task.approvalKind,
     integratedCommit: task.integratedCommit,
     provenanceIntegratedCommit: task.provenance?.integratedCommit,
+    approvedFingerprint: task.approvedProvenance?.fingerprint,
     attempts: task.attempts.length,
-    updatedAt: task.updatedAt,
   });
 }
 
@@ -1629,17 +1697,27 @@ export function normalizeWritePaths(paths: string[]): string[] {
   ].sort();
 }
 
+/** Legacy brief phrasing accepted as an investigation marker for boards planned before the explicit kind field. */
+const LEGACY_INVESTIGATION_BRIEF = /investigat|no[- ]file|read[- ]only/i;
+
 export function normalizeTaskContract(input: {
   brief: string;
+  kind?: "investigation";
   writePaths?: string[];
   successCriteria?: string[];
-}): { writePaths: string[]; successCriteria?: string[] } {
+}): { writePaths: string[]; successCriteria?: string[]; kind?: "investigation" } {
   if (!input.writePaths) throw new Error("writePaths is required for every new task");
   const writePaths = normalizeWritePaths(input.writePaths);
   const noFileTask =
-    writePaths.length === 0 && /investigat|no[- ]file|read[- ]only/i.test(input.brief);
+    writePaths.length === 0 &&
+    (input.kind === "investigation" || LEGACY_INVESTIGATION_BRIEF.test(input.brief));
+  if (input.kind === "investigation" && writePaths.length > 0) {
+    throw new Error("investigation tasks must use writePaths: []");
+  }
   if (writePaths.length === 0 && !noFileTask) {
-    throw new Error("empty writePaths requires an explicit investigation or no-file brief");
+    throw new Error(
+      'empty writePaths requires kind: "investigation" (or a legacy investigation/no-file brief)'
+    );
   }
   if (!noFileTask && !input.successCriteria) {
     throw new Error("successCriteria is required for every executable task");
@@ -1649,17 +1727,30 @@ export function normalizeTaskContract(input: {
       ? normalizeSuccessCriteria(input.successCriteria)
       : undefined
     : normalizeSuccessCriteria(input.successCriteria ?? []);
-  return { writePaths, ...(successCriteria ? { successCriteria } : {}) };
+  return {
+    writePaths,
+    ...(successCriteria ? { successCriteria } : {}),
+    ...(noFileTask ? { kind: "investigation" as const } : {}),
+  };
 }
 
 export function normalizeExistingTaskContract(
-  task: Pick<Task, "brief" | "writePaths" | "successCriteria">
-): { writePaths: string[]; successCriteria?: string[] } {
+  task: Pick<Task, "brief" | "kind" | "writePaths" | "successCriteria">
+): { writePaths: string[]; successCriteria?: string[]; kind?: "investigation" } {
   return normalizeTaskContract({
     brief: task.brief,
+    ...(task.kind === undefined ? {} : { kind: task.kind }),
     ...(task.writePaths === undefined ? {} : { writePaths: task.writePaths }),
     ...(task.successCriteria === undefined ? {} : { successCriteria: task.successCriteria }),
   });
+}
+
+/** A task is read-only when it is an explicit investigation or a discovery task. */
+export function isReadOnlyTask(
+  task: Pick<Task, "kind" | "discovery" | "writePaths" | "brief">
+): boolean {
+  if (task.kind === "investigation" || task.discovery) return true;
+  return task.writePaths?.length === 0 && LEGACY_INVESTIGATION_BRIEF.test(task.brief);
 }
 
 function writePathsOverlap(left: string, right: string): boolean {
@@ -1688,6 +1779,10 @@ export function applyPlanTaskEdits(
     if (task.status === "changes_requested" || task.status === "failed") {
       forceStatus(task, "todo");
     }
+  }
+  if (edits.kind !== undefined) {
+    if (edits.kind === "investigation") task.kind = "investigation";
+    else delete task.kind;
   }
   if (edits.tier !== undefined) {
     if (!new Set(availableTiers).has(edits.tier)) {

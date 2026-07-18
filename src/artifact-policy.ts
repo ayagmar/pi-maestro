@@ -88,6 +88,9 @@ function fingerprintTask(
   const contract = {
     title: task.title,
     brief: task.brief,
+    // Included only when set so legacy implementation-task fingerprints
+    // (captured before the kind field existed) remain stable.
+    ...(task.kind ? { kind: task.kind } : {}),
     successCriteria: task.successCriteria ?? [],
     writePaths: normalizedPaths(task.writePaths ?? []),
     discovery: task.discovery

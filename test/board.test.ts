@@ -27,8 +27,11 @@ import {
   isRunnable,
   latestArchiveFile,
   listArchivedBoards,
+  humanRetryRiskToken,
+  isReadOnlyTask,
   loadBoard,
   loadStatusHistory,
+  normalizeTaskContract,
   rejectPlan,
   replaceBoard,
   replaceBoardWithArchive,
@@ -989,6 +992,72 @@ test("approved provenance round-trips a SHA-1 Git tree and kind-aware report dep
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("task contract accepts explicit investigation kind regardless of brief phrasing", () => {
+  // Explicit kind: no magic words needed in the brief.
+  const contract = normalizeTaskContract({
+    brief: "Determine why the cache misses spike under load and summarize root causes",
+    kind: "investigation",
+    writePaths: [],
+  });
+  assert.deepEqual(contract.writePaths, []);
+  assert.equal(contract.kind, "investigation");
+
+  // Legacy phrasing still works for boards planned before the kind field.
+  const legacy = normalizeTaskContract({
+    brief: "Read-only investigation with no-file changes",
+    writePaths: [],
+  });
+  assert.equal(legacy.kind, "investigation");
+
+  // Investigation kind with a write scope is a contradiction.
+  assert.throws(
+    () =>
+      normalizeTaskContract({
+        brief: "whatever",
+        kind: "investigation",
+        writePaths: ["src/index.ts"],
+      }),
+    /investigation tasks must use writePaths/
+  );
+
+  // Empty scope without the kind and without legacy phrasing stays rejected.
+  assert.throws(
+    () => normalizeTaskContract({ brief: "Do something vague", writePaths: [] }),
+    /empty writePaths requires kind/
+  );
+});
+
+test("isReadOnlyTask covers explicit kind, discovery, and legacy briefs", () => {
+  assert.equal(isReadOnlyTask({ kind: "investigation", brief: "anything", writePaths: [] }), true);
+  assert.equal(
+    isReadOnlyTask({
+      brief: "anything",
+      writePaths: [],
+      discovery: { allowedWritePaths: ["src/**"] },
+    }),
+    true
+  );
+  assert.equal(
+    isReadOnlyTask({ brief: "Read-only investigation with no-file changes", writePaths: [] }),
+    true
+  );
+  assert.equal(isReadOnlyTask({ brief: "Implement the feature", writePaths: ["src/a.ts"] }), false);
+});
+
+test("human retry risk token ignores unrelated board touches but tracks acceptance evidence", () => {
+  const board = emptyBoard();
+  const task = createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+  const before = humanRetryRiskToken(task);
+
+  // An unrelated metadata touch (updatedAt) must not invalidate a confirmed retry.
+  task.updatedAt += 1000;
+  assert.equal(humanRetryRiskToken(task), before);
+
+  // Acceptance/integration evidence changes must invalidate it.
+  task.integratedCommit = "abc123";
+  assert.notEqual(humanRetryRiskToken(task), before);
 });
 
 test("loadBoard archives a corrupt board before returning an empty board", () => {

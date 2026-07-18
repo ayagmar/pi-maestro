@@ -481,6 +481,137 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
+test("turn-based watchdog steers investigation runs with converge text and read progress resets it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-readonly-"));
+  const fakePi = join(root, "investigating-pi.mjs");
+  const steerFile = join(root, "steer.txt");
+  // Emits distinct read-tool events forever; never edits or writes files.
+  writeFileSync(
+    fakePi,
+    `import { writeFileSync } from "node:fs";
+let buffer = "";
+let turn = 0;
+const interval = setInterval(() => {
+  turn += 1;
+  console.log(JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { path: "file-" + turn + ".ts" } }));
+  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1 }, content: [] } }));
+  if (turn >= 30) {
+    clearInterval(interval);
+    console.log(JSON.stringify({ type: "agent_settled" }));
+  }
+}, 2);
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "steer") writeFileSync(${JSON.stringify(steerFile)}, command.message);
+    if (command.type === "abort") process.exit(1);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "investigation",
+      cwd: root,
+      prompt: "investigate",
+      tier: { thinking: "low" },
+      runKind: "investigation",
+      watchdogIdleSeconds: 0,
+      watchdogWarningTurns: 5,
+      watchdogTerminationTurns: 2,
+    });
+    const outcome = await run.outcome;
+    // Novel read activity is progress for read-only runs: 30 turns of
+    // distinct reads finish normally instead of stalling at turn 5+2.
+    assert.equal(outcome.failureReason?.kind, undefined);
+    assert.equal(outcome.aborted, false);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("read-only run repeating the identical action stalls with investigation steer text", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-loop-"));
+  const fakePi = join(root, "looping-pi.mjs");
+  const steerFile = join(root, "steer.txt");
+  // Repeats the exact same read call forever: a genuine loop.
+  writeFileSync(
+    fakePi,
+    `import { writeFileSync } from "node:fs";
+let buffer = "";
+setInterval(() => {
+  console.log(JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { path: "same.ts" } }));
+  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1 }, content: [] } }));
+}, 2);
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "steer") writeFileSync(${JSON.stringify(steerFile)}, command.message);
+    if (command.type === "abort") process.exit(1);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "loop",
+      cwd: root,
+      prompt: "investigate",
+      tier: { thinking: "low" },
+      runKind: "investigation",
+      watchdogIdleSeconds: 0,
+      watchdogWarningTurns: 5,
+      watchdogTerminationTurns: 2,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.failureCause, "stalled");
+    const steer = readFileSync(steerFile, "utf-8");
+    assert.match(steer, /consolidate|report format/i);
+    assert.doesNotMatch(steer, /smallest in-scope implementation/);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("verification log is streamed to disk before the command finishes", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-verify-stream-"));
+  try {
+    // The command emits evidence, then sleeps past the timeout; the timeout
+    // kill must still leave the already-emitted output in the log file.
+    const result = await runVerification({
+      cwd: root,
+      stateDir: root,
+      name: "stream",
+      command: "echo evidence-before-kill && sleep 30",
+      timeoutSeconds: 0.2,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.timedOut, true);
+    assert.match(readFileSync(result.logFile, "utf-8"), /evidence-before-kill/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("touchedFile picks up write/edit paths from tool_execution_start", () => {
   // pi's JSON stream carries args on tool_execution_start; tool_execution_end has args: null
   assert.equal(

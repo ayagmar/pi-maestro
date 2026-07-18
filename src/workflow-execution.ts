@@ -4,6 +4,7 @@ import {
   forceStatus,
   humanRetryEligibility,
   humanRetryRiskToken,
+  isReadOnlyTask,
   isRunnableWithConfig,
   loadBoard,
   planValidationMessage,
@@ -34,7 +35,14 @@ import { claimDispatchLifecycle } from "./workflow-dispatch.js";
 import { consumesMaxAttempt, lastReport, snapshot, type TaskSnapshot } from "./workflow-policy.js";
 import { sessionLabel } from "./workflow-review-policy.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
-import { captureDiff, changedPaths, type WorktreeRef, worktreeExists } from "./worktree.js";
+import {
+  captureChangeBaseline,
+  captureDiff,
+  changedPaths,
+  changedPathsSinceBaseline,
+  type WorktreeRef,
+  worktreeExists,
+} from "./worktree.js";
 
 export async function executeTask(options: {
   cwd: string;
@@ -159,6 +167,10 @@ export async function executeTask(options: {
       ? `${basePrompt}\n\n${discoveryInstructions(task.discovery.allowedWritePaths)}`
       : basePrompt;
     const promptContext = accountPromptContext(prompt);
+    // Without a worktree the executor mutates the shared checkout directly.
+    // Tool events under-report bash mutations (sed -i, git apply, codegen),
+    // so attribute changes by content against a pre-run Git baseline instead.
+    const changeBaseline = worktree ? undefined : captureChangeBaseline(cwd);
     const runOptions: Parameters<StartExecutor>[0] = {
       stateDir: stateDir(cwd),
       runId: `${task.id}-attempt-${attemptIndex}`,
@@ -178,6 +190,7 @@ export async function executeTask(options: {
       ...(config.watchdogTerminationTurns === undefined
         ? {}
         : { watchdogTerminationTurns: config.watchdogTerminationTurns }),
+      runKind: isReadOnlyTask(task) ? "investigation" : "implementation",
       onUpdate: (update) => {
         const sessionFile = update.sessionFile;
         if (sessionFile) {
@@ -262,10 +275,13 @@ export async function executeTask(options: {
       worktree && task.attempts.at(-1)?.branch === worktree.branch
         ? (task.attempts.at(-1)?.touchedFiles ?? [])
         : [];
+    const baselineChanges = changeBaseline
+      ? changedPathsSinceBaseline(cwd, changeBaseline)
+      : undefined;
     run.attempt.touchedFiles =
       worktree && worktreeExists(worktree)
         ? [...new Set([...priorWorktreeFiles, ...changedPaths(worktree.worktreePath)])].sort()
-        : [...outcome.touchedFiles];
+        : [...new Set([...outcome.touchedFiles, ...(baselineChanges ?? [])])].sort();
 
     const status: TaskStatus = outcome.aborted
       ? "cancelled"

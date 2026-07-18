@@ -168,10 +168,14 @@ export interface ApprovedProvenance {
   approvedAt: number;
 }
 
+export type TaskKind = "implementation" | "investigation";
+
 export interface Task {
   id: string;
   title: string;
   brief: string;
+  /** Explicit no-file investigation marker; absent means implementation work. */
+  kind?: "investigation";
   /** Conventional commit message used when auto-committing this task's approved work. */
   commitMessage?: string;
   /** Successor task that replaced this task. */
@@ -240,6 +244,7 @@ export interface PlanValidation {
 export interface PlanTaskEdits {
   title?: string;
   brief?: string;
+  kind?: TaskKind;
   tier?: string;
   dependsOn?: string[];
   writePaths?: string[];
@@ -341,6 +346,7 @@ export interface RecipeTask {
   id: string;
   title: string;
   brief: string;
+  kind?: "investigation";
   tier: string;
   dependsOn: string[];
   writePaths: string[];

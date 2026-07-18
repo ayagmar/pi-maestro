@@ -1,6 +1,6 @@
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadBoard, sweepDispatchState } from "./board.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, setProjectConfigTrust } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT } from "./constants.js";
 import {
   acknowledgeDeliveredDecision,
@@ -110,6 +110,19 @@ export function registerMaestroLifecycle(
 
   pi.on("session_start", (event, ctx) => {
     dependencies.setCommandCwd(ctx.cwd);
+    // Project-local .pi/maestro.json can steer budgets, tiers, and tool
+    // lists; honor it only for projects the user told pi to trust. Contexts
+    // without the trust API (legacy harnesses) keep the trusted default.
+    const trustApi = (ctx as { isProjectTrusted?: () => boolean }).isProjectTrusted;
+    if (typeof trustApi === "function") {
+      try {
+        setProjectConfigTrust(trustApi.call(ctx));
+      } catch {
+        setProjectConfigTrust(false);
+      }
+    } else {
+      setProjectConfigTrust(true);
+    }
     state.start();
     dependencies.closeLivePane();
     dependencies.clearSuppressedPane();

@@ -9,6 +9,7 @@ interface ExportedPlanTask {
   id: string;
   title: string;
   brief: string;
+  kind?: "investigation";
   tier: string;
   dependsOn: string[];
   writePaths: string[];
@@ -49,6 +50,7 @@ export function exportPlan(board: Board): string {
       id: task.id,
       title: task.title,
       brief: task.brief,
+      ...(task.kind ? { kind: task.kind } : {}),
       tier: task.tier,
       dependsOn: [...task.dependsOn],
       writePaths: [...(task.writePaths ?? [])],
@@ -99,6 +101,7 @@ export function importPlan(
     const task = createTask(board, {
       title: raw.title,
       brief: raw.brief,
+      ...(contract.kind ? { kind: contract.kind } : {}),
       tier: raw.tier,
       dependsOn: raw.dependsOn,
       writePaths: contract.writePaths,
@@ -222,6 +225,7 @@ function changedFields(before: Task, after: Task): string[] {
   const fields: Array<[string, unknown, unknown]> = [
     ["title", before.title, after.title],
     ["brief", before.brief, after.brief],
+    ["kind", before.kind ?? "implementation", after.kind ?? "implementation"],
     ["success criteria", before.successCriteria ?? [], after.successCriteria ?? []],
     ["write scope", before.writePaths ?? [], after.writePaths ?? []],
     ["dependencies", before.dependsOn, after.dependsOn],
@@ -240,7 +244,9 @@ function changedFields(before: Task, after: Task): string[] {
 function fingerprintEffects(fields: readonly string[]): string[] {
   const effects = new Set<string>();
   for (const field of fields) {
-    if (["title", "brief", "success criteria", "write scope", "discovery"].includes(field)) {
+    if (
+      ["title", "brief", "kind", "success criteria", "write scope", "discovery"].includes(field)
+    ) {
       effects.add("contract");
     }
     if (field === "dependencies") {
@@ -298,6 +304,7 @@ function isExportedTask(value: unknown): value is ExportedPlanTask {
     typeof value.id === "string" &&
     typeof value.title === "string" &&
     typeof value.brief === "string" &&
+    (value.kind === undefined || value.kind === "investigation") &&
     typeof value.tier === "string" &&
     Array.isArray(value.dependsOn) &&
     value.dependsOn.every((item) => typeof item === "string") &&

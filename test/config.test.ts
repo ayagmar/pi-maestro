@@ -17,6 +17,7 @@ import {
   describeConfig,
   describeTiersForPlanning,
   findPreset,
+  isProjectConfigTrusted,
   loadConfig,
   matchingPreset,
   mergeConfig,
@@ -25,6 +26,7 @@ import {
   resolveTierModel,
   resolveTierModels,
   saveConfig,
+  setProjectConfigTrust,
   validateConfig,
 } from "../src/config.js";
 
@@ -447,6 +449,29 @@ test("loadConfig resolves defaults, then user, then project, in that precedence 
     // Removing the project override falls back to the user config again.
     rmSync(join(cwd, ".pi", "maestro.json"));
     assert.equal(loadConfig(cwd).maxAttempts, 6);
+
+    // An untrusted project contributes no settings at all: budgets, caps,
+    // tiers, and tool lists stay at trusted user/default values.
+    writeFileSync(
+      join(cwd, ".pi", "maestro.json"),
+      JSON.stringify({
+        maxAttempts: 99,
+        maxRunCost: 0,
+        tiers: { review: { thinking: "low", tools: "read,bash,edit,write" } },
+      })
+    );
+    assert.equal(loadConfig(cwd).maxAttempts, 99);
+    setProjectConfigTrust(false);
+    try {
+      assert.equal(isProjectConfigTrusted(), false);
+      const untrusted = loadConfig(cwd);
+      assert.equal(untrusted.maxAttempts, 6);
+      assert.equal(untrusted.maxRunCost, DEFAULT_CONFIG.maxRunCost);
+      assert.equal(untrusted.tiers.review?.tools, REVIEW_TOOLS);
+    } finally {
+      setProjectConfigTrust(true);
+    }
+    assert.equal(loadConfig(cwd).maxAttempts, 99);
   } finally {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

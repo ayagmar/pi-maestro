@@ -1803,7 +1803,7 @@ test("executor session is persisted before the run settles", async () => {
   }
 });
 
-test("successful main-tree execution captures only touched-file changes", async () => {
+test("main-tree execution attributes run changes by content and excludes pre-existing dirt", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" });
   try {
@@ -1811,9 +1811,12 @@ test("successful main-tree execution captures only touched-file changes", async 
     git("config", "user.email", "test@local");
     git("config", "user.name", "Test");
     writeFileSync(join(cwd, "task.txt"), "base\n");
-    writeFileSync(join(cwd, "unrelated.txt"), "base\n");
+    writeFileSync(join(cwd, "pre-existing.txt"), "base\n");
     git("add", "-A");
     git("commit", "-qm", "base");
+    // The user's own uncommitted edit exists before dispatch and must never
+    // be attributed to the executor.
+    writeFileSync(join(cwd, "pre-existing.txt"), "user dirt\n");
     const { board, task } = boardWithTask();
     saveBoard(cwd, board);
 
@@ -1825,16 +1828,19 @@ test("successful main-tree execution captures only touched-file changes", async 
       config,
       startExecutor: (options) => {
         writeFileSync(join(options.cwd, "task.txt"), "executor change\n");
-        writeFileSync(join(options.cwd, "unrelated.txt"), "unrelated change\n");
+        // Simulates a bash-side mutation the tool-event stream never reports.
+        writeFileSync(join(options.cwd, "bash-side.txt"), "bash change\n");
         return executor({ finalReport: "Work completed", touchedFiles: ["task.txt"] })(options);
       },
       onUpdate,
       trackRun,
     });
 
-    const diff = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.diff ?? "";
+    const attempt = findTask(loadBoard(cwd), task.id)?.attempts.at(-1);
+    assert.deepEqual(attempt?.touchedFiles, ["bash-side.txt", "task.txt"]);
+    const diff = attempt?.diff ?? "";
     assert.match(diff, /executor change/);
-    assert.doesNotMatch(diff, /unrelated change/);
+    assert.doesNotMatch(diff, /user dirt/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

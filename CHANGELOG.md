@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Correctness
+
+- Watchdog progress detection is now run-kind aware: investigation/discovery executors and reviewers progress through novel read-tool activity instead of being steered with implementation text and killed as stalled; only exact repeated actions count as no progress, and steering messages are phase-specific.
+- Non-worktree executions now attribute file changes by content against a pre-run Git baseline, so bash-side mutations (sed -i, git apply, codegen) are included in touched files, candidate trees, and review scope; pre-existing user dirt is never attributed to the executor.
+- Task contracts gained an explicit `kind: "investigation"` field replacing the brief-phrasing regex for no-file work; legacy investigation-phrased briefs remain accepted, and the kind flows through maestro_plan, maestro_update, recipes, plan export/import, and the contract fingerprint.
+- Human-retry risk tokens no longer include `updatedAt`, so unrelated board touches between confirmation and dispatch cannot invalidate a confirmed retry; acceptance and integration evidence changes still do.
+- Stale board locks now record the owner's kernel process start time on Linux, so a recycled PID can no longer keep a dead lock alive.
+- Main-tree identity checks exclude `.pi/maestro.json` and `.pi/maestro-recipes/`, so editing maestro config or recipes mid-review no longer fails promotion with a spurious "main checkout changed".
+
+### Security
+
+- Project-local `.pi/maestro.json` is honored only for pi-trusted projects; untrusted repositories can no longer influence budgets, attempt caps, tier models, or tier tool lists.
+
+### Performance
+
+- Board and config reads are cached by exact file identity (inode + size + mtime ns), and board lock contention now spins at fine granularity before backing off, reducing synchronous stalls on the interactive session.
+
+### Reliability
+
+- Verification logs are streamed to disk as output arrives, so a hard kill of pi retains partial verification evidence.
+- Added a best-effort (non-blocking) Windows CI job for typecheck and tests.
+
 ## 0.1.0
 
 ### Orchestration

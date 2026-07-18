@@ -49,3 +49,33 @@ jobs:
 
       - name: Check formatting (Biome)
         run: pnpm run format:check
+
+  # Windows support is best-effort: grouped kill, the hard-link lock protocol,
+  # and detached-spawn semantics differ there. Non-blocking until proven stable.
+  check-windows:
+    runs-on: windows-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run typecheck
+
+      - name: Run tests
+        run: pnpm run test

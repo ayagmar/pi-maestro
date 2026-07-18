@@ -1,13 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  createWriteStream,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { type Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
@@ -49,12 +42,16 @@ export async function runVerification(options: {
       stdio: ["ignore", "pipe", "pipe"],
       detached: grouped,
     });
+    // Stream evidence to disk as it arrives so a SIGKILL of this process
+    // still leaves the partial verification log behind.
+    const logStream = createWriteStream(logFile);
     let output = "";
     let timedOut = false;
     let settled = false;
     let killTimer: NodeJS.Timeout | undefined;
     const append = (chunk: Buffer) => {
       output = `${output}${chunk.toString()}`.slice(-16_000);
+      logStream.write(chunk);
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
@@ -80,7 +77,7 @@ export async function runVerification(options: {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       options.signal?.removeEventListener("abort", stop);
-      writeFileSync(logFile, output);
+      logStream.end();
       const exitCode = code ?? 1;
       resolve({
         ok: exitCode === 0 && !timedOut && !options.signal?.aborted,
@@ -101,6 +98,7 @@ export async function runVerification(options: {
     child.on("close", finish);
     child.on("error", (error) => {
       output = `${output}\n${error.message}`;
+      logStream.write(`\n${error.message}`);
       finish(1);
     });
     if (options.signal?.aborted) stop();
@@ -195,6 +193,22 @@ export function cappedLogWriter(
     writtenBytes += bytes.length;
   };
 }
+
+/**
+ * What kind of work a launch performs, for progress detection and steering:
+ * implementation runs progress by mutating files; investigation and review
+ * runs are legitimately read-only and progress through read-tool activity.
+ */
+export type RunKind = "implementation" | "investigation" | "review";
+
+const WATCHDOG_STEER_MESSAGES: Record<RunKind, string> = {
+  implementation:
+    "Stop broad investigation. Either make the smallest in-scope implementation and run targeted verification, or report one concrete blocker within the next few turns.",
+  investigation:
+    "Converge now. Stop opening new lines of inquiry: consolidate what you have found into the required report format within the next few turns, or report one concrete blocker.",
+  review:
+    "Converge now. Stop expanding the review: finish verifying the remaining acceptance criteria and end with your VERDICT line within the next few turns.",
+};
 
 export interface ExecutorHandle {
   attempt: Attempt;
@@ -352,6 +366,8 @@ export function startExecutor(options: {
   watchdogIdleSeconds?: number;
   watchdogWarningTurns?: number;
   watchdogTerminationTurns?: number;
+  /** Progress model and steering text for this launch. Defaults to implementation. */
+  runKind?: RunKind;
   signal?: AbortSignal;
   onUpdate?: (update: RunUpdate) => void;
 }): ExecutorHandle {
@@ -431,6 +447,10 @@ export function startExecutor(options: {
     let watchdogSteeredAt: number | undefined;
     const actionSignatures: string[] = [];
     const idleMs = Math.max(0, (options.watchdogIdleSeconds ?? 120) * 1000);
+    const runKind: RunKind = options.runKind ?? "implementation";
+    // Read-only work progresses through reading; only repeating the exact
+    // same action shape over and over counts as no progress there.
+    const readOnlyProgress = runKind !== "implementation";
 
     const evaluateWatchdog = () => {
       const turnsWithoutProgress = attempt.usage.turns - progressTurns;
@@ -441,11 +461,7 @@ export function startExecutor(options: {
         watchdogSteeredAt === undefined
       ) {
         watchdogSteeredAt = attempt.usage.turns;
-        send({
-          type: "steer",
-          message:
-            "Stop broad investigation. Either make the smallest in-scope implementation and run targeted verification, or report one concrete blocker within the next few turns.",
-        });
+        send({ type: "steer", message: WATCHDOG_STEER_MESSAGES[runKind] });
         return;
       }
       if (
@@ -516,9 +532,15 @@ export function startExecutor(options: {
 
       if (event.type === "tool_execution_start" && event.toolName) {
         lastActivity = event.toolName;
-        actionSignatures.push(event.toolName.toLowerCase());
+        const signature = `${event.toolName.toLowerCase()}:${JSON.stringify(event.args ?? null)}`;
+        const repeated = actionSignatures.includes(signature);
+        actionSignatures.push(signature);
         if (actionSignatures.length > 8) actionSignatures.shift();
-        if (/^(edit|write)$/.test(event.toolName)) {
+        const mutation = /^(edit|write)$/.test(event.toolName);
+        // Implementation runs progress by mutating files. Read-only runs
+        // (investigation, review) progress through novel tool activity;
+        // exact repeats of a recent action do not reset the watchdog.
+        if (mutation || (readOnlyProgress && !repeated)) {
           lastProgressAt = Date.now();
           progressTurns = attempt.usage.turns;
           watchdogSteeredAt = undefined;

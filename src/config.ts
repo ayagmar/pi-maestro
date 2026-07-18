@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir, type ModelRegistry, resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
@@ -577,30 +577,81 @@ export function validateEffectiveConfig(config: MaestroConfig): string | undefin
   return undefined;
 }
 
+interface ConfigCacheEntry {
+  identity: string;
+  value: Partial<MaestroConfig> | undefined;
+}
+
+const configCache = new Map<string, ConfigCacheEntry>();
+
+/** Exact file identity (inode + size + mtime ns) so a cached parse can never go stale silently. */
+function configFileIdentity(file: string): string | undefined {
+  try {
+    const stat = statSync(file, { bigint: true });
+    return `${stat.ino}-${stat.size}-${stat.mtimeNs}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function readConfigFile(file: string): Partial<MaestroConfig> | undefined {
-  if (!existsSync(file)) return undefined;
+  const identity = configFileIdentity(file);
+  if (identity === undefined) {
+    configCache.delete(file);
+    return undefined;
+  }
+  const cached = configCache.get(file);
+  if (cached && cached.identity === identity) {
+    return cached.value === undefined ? undefined : structuredClone(cached.value);
+  }
   const contents = readFileSync(file, "utf-8");
   try {
     const parsed: unknown = JSON.parse(contents);
     const error = validateConfig(parsed);
     if (error) {
+      configCache.delete(file);
       renameSync(file, `${file}.invalid-${Date.now()}`);
       return undefined;
     }
+    if (configFileIdentity(file) === identity) {
+      configCache.set(file, {
+        identity,
+        value: structuredClone(parsed) as Partial<MaestroConfig>,
+      });
+    }
     return parsed as Partial<MaestroConfig>;
   } catch {
+    configCache.delete(file);
     renameSync(file, `${file}.corrupt-${Date.now()}`);
     return undefined;
   }
 }
 
 /**
+ * Whether the current project is trusted by pi. Untrusted projects cannot
+ * influence maestro behavior through `.pi/maestro.json`: budgets, attempt
+ * caps, tier models, and tier tool lists all stay at trusted (user) values.
+ * The extension records pi's decision at session start; the default is
+ * trusted for direct library/test use outside a pi session.
+ */
+let projectConfigTrusted = true;
+
+export function setProjectConfigTrust(trusted: boolean): void {
+  projectConfigTrusted = trusted;
+}
+
+export function isProjectConfigTrusted(): boolean {
+  return projectConfigTrusted;
+}
+
+/**
  * Resolve config: defaults ← trusted user config ← non-executable project settings.
- * A repository may select a user-defined verification profile, but cannot define commands.
+ * A repository may select a user-defined verification profile, but cannot define
+ * commands. An untrusted project contributes no settings at all.
  */
 export function loadConfig(cwd: string): MaestroConfig {
   const user = readConfigFile(configFile("user", cwd));
-  const project = readConfigFile(configFile("project", cwd));
+  const project = projectConfigTrusted ? readConfigFile(configFile("project", cwd)) : undefined;
   const trusted = mergeConfig(DEFAULT_CONFIG, user);
   let resolved = trusted;
   if (project) {

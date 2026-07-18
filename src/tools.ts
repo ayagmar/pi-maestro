@@ -71,6 +71,12 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             description:
               "Self-contained instructions: goal, relevant file paths, constraints, acceptance criteria, verification command",
           }),
+          kind: Type.Optional(
+            StringEnum(["implementation", "investigation"] as const, {
+              description:
+                "implementation (default) changes files; investigation is explicit read-only/no-file work and requires writePaths: [].",
+            })
+          ),
           tier: Type.String({ description: "Complexity tier: trivial, standard, or complex" }),
           writePaths: Type.Array(Type.String(), {
             maxItems: 64,
@@ -137,6 +143,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         for (const input of params.tasks as {
           title: string;
           brief: string;
+          kind?: "implementation" | "investigation";
           tier: string;
           commitMessage?: string;
           supersedesTaskId?: string;
@@ -152,7 +159,11 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           if (verificationProfile && !config.verificationProfiles?.[verificationProfile]) {
             throw new Error(`Unknown verification profile: ${verificationProfile}`);
           }
-          const contract = normalizeTaskContract(input);
+          const { kind: inputKind, ...inputWithoutKind } = input;
+          const contract = normalizeTaskContract({
+            ...inputWithoutKind,
+            ...(inputKind === "investigation" ? { kind: "investigation" as const } : {}),
+          });
           let discovery: { allowedWritePaths: string[] } | undefined;
           if (input.discovery) {
             if (contract.writePaths.length !== 0) {
@@ -174,6 +185,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             brief: input.brief,
             tier: input.tier,
           };
+          if (contract.kind) taskInput.kind = contract.kind;
           if (input.commitMessage) taskInput.commitMessage = input.commitMessage;
           if (input.dependsOn) taskInput.dependsOn = input.dependsOn;
           taskInput.writePaths = contract.writePaths;
@@ -468,6 +480,12 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       taskId: Type.String({ description: "Task id like T1" }),
       title: Type.Optional(Type.String({ description: "New title" })),
       brief: Type.Optional(Type.String({ description: "New self-contained brief" })),
+      kind: Type.Optional(
+        StringEnum(["implementation", "investigation"] as const, {
+          description:
+            "Replacement task kind; investigation marks explicit read-only/no-file work and requires writePaths: [].",
+        })
+      ),
       tier: Type.Optional(Type.String({ description: "New complexity tier" })),
       dependsOn: Type.Optional(
         Type.Array(Type.String(), { description: "Replacement dependency task ids" })
@@ -514,6 +532,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         taskId,
         title,
         brief,
+        kind,
         tier,
         dependsOn,
         writePaths,
@@ -528,6 +547,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         taskId: string;
         title?: string;
         brief?: string;
+        kind?: "implementation" | "investigation";
         tier?: string;
         dependsOn?: string[];
         writePaths?: string[];
@@ -555,6 +575,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       const editsContractField =
         title !== undefined ||
         brief !== undefined ||
+        kind !== undefined ||
         successCriteria !== undefined ||
         tier !== undefined ||
         writePaths !== undefined ||
@@ -563,7 +584,10 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         dependsOn !== undefined ||
         commitMessage !== undefined;
       const editsTaskContract =
-        brief !== undefined || writePaths !== undefined || successCriteria !== undefined;
+        brief !== undefined ||
+        kind !== undefined ||
+        writePaths !== undefined ||
+        successCriteria !== undefined;
       const costSoFar = beforeTask ? snapshot(beforeTask).cost : 0;
       if (wasInFlight && editsContractField && !invalidateInFlight) {
         throw new Error(
@@ -578,6 +602,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           {
             ...(title !== undefined ? { title } : {}),
             ...(brief !== undefined ? { brief } : {}),
+            ...(kind !== undefined ? { kind } : {}),
             ...(tier !== undefined ? { tier } : {}),
             ...(dependsOn !== undefined ? { dependsOn } : {}),
             ...(writePaths !== undefined ? { writePaths } : {}),
