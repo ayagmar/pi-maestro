@@ -16,6 +16,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { completionFreshness } from "./artifact-policy.js";
 import { STATE_DIR } from "./constants.js";
+import { processStartId } from "./runner.js";
 import {
   type Attempt,
   type Board,
@@ -185,6 +186,24 @@ export function loadBoard(cwd: string): Board {
   }
 }
 
+/**
+ * Zero-copy read-only view of the current board for hot render paths
+ * (status bar, widgets, dashboards). The returned object is the shared
+ * cache entry: callers must not mutate it. Any mutation path must use
+ * loadBoard/updateBoard/updateTask instead.
+ */
+export function loadBoardView(cwd: string): Readonly<Board> {
+  const file = boardFile(cwd);
+  const identity = fileIdentity(file);
+  const cached = identity === undefined ? undefined : boardCache.get(file);
+  if (identity !== undefined && cached && cached.identity === identity) return cached.board;
+  // Cache miss: loadBoard parses, validates, and repopulates the cache.
+  const board = loadBoard(cwd);
+  const freshIdentity = fileIdentity(file);
+  const fresh = freshIdentity === undefined ? undefined : boardCache.get(file);
+  return fresh && fresh.identity === freshIdentity ? fresh.board : board;
+}
+
 export function listCorruptBoardFiles(cwd: string): string[] {
   const directory = stateDir(cwd);
   if (!existsSync(directory)) return [];
@@ -216,6 +235,23 @@ export function saveBoard(cwd: string, board: Board): void {
  */
 export function updateBoard<T>(cwd: string, mutate: (board: Board) => T): T {
   const lock = acquireBoardLock(cwd);
+  try {
+    const board = loadBoard(cwd);
+    const result = mutate(board);
+    if (result !== false) saveBoardUnlocked(cwd, board);
+    return result;
+  } finally {
+    releaseBoardLock(lock);
+  }
+}
+
+/**
+ * updateBoard with a non-blocking lock wait, for interactive-session paths
+ * (tool handlers, commands) where an event-loop stall would freeze the TUI.
+ * The mutate callback itself still runs synchronously under the lock.
+ */
+export async function updateBoardAsync<T>(cwd: string, mutate: (board: Board) => T): Promise<T> {
+  const lock = await acquireBoardLockAsync(cwd);
   try {
     const board = loadBoard(cwd);
     const result = mutate(board);
@@ -282,46 +318,65 @@ function saveBoardUnlocked(cwd: string, board: Board): void {
 }
 
 /**
- * Kernel-reported process start identity, so a recycled PID cannot masquerade
- * as a live lock owner. Linux-only; other platforms return undefined and keep
- * the conservative liveness-only check.
+ * Contention model: the lock is held only inside synchronous critical
+ * sections with no awaits, so two callers in the same process can never
+ * contend. Waiting happens only when a *different process* (a second pi
+ * session in the same repo, or a crashed owner pending stale reclaim)
+ * holds board.lock — normally for single-digit milliseconds.
  */
-function processStartId(pid: number): string | undefined {
+function tryAcquireBoardLock(
+  file: string,
+  token: string
+): BoardLock | { retry: true } | { reclaimed: true } {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-    const closeParen = stat.lastIndexOf(")");
-    if (closeParen < 0) return undefined;
-    const fields = stat.slice(closeParen + 2).split(" ");
-    // Field 22 (starttime) is index 19 after the (pid, comm) prefix.
-    const startTicks = fields[19];
-    return startTicks && /^\d+$/.test(startTicks) ? startTicks : undefined;
-  } catch {
-    return undefined;
+    const fd = openSync(file, "wx");
+    const start = processStartId(process.pid);
+    writeFileSync(fd, JSON.stringify({ pid: process.pid, token, ...(start ? { start } : {}) }));
+    return { fd, file, token };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const staleOwner = staleLockOwner(file);
+    if (staleOwner && reclaimStaleLock(file, staleOwner)) return { reclaimed: true };
+    return { retry: true };
   }
 }
 
-function acquireBoardLock(cwd: string): BoardLock {
+function boardLockFile(cwd: string): string {
   const dir = stateDir(cwd);
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, "board.lock");
-  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return join(dir, "board.lock");
+}
+
+function lockToken(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function acquireBoardLock(cwd: string): BoardLock {
+  const file = boardLockFile(cwd);
+  const token = lockToken();
   for (let tries = 0; tries < BOARD_LOCK_RETRIES; tries += 1) {
-    try {
-      const fd = openSync(file, "wx");
-      const start = processStartId(process.pid);
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, token, ...(start ? { start } : {}) }));
-      return { fd, file, token };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const staleOwner = staleLockOwner(file);
-      if (staleOwner && reclaimStaleLock(file, staleOwner)) continue;
-      // Board critical sections are read-modify-write of one JSON file and
-      // complete in single-digit milliseconds. Spin briefly at fine
-      // granularity so typical contention resolves in ≤1ms of blocking,
-      // then back off to 10ms slices for the pathological long-hold case.
-      const waitMs = tries < 20 ? 1 : 10;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
-    }
+    const acquired = tryAcquireBoardLock(file, token);
+    if ("fd" in acquired) return acquired;
+    if ("reclaimed" in acquired) continue;
+    // Spin briefly at fine granularity so typical cross-process contention
+    // resolves in ≤1ms of blocking, then back off to 10ms slices for the
+    // pathological long-hold case.
+    const waitMs = tries < 20 ? 1 : 10;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+  }
+  throw new Error("Timed out waiting for maestro board lock");
+}
+
+/** Same protocol as acquireBoardLock, but waits without blocking the event loop. */
+async function acquireBoardLockAsync(cwd: string): Promise<BoardLock> {
+  const file = boardLockFile(cwd);
+  const token = lockToken();
+  for (let tries = 0; tries < BOARD_LOCK_RETRIES; tries += 1) {
+    const acquired = tryAcquireBoardLock(file, token);
+    if ("fd" in acquired) return acquired;
+    if ("reclaimed" in acquired) continue;
+    const waitMs = tries < 20 ? 1 : 10;
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
   throw new Error("Timed out waiting for maestro board lock");
 }
@@ -1021,20 +1076,42 @@ export function updateTask(
 ): Task | undefined {
   const lock = acquireBoardLock(cwd);
   try {
-    const board = loadBoard(cwd);
-    const task = findTask(board, taskId);
-    if (!task) return undefined;
-    const previousStatus = task.status;
-    mutate(task, board);
-    task.updatedAt = Date.now();
-    saveBoardUnlocked(cwd, board);
-    if (task.status !== previousStatus) {
-      recordStatusChange(cwd, task.id, previousStatus, task.status, board.revision as number);
-    }
-    return task;
+    return updateTaskUnlocked(cwd, taskId, mutate);
   } finally {
     releaseBoardLock(lock);
   }
+}
+
+/** updateTask with a non-blocking lock wait, for interactive-session paths. */
+export async function updateTaskAsync(
+  cwd: string,
+  taskId: string,
+  mutate: (task: Task, board: Board) => void
+): Promise<Task | undefined> {
+  const lock = await acquireBoardLockAsync(cwd);
+  try {
+    return updateTaskUnlocked(cwd, taskId, mutate);
+  } finally {
+    releaseBoardLock(lock);
+  }
+}
+
+function updateTaskUnlocked(
+  cwd: string,
+  taskId: string,
+  mutate: (task: Task, board: Board) => void
+): Task | undefined {
+  const board = loadBoard(cwd);
+  const task = findTask(board, taskId);
+  if (!task) return undefined;
+  const previousStatus = task.status;
+  mutate(task, board);
+  task.updatedAt = Date.now();
+  saveBoardUnlocked(cwd, board);
+  if (task.status !== previousStatus) {
+    recordStatusChange(cwd, task.id, previousStatus, task.status, board.revision as number);
+  }
+  return task;
 }
 
 export function assertTaskNotDispatched(task: Task): void {
@@ -1705,13 +1782,22 @@ export function normalizeTaskContract(input: {
   kind?: "investigation";
   writePaths?: string[];
   successCriteria?: string[];
-}): { writePaths: string[]; successCriteria?: string[]; kind?: "investigation" } {
+}): {
+  writePaths: string[];
+  successCriteria?: string[];
+  kind?: "investigation";
+  /** Set when only legacy brief phrasing (not an explicit kind) legitimized the empty scope. */
+  legacyInvestigationBrief?: true;
+} {
   if (!input.writePaths) throw new Error("writePaths is required for every new task");
   const writePaths = normalizeWritePaths(input.writePaths);
-  const noFileTask =
+  const explicitInvestigation = input.kind === "investigation";
+  const legacyInvestigation =
+    !explicitInvestigation &&
     writePaths.length === 0 &&
-    (input.kind === "investigation" || LEGACY_INVESTIGATION_BRIEF.test(input.brief));
-  if (input.kind === "investigation" && writePaths.length > 0) {
+    LEGACY_INVESTIGATION_BRIEF.test(input.brief);
+  const noFileTask = writePaths.length === 0 && (explicitInvestigation || legacyInvestigation);
+  if (explicitInvestigation && writePaths.length > 0) {
     throw new Error("investigation tasks must use writePaths: []");
   }
   if (writePaths.length === 0 && !noFileTask) {
@@ -1731,6 +1817,7 @@ export function normalizeTaskContract(input: {
     writePaths,
     ...(successCriteria ? { successCriteria } : {}),
     ...(noFileTask ? { kind: "investigation" as const } : {}),
+    ...(legacyInvestigation ? { legacyInvestigationBrief: true as const } : {}),
   };
 }
 

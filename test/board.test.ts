@@ -30,6 +30,7 @@ import {
   humanRetryRiskToken,
   isReadOnlyTask,
   loadBoard,
+  loadBoardView,
   loadStatusHistory,
   normalizeTaskContract,
   rejectPlan,
@@ -42,7 +43,9 @@ import {
   taskGroup,
   transition,
   updateBoard,
+  updateBoardAsync,
   updateTask,
+  updateTaskAsync,
   validatePlan,
 } from "../src/board.js";
 import { type Attempt, type Board, type TaskStatus } from "../src/types.js";
@@ -1004,12 +1007,16 @@ test("task contract accepts explicit investigation kind regardless of brief phra
   assert.deepEqual(contract.writePaths, []);
   assert.equal(contract.kind, "investigation");
 
-  // Legacy phrasing still works for boards planned before the kind field.
+  // Legacy phrasing still works for boards planned before the kind field,
+  // but is flagged so planning surfaces a deprecation notice.
   const legacy = normalizeTaskContract({
     brief: "Read-only investigation with no-file changes",
     writePaths: [],
   });
   assert.equal(legacy.kind, "investigation");
+  assert.equal(legacy.legacyInvestigationBrief, true);
+  // The explicit kind is the supported path and carries no deprecation flag.
+  assert.equal(contract.legacyInvestigationBrief, undefined);
 
   // Investigation kind with a write scope is a contradiction.
   assert.throws(
@@ -1058,6 +1065,66 @@ test("human retry risk token ignores unrelated board touches but tracks acceptan
   // Acceptance/integration evidence changes must invalidate it.
   task.integratedCommit = "abc123";
   assert.notEqual(humanRetryRiskToken(task), before);
+});
+
+test("async board helpers persist mutations and honor the false-result veto", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-async-board-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, { title: "Async", brief: "work", tier: "standard" });
+    saveBoard(cwd, board);
+
+    await updateBoardAsync(cwd, (fresh) => {
+      fresh.goal = "async goal";
+      return true;
+    });
+    assert.equal(loadBoard(cwd).goal, "async goal");
+
+    // A false result is never persisted.
+    await updateBoardAsync(cwd, (fresh) => {
+      fresh.goal = "discarded";
+      return false;
+    });
+    assert.equal(loadBoard(cwd).goal, "async goal");
+
+    const updated = await updateTaskAsync(cwd, task.id, (fresh) => {
+      fresh.title = "Async updated";
+    });
+    assert.equal(updated?.title, "Async updated");
+    assert.equal(findTask(loadBoard(cwd), task.id)?.title, "Async updated");
+    assert.equal(await updateTaskAsync(cwd, "T999", () => {}), undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loadBoardView tracks writes without cloning and loadBoard callers cannot corrupt it", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-board-view-"));
+  try {
+    const board = emptyBoard();
+    createTask(board, { title: "View", brief: "work", tier: "standard" });
+    saveBoard(cwd, board);
+
+    const view = loadBoardView(cwd);
+    assert.equal(view.tasks[0]?.title, "View");
+    // Same identity, same cached object: zero-copy on repeat reads.
+    assert.equal(loadBoardView(cwd), view);
+
+    // A mutable loadBoard copy does not alias the shared view.
+    const copy = loadBoard(cwd);
+    const copyTask = copy.tasks[0];
+    assert.ok(copyTask);
+    copyTask.title = "mutated copy";
+    assert.equal(loadBoardView(cwd).tasks[0]?.title, "View");
+
+    // A persisted write invalidates the view by file identity.
+    updateTask(cwd, "T1", (task) => {
+      task.title = "Written";
+    });
+    assert.equal(loadBoardView(cwd).tasks[0]?.title, "Written");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("loadBoard archives a corrupt board before returning an empty board", () => {

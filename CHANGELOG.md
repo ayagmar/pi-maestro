@@ -4,6 +4,9 @@
 
 ### Correctness
 
+- Parallel non-worktree batches now auto-isolate in per-task worktrees (with a user notice) so concurrent executors can never cross-attribute each other's file changes; single-task dispatch keeps the shared checkout, and non-Git projects keep legacy behavior.
+- Investigation runs that legitimately write a long report across turns without tool calls now count meaningful report growth as watchdog progress.
+- Legacy investigation-phrased briefs (empty writePaths without `kind: "investigation"`) now produce an explicit deprecation notice at planning; the explicit kind is the supported path.
 - Watchdog progress detection is now run-kind aware: investigation/discovery executors and reviewers progress through novel read-tool activity instead of being steered with implementation text and killed as stalled; only exact repeated actions count as no progress, and steering messages are phase-specific.
 - Non-worktree executions now attribute file changes by content against a pre-run Git baseline, so bash-side mutations (sed -i, git apply, codegen) are included in touched files, candidate trees, and review scope; pre-existing user dirt is never attributed to the executor.
 - Task contracts gained an explicit `kind: "investigation"` field replacing the brief-phrasing regex for no-file work; legacy investigation-phrased briefs remain accepted, and the kind flows through maestro_plan, maestro_update, recipes, plan export/import, and the contract fingerprint.
@@ -17,6 +20,10 @@
 
 ### Performance
 
+- Hot render paths (per-executor-event UI refresh) are throttled with a leading-edge coalescing scheduler; single refreshes stay synchronous, bursts collapse to one trailing render.
+- The status bar and widgets read a zero-copy cached board view instead of cloning the board on every executor event.
+- Interactive tool handlers (maestro_plan/maestro_update and drive decision recovery) wait for the board lock asynchronously, so cross-process contention can no longer stall the TUI event loop.
+- macOS and BSD now also get PID-recycle-safe board locks via `ps` start-time identity (Linux keeps /proc).
 - Board and config reads are cached by exact file identity (inode + size + mtime ns), and board lock contention now spins at fine granularity before backing off, reducing synchronous stalls on the interactive session.
 
 ### Reliability

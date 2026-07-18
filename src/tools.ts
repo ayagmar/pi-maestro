@@ -18,7 +18,8 @@ import {
   normalizeWritePaths,
   planValidationMessage,
   updateBoard,
-  updateTask,
+  updateBoardAsync,
+  updateTaskAsync,
   validatePlan,
 } from "./board.js";
 import { loadConfig } from "./config.js";
@@ -134,10 +135,13 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const config = loadConfig(ctx.cwd);
-      const result = updateBoard(ctx.cwd, (board) => {
+      // Tool handlers run on the interactive session thread; wait for the
+      // board lock without blocking the event loop.
+      const result = await updateBoardAsync(ctx.cwd, (board) => {
         assertPlanTaskLimit(board.tasks.length + (params.tasks as unknown[]).length, config);
         const initialTaskCount = board.tasks.length;
         const created: Task[] = [];
+        const legacyInvestigationTaskIds: string[] = [];
         const supersededTaskIds = new Set<string>();
         const supersessions: Array<{ predecessorId: string; successorId: string }> = [];
         for (const input of params.tasks as {
@@ -195,6 +199,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           if (input.reviewPolicy) taskInput.reviewPolicy = input.reviewPolicy;
           const task = createTask(board, taskInput);
           created.push(task);
+          if (contract.legacyInvestigationBrief) legacyInvestigationTaskIds.push(task.id);
 
           if (input.supersedesTaskId) {
             const predecessorId = input.supersedesTaskId.trim().toUpperCase();
@@ -219,7 +224,12 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           board.planPending = true;
         }
         if (preflightWorkflow(board, config).requiresConfirmation) board.planPending = true;
-        return { created, supersessions, planPending: board.planPending };
+        return {
+          created,
+          supersessions,
+          legacyInvestigationTaskIds,
+          planPending: board.planPending,
+        };
       });
       const worktreeWarning = parkIdleToolWorktrees(ctx.cwd, driveController);
       adoptBoard(ctx);
@@ -235,11 +245,14 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             .map(({ predecessorId, successorId }) => `${predecessorId} → ${successorId}`)
             .join(", ")}. Downstream dependencies were rewired.`
         : "";
+      const legacyKindNotice = result.legacyInvestigationTaskIds.length
+        ? `\nDeprecated: ${result.legacyInvestigationTaskIds.join(", ")} rel${result.legacyInvestigationTaskIds.length === 1 ? "ies" : "y"} on investigation-phrased brief text to justify writePaths: []. Set kind: "investigation" explicitly; brief-phrasing detection will be removed.`
+        : "";
       return {
         content: [
           {
             type: "text",
-            text: `Created ${created.length} task(s):\n${lines.join("\n")}${replacement}${approval}${worktreeWarning}`,
+            text: `Created ${created.length} task(s):\n${lines.join("\n")}${replacement}${legacyKindNotice}${approval}${worktreeWarning}`,
           },
         ],
         details: { action: "plan", tasks: created.map((task) => snapshot(task)) },
@@ -594,7 +607,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           `${beforeTask.id} is ${beforeTask.status} with an in-flight attempt/review ($${costSoFar.toFixed(4)} cost so far). This contract edit would invalidate that work. Wait for it to settle or pass invalidateInFlight: true to acknowledge the invalidation.`
         );
       }
-      const updated = updateTask(ctx.cwd, taskId, (fresh, board) => {
+      const updated = await updateTaskAsync(ctx.cwd, taskId, (fresh, board) => {
         assertPlanTaskLimit(board.tasks.length, config);
         assertTaskNotDispatched(fresh);
         applyPlanTaskEdits(

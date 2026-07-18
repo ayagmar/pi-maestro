@@ -1803,6 +1803,108 @@ test("executor session is persisted before the run settles", async () => {
   }
 });
 
+test("parallel non-worktree batches auto-isolate in per-task worktrees with a notice", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-parallel-isolate-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    for (const index of [1, 2]) {
+      createTask(board, {
+        title: `Parallel ${index}`,
+        brief: `write file ${index}`,
+        tier: "standard",
+        writePaths: [`file-${index}.txt`],
+        successCriteria: [`file ${index} exists`],
+      });
+    }
+    saveBoard(cwd, board);
+
+    const executorCwds: string[] = [];
+    const notices: string[] = [];
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, useWorktrees: false, maxParallel: 2, autoCommit: false },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        if (options.runId.includes("-review-")) {
+          // Reviewers are read-only; mutating the candidate here would
+          // legitimately invalidate the review.
+          return executor({ finalReport: "VERDICT: APPROVE" })(options);
+        }
+        executorCwds.push(options.cwd);
+        // Each executor writes its own file in whatever checkout it received.
+        const marker = options.runId.startsWith("T1-") ? "file-1.txt" : "file-2.txt";
+        writeFileSync(join(options.cwd, marker), `${options.runId}\n`);
+        return executor({ finalReport: "done", touchedFiles: [marker] })(options);
+      },
+      onUpdate,
+      trackRun,
+      onNotice: (message) => notices.push(message),
+    });
+
+    // Both executors ran in isolated checkouts, not the shared main tree.
+    assert.equal(executorCwds.length, 2);
+    for (const executorCwd of executorCwds) assert.notEqual(executorCwd, cwd);
+    assert.notEqual(executorCwds[0], executorCwds[1]);
+    assert.ok(notices.some((notice) => /isolated in per-task worktrees/.test(notice)));
+
+    // Attribution stayed exact: neither sibling absorbed the other's file.
+    const persisted = loadBoard(cwd);
+    const first = findTask(persisted, "T1");
+    const second = findTask(persisted, "T2");
+    assert.deepEqual(first?.attempts.at(-1)?.touchedFiles, ["file-1.txt"]);
+    assert.deepEqual(second?.attempts.at(-1)?.touchedFiles, ["file-2.txt"]);
+    assert.equal(result.stoppedBecause.code, "completed");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("single-task non-worktree dispatch keeps the shared checkout", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-single-shared-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    const executorCwds: string[] = [];
+    const notices: string[] = [];
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config: { ...config, useWorktrees: false, maxParallel: 2 },
+      startExecutor: (options) => {
+        executorCwds.push(options.cwd);
+        return executor({ finalReport: "done" })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.deepEqual(executorCwds, [cwd]);
+    assert.deepEqual(notices, []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("main-tree execution attributes run changes by content and excludes pre-existing dirt", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" });

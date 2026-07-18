@@ -1,6 +1,13 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { type Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
@@ -12,6 +19,43 @@ const VERIFICATION_KILL_GRACE_MS = 250;
 import { type Attempt, type FailureReason, type TierConfig, type Usage } from "./types.js";
 
 export type RunFailureCause = "provider" | "process" | "user_abort" | "cost_cap" | "stalled";
+
+/**
+ * Kernel-reported process start identity, so a recycled PID cannot masquerade
+ * as a live owner of on-disk state (board locks). Linux reads /proc; macOS
+ * and BSDs ask ps for the start time. Unsupported platforms return undefined
+ * and callers keep a conservative liveness-only check.
+ */
+export function processStartId(pid: number): string | undefined {
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+      const closeParen = stat.lastIndexOf(")");
+      if (closeParen < 0) return undefined;
+      const fields = stat.slice(closeParen + 2).split(" ");
+      // Field 22 (starttime) is index 19 after the (pid, comm) prefix.
+      const startTicks = fields[19];
+      return startTicks && /^\d+$/.test(startTicks) ? startTicks : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (process.platform === "darwin" || process.platform.endsWith("bsd")) {
+    try {
+      const lstart = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 2000,
+      }).trim();
+      if (!lstart) return undefined;
+      const epoch = Date.parse(lstart);
+      return Number.isFinite(epoch) ? String(epoch) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
 
 export interface VerificationResult {
   ok: boolean;
@@ -200,6 +244,9 @@ export function cappedLogWriter(
  * runs are legitimately read-only and progress through read-tool activity.
  */
 export type RunKind = "implementation" | "investigation" | "review";
+
+/** Minimum new final-report characters per turn that count as investigation progress. */
+const REPORT_PROGRESS_MIN_GROWTH = 80;
 
 const WATCHDOG_STEER_MESSAGES: Record<RunKind, string> = {
   implementation:
@@ -548,6 +595,7 @@ export function startExecutor(options: {
       }
 
       if (event.type === "message_end" && event.message?.role === "assistant") {
+        const reportLengthBefore = result.finalReport.length;
         // Apply the cap after clearing a prior transient provider error. The
         // successful message that crosses the cap must still end as cost_cap.
         const exceededCostCap = applyAssistantMessage(
@@ -557,6 +605,17 @@ export function startExecutor(options: {
           options.maxCost
         );
         if (exceededCostCap && !abortCause) abortWithCause("cost_cap");
+        // Read-only runs can legitimately spend consecutive turns writing a
+        // long report with no tool calls at all. Meaningful new assistant
+        // text is progress there; identical or shrinking text is not.
+        if (
+          readOnlyProgress &&
+          result.finalReport.length >= reportLengthBefore + REPORT_PROGRESS_MIN_GROWTH
+        ) {
+          lastProgressAt = Date.now();
+          progressTurns = attempt.usage.turns;
+          watchdogSteeredAt = undefined;
+        }
       }
 
       const touched = touchedFile(event, options.cwd);

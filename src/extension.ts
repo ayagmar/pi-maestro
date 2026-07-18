@@ -9,6 +9,7 @@ import {
   consumeQuarantineNotice,
   findTask,
   loadBoard,
+  loadBoardView,
   restoreQuarantineNotice,
   updateBoard,
 } from "./board.js";
@@ -26,6 +27,7 @@ import { notify } from "./handoff.js";
 import { LivePaneController } from "./live-pane-controller.js";
 import { manuallyApproveTask } from "./manual-approval.js";
 import { showPlanReview } from "./plan-review-controller.js";
+import { createRenderThrottle } from "./render-scheduler.js";
 import { startExecutor as defaultStartExecutor } from "./runner.js";
 import { SessionNavigator } from "./session-navigator.js";
 import { projectStatus } from "./status.js";
@@ -125,6 +127,15 @@ export default function maestro(
     }
   }
 
+  // Executor events arrive in bursts (hundreds/second across parallel runs).
+  // Only that per-event path is throttled: the leading edge renders
+  // immediately and bursts coalesce into one trailing render with the
+  // latest context. Commands, lifecycle, and run start/stop keep the
+  // synchronous refreshUI so their effects are observable immediately.
+  const eventRefreshThrottle = createRenderThrottle((ctx: ExtensionContext) => refreshUI(ctx), {
+    intervalMs: 100,
+  });
+
   function refreshUI(ctx: ExtensionContext): void {
     // Executor stdout events outlive session switches; any access on a stale
     // ctx throws. Skip — the next session's events arrive with a live ctx.
@@ -133,7 +144,9 @@ export default function maestro(
     } catch {
       return;
     }
-    const board = loadBoard(ctx.cwd);
+    // Hot path: refreshUI runs on every executor event. The view is a shared
+    // read-only cache entry; nothing below mutates it.
+    const board = loadBoardView(ctx.cwd);
     notifyQuarantine(ctx);
     livePaneController.sync(ctx);
 
@@ -211,6 +224,7 @@ export default function maestro(
     isRuntimeActive: () => lifecycleState.isActive(),
     adoptBoard,
     refreshUI,
+    refreshUIOnEvent: (ctx: ExtensionContext) => eventRefreshThrottle.schedule(ctx),
     notify,
     sendDecision,
     onRunStarted: () => livePaneController.onRunStarted(),

@@ -67,6 +67,8 @@ export interface DriveRuntimeServices {
   isRuntimeActive(): boolean;
   adoptBoard(ctx: ExtensionContext): void;
   refreshUI(ctx: ExtensionContext): void;
+  /** Throttled refresh for high-frequency executor events. Defaults to refreshUI. */
+  refreshUIOnEvent?(ctx: ExtensionContext): void;
   notify(ctx: ExtensionContext, message: string, level?: "info" | "warning" | "error"): void;
   sendDecision(evidence: string, decisionId: string): void;
   onRunStarted(): void;
@@ -480,6 +482,7 @@ export class DriveRuntimeController {
       isLive: (taskId) => this.isTaskLive(taskId),
       onRetentionWarning: (warning) =>
         services.notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
+      onNotice: (message) => services.notify(ctx, message, "warning"),
     };
     if (taskIds) driveOptions.taskIds = taskIds;
     if (signal) driveOptions.signal = signal;
@@ -505,7 +508,9 @@ export class DriveRuntimeController {
       live.cost = update.cost;
       live.lastActivity = update.lastActivity;
     }
-    if (services.isRuntimeActive()) services.refreshUI(ctx);
+    if (services.isRuntimeActive()) {
+      (services.refreshUIOnEvent ?? services.refreshUI)(ctx);
+    }
   }
 
   private trackRun(

@@ -43,6 +43,7 @@ import { reviewTask } from "./workflow-review.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
 import {
   createWorktree,
+  inspectGit,
   parkInactiveWorktrees,
   removeUnreferencedCleanWorktree,
   removeWorktree,
@@ -117,6 +118,8 @@ export async function driveBoard(options: {
   trackRun: TrackRun;
   isLive?: (taskId: string) => boolean;
   onRetentionWarning?: (warning: string) => void;
+  /** Operational notices (isolation escalation, serialization) surfaced to the user. */
+  onNotice?: (message: string) => void;
   humanRetryTaskId?: string;
   humanRetryExpectedRiskToken?: string;
   humanRetryOwnerSession?: string;
@@ -292,7 +295,24 @@ export async function driveBoard(options: {
         );
         const worktrees = new Map<string, WorktreeRef>();
         const created: WorktreeRef[] = [];
-        const isolateBatch = config.useWorktrees || retryEligibility?.kind === "execute";
+        let isolateBatch = config.useWorktrees || retryEligibility?.kind === "execute";
+        // Parallel executors sharing one Git working tree cross-attribute
+        // each other's file changes: sibling A's edits land in sibling B's
+        // baseline diff, candidate tree, and review scope. Auto-isolate
+        // parallel batches in per-task worktrees. Non-Git projects have no
+        // content attribution (or worktrees) at all, so they keep the
+        // legacy tool-event-only behavior.
+        if (
+          !isolateBatch &&
+          dispatchable.length > 1 &&
+          config.maxParallel > 1 &&
+          inspectGit(cwd).ok
+        ) {
+          isolateBatch = true;
+          options.onNotice?.(
+            `Parallel batch of ${dispatchable.length} tasks isolated in per-task worktrees to keep change attribution exact (useWorktrees is off).`
+          );
+        }
         try {
           for (const task of dispatchable) {
             const previous = task.attempts.at(-1);

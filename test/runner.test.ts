@@ -591,6 +591,62 @@ process.stdin.on("end", () => process.exit(0));
   }
 });
 
+test("investigation run writing a growing report without tool calls does not stall", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-report-"));
+  const fakePi = join(root, "reporting-pi.mjs");
+  // Emits assistant turns whose report text keeps growing; zero tool calls.
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+let turn = 0;
+const paragraph = "Detailed findings paragraph with enough substance to count as new report text for this turn. ";
+let report = "";
+const interval = setInterval(() => {
+  turn += 1;
+  report += paragraph;
+  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1 }, content: [{ type: "text", text: report }] } }));
+  if (turn >= 20) {
+    clearInterval(interval);
+    console.log(JSON.stringify({ type: "agent_settled" }));
+  }
+}, 2);
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "abort") process.exit(1);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "report-progress",
+      cwd: root,
+      prompt: "investigate and report",
+      tier: { thinking: "low" },
+      runKind: "investigation",
+      watchdogIdleSeconds: 0,
+      watchdogWarningTurns: 5,
+      watchdogTerminationTurns: 2,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.failureReason?.kind, undefined);
+    assert.equal(outcome.aborted, false);
+    assert.match(outcome.finalReport, /Detailed findings/);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("verification log is streamed to disk before the command finishes", async () => {
   if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "maestro-verify-stream-"));
