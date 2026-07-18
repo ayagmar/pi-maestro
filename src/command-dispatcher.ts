@@ -3,6 +3,7 @@ import { MaestroCommandCompletions } from "./command-completions.js";
 import {
   handleConfigCommand,
   handleCostsCommand,
+  handleInsightsCommand,
   handleReconcileCommand,
   handleSimulationCommand,
   handleTimelineCommand,
@@ -136,6 +137,9 @@ export class MaestroCommandDispatcher {
         case "costs":
           handleCostsCommand(ctx);
           return;
+        case "insights":
+          handleInsightsCommand(ctx);
+          return;
         case "reconcile":
           handleReconcileCommand(ctx);
           return;
@@ -205,6 +209,7 @@ export class MaestroCommandDispatcher {
         "scripting",
         `/${COMMAND} config         interactive settings editor (add "project" for repo scope, "show" to print)`,
         `/${COMMAND} costs          show attempts, total/average cost, models, and providers`,
+        `/${COMMAND} insights       compare model/tier cost, approval, review, and failure outcomes`,
         `/${COMMAND} simulate [ids] preview deterministic dependency waves without running work`,
         `/${COMMAND} plan export <file>  export a versioned plan without run evidence`,
         `/${COMMAND} plan import <file>  validate, archive current work, and import`,

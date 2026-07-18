@@ -26,6 +26,7 @@ export const MAESTRO_COMMANDS = [
   "recipe run",
   "recipe remove",
   "costs",
+  "insights",
   "simulate",
   "discover",
   "open",

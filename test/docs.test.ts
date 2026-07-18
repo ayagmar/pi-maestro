@@ -94,6 +94,7 @@ test("configuration docs match runtime defaults and commands remain documented",
   for (const command of [
     "retry",
     "timeline",
+    "insights",
     "reconcile",
     "plan diff",
     "recipe preview",
@@ -105,7 +106,7 @@ test("configuration docs match runtime defaults and commands remain documented",
   }
   assert.equal(MAESTRO_COMMANDS.includes("plan compare" as never), false);
   assert.equal(MAESTRO_COMMANDS.includes("watch" as never), false);
-  assert.equal(MAESTRO_COMMANDS.length, 39);
+  assert.equal(MAESTRO_COMMANDS.length, 40);
   assert.doesNotMatch(read("README.md"), /\/maestro list\b|plan compare|\/maestro watch\b/);
   assert.doesNotMatch(read("docs/operations.md"), /plan compare/);
 });

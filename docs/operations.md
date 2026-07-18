@@ -37,6 +37,7 @@ Maestro preserves board state, attempts, logs, sessions, and checkpoint branches
   live or capped work, confirms accepted/integrated work, preserves history, and isolates execution
   retry from the dirty integration checkout.
 - `/maestro timeline [taskId]` derives bounded chronology without model calls.
+- `/maestro insights` reads the current and archived boards without mutation or model calls and renders a bounded per-executor-model/task-tier report of attempts, first-review approval, average end-to-end cost per approved task, failure kinds, and reviewer rejection.
 - `/maestro reconcile` reports missing review, artifact, integration, verification, or recovery proof without rewriting state.
 - `/maestro simulate` reports deterministic dependency waves; plan approval and drive preflight additionally report concurrency, raw launch upper bounds, verification-profile usage, an explicitly labeled projected-cost estimate, and whether explicit scale confirmation is required. Cost forecasting prefers archived per-model-and-tier launch averages, otherwise applies model pricing metadata to a rough 20,000-input/4,000-output-token launch, and finally uses a static $0.10 fallback for unresolved models.
 - `/maestro agents` and `ctrl+alt+w` open the rich executor/reviewer session browser. Live sessions

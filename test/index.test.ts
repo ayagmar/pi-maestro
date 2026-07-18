@@ -872,6 +872,35 @@ test("/maestro costs summarizes attempts, cost, and identities", async () => {
   );
 });
 
+test("/maestro insights reads current and archived boards without double counting", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      task.status = "approved";
+      const attempt = billedAttempt(0.02, "openai/gpt-5-mini");
+      attempt.reviewLaunches = [
+        {
+          startedAt: 1,
+          verdict: "approve",
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        },
+      ];
+      task.attempts.push(attempt);
+      saveBoard(cwd, board);
+      archiveBoard(cwd);
+    },
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+      assert.ok(command.getArgumentCompletions?.("in")?.some((item) => item.value === "insights"));
+      await command.handler("INSIGHTS", ctx);
+      assert.match(notices[0] ?? "", /current board \+ 1 archive\(s\) · 1 attempt\(s\)/);
+      assert.match(notices[0] ?? "", /standard · openai\/gpt-5-mini/);
+      assert.match(notices[0] ?? "", /first-review approval 100\.0% \(1\/1\)/);
+    }
+  );
+});
+
 test("history command skips valid-JSON malformed rows and prints valid entries", async () => {
   await withBoard(
     (cwd) => {

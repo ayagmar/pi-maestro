@@ -396,6 +396,7 @@ ctrl+alt+w                open or close the agent-session viewer
 /maestro config project   interactive settings editor (repo scope)
 /maestro config show      print the resolved defaults + user + project configuration
 /maestro costs            show attempts, total/average billed cost, models, and providers
+/maestro insights         compare model/tier approvals, cost, failures, and review rejection
 /maestro reconcile        report board/artifact provenance inconsistencies
 /maestro timeline [id]    show bounded chronological evidence without waking a model
 /maestro timeline archive <file> [id]  inspect an archived board without restoring it
@@ -418,7 +419,10 @@ counts, rounds and attempts, total cost, average cost across billed attempts, an
 model/provider identifiers recorded by executors and reviewers. `/maestro costs` prints it directly
 without task details, including executor/reviewer context sizes, omission counts, and a reconciled
 cost breakdown. Zero-cost startup/provider
-failures count as attempts but are excluded from the meaningful average.
+failures count as attempts but are excluded from the meaningful average. `/maestro insights` is a
+bounded, model-free read over the current and archived boards, grouped by executor model and task
+tier; it reports attempts, first-review approval rate, average end-to-end cost per approved task,
+failure kinds, and reviewer rejection rate.
 
 ## Guides
 

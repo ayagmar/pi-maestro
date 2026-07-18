@@ -97,6 +97,7 @@ test("pure policy modules do not import Pi, TUI, process, runner, or Git adapter
     "dashboard-evidence.ts",
     "dashboard-launches.ts",
     "dashboard-navigation.ts",
+    "insights.ts",
     "plan-review.ts",
     "plan-serialization.ts",
     "status.ts",
@@ -255,6 +256,7 @@ test("inspection and configuration commands live outside the extension root", ()
 
   const commands = files.find((file) => file.name === "command-inspection.ts")?.contents ?? "";
   assert.match(commands, /function handleSimulationCommand/);
+  assert.match(commands, /function handleInsightsCommand/);
   assert.match(commands, /function handleReconcileCommand/);
   assert.match(commands, /function handleTimelineCommand/);
   assert.match(commands, /function handleConfigCommand/);

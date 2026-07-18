@@ -2,6 +2,7 @@ import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { completionFreshness } from "./artifact-policy.js";
 import {
   findTask,
+  listArchivedBoards,
   loadArchivedBoard,
   loadBoard,
   planValidationMessage,
@@ -10,6 +11,7 @@ import {
 import { describeConfig, loadConfig } from "./config.js";
 import { formatCostSummary } from "./format.js";
 import { notify } from "./handoff.js";
+import { deriveModelInsights, formatModelInsights } from "./insights.js";
 import { assertKnownTaskIds } from "./session-control.js";
 import { showSettings } from "./settings-ui.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
@@ -48,6 +50,18 @@ export function handleCostsCommand(ctx: ExtensionCommandContext): void {
       ? "No recorded costs; the board is empty."
       : formatCostSummary(board.tasks)
   );
+}
+
+export function handleInsightsCommand(ctx: ExtensionCommandContext): void {
+  const current = loadBoard(ctx.cwd);
+  const archives = listArchivedBoards(ctx.cwd).flatMap(({ file }) => {
+    try {
+      return [loadArchivedBoard(ctx.cwd, file)];
+    } catch {
+      return [];
+    }
+  });
+  notify(ctx, formatModelInsights(deriveModelInsights([current, ...archives]), archives.length));
 }
 
 export function handleReconcileCommand(ctx: ExtensionCommandContext): void {

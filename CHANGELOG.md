@@ -20,6 +20,7 @@
 
 ### Observability
 
+- `/maestro insights` now renders a bounded, model-free aggregation over current and archived boards with per-model/tier attempts, first-review approval, approved-task cost, failure kinds, and reviewer rejection rates.
 - Plan approval and drive scale preflight now show a clearly labeled projected-cost estimate, preferring archived per-model-and-tier launch averages before model pricing metadata and a documented static fallback.
 
 ### Performance
