@@ -67,7 +67,9 @@ test("workflow preflight size guidance and confirmation thresholds are determini
   const report = formatWorkflowPreflight(large);
   assert.match(report, /dependency waves:/);
   assert.match(report, /raw launch upper bounds:/);
-  assert.doesNotMatch(report, /\$|price estimate|USD/i);
+  assert.match(report, /projected cost estimate: \$.*upper-bound launches/i);
+  assert.equal(large.projectedCost.assumptions.inputTokensPerLaunch, 20_000);
+  assert.equal(large.projectedCost.assumptions.outputTokensPerLaunch, 4_000);
   assert.ok(report.length <= 4_000);
 });
 

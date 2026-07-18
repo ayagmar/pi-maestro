@@ -8,6 +8,7 @@ import {
 } from "./board.js";
 import { loadConfig } from "./config.js";
 import { COMMAND } from "./constants.js";
+import { preflightWorkflowWithCost } from "./cost-forecast.js";
 import { notify } from "./handoff.js";
 import { formatWorkflowPreflight, preflightWorkflow } from "./preflight.js";
 import { assertKnownTaskIds } from "./session-control.js";
@@ -43,7 +44,7 @@ export async function confirmDriveScale(
 ): Promise<boolean> {
   const board = loadBoard(ctx.cwd);
   const config = loadConfig(ctx.cwd);
-  const preflight = preflightWorkflow(board, config, taskIds);
+  const preflight = preflightWorkflowWithCost(ctx.cwd, board, config, ctx, taskIds);
   if (!preflight.requiresConfirmation || board.scaleApproval?.signature === preflight.signature) {
     return true;
   }
@@ -51,7 +52,7 @@ export async function confirmDriveScale(
   if (!ctx.hasUI) return false;
   const confirmed = await ctx.ui.confirm(
     "Confirm workflow scale?",
-    `${preflight.taskCount} tasks and up to ${preflight.totalLaunchUpperBound} raw launches (${preflight.signature}).`
+    `${preflight.taskCount} tasks, up to ${preflight.totalLaunchUpperBound} raw launches, and an estimated projected cost of $${preflight.projectedCost.estimatedUsd.toFixed(2)} (${preflight.signature}).`
   );
   if (!confirmed) return false;
   updateBoard(ctx.cwd, (fresh) => {

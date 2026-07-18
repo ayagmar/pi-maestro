@@ -1,10 +1,14 @@
-import { formatWorkflowPreflight, preflightWorkflow } from "./preflight.js";
+import { formatWorkflowPreflight, preflightWorkflow, type WorkflowPreflight } from "./preflight.js";
 import { type Board, type MaestroConfig } from "./types.js";
 
 /** Rich read-only plan projection used at the approval gate. */
-export function formatPlanReviewMarkdown(board: Board, config: MaestroConfig): string {
+export function formatPlanReviewMarkdown(
+  board: Board,
+  config: MaestroConfig,
+  workflowPreflight: WorkflowPreflight = preflightWorkflow(board, config)
+): string {
   const tasks = board.tasks.filter((task) => task.status !== "cancelled");
-  const preflight = formatWorkflowPreflight(preflightWorkflow(board, config));
+  const preflight = formatWorkflowPreflight(workflowPreflight);
   const sections = tasks.map((task) => {
     const criteria = (task.successCriteria ?? []).map((item) => `- ${item}`).join("\n") || "- None";
     const writes = task.writePaths?.map((path) => `\`${path}\``).join(", ") || "None";

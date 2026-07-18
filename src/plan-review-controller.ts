@@ -9,6 +9,7 @@ import {
 } from "./board.js";
 import { pickFromList } from "./command-ui.js";
 import { loadConfig } from "./config.js";
+import { preflightWorkflowWithCost } from "./cost-forecast.js";
 import { truncateText } from "./format.js";
 import { notify } from "./handoff.js";
 import { formatPlanReviewMarkdown } from "./plan-review.js";
@@ -75,10 +76,15 @@ export async function showPlanReview(
     const choice = await pickFromList(ctx, "Maestro Plan · awaiting approval", items);
     if (!choice) return;
     if (choice === "overview") {
+      const config = loadConfig(ctx.cwd);
       await showScrollableMarkdown(
         ctx,
         "Maestro Plan · review",
-        formatPlanReviewMarkdown(board, loadConfig(ctx.cwd))
+        formatPlanReviewMarkdown(
+          board,
+          config,
+          preflightWorkflowWithCost(ctx.cwd, board, config, ctx)
+        )
       );
       continue;
     }
@@ -94,7 +100,7 @@ export async function showPlanReview(
         notify(ctx, `${validationError}\nEdit the listed tasks before approving.`, "error");
         continue;
       }
-      const preflight = preflightWorkflow(fresh, config);
+      const preflight = preflightWorkflowWithCost(ctx.cwd, fresh, config, ctx);
       notify(
         ctx,
         formatWorkflowPreflight(preflight),
@@ -105,7 +111,7 @@ export async function showPlanReview(
           ctx.hasUI &&
           (await ctx.ui.confirm(
             "Confirm workflow scale?",
-            `${preflight.taskCount} tasks and up to ${preflight.totalLaunchUpperBound} raw launches (${preflight.signature}).`
+            `${preflight.taskCount} tasks, up to ${preflight.totalLaunchUpperBound} raw launches, and an estimated projected cost of $${preflight.projectedCost.estimatedUsd.toFixed(2)} (${preflight.signature}).`
           ));
         if (!confirmed) {
           notify(ctx, "Plan remains gated; workflow scale was not confirmed.", "warning");

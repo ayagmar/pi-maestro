@@ -143,7 +143,10 @@ pause and wait (or abort) before switching.
 With `planGate` enabled, use an explicit plan-approve-drive flow. The gate validates dependency
 references, dependency cycles, and configured tiers before any executor or reviewer starts.
 `/maestro plan` starts with a read-only overview of every pending task, including criteria, write
-scope, verification, review policy, commit message, and workflow preflight. Each task offers a
+scope, verification, review policy, commit message, and workflow preflight. Preflight clearly labels
+its projected cost as an estimate: archived per-model-and-tier launch averages are preferred, then
+model pricing metadata assumes 20,000 input and 4,000 output tokens per launch, and unresolved
+models use a static $0.10-per-launch fallback. Each task offers a
 read-only full-brief viewer plus editing for its title, brief, tier, dependencies, criteria, write
 scope, commit message, verification profile, and cancellation state. Choose **Save changes** to
 validate and persist the draft, or **Cancel editing**/Esc to discard it. Invalid plans remain

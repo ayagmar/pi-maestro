@@ -47,8 +47,11 @@ dispatch, but do not invalidate an otherwise identical artifact fingerprint.
 
 Preflight classifies up to 8 tasks as small, 9–24 as medium, and larger plans as large. It reports
 dependency waves, configured/effective concurrency, executor and reviewer launch upper bounds,
-verification-profile usage, and confirmation thresholds. These are deterministic bounds, never
-price estimates.
+verification-profile usage, confirmation thresholds, and a clearly labeled projected-cost estimate.
+The estimate prices the raw-launch upper-bound scenario. It prefers archived per-model-and-tier
+launch averages, falls back to model pricing metadata with a rough assumption of 20,000 input and
+4,000 output tokens per launch, then uses $0.10 per unresolved launch. It is guidance rather than a
+budget guarantee.
 
 ## Trusted verification profiles
 

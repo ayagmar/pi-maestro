@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { type ProjectedCostEstimate, staticProjectedCost } from "./cost-forecast-policy.js";
 import { type Board, type MaestroConfig, type Task } from "./types.js";
 
 export type WorkflowSize = "small" | "medium" | "large";
@@ -11,6 +12,7 @@ export interface WorkflowPreflight {
   executorLaunchUpperBound: number;
   reviewerLaunchUpperBound: number;
   totalLaunchUpperBound: number;
+  projectedCost: ProjectedCostEstimate;
   verificationProfileUsage: Array<{ profile: string; tasks: number }>;
   size: WorkflowSize;
   guidance: string;
@@ -30,9 +32,10 @@ export function assertPlanTaskLimit(taskCount: number, config: MaestroConfig): v
 export function preflightWorkflow(
   board: Board,
   config: MaestroConfig,
-  taskIds?: readonly string[]
+  taskIds?: readonly string[],
+  projectedCost?: ProjectedCostEstimate
 ): WorkflowPreflight {
-  const selected = selectedTasks(board, taskIds);
+  const selected = selectedWorkflowTasks(board, taskIds);
   assertPlanTaskLimit(selected.length, config);
   const waves = dependencyWaves(selected);
   const maximumWaveWidth = Math.max(0, ...waves.map((wave) => wave.length));
@@ -80,6 +83,7 @@ export function preflightWorkflow(
     executorLaunchUpperBound,
     reviewerLaunchUpperBound,
     totalLaunchUpperBound,
+    projectedCost: projectedCost ?? staticProjectedCost(totalLaunchUpperBound),
     verificationProfileUsage: verificationUsage(selected, config),
     size,
     guidance:
@@ -107,6 +111,7 @@ export function formatWorkflowPreflight(preflight: WorkflowPreflight): string {
     }`,
     `concurrency: configured ${preflight.configuredConcurrency} · effective ${preflight.effectiveConcurrency}`,
     `raw launch upper bounds: executor ${preflight.executorLaunchUpperBound} · reviewer ${preflight.reviewerLaunchUpperBound} · combined ${preflight.totalLaunchUpperBound}`,
+    `projected cost estimate: $${preflight.projectedCost.estimatedUsd.toFixed(2)} · upper-bound launches · historical ${preflight.projectedCost.sourceLaunches.historical} / metadata ${preflight.projectedCost.sourceLaunches.modelMetadata} / static ${preflight.projectedCost.sourceLaunches.staticFallback}`,
     `verification profiles: ${profiles || "none"}`,
     preflight.guidance,
     ...(preflight.warnings.length > 0
@@ -119,7 +124,10 @@ export function formatWorkflowPreflight(preflight: WorkflowPreflight): string {
   return report.length <= 4_000 ? report : `${report.slice(0, 3_980)}\n… bounded`;
 }
 
-function selectedTasks(board: Board, taskIds: readonly string[] | undefined): Task[] {
+export function selectedWorkflowTasks(
+  board: Board,
+  taskIds: readonly string[] | undefined
+): Task[] {
   const selected = taskIds?.length
     ? new Set(taskIds.map((id) => id.trim().toUpperCase()))
     : undefined;
