@@ -1,5 +1,6 @@
 import { taskFingerprint } from "./artifact-policy.js";
 import {
+  DETACHED_DISPATCH_LEASE_MS,
   findTask,
   forceStatus,
   humanRetryEligibility,
@@ -8,6 +9,7 @@ import {
   isRunnableWithConfig,
   loadBoard,
   planValidationMessage,
+  releaseTaskDispatch,
   stateDir,
   transition,
   updateTask,
@@ -189,6 +191,7 @@ export async function executeTask(options: {
       ...(watchdogWarningTurns === undefined ? {} : { watchdogWarningTurns }),
       ...(watchdogTerminationTurns === undefined ? {} : { watchdogTerminationTurns }),
       runKind: isReadOnlyTask(task) ? "investigation" : "implementation",
+      ...(config.detachedExecutors ? { detached: true } : {}),
       onUpdate: (update) => {
         const sessionFile = update.sessionFile;
         if (sessionFile) {
@@ -251,6 +254,9 @@ export async function executeTask(options: {
       const reserved = fresh.attempts.findIndex((attempt) => attempt.index === attemptIndex);
       if (reserved >= 0) fresh.attempts[reserved] = run.attempt;
     });
+    if (run.attempt.detached) {
+      lifecycle.extendLease?.(DETACHED_DISPATCH_LEASE_MS);
+    }
 
     let outcome: RunOutcome;
     try {
@@ -328,6 +334,58 @@ export async function executeTask(options: {
   }
 
   return snapshot(updated ?? task);
+}
+
+export function settleReattachedDetachedAttempt(
+  cwd: string,
+  taskId: string,
+  claimId: string,
+  attempt: Attempt,
+  outcome: RunOutcome
+): Task | undefined {
+  attempt.usage = { ...outcome.usage };
+  attempt.finalReport = outcome.finalReport;
+  attempt.exitCode = outcome.exitCode;
+  attempt.endedAt ??= Date.now();
+  if (outcome.model) attempt.model = outcome.model;
+  if (outcome.errorMessage) attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
+  const failureReason = classifyFailure(outcome);
+  if (failureReason) attempt.failureReason = failureReason;
+  if (
+    attempt.worktreePath &&
+    worktreeExists({
+      worktreePath: attempt.worktreePath,
+      branch: attempt.branch ?? "",
+    })
+  ) {
+    attempt.touchedFiles = changedPaths(attempt.worktreePath);
+  } else {
+    attempt.touchedFiles = [...outcome.touchedFiles];
+  }
+  const status: TaskStatus = outcome.aborted
+    ? "cancelled"
+    : outcome.exitCode === 0 && !outcome.errorMessage
+      ? "ready_for_review"
+      : "failed";
+  if (status === "ready_for_review") {
+    try {
+      const diff = captureDiff(
+        attempt.worktreePath ?? cwd,
+        attempt.worktreePath ? undefined : attempt.touchedFiles
+      );
+      if (diff) attempt.diff = diff;
+    } catch {
+      // Display diff remains best-effort; the worktree is the authoritative candidate.
+    }
+  }
+  const updated = updateTask(cwd, taskId, (task) => {
+    if (task.dispatchClaim?.id !== claimId) return;
+    transition(task, status);
+    const index = task.attempts.findIndex((candidate) => candidate.index === attempt.index);
+    if (index >= 0) task.attempts[index] = attempt;
+  });
+  releaseTaskDispatch(cwd, taskId, claimId);
+  return updated;
 }
 
 export function rejectedRunOutcome(run: ExecutorHandle, error: unknown): RunOutcome {

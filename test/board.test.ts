@@ -39,6 +39,7 @@ import {
   restoreArchivedBoard,
   saveBoard,
   setStatus,
+  sweepDispatchState,
   taskFailureCause,
   taskGroup,
   transition,
@@ -957,6 +958,42 @@ test("restoreArchivedBoard rejects invalid optional Attempt fields without repla
       /not a valid maestro board/
     );
     assert.equal(loadBoard(cwd).tasks[0]?.title, "Current");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("startup sweep defers exited detached attempts to lifecycle log replay", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-detached-sweep-test-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, { title: "Detached", brief: "work", tier: "standard" });
+    forceStatus(task, "running");
+    task.dispatchClaim = {
+      id: "detached-claim",
+      kind: "execute",
+      claimedAt: 1,
+      expiresAt: 2,
+    };
+    task.attempts.push({
+      index: 1,
+      logFile: join(cwd, "detached.jsonl"),
+      controlFile: join(cwd, "detached.control"),
+      detached: true,
+      pid: 999_999_999,
+      processStartId: "dead",
+      thinking: "low",
+      startedAt: 1,
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      touchedFiles: [],
+    });
+    saveBoard(cwd, board);
+
+    assert.deepEqual(sweepDispatchState(cwd), []);
+    const recovered = findTask(loadBoard(cwd), task.id);
+    assert.equal(recovered?.status, "running");
+    assert.equal(recovered?.dispatchClaim?.id, "detached-claim");
+    assert.equal(recovered?.attempts[0]?.endedAt, undefined);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

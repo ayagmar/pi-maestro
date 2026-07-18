@@ -1,12 +1,14 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  appendFileSync,
   createWriteStream,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { type Writable } from "node:stream";
@@ -260,6 +262,8 @@ const WATCHDOG_STEER_MESSAGES: Record<RunKind, string> = {
 export interface ExecutorHandle {
   attempt: Attempt;
   outcome: Promise<RunOutcome>;
+  /** Detached transports are preserved when the owning Pi runtime shuts down. */
+  survivesShutdown?: boolean;
   /** Queue a steering message into the running executor (delivered before its next LLM call). */
   steer(message: string): void;
   /** Queue a follow-up message until the executor has finished its current work. */
@@ -394,7 +398,7 @@ export function touchedFile(event: JsonEvent, cwd: string): string | undefined {
  * adding the child to Pi's ordinary /resume list. Every stdout event is also
  * mirrored to stateDir/logs/<runId>.jsonl for live tailing.
  */
-export function startExecutor(options: {
+export interface StartExecutorOptions {
   stateDir: string;
   runId: string;
   cwd: string;
@@ -417,7 +421,11 @@ export function startExecutor(options: {
   runKind?: RunKind;
   signal?: AbortSignal;
   onUpdate?: (update: RunUpdate) => void;
-}): ExecutorHandle {
+  /** Opt-in Unix detached JSONL transport. */
+  detached?: boolean;
+}
+
+export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
   const logFile = join(options.stateDir, LOGS_DIR, `${options.runId}.jsonl`);
   mkdirSync(dirname(logFile), { recursive: true });
 
@@ -444,6 +452,9 @@ export function startExecutor(options: {
   if (options.tier.tools) args.push("--tools", options.tier.tools);
 
   const invocation = piInvocation(args);
+  if (options.detached && process.platform !== "win32") {
+    return startDetachedExecutor(options, attempt, invocation);
+  }
   const proc = spawn(invocation.command, invocation.args, {
     cwd: options.cwd,
     shell: false,
@@ -738,6 +749,248 @@ export function startExecutor(options: {
   return {
     attempt,
     outcome,
+    steer: (message: string) => send({ type: "steer", message }),
+    followUp: (message: string) => send({ type: "follow_up", message }),
+    abort,
+  };
+}
+
+function startDetachedExecutor(
+  options: StartExecutorOptions,
+  attempt: Attempt,
+  invocation: { command: string; args: string[] }
+): ExecutorHandle {
+  const controlFile = `${attempt.logFile}.control`;
+  const exitFile = `${attempt.logFile}.exit`;
+  const stderrFile = `${attempt.logFile}.stderr`;
+  writeFileSync(
+    controlFile,
+    `${[
+      { type: "set_session_name", name: options.sessionLabel ?? `maestro ${options.runId}` },
+      { type: "get_state" },
+      { type: "prompt", message: options.prompt },
+    ]
+      .map((command) => JSON.stringify(command))
+      .join("\n")}\n`,
+    { mode: 0o600 }
+  );
+  writeFileSync(attempt.logFile, "", { mode: 0o600 });
+  try {
+    writeFileSync(stderrFile, "", { mode: 0o600 });
+  } catch {
+    // The detached shell reports an actionable process failure through its exit file.
+  }
+  const shellScript =
+    'control="$1"; events="$2"; errors="$3"; exitfile="$4"; shift 4; tail -n +1 -f "$control" | "$@" >>"$events" 2>>"$errors"; code=$?; printf "%s\\n" "$code" >"$exitfile"';
+  const proc = spawn(
+    "/bin/sh",
+    [
+      "-c",
+      shellScript,
+      "maestro-detached",
+      controlFile,
+      attempt.logFile,
+      stderrFile,
+      exitFile,
+      invocation.command,
+      ...invocation.args,
+    ],
+    {
+      cwd: options.cwd,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, PI_MAESTRO_EXECUTOR: "1" },
+    }
+  );
+  proc.unref();
+  attempt.detached = true;
+  if (proc.pid) {
+    attempt.pid = proc.pid;
+    const startId = processStartId(proc.pid);
+    if (startId) attempt.processStartId = startId;
+  }
+  attempt.controlFile = controlFile;
+  attempt.exitFile = exitFile;
+  attempt.stderrFile = stderrFile;
+  return monitorDetachedExecutor(attempt, options.cwd, options);
+}
+
+export function reattachDetachedExecutor(
+  attempt: Attempt,
+  cwd: string,
+  onUpdate?: (update: RunUpdate) => void
+): ExecutorHandle {
+  return monitorDetachedExecutor(attempt, cwd, { onUpdate });
+}
+
+export function detachedAttemptIsLive(attempt: Attempt): boolean {
+  if (!attempt.detached || !attempt.pid) return false;
+  if (attempt.processStartId) {
+    const current = processStartId(attempt.pid);
+    if (current !== undefined && current !== attempt.processStartId) return false;
+  }
+  try {
+    process.kill(attempt.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function monitorDetachedExecutor(
+  attempt: Attempt,
+  cwd: string,
+  options: {
+    maxCost?: number | undefined;
+    onUpdate?: ((update: RunUpdate) => void) | undefined;
+  } = {}
+): ExecutorHandle {
+  const result: RunOutcome = {
+    exitCode: 0,
+    usage: attempt.usage,
+    finalReport: attempt.finalReport ?? "",
+    touchedFiles: attempt.touchedFiles,
+    aborted: false,
+  };
+  let offset = 0;
+  let buffer = "";
+  let settled = false;
+  let abortCause: "user_abort" | "cost_cap" | undefined;
+  let terminalPolls = 0;
+  let timer: NodeJS.Timeout | undefined;
+  let resolveOutcome: (outcome: RunOutcome) => void = () => {};
+  const outcome = new Promise<RunOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  const send = (command: Record<string, unknown>) => {
+    if (!attempt.controlFile) return;
+    try {
+      appendFileSync(attempt.controlFile, `${JSON.stringify(command)}\n`, "utf-8");
+    } catch {
+      // Recovery remains abortable through the persisted process group.
+    }
+  };
+  const killGroup = (signal: NodeJS.Signals) => {
+    if (!attempt.pid) return;
+    try {
+      process.kill(-attempt.pid, signal);
+    } catch {
+      try {
+        process.kill(attempt.pid, signal);
+      } catch {
+        // Process already exited.
+      }
+    }
+  };
+  const finish = (exitCode: number) => {
+    if (settled) return;
+    settled = true;
+    if (timer) clearInterval(timer);
+    result.exitCode = abortCause ? 1 : exitCode;
+    result.aborted = abortCause === "user_abort";
+    if (abortCause === "cost_cap") result.failureCause = "cost_cap";
+    else if (abortCause === "user_abort") result.failureCause = "user_abort";
+    if (exitCode !== 0 && !abortCause && !result.errorMessage) {
+      const stderr =
+        attempt.stderrFile && existsSync(attempt.stderrFile)
+          ? readFileSync(attempt.stderrFile, "utf-8").trim().slice(-4_000)
+          : "";
+      result.errorMessage = redactFailureMessage(
+        stderr || `detached executor exited with code ${exitCode}`
+      );
+      result.failureCause = "process";
+    }
+    const failureReason = classifyFailure(result);
+    if (failureReason) {
+      result.failureReason = failureReason;
+      attempt.failureReason = failureReason;
+    }
+    attempt.finalReport = result.finalReport;
+    attempt.endedAt = Date.now();
+    attempt.exitCode = result.exitCode;
+    resolveOutcome(result);
+  };
+  const abort = () => {
+    if (abortCause) return;
+    abortCause = "user_abort";
+    send({ type: "abort" });
+    setTimeout(() => killGroup("SIGTERM"), KILL_GRACE_MS).unref();
+    setTimeout(() => killGroup("SIGKILL"), KILL_GRACE_MS * 2).unref();
+  };
+  const processEvent = (event: JsonEvent) => {
+    if (event.type === "response" && event.command === "get_state" && event.data?.sessionFile) {
+      attempt.sessionFile = event.data.sessionFile;
+    }
+    if (event.type === "response" && event.command === "prompt" && event.success === false) {
+      result.errorMessage = event.error ?? "executor rejected the prompt";
+      result.failureCause = "provider";
+      killGroup("SIGTERM");
+    }
+    if (event.type === "message_end" && event.message?.role === "assistant") {
+      if (applyAssistantMessage(result, attempt, event.message, options.maxCost)) {
+        abortCause = "cost_cap";
+        send({ type: "abort" });
+        setTimeout(() => killGroup("SIGTERM"), KILL_GRACE_MS).unref();
+      }
+    }
+    const touched = touchedFile(event, cwd);
+    if (touched && !attempt.touchedFiles.includes(touched)) attempt.touchedFiles.push(touched);
+    options.onUpdate?.({
+      turns: attempt.usage.turns,
+      cost: attempt.usage.cost,
+      lastActivity: event.toolName ?? event.type,
+      lastEventAt: Date.now(),
+      changedFileCount: attempt.touchedFiles.length,
+      ...(attempt.sessionFile ? { sessionFile: attempt.sessionFile } : {}),
+    });
+    if (event.type === "agent_settled") {
+      killGroup("SIGTERM");
+      setTimeout(() => finish(0), 25).unref();
+    }
+  };
+  const poll = () => {
+    try {
+      const contents = readFileSync(attempt.logFile, "utf-8");
+      if (contents.length < offset) {
+        offset = 0;
+        buffer = "";
+      }
+      buffer += contents.slice(offset);
+      offset = contents.length;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          processEvent(JSON.parse(line) as JsonEvent);
+        } catch {
+          // Ignore malformed or partially written records.
+        }
+      }
+    } catch {
+      // The launcher may not have created its event file yet.
+    }
+    if (settled) return;
+    if (attempt.exitFile && existsSync(attempt.exitFile)) {
+      terminalPolls += 1;
+      const code = Number.parseInt(readFileSync(attempt.exitFile, "utf-8").trim(), 10);
+      if (terminalPolls >= 2) finish(Number.isFinite(code) ? code : 1);
+    } else if (!detachedAttemptIsLive(attempt)) {
+      terminalPolls += 1;
+      if (terminalPolls >= 2) finish(1);
+    } else {
+      terminalPolls = 0;
+    }
+  };
+  poll();
+  if (!settled) {
+    timer = setInterval(poll, 100);
+    timer.unref();
+  }
+  return {
+    attempt,
+    outcome,
+    survivesShutdown: true,
     steer: (message: string) => send({ type: "steer", message }),
     followUp: (message: string) => send({ type: "follow_up", message }),
     abort,

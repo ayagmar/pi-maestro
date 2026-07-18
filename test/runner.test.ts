@@ -12,6 +12,7 @@ import {
   mapWithConcurrencyLimit,
   projectSessionDir,
   type RunOutcome,
+  reattachDetachedExecutor,
   redactFailureMessage,
   runVerification,
   startExecutor,
@@ -115,6 +116,60 @@ process.stdin.on("end", () => process.exit(0));
     assert.equal(outcome.exitCode, 0);
   } finally {
     process.argv[1] = originalScript;
+  }
+});
+
+test("detached executor transport persists PID-safe control and event files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-detached-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type !== "prompt") continue;
+    console.log(JSON.stringify({ type: "tool_execution_start", toolName: "write", args: { path: "detached.ts" } }));
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", model: "test/model", usage: { input: 4, output: 2, cost: { total: 0.03 } }, content: [{ type: "text", text: "detached complete" }] } }));
+    console.log(JSON.stringify({ type: "agent_settled" }));
+  }
+});
+`
+  );
+
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "detached",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+      detached: true,
+    });
+    const reattached = reattachDetachedExecutor(structuredClone(run.attempt), root);
+    const [outcome, recoveredOutcome] = await Promise.all([run.outcome, reattached.outcome]);
+
+    assert.equal(run.survivesShutdown, true);
+    assert.equal(run.attempt.detached, true);
+    assert.ok(run.attempt.pid);
+    assert.ok(run.attempt.processStartId || process.platform !== "linux");
+    assert.match(readFileSync(run.attempt.controlFile ?? "", "utf-8"), /"type":"prompt"/);
+    assert.match(readFileSync(run.attempt.logFile, "utf-8"), /agent_settled/);
+    assert.deepEqual(outcome.touchedFiles, ["detached.ts"]);
+    assert.equal(outcome.finalReport, "detached complete");
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(reattached.survivesShutdown, true);
+    assert.equal(recoveredOutcome.finalReport, "detached complete");
+    assert.equal(recoveredOutcome.exitCode, 0);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

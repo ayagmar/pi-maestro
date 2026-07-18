@@ -10,6 +10,7 @@ import {
 } from "./drive-controller.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { notify } from "./handoff.js";
+import { reattachDetachedExecutor } from "./runner.js";
 import {
   maestroBoardCwd,
   previousBoardSession,
@@ -17,6 +18,8 @@ import {
   sessionSwitchBlocked,
 } from "./session-control.js";
 import { type Board } from "./types.js";
+import { settleReattachedDetachedAttempt } from "./workflow-execution.js";
+import { type WorkflowRun } from "./workflow-runtime.js";
 import { parkInactiveWorktrees, sweepWorktrees } from "./worktree.js";
 
 export class ExtensionLifecycleState {
@@ -149,6 +152,80 @@ export function registerMaestroLifecycle(
     const recoveryNotes = sweepDispatchState(boardCwd);
     for (const note of recoveryNotes) notify(ctx, note, "warning");
     let recovered = loadBoard(boardCwd);
+    for (const task of recovered.tasks) {
+      const attempt = task.attempts.at(-1);
+      const claim = task.dispatchClaim;
+      if (
+        task.status !== "running" ||
+        claim?.kind !== "execute" ||
+        !attempt?.detached ||
+        !attempt.controlFile
+      ) {
+        continue;
+      }
+      let live: WorkflowRun | undefined;
+      const handle = reattachDetachedExecutor(
+        attempt,
+        attempt.worktreePath ?? boardCwd,
+        (update) => {
+          if (!live) return;
+          live.turns = update.turns;
+          live.cost = update.cost;
+          live.lastActivity = update.lastActivity;
+          try {
+            dependencies.refreshUI(ctx);
+          } catch {
+            // The reattached executor outlives stale UI contexts.
+          }
+        }
+      );
+      live = {
+        taskId: task.id,
+        kind: "execute",
+        turns: attempt.usage.turns,
+        cost: attempt.usage.cost,
+        lastActivity: "reattached detached executor",
+        handle,
+      };
+      driveController.registerLiveRun(live);
+      void handle.outcome
+        .then((outcome) => {
+          settleReattachedDetachedAttempt(boardCwd, task.id, claim.id, handle.attempt, outcome);
+          if (live) driveController.removeLiveRun(live);
+          const detachedBoard = loadBoard(boardCwd);
+          if (driveController.liveRunCount() === 0 && detachedBoard.activeDrive) {
+            const summary = unexpectedDriveSummary(
+              boardCwd,
+              detachedBoard.activeDrive.taskIds,
+              "detached executor settled after supervisor reattachment; resume the drive from persisted task state"
+            );
+            persistDriveDecision(
+              boardCwd,
+              detachedBoard.activeDrive.ownerSession,
+              summary,
+              formatDrivePulse(summary),
+              detachedBoard.activeDrive.id
+            );
+          }
+          try {
+            dependencies.refreshUI(ctx);
+          } catch {
+            // The session may have switched while the detached run settled.
+          }
+        })
+        .catch((error) => {
+          if (live) driveController.removeLiveRun(live);
+          try {
+            notify(ctx, `${task.id}: detached recovery failed: ${String(error)}`, "error");
+          } catch {
+            // Persisted attempt and claim remain available to the next startup sweep.
+          }
+        });
+      notify(
+        ctx,
+        `${task.id}: reattached detached executor ${attempt.pid ?? "(exited)"} (log tail + control).`
+      );
+    }
     const orphanedDrive = recovered.activeDrive;
     const currentSession = ctx.sessionManager.getSessionFile();
     if (
@@ -219,7 +296,10 @@ export function registerMaestroLifecycle(
     state.shutdown();
     dependencies.closeLivePane();
     const active = driveController.activeOwner();
-    if (active) {
+    const hasDetachedSurvivor = [...driveController.liveRunValues()].some(
+      (run) => run.handle.survivesShutdown
+    );
+    if (active && !hasDetachedSurvivor) {
       try {
         const summary = unexpectedDriveSummary(
           active.cwd,

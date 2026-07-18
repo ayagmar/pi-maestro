@@ -258,6 +258,7 @@ trusted user/default value:
   "maxParallel": 4,
   "planGate": true,
   "useWorktrees": false,
+  "detachedExecutors": false,
   "maxAttempts": 3,
   "maxCostPerTask": 2,
   "maxRunCost": 25,
@@ -293,6 +294,7 @@ trusted user/default value:
   serializes merges into the original tree, then deletes the worktree and branch. A merge conflict
   is aborted, changes the task to `changes_requested`, and retains the checkout, branch, and
   recovery notes; the next retry reuses that worktree (default false).
+- `detachedExecutors` — opt-in Unix executor survivability (default false). Git projects force each detached executor into its own task worktree. Because Pi RPC is stdio-only and cannot reconnect to an abandoned pipe, Maestro uses persisted JSONL event/control files plus a detached process group, records PID and kernel start identity, extends that dispatch lease for up to seven days, and reattaches by log tail on `session_start`. Reattached runs remain steerable and abortable; if they settle while Maestro is absent, startup reconstructs their outcome before review. Reviewer launches remain attached to the supervising runtime, and Windows falls back to the normal attached transport.
 - `autoCommit` — commit each task's approved work as one conventional commit (default on).
   The commit message comes from the task's `commitMessage` (the orchestrator plans one per
   task, e.g. `fix: handle empty board`) or falls back to `feat: <title>`. Main-tree runs
@@ -478,8 +480,7 @@ Maestro is not a sandbox, CI service, analytics database, or generic plugin syst
   retain descriptive, numbered names and their exact session path, with raw event logs under
   `.pi/maestro/logs/`. The
   `.pi/maestro/` state dir gitignores itself — runtime state never floods your git status.
-  RPC mode is what makes mid-run steering and clean aborts possible. Executor-side extension
-  dialogs (e.g. permission gates) are auto-cancelled so headless runs can never hang.
+  RPC mode is what makes mid-run steering and clean aborts possible. With `detachedExecutors` enabled on Unix, persisted JSONL transport files replace the otherwise non-reattachable stdio pipes so executor work can survive Pi exit and be reattached safely by PID plus process-start identity. Executor-side extension dialogs (e.g. permission gates) are auto-cancelled so headless runs can never hang.
 - Dependencies gate execution: a task only runs when everything it `dependsOn` is `approved`.
   Its fresh prompt includes each approved dependency's report and, when available, a reference to
   that dependency's persisted pi session transcript. Injected dependency reports and retry review

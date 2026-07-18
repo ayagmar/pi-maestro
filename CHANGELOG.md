@@ -37,6 +37,7 @@
 
 ### Reliability
 
+- Opt-in Unix detached executors now survive Pi exit through persisted JSONL control/event transport, PID+start-time recovery, long bounded dispatch leases, forced Git worktree isolation, and startup log-tail reattachment; reviewers and Windows retain attached RPC behavior.
 - Verification logs are streamed to disk as output arrives, so a hard kill of pi retains partial verification evidence.
 - Added a best-effort (non-blocking) Windows CI job for typecheck and tests.
 

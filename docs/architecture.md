@@ -73,6 +73,8 @@ non-recursive, so managed children remain outside `/resume`; board references an
 browser open their exact files. Recursive usage scanners still traverse the nested JSONL transcripts.
 This separates session discoverability from accounting without changing Pi's session format.
 
+Pi RPC is a stdin/stdout protocol and cannot reconnect abandoned anonymous pipes. When the opt-in `detachedExecutors` setting is enabled on Unix, `runner.ts` instead launches the executor behind persisted JSONL event/control files in a detached process group. Attempts persist PID plus kernel start identity and a long bounded dispatch lease; startup preserves only identity-matching live processes, tails their complete event log, and settles the existing worktree-backed attempt through the normal execution boundary. Reviewer launches remain attached, and Windows retains the ordinary transport.
+
 Verification commands come only from operator-owned user config. Repository config may select a known profile but cannot define executable commands. Unix verification uses a process group with TERM/KILL escalation. Failed integrated verification retains a checkpoint branch while its idle checkout is parked.
 
 ## Why exactly three model tools

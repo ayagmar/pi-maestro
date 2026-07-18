@@ -15,6 +15,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `planGate` | false | Require human plan approval |
 | `livePanes` | false | Automatically open the passive agent pane; sessions remain available on demand |
 | `useWorktrees` | false | Isolate task checkouts |
+| `detachedExecutors` | false | Unix-only detached executor transport; Git tasks auto-isolate |
 | `autoCommit` | true | Commit only attributed task paths |
 | `maxAttempts` | 3 | 1–100 consumed attempts |
 | `maxPlanTasks` | 64 | 1–512 tasks at plan mutation boundaries |
@@ -34,6 +35,8 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `watchdogTerminationTurns` | 4 | 0–10000 |
 | `handoffContextRatio` | 0.68 | 0–1; 0 disables |
 | `cleanupCompletedTasks` | true | Archive then clear settled boards |
+
+`detachedExecutors` is opt-in and applies to executor launches, not reviewers. Pi RPC exposes only stdio, so Unix survivability uses persisted JSONL control/event files and a detached process group rather than attempting to reconnect abandoned pipes. Attempts persist PID plus kernel start identity, receive a seven-day dispatch lease, auto-isolate in Git worktrees, and reattach by log tail on session start. Windows uses the ordinary attached transport.
 
 `tiers` must define valid thinking levels. The built-in tiers are `trivial`, `standard`, `complex`, and read-only `review`. Each tier may set `watchdogIdleSeconds` (0–86400), `watchdogWarningTurns` (0–10000), and `watchdogTerminationTurns` (0–10000); those values override the corresponding global watchdog thresholds only for launches on that tier. Omitted tier fields inherit the global values, including on the `review` tier.
 

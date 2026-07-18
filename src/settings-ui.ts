@@ -151,6 +151,7 @@ export function applySettingsChange(
   else if (id === "livePanes") config.livePanes = value === "on";
   else if (id === "maxParallel") config.maxParallel = Number(value);
   else if (id === "useWorktrees") config.useWorktrees = value === "on";
+  else if (id === "detachedExecutors") config.detachedExecutors = value === "on";
   else if (id === "autoCommit") config.autoCommit = value === "on";
   else if (id === "cleanupCompletedTasks") config.cleanupCompletedTasks = value === "on";
   else if (id === "maxAttempts") config.maxAttempts = Number(value);
@@ -399,6 +400,13 @@ export async function showSettings(
             currentValue: config.useWorktrees ? "on" : "off",
             values: ["off", "on"],
             description: "Isolate tasks in a parallel batch in separate git worktrees.",
+          },
+          {
+            id: "detachedExecutors",
+            label: "Detached executor survivability",
+            currentValue: (config.detachedExecutors ?? false) ? "on" : "off",
+            values: ["off", "on"],
+            description: "Unix only. Keep isolated executor RPC processes alive across Pi exits.",
           },
           {
             id: "autoCommit",

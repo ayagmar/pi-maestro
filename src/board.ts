@@ -16,7 +16,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { completionFreshness } from "./artifact-policy.js";
 import { STATE_DIR } from "./constants.js";
-import { processStartId } from "./runner.js";
+import { detachedAttemptIsLive, processStartId } from "./runner.js";
 import {
   type Attempt,
   type Board,
@@ -37,6 +37,7 @@ const BOARD_LOCK_STALE_MS = 30_000;
 let quarantineNotice: string | undefined;
 const BOARD_LOCK_RETRIES = 500;
 export const DISPATCH_LEASE_MS = 30_000;
+export const DETACHED_DISPATCH_LEASE_MS = 7 * 24 * 60 * 60 * 1_000;
 
 interface BoardLock {
   fd: number;
@@ -835,6 +836,12 @@ function isAttempt(value: unknown): boolean {
     (value.sessionDir === undefined || typeof value.sessionDir === "string") &&
     (value.model === undefined || typeof value.model === "string") &&
     (value.provider === undefined || typeof value.provider === "string") &&
+    (value.detached === undefined || typeof value.detached === "boolean") &&
+    (value.pid === undefined || (isNumber(value.pid) && Number.isInteger(value.pid))) &&
+    (value.processStartId === undefined || typeof value.processStartId === "string") &&
+    (value.controlFile === undefined || typeof value.controlFile === "string") &&
+    (value.exitFile === undefined || typeof value.exitFile === "string") &&
+    (value.stderrFile === undefined || typeof value.stderrFile === "string") &&
     (value.endedAt === undefined || isNumber(value.endedAt)) &&
     (value.exitCode === undefined || isNumber(value.exitCode)) &&
     (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
@@ -1147,6 +1154,12 @@ export function claimTaskDispatch(
         note = `${fresh.id} dispatch declined; held by ${fresh.dispatchClaim.id} (${fresh.dispatchClaim.kind})`;
         return;
       }
+      const detachedAttempt = fresh.attempts.at(-1);
+      if (detachedAttempt && detachedAttemptIsLive(detachedAttempt)) {
+        fresh.dispatchClaim.expiresAt = Date.now() + DETACHED_DISPATCH_LEASE_MS;
+        note = `${fresh.id} dispatch declined; detached executor ${detachedAttempt.pid} is still live`;
+        return;
+      }
       recoverExpiredClaim(fresh);
     }
     if (!dispatchable(board, fresh)) {
@@ -1200,11 +1213,16 @@ export function releaseTaskDispatch(cwd: string, taskId: string, claimId: string
   return released;
 }
 
-export function renewTaskDispatch(cwd: string, taskId: string, claimId: string): boolean {
+export function renewTaskDispatch(
+  cwd: string,
+  taskId: string,
+  claimId: string,
+  leaseMs = DISPATCH_LEASE_MS
+): boolean {
   let renewed = false;
   updateTask(cwd, taskId, (task) => {
     if (task.dispatchClaim?.id !== claimId) return;
-    task.dispatchClaim.expiresAt = Date.now() + DISPATCH_LEASE_MS;
+    task.dispatchClaim.expiresAt = Date.now() + leaseMs;
     renewed = true;
   });
   return renewed;
@@ -1251,6 +1269,19 @@ function recoverExpiredClaim(task: Task): void {
 export function sweepDispatchState(cwd: string): string[] {
   const notes: string[] = [];
   for (const stale of loadBoard(cwd).tasks) {
+    const detachedAttempt = stale.attempts.at(-1);
+    if (
+      stale.status === "running" &&
+      stale.dispatchClaim?.kind === "execute" &&
+      detachedAttempt?.detached
+    ) {
+      if (detachedAttemptIsLive(detachedAttempt)) {
+        renewTaskDispatch(cwd, stale.id, stale.dispatchClaim.id, DETACHED_DISPATCH_LEASE_MS);
+      }
+      // Live and just-exited detached transports are both settled by the
+      // lifecycle reattachment pass, which can replay their complete log.
+      continue;
+    }
     const orphanCount =
       stale.status === "running"
         ? 0

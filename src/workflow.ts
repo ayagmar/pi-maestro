@@ -295,7 +295,10 @@ export async function driveBoard(options: {
         );
         const worktrees = new Map<string, WorktreeRef>();
         const created: WorktreeRef[] = [];
-        let isolateBatch = config.useWorktrees || retryEligibility?.kind === "execute";
+        let isolateBatch =
+          config.useWorktrees ||
+          (config.detachedExecutors === true && inspectGit(cwd).ok) ||
+          retryEligibility?.kind === "execute";
         // Parallel executors sharing one Git working tree cross-attribute
         // each other's file changes: sibling A's edits land in sibling B's
         // baseline diff, candidate tree, and review scope. Auto-isolate

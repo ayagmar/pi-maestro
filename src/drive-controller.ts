@@ -531,8 +531,11 @@ export class DriveRuntimeController {
   }
 
   shutdown(): void {
-    this.active?.abortController.abort();
-    for (const run of this.liveRuns) run.handle.abort();
+    // Detached executor transports intentionally outlive the owning Pi
+    // runtime. Regular children are still stopped immediately.
+    for (const run of this.liveRuns) {
+      if (!run.handle.survivesShutdown) run.handle.abort();
+    }
     this.liveRuns.clear();
   }
 }

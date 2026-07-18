@@ -11,14 +11,19 @@ export function claimDispatchLifecycle(
   const dispatch = claimTaskDispatch(cwd, taskId, kind, dispatchable);
   if (!dispatch?.claimed) return { dispatch };
 
+  let leaseMs: number | undefined;
   const renewal = setInterval(() => {
-    renewTaskDispatch(cwd, taskId, dispatch.claimId);
+    renewTaskDispatch(cwd, taskId, dispatch.claimId, leaseMs);
   }, 10_000);
   renewal.unref();
   let closed = false;
 
   return {
     dispatch,
+    extendLease: (durationMs: number) => {
+      leaseMs = durationMs;
+      renewTaskDispatch(cwd, taskId, dispatch.claimId, durationMs);
+    },
     release: () => {
       if (closed) return;
       closed = true;

@@ -72,6 +72,13 @@ export interface Attempt {
   model?: string;
   /** Provider parsed from the resolved model id, when available. */
   provider?: string;
+  /** Opt-in detached RPC transport metadata used for PID-safe startup recovery. */
+  detached?: boolean;
+  pid?: number;
+  processStartId?: string;
+  controlFile?: string;
+  exitFile?: string;
+  stderrFile?: string;
   thinking: string;
   startedAt: number;
   endedAt?: number;
@@ -390,6 +397,8 @@ export interface MaestroConfig {
   livePanes: boolean;
   /** Isolate tasks in per-task git worktrees when a batch dispatches in parallel. */
   useWorktrees: boolean;
+  /** Run executor RPC processes in an opt-in detached transport that survives supervisor exit. */
+  detachedExecutors?: boolean;
   /** Hard attempt cap per task; exceeded tasks need an explicit maestro-run or a brief rewrite. */
   maxAttempts: number;
   maxPlanTasks: number;
