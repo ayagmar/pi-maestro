@@ -159,6 +159,19 @@ test("resolveTierModel qualifies bare patterns with an authed provider", () => {
   assert.deepEqual(result, { ok: true, modelArg: "opencode/claude-sonnet-5" });
 });
 
+test("resolveTierModel keeps qualified model resolution local to the extension API", () => {
+  const registry = fakeRegistry([
+    { provider: "OpenAI-Codex", id: "gpt-5.6-sol" },
+    { provider: "openai", id: "gpt-5.6-terra" },
+  ]);
+  const result = resolveTierModel(
+    "standard",
+    { model: "openai-codex/gpt-5.6-sol", thinking: "medium" },
+    registry
+  );
+  assert.deepEqual(result, { ok: true, modelArg: "OpenAI-Codex/gpt-5.6-sol" });
+});
+
 test("resolveTierModel prefers the orchestrator's provider when it serves the pattern", () => {
   const registry = fakeRegistry([
     { provider: "github-copilot", id: "claude-fable-5" },

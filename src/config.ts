@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAgentDir, type ModelRegistry, resolveCliModel } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
 import { type MaestroConfig, type TierConfig } from "./types.js";
 
@@ -781,20 +781,20 @@ export function resolveTierModel(
   if (!tier.model) return { ok: true, modelArg: undefined }; // inherit pi default
 
   if (tier.model.includes("/")) {
-    const result = resolveCliModel({ cliModel: tier.model, modelRegistry });
-    if (!result.model) {
+    const result = findQualifiedModel(modelRegistry, tier.model);
+    if (!result) {
       return {
         ok: false,
         error: `Tier "${tierName}": "${tier.model}" does not match any model. Fix it in /maestro config or check pi --list-models.`,
       };
     }
-    if (!modelRegistry.hasConfiguredAuth(result.model)) {
+    if (!modelRegistry.hasConfiguredAuth(result)) {
       return {
         ok: false,
-        error: `Tier "${tierName}": no API key for ${result.model.provider}/${result.model.id}. Run /login for that provider or pick another model in /maestro config.`,
+        error: `Tier "${tierName}": no API key for ${result.provider}/${result.id}. Run /login for that provider or pick another model in /maestro config.`,
       };
     }
-    return { ok: true, modelArg: `${result.model.provider}/${result.model.id}` };
+    return { ok: true, modelArg: `${result.provider}/${result.id}` };
   }
 
   const pattern = tier.model.toLowerCase();
@@ -816,6 +816,27 @@ export function resolveTierModel(
     return { ok: false, error: `Tier "${tierName}": no usable model for "${tier.model}".` };
   }
   return { ok: true, modelArg: `${chosen.provider}/${chosen.id}` };
+}
+
+function findQualifiedModel(modelRegistry: ModelRegistry, reference: string) {
+  const models = modelRegistry.getAll();
+  const normalized = reference.toLowerCase();
+  const exact = models.find(
+    (model) => `${model.provider}/${model.id}`.toLowerCase() === normalized
+  );
+  if (exact) return exact;
+
+  const separator = reference.indexOf("/");
+  if (separator < 1 || separator === reference.length - 1) return undefined;
+  const provider = reference.slice(0, separator).toLowerCase();
+  const pattern = reference.slice(separator + 1).toLowerCase();
+  return models
+    .filter((model) => model.provider.toLowerCase() === provider)
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .find(
+      (model) =>
+        model.id.toLowerCase().includes(pattern) || model.name?.toLowerCase().includes(pattern)
+    );
 }
 
 /** Resolve the primary and ordered fallbacks, skipping patterns unavailable with current auth. */
