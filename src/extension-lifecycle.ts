@@ -1,7 +1,7 @@
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadBoard, sweepDispatchState } from "./board.js";
 import { loadConfig, setProjectConfigTrust } from "./config.js";
-import { COMMAND, CONTEXT_NUDGE_PERCENT } from "./constants.js";
+import { COMMAND, CONTEXT_NUDGE_PERCENT, MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import {
   acknowledgeDeliveredDecision,
   type DriveRuntimeController,
@@ -177,7 +177,9 @@ export function registerMaestroLifecycle(
           } catch {
             // The reattached executor outlives stale UI contexts.
           }
-        }
+        },
+        task.discovery ? MAX_DISCOVERY_REPORT_BYTES : undefined,
+        task.discovery ? MAX_DISCOVERY_REPORT_BYTES : undefined
       );
       live = {
         taskId: task.id,

@@ -1,5 +1,4 @@
 import {
-  appendFileSync,
   closeSync,
   copyFileSync,
   existsSync,
@@ -15,8 +14,19 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { completionFreshness } from "./artifact-policy.js";
-import { STATE_DIR } from "./constants.js";
-import { detachedAttemptIsLive, processStartId } from "./runner.js";
+import { MAX_DISCOVERY_REPORT_BYTES, MAX_PERSISTED_REPORT_CHARS, STATE_DIR } from "./constants.js";
+import {
+  appendPrivateFile,
+  ensurePrivateDirectory,
+  ensurePrivateFile,
+  writePrivateFile,
+} from "./private-files.js";
+import {
+  boundedReport,
+  boundedReportBytes,
+  detachedAttemptIsLive,
+  processStartId,
+} from "./runner.js";
 import {
   type Attempt,
   type Board,
@@ -301,18 +311,62 @@ export function replaceBoardWithArchive(
   }
 }
 
-function saveBoardUnlocked(cwd: string, board: Board): void {
+function ensureStateDirectory(cwd: string): string {
   const dir = stateDir(cwd);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-    // Runtime state (board, logs) has no place in version control.
-    writeFileSync(join(dir, ".gitignore"), "*\n", "utf-8");
+  ensurePrivateDirectory(dir);
+  const ignoreFile = join(dir, ".gitignore");
+  if (!existsSync(ignoreFile)) {
+    try {
+      writePrivateFile(ignoreFile, "*\n", { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  } else {
+    ensurePrivateFile(ignoreFile);
   }
+  return dir;
+}
+
+function boundBoardEvidence(board: Board): void {
+  for (const task of board.tasks) {
+    if (task.reviewNotes !== undefined) task.reviewNotes = boundedReport(task.reviewNotes);
+    // Legacy approved boards predate provenance capture; their latest report
+    // is still the authoritative approved artifact and must not be rewritten.
+    const authoritativeApprovedReport =
+      task.status === "approved" &&
+      (task.approvedProvenance === undefined || task.approvedProvenance.artifact.kind === "report");
+    const executorReportLimit = task.discovery
+      ? MAX_DISCOVERY_REPORT_BYTES
+      : MAX_PERSISTED_REPORT_CHARS;
+    for (const attempt of task.attempts) {
+      // Never mutate an already-approved report artifact: its digest is part of
+      // dependency freshness. Discovery JSON also keeps its larger valid limit.
+      if (attempt.finalReport !== undefined && !authoritativeApprovedReport) {
+        attempt.finalReport = task.discovery
+          ? boundedReportBytes(attempt.finalReport, executorReportLimit)
+          : boundedReport(attempt.finalReport, executorReportLimit);
+      }
+      if (attempt.reviewReport !== undefined)
+        attempt.reviewReport = boundedReport(attempt.reviewReport);
+      if (attempt.reviewNotes !== undefined)
+        attempt.reviewNotes = boundedReport(attempt.reviewNotes);
+      for (const launch of attempt.reviewLaunches ?? []) {
+        if (launch.finalReport !== undefined)
+          launch.finalReport = boundedReport(launch.finalReport);
+      }
+    }
+  }
+}
+
+function saveBoardUnlocked(cwd: string, board: Board): void {
+  ensureStateDirectory(cwd);
+  boundBoardEvidence(board);
   board.revision = (board.revision ?? 0) + 1;
   const file = boardFile(cwd);
   const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
-  writeFileSync(tmp, `${JSON.stringify(board, null, 2)}\n`, "utf-8");
+  writePrivateFile(tmp, `${JSON.stringify(board, null, 2)}\n`);
   renameSync(tmp, file);
+  ensurePrivateFile(file);
   const identity = fileIdentity(file);
   if (identity) boardCache.set(file, { identity, board: structuredClone(board) });
   else boardCache.delete(file);
@@ -330,7 +384,7 @@ function tryAcquireBoardLock(
   token: string
 ): BoardLock | { retry: true } | { reclaimed: true } {
   try {
-    const fd = openSync(file, "wx");
+    const fd = openSync(file, "wx", 0o600);
     const start = processStartId(process.pid);
     writeFileSync(fd, JSON.stringify({ pid: process.pid, token, ...(start ? { start } : {}) }));
     return { fd, file, token };
@@ -343,9 +397,7 @@ function tryAcquireBoardLock(
 }
 
 function boardLockFile(cwd: string): string {
-  const dir = stateDir(cwd);
-  mkdirSync(dir, { recursive: true });
-  return join(dir, "board.lock");
+  return join(ensureStateDirectory(cwd), "board.lock");
 }
 
 function lockToken(): string {
@@ -468,26 +520,29 @@ export function recordStatusChange(
   to: TaskStatus,
   revision: number
 ): void {
-  const dir = stateDir(cwd);
-  mkdirSync(dir, { recursive: true });
+  const dir = ensureStateDirectory(cwd);
   const record = { ts: new Date().toISOString(), taskId, from, to, revision };
-  appendFileSync(join(dir, HISTORY_FILE), `${JSON.stringify(record)}\n`, "utf-8");
+  appendPrivateFile(join(dir, HISTORY_FILE), `${JSON.stringify(record)}\n`);
 }
 
 export function archiveBoard(cwd: string): string | undefined {
   const file = boardFile(cwd);
   if (!existsSync(file)) return undefined;
 
-  const archiveDir = join(stateDir(cwd), "archive");
-  mkdirSync(archiveDir, { recursive: true });
+  const archiveDir = join(ensureStateDirectory(cwd), "archive");
+  ensurePrivateDirectory(archiveDir);
   const timestamp = new Date().toISOString();
-  let archive = join(archiveDir, `${timestamp}-board.json`);
+  // Use an ISO-derived filename without colons (invalid on Windows). The
+  // timestamp returned to consumers remains canonical ISO.
+  const filenameTimestamp = `${timestamp.slice(0, 11)}${timestamp.slice(11).replaceAll(":", "-")}`;
+  let archive = join(archiveDir, `${filenameTimestamp}-board.json`);
   let suffix = 1;
   while (existsSync(archive)) {
-    archive = join(archiveDir, `${timestamp}-${suffix}-board.json`);
+    archive = join(archiveDir, `${filenameTimestamp}-${suffix}-board.json`);
     suffix += 1;
   }
   copyFileSync(file, archive);
+  ensurePrivateFile(archive);
   return archive;
 }
 
@@ -497,11 +552,21 @@ export interface ArchivedBoard {
   taskCount: number;
 }
 
+function canonicalArchiveTimestamp(raw: string): string {
+  // Accept both legacy colon-bearing names and portable names. Only the time
+  // separators are restored, leaving the date's hyphens untouched.
+  return /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d+)?Z$/.test(raw)
+    ? `${raw.slice(0, 13)}:${raw.slice(14, 16)}:${raw.slice(17)}`
+    : raw;
+}
+
 function archiveSortKey(name: string): { iso: string; suffix: number } {
-  const isoEnd = name.indexOf("Z");
-  const iso = isoEnd < 0 ? name : name.slice(0, isoEnd + 1);
-  const match = name.slice(iso.length).match(/^-(\d+)-board\.json$/);
-  return { iso, suffix: match ? Number(match[1]) : 0 };
+  const match = name.match(/^(.*Z)(?:-(\d+))?-board\.json$/);
+  if (!match) return { iso: name, suffix: 0 };
+  return {
+    iso: canonicalArchiveTimestamp(match[1] ?? name),
+    suffix: Number(match[2] ?? 0),
+  };
 }
 
 export function latestArchiveFile(cwd: string): { file: string; timestamp: string } | undefined {
@@ -520,7 +585,8 @@ export function latestArchiveFile(cwd: string): { file: string; timestamp: strin
   if (!name) return undefined;
   const isoEnd = name.indexOf("Z");
   if (isoEnd < 0) return undefined;
-  return { file: join(directory, name), timestamp: name.slice(0, isoEnd + 1) };
+  const timestamp = canonicalArchiveTimestamp(name.slice(0, isoEnd + 1));
+  return { file: join(directory, name), timestamp };
 }
 
 export function loadArchivedBoard(cwd: string, selectedFile: string): Board {
@@ -542,14 +608,21 @@ export function listArchivedBoards(cwd: string): ArchivedBoard[] {
 
   return readdirSync(directory)
     .filter((name) => name.endsWith("-board.json"))
-    .sort((left, right) => right.localeCompare(left))
+    .sort((left, right) => {
+      const a = archiveSortKey(left);
+      const b = archiveSortKey(right);
+      if (a.iso !== b.iso) return b.iso.localeCompare(a.iso);
+      return b.suffix - a.suffix;
+    })
     .flatMap((name) => {
       const file = join(directory, name);
       const board = readArchivedBoard(file);
       if (!board) return [];
-      return [
-        { file, timestamp: name.slice(0, -"-board.json".length), taskCount: board.tasks.length },
-      ];
+      const isoEnd = name.indexOf("Z");
+      const timestamp = canonicalArchiveTimestamp(
+        isoEnd < 0 ? name.slice(0, -"-board.json".length) : name.slice(0, isoEnd + 1)
+      );
+      return [{ file, timestamp, taskCount: board.tasks.length }];
     });
 }
 
@@ -996,6 +1069,7 @@ function quarantineCorruptBoard(file: string): string {
     destination = `${prefix}-${suffix}`;
   }
   renameSync(file, destination);
+  ensurePrivateFile(destination);
   return destination;
 }
 

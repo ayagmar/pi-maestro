@@ -6,11 +6,13 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { captureApprovedProvenance, completionFreshness } from "../src/artifact-policy.js";
 import {
   applyPlanTaskEdits,
   approvePlan,
@@ -24,11 +26,11 @@ import {
   forceStatus,
   groupTasks,
   humanRetryEligibility,
+  humanRetryRiskToken,
+  isReadOnlyTask,
   isRunnable,
   latestArchiveFile,
   listArchivedBoards,
-  humanRetryRiskToken,
-  isReadOnlyTask,
   loadBoard,
   loadBoardView,
   loadStatusHistory,
@@ -49,6 +51,8 @@ import {
   updateTaskAsync,
   validatePlan,
 } from "../src/board.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
+import { parseDiscoveryOutput } from "../src/discovery.js";
 import { type Attempt, type Board, type TaskStatus } from "../src/types.js";
 
 function emptyBoard(): Board {
@@ -600,6 +604,176 @@ test("saveBoard/loadBoard round-trips and increments revisions", () => {
   }
 });
 
+test("runtime state and evidence files are private on POSIX", () => {
+  if (process.platform === "win32") return;
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-private-state-"));
+  try {
+    const board = emptyBoard();
+    createTask(board, { title: "A", brief: "do a", tier: "standard" });
+    saveBoard(cwd, board);
+    updateTask(cwd, "T1", (task) => {
+      task.status = "running";
+    });
+    const archive = archiveBoard(cwd);
+    assert.ok(archive);
+    assert.equal(statSync(join(cwd, ".pi", "maestro")).mode & 0o777, 0o700);
+    assert.equal(statSync(join(cwd, ".pi", "maestro", "board.json")).mode & 0o777, 0o600);
+    assert.equal(statSync(join(cwd, ".pi", "maestro", "history.jsonl")).mode & 0o777, 0o600);
+    assert.equal(statSync(join(cwd, ".pi", "maestro", "archive")).mode & 0o777, 0o700);
+    assert.equal(statSync(archive).mode & 0o777, 0o600);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("saveBoard bounds persisted executor and reviewer reports", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-bounded-reports-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, { title: "A", brief: "do a", tier: "standard" });
+    task.reviewNotes = "r".repeat(100_000);
+    task.attempts.push({
+      index: 1,
+      logFile: "executor.log",
+      thinking: "low",
+      startedAt: 1,
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      finalReport: "f".repeat(100_000),
+      reviewReport: "v".repeat(100_000),
+      reviewNotes: "n".repeat(100_000),
+      touchedFiles: [],
+    });
+    saveBoard(cwd, board);
+    const saved = loadBoard(cwd).tasks[0];
+    assert.ok(saved);
+    assert.ok((saved.reviewNotes?.length ?? 0) <= 16_000);
+    assert.ok((saved.attempts[0]?.finalReport?.length ?? 0) <= 16_000);
+    assert.match(saved.attempts[0]?.finalReport ?? "", /report truncated/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("saveBoard preserves valid discovery JSON above the ordinary report limit", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-discovery-report-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, {
+      title: "Discover work",
+      brief: "return discovery JSON",
+      tier: "standard",
+      kind: "investigation",
+      writePaths: [],
+    });
+    task.discovery = { allowedWritePaths: ["src/**"] };
+    const report = JSON.stringify({
+      kind: "pi-maestro-discovery",
+      version: 1,
+      items: [
+        {
+          key: "large",
+          title: "Large discovered task",
+          brief: "x".repeat(17_000),
+          tier: "standard",
+          writePaths: ["src/**"],
+          successCriteria: ["complete"],
+          dependsOn: [],
+        },
+      ],
+    });
+    task.attempts.push({
+      index: 1,
+      logFile: "discovery.log",
+      thinking: "low",
+      startedAt: 1,
+      usage: { input: 0, output: 0, cost: 0, turns: 1 },
+      finalReport: report,
+      touchedFiles: [],
+    });
+
+    saveBoard(cwd, board);
+    const persisted = loadBoard(cwd).tasks[0]?.attempts[0]?.finalReport;
+    assert.equal(persisted, report);
+    assert.ok(Buffer.byteLength(persisted ?? "", "utf8") <= 64_000);
+    assert.equal(parseDiscoveryOutput(persisted ?? "").items.length, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("saveBoard never invalidates an approved report artifact identity", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-approved-report-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, {
+      title: "Approved report",
+      brief: "retain authoritative evidence",
+      tier: "standard",
+      kind: "investigation",
+      writePaths: [],
+    });
+    const report = "authoritative ".repeat(1_300);
+    task.attempts.push({
+      index: 1,
+      logFile: "report.log",
+      thinking: "low",
+      startedAt: 1,
+      endedAt: 2,
+      exitCode: 0,
+      usage: { input: 0, output: 0, cost: 0, turns: 1 },
+      finalReport: report,
+      touchedFiles: [],
+    });
+    forceStatus(task, "approved");
+    const proof = captureApprovedProvenance(board, task, DEFAULT_CONFIG);
+    assert.ok(proof);
+    task.approvedProvenance = proof;
+    assert.equal(completionFreshness(board, task, DEFAULT_CONFIG).state, "fresh");
+
+    saveBoard(cwd, board);
+    const persistedBoard = loadBoard(cwd);
+    const persistedTask = persistedBoard.tasks[0];
+    assert.ok(persistedTask);
+    assert.equal(persistedTask.attempts[0]?.finalReport, report);
+    assert.equal(completionFreshness(persistedBoard, persistedTask, DEFAULT_CONFIG).state, "fresh");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("saveBoard preserves legacy approved reports that predate provenance capture", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-legacy-approved-report-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, {
+      title: "Legacy approved",
+      brief: "investigate",
+      tier: "standard",
+      kind: "investigation",
+      writePaths: [],
+    });
+    const report = "legacy evidence ".repeat(2_000);
+    task.attempts.push({
+      index: 1,
+      logFile: "legacy.log",
+      thinking: "low",
+      startedAt: 1,
+      endedAt: 2,
+      exitCode: 0,
+      usage: { input: 0, output: 0, cost: 0, turns: 1 },
+      finalReport: report,
+      touchedFiles: [],
+    });
+    // Legacy boards have approved tasks without approvedProvenance; their
+    // latest report is still the authoritative artifact for dependencies.
+    forceStatus(task, "approved");
+    saveBoard(cwd, board);
+    assert.equal(loadBoard(cwd).tasks[0]?.attempts[0]?.finalReport, report);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("saveBoard/loadBoard preserves a bounded reviewer log reference", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-log-test-"));
   try {
@@ -726,8 +900,16 @@ test("archiveBoard copies the current board and returns its path", () => {
     const archive = archiveBoard(cwd);
 
     assert.ok(archive);
-    assert.match(archive, /archive[/\\].+-board\.json$/);
+    assert.match(
+      archive,
+      /archive[/\\]\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d+)?Z-board\.json$/
+    );
+    assert.doesNotMatch(archive, /:/);
     assert.equal(readFileSync(archive, "utf-8"), boardContents);
+    const latest = latestArchiveFile(cwd);
+    assert.ok(latest);
+    assert.match(latest.timestamp, /T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/);
+    assert.equal(Number.isFinite(Date.parse(latest.timestamp)), true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

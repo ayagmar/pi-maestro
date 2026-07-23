@@ -16,6 +16,7 @@ import {
   validatePlan,
 } from "./board.js";
 import { loadConfig } from "./config.js";
+import { MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import { DISCOVERY_TOOLS, discoveryInstructions } from "./discovery.js";
 import { accountPromptContext, buildExecutorPrompt } from "./prompts.js";
 import {
@@ -191,6 +192,9 @@ export async function executeTask(options: {
       ...(watchdogWarningTurns === undefined ? {} : { watchdogWarningTurns }),
       ...(watchdogTerminationTurns === undefined ? {} : { watchdogTerminationTurns }),
       runKind: isReadOnlyTask(task) ? "investigation" : "implementation",
+      ...(task.discovery
+        ? { maxReportChars: MAX_DISCOVERY_REPORT_BYTES, maxReportBytes: MAX_DISCOVERY_REPORT_BYTES }
+        : {}),
       ...(config.detachedExecutors ? { detached: true } : {}),
       onUpdate: (update) => {
         const sessionFile = update.sessionFile;
