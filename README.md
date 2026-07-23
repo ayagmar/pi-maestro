@@ -271,7 +271,7 @@ trusted user/default value:
       "thinking": "medium"
     },
     "complex":  { "model": "gpt-5.6-sol", "thinking": "high" },
-    "review":   { "model": "gpt-5.6-sol", "thinking": "medium", "tools": "read,bash,grep,find,ls" }
+    "review":   { "model": "gpt-5.6-sol", "thinking": "medium", "tools": "read,grep,find,ls" }
   }
 }
 ```
@@ -294,7 +294,7 @@ trusted user/default value:
   serializes merges into the original tree, then deletes the worktree and branch. A merge conflict
   is aborted, changes the task to `changes_requested`, and retains the checkout, branch, and
   recovery notes; the next retry reuses that worktree (default false).
-- `detachedExecutors` — opt-in Unix executor survivability (default false). Git projects force each detached executor into its own task worktree. Because Pi RPC is stdio-only and cannot reconnect to an abandoned pipe, Maestro uses persisted JSONL event/control files plus a detached process group, records PID and kernel start identity, extends that dispatch lease for up to seven days, and reattaches by log tail on `session_start`. Reattached runs remain steerable and abortable; if they settle while Maestro is absent, startup reconstructs their outcome before review. Reviewer launches remain attached to the supervising runtime, and Windows falls back to the normal attached transport.
+- `detachedExecutors` — opt-in Unix executor survivability (default false). Git projects force each detached executor into its own task worktree. Because Pi RPC is stdio-only and cannot reconnect to an abandoned pipe, Maestro uses a detached supervisor with persisted JSONL event/control files. The supervisor auto-cancels UI requests, applies watchdog and cost-cap termination, enforces compact/full complete-line logging and byte caps while the parent is absent, records an atomic terminal outcome, and lets `session_start` reattach by incremental log tail. Reattached runs remain steerable and abortable; if they settle while Maestro is absent, startup reconstructs their outcome before review. Reviewer launches remain attached to the supervising runtime, and Windows falls back to the normal attached transport with `taskkill /t` descendant cleanup on abort/timeout; that Windows path remains best-effort until a hosted Windows run passes.
 - `autoCommit` — commit each task's approved work as one conventional commit (default on).
   The commit message comes from the task's `commitMessage` (the orchestrator plans one per
   task, e.g. `fix: handle empty board`) or falls back to `feat: <title>`. Main-tree runs
@@ -332,8 +332,9 @@ trusted user/default value:
 - `thinking` — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Per GPT-5.6 guidance: start
   medium, test one level lower, raise only when results show a gain.
 - `tools` — comma-separated allowlist passed to the executor. Every preset's `review` tier defaults
-  to `read,bash,grep,find,ls`, so automated reviewers are read-only by default. This field is
-  configurable: adding write-capable tools removes that guarantee. Manual approval from the board
+  to `read,grep,find,ls`, so automated reviewers are read-only by default. This field is
+  configurable: adding `bash` or other write-capable tools removes that guarantee; this is not a
+  machine sandbox. Trusted verification commands remain the supported place for operator-selected checks. Manual approval from the board
   or task picker bypasses the reviewer entirely.
 - You can add your own tier names; the orchestrator's planning guidance lists them.
 
@@ -349,7 +350,7 @@ When worktrees are enabled, every attempt—including a single task—runs in an
 
 Trusted verification commands are arbitrary local code and may be defined only in the operator-owned user config (`~/.pi/agent/maestro.json`) with `verificationProfiles` entries shaped as `{ "command": "pnpm test", "timeoutSeconds": 300 }`. Repository `.pi/maestro.json` may select a known user profile with `defaultVerificationProfile`, but repository-defined commands and unknown selections are ignored. Task briefs and model instructions are never executed. Verification runs in a dedicated process group on Unix; timeout or abort sends TERM followed by KILL, bounds captured output, and logs under `.pi/maestro/verification/`. Candidate mutation invalidates review. Failed post-integration verification retains a checkpoint branch as recovery evidence while parking the idle checkout; successful approval removes both checkout and task branch only after provenance is persisted.
 
-The watchdog steers once after `watchdogIdleSeconds` of silence (default 120) or `watchdogWarningTurns` without meaningful progress (default 12), then classifies continued inactivity as `stalled` after `watchdogTerminationTurns` (default 4 additional turns). Any tier, including `review`, may override those three fields for its launches; omitted tier values inherit the global thresholds. `handoffContextRatio` controls automatic safe handoff. Model prompts use named, priority-bounded sections: success criteria and open blockers are retained before dependency conclusions, display diffs, and historical detail. Repeated dependency payloads share a fixed budget, and `/maestro costs` reports compact executor-context character/token estimates. Logs use `logEvents` (`compact` by default) and `maxLogBytesPerRun`; zero bytes means unlimited. New defaults cap a task at $5 and a drive at $25 without overriding explicit user configuration. `cleanupCompletedTasks` defaults to `true`: after every board task is approved or cancelled, Maestro archives the final board and clears tasks from the live board. Set it to `false` to retain completed tasks live. `/maestro reconcile` separately reports manual acceptance and missing authoritative-tree, review, integration, verification, or recovery-worktree evidence without rewriting state.
+The watchdog steers once after `watchdogIdleSeconds` of silence (default 120) or `watchdogWarningTurns` without meaningful progress (default 12), then classifies continued inactivity as `stalled` after `watchdogTerminationTurns` (default 4 additional turns). After steering, the grace applies to both subsequent no-progress turns and prolonged silence, so a silent run cannot hang forever while a run that responds after steering can settle normally. Any tier, including `review`, may override those three fields for its launches; omitted tier values inherit the global thresholds. `handoffContextRatio` controls automatic safe handoff. Model prompts use named, priority-bounded sections: success criteria and open blockers are retained before dependency conclusions, display diffs, and historical detail. Repeated dependency payloads share a fixed budget, and `/maestro costs` reports compact executor-context character/token estimates. Logs use `logEvents` (`compact` by default) and `maxLogBytesPerRun`; zero bytes means unlimited. New defaults cap a task at $5 and a drive at $25 without overriding explicit user configuration. `cleanupCompletedTasks` defaults to `true`: after every board task is approved or cancelled, Maestro archives the final board and clears tasks from the live board. Set it to `false` to retain completed tasks live. `/maestro reconcile` separately reports manual acceptance and missing authoritative-tree, review, integration, verification, or recovery-worktree evidence without rewriting state.
 
 `/maestro doctor` prints a non-secret readiness report: user/project config files and precedence,
 effective limits and tier settings, authenticated model and fallback resolution, git readiness, and
@@ -494,8 +495,10 @@ Maestro is not a sandbox, CI service, analytics database, or generic plugin syst
   10,000-character injected-context limit, omitted when empty, persisted on the attempt, and never
   changes the executor outcome if capture fails.
 - Review verdicts persist on the reviewed attempt (`reviewReport`, `reviewSessionFile`): from the
-  task picker you can view the full verdict text or switch into the reviewer's session. Reviewer
-  usage is added to that task's totals.
+  task picker you can view the retained verdict text or switch into the reviewer's session. Ordinary
+  report previews are bounded, discovery JSON retains its larger validation limit, and an approved
+  report artifact is never rewritten because its digest is dependency evidence. Reviewer usage is
+  added to that task's totals.
 - Reviewers must end with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`; anything else leaves
   the task in `ready_for_review` for you or the orchestrator to re-review.
 - Every task status change is appended to `.pi/maestro/history.jsonl`; `/maestro history [n]`

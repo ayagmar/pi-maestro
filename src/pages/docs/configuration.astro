@@ -7,6 +7,7 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
     <div class="table-wrap"><table><thead><tr><th>Scope</th><th>Path</th><th>What it can do</th></tr></thead><tbody><tr><td>User</td><td><code>~/.pi/agent/maestro.json</code></td><td>Own models, fallbacks, limits, and trusted verification commands.</td></tr><tr><td>Project</td><td><code>.pi/maestro.json</code></td><td>Tune project behavior and select a known user verification profile.</td></tr></tbody></table></div>
     <h2>Useful defaults</h2>
     <div class="table-wrap"><table><thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead><tbody><tr><td><code>maxParallel</code></td><td>3</td><td>Maximum executor or reviewer processes at once.</td></tr><tr><td><code>planGate</code></td><td>false</td><td>Require human approval before the first drive.</td></tr><tr><td><code>useWorktrees</code></td><td>false</td><td>Give every runnable task an isolated Git checkout.</td></tr><tr><td><code>detachedExecutors</code></td><td>false</td><td>Unix-only persisted executor transport with startup reattachment; Git tasks auto-isolate.</td></tr><tr><td><code>autoCommit</code></td><td>true</td><td>Commit approved attributed work as one conventional commit.</td></tr><tr><td><code>maxAttempts</code></td><td>3</td><td>Consumed execution attempts per task.</td></tr><tr><td><code>maxCostPerTask</code></td><td>$5</td><td>Abort an attempt after its billed cost exceeds the cap.</td></tr><tr><td><code>maxRunCost</code></td><td>$25</td><td>Gate new batches after the recorded run total reaches the cap.</td></tr><tr><td><code>statusWaitSeconds</code></td><td>60</td><td>Interval for mechanical progress pulses; zero disables waiting.</td></tr></tbody></table></div>
+    <p>Detached Unix executors use a persistent supervisor: UI requests are cancelled, watchdog and cost-cap termination continue while the parent is absent, logs keep complete lines within their byte cap, and startup reattaches by incremental tail. Runtime evidence uses private POSIX modes where supported; ordinary reports are bounded previews, discovery JSON retains its validation limit, approved report identities stay immutable, and full evidence remains in session logs.</p>
     <h2>Preset and tier model selection</h2>
     <p>The interactive settings editor is available at <code>/maestro config</code> (user scope) and <code>/maestro config project</code>. Presets define per-tier models and thinking levels; qualified model patterns such as <code>openai-codex/gpt-5.6-sol</code> pin a provider. A tier may also override <code>watchdogIdleSeconds</code>, <code>watchdogWarningTurns</code>, and <code>watchdogTerminationTurns</code>; omitted values inherit the global thresholds.</p>
     <div class="code-block"><button class="copy-button" type="button">Copy</button><pre><code>&#123;
@@ -14,7 +15,7 @@ import DocsLayout from "../../layouts/DocsLayout.astro";
   "planGate": true,
   "tiers": &#123;
     "standard": &#123; "model": "gpt-5.6-sol", "thinking": "medium" &#125;,
-    "review": &#123; "model": "gpt-5.6-sol", "thinking": "medium", "tools": "read,bash,grep,find,ls" &#125;
+    "review": &#123; "model": "gpt-5.6-sol", "thinking": "medium", "tools": "read,grep,find,ls" &#125;
   &#125;
 &#125;</code></pre></div>
     <h2>Trusted verification</h2>

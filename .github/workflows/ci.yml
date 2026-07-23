@@ -50,8 +50,8 @@ jobs:
       - name: Check formatting (Biome)
         run: pnpm run format:check
 
-  # Windows support is best-effort: grouped kill, the hard-link lock protocol,
-  # and detached-spawn semantics differ there. Non-blocking until proven stable.
+  # Windows support is best-effort: taskkill tree cleanup, the hard-link lock protocol,
+  # and attached fallback still need a real hosted run. Non-blocking until proven stable.
   check-windows:
     runs-on: windows-latest
     continue-on-error: true

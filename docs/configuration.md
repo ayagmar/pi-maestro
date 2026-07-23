@@ -36,7 +36,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `handoffContextRatio` | 0.68 | 0–1; 0 disables |
 | `cleanupCompletedTasks` | true | Archive then clear settled boards |
 
-`detachedExecutors` is opt-in and applies to executor launches, not reviewers. Pi RPC exposes only stdio, so Unix survivability uses persisted JSONL control/event files and a detached process group rather than attempting to reconnect abandoned pipes. Attempts persist PID plus kernel start identity, receive a seven-day dispatch lease, auto-isolate in Git worktrees, and reattach by log tail on session start. Windows uses the ordinary attached transport.
+`detachedExecutors` is opt-in and applies to executor launches, not reviewers. Pi RPC exposes only stdio, so Unix survivability uses persisted JSONL control/event files and a detached supervisor process rather than attempting to reconnect abandoned pipes. The supervisor handles UI requests by cancelling them, applies the same watchdog and cost-cap termination policy, writes complete event lines within `maxLogBytesPerRun`, bounds stderr, and persists a terminal outcome record; after the executor exits it drains stdout briefly and then settles even if a tool-spawned descendant still holds the stdio pipes, reaping that process group. Attempts persist PID plus kernel start identity, receive a seven-day dispatch lease, auto-isolate in Git worktrees, and reattach by incremental log tail on session start. Windows uses the ordinary attached transport.
 
 `tiers` must define valid thinking levels. The built-in tiers are `trivial`, `standard`, `complex`, and read-only `review`. Each tier may set `watchdogIdleSeconds` (0–86400), `watchdogWarningTurns` (0–10000), and `watchdogTerminationTurns` (0–10000); those values override the corresponding global watchdog thresholds only for launches on that tier. Omitted tier fields inherit the global values, including on the `review` tier.
 
@@ -69,4 +69,4 @@ Only user config may define executable profiles:
 }
 ```
 
-Commands are arbitrary local operator code. Output is bounded and logged. Timeout or abort terminates the verification process group. Verification must not mutate candidate files; mutation invalidates review.
+Commands are arbitrary local operator code. Output is bounded and logged. Timeout or abort terminates the verification process tree (Unix process groups; Windows `taskkill /t` with forced escalation). Verification must not mutate candidate files; mutation invalidates review. Runtime board, history, archive, control, log, and verification evidence is created with private POSIX modes where supported. Ordinary executor and reviewer reports are bounded previews; discovery JSON retains its larger validation limit, approved report identities are immutable, and the full transcript remains in the Pi session/log. Windows tree cleanup remains best-effort until it passes a real hosted Windows run.
