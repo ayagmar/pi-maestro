@@ -1,14 +1,27 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   applyAssistantMessage,
+  boundedReportBytes,
   cappedLogWriter,
   classifyFailure,
+  detachedAttemptIsLive,
   mapWithConcurrencyLimit,
   projectSessionDir,
   type RunOutcome,
@@ -17,8 +30,29 @@ import {
   runVerification,
   startExecutor,
   touchedFile,
+  windowsTaskkillArguments,
 } from "../src/runner.js";
 import { type Attempt } from "../src/types.js";
+
+const wait = async (milliseconds: number): Promise<void> =>
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+test("byte-bounded reports do not split UTF-8 or exceed their limit", () => {
+  const bounded = boundedReportBytes("é".repeat(40_000), 64_000);
+  assert.ok(Buffer.byteLength(bounded, "utf8") <= 64_000);
+  assert.doesNotMatch(bounded, /�/);
+});
+
+test("byte-bounded reports preserve legitimate replacement characters in content", () => {
+  const report = `${"A".repeat(10)}\uFFFD${"B".repeat(40_000)}`;
+  const started = Date.now();
+  const bounded = boundedReportBytes(report, 16_000);
+  assert.ok(Date.now() - started < 1_000, "bounding must not scan character by character");
+  assert.ok(Buffer.byteLength(bounded, "utf8") <= 16_000);
+  // The head half of the bound is ~7,900 bytes; the legitimate U+FFFD at
+  // offset 10 must survive instead of being trimmed away as a split artifact.
+  assert.ok(bounded.startsWith(`${"A".repeat(10)}\uFFFD`));
+});
 
 test("capped run logs stop at the byte limit without stopping outcome tracking", () => {
   const output = new PassThrough();
@@ -163,10 +197,693 @@ process.stdin.on("data", (chunk) => {
     assert.match(readFileSync(run.attempt.logFile, "utf-8"), /agent_settled/);
     assert.deepEqual(outcome.touchedFiles, ["detached.ts"]);
     assert.equal(outcome.finalReport, "detached complete");
+    assert.equal(outcome.usage.turns, 1);
     assert.equal(outcome.exitCode, 0);
     assert.equal(reattached.survivesShutdown, true);
     assert.equal(recoveredOutcome.finalReport, "detached complete");
+    assert.equal(recoveredOutcome.usage.turns, 1);
     assert.equal(recoveredOutcome.exitCode, 0);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached supervision cancels UI requests and enforces compact byte-bounded logs", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-detached-safety-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  const responseFile = join(root, "ui-response.json");
+  writeFileSync(
+    fakePi,
+    `import { writeFileSync } from "node:fs";
+let buffer = "";
+let asked = false;
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "prompt" && !asked) {
+      asked = true;
+      console.log(JSON.stringify({ type: "extension_ui_request", id: "approval-1" }));
+      for (let index = 0; index < 100; index++) console.log(JSON.stringify({ type: "noise", data: "x".repeat(200) }));
+    }
+    if (command.type === "extension_ui_response") {
+      writeFileSync(${JSON.stringify(responseFile)}, JSON.stringify(command));
+      console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.01 } }, content: [{ type: "text", text: "detached UI handled" }] } }));
+      console.log(JSON.stringify({ type: "agent_settled" }));
+    }
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "detached-safety",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+      detached: true,
+      logEvents: "compact",
+      maxLogBytes: 512,
+    });
+    const outcome = await run.outcome;
+    const response = JSON.parse(readFileSync(responseFile, "utf8")) as Record<string, unknown>;
+    const log = readFileSync(run.attempt.logFile, "utf8");
+    assert.equal(response.cancelled, true);
+    assert.equal(outcome.finalReport, "detached UI handled");
+    assert.ok(statSync(run.attempt.logFile).size <= 512);
+    assert.doesNotThrow(() => {
+      for (const line of log.split("\n").filter(Boolean)) JSON.parse(line);
+    });
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached supervision reports a cost-cap abort", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-detached-cost-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "prompt") console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 1 } }, content: [{ type: "text", text: "over budget" }] } }));
+    if (command.type === "abort") process.exit(1);
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "detached-cost",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+      detached: true,
+      maxCost: 0.1,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.failureCause, "cost_cap");
+    assert.equal(outcome.aborted, false);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached watchdog gives post-steer work its grace period", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-watchdog-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "steer") setTimeout(() => {
+      console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "detached finished after steer" }] } }));
+      console.log(JSON.stringify({ type: "agent_settled" }));
+    }, 30);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "detached-watchdog",
+      cwd: root,
+      prompt: "finish after steering",
+      tier: { thinking: "low" },
+      detached: true,
+      watchdogIdleSeconds: 0.02,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 20,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.failureCause, undefined);
+    assert.equal(outcome.finalReport, "detached finished after steer");
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached full logs reach their cap without partial records or lost outcomes", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-full-log-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (JSON.parse(line).type !== "prompt") continue;
+    for (let index = 0; index < 30; index++) console.log(JSON.stringify({ type: "noise", index, data: "é".repeat(100) }));
+    const event = Buffer.from(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "café after cap" }] } }) + "\\n");
+    const split = event.indexOf(Buffer.from("é")) + 1;
+    process.stdout.write(event.subarray(0, split));
+    setTimeout(() => {
+      process.stdout.write(event.subarray(split));
+      console.log(JSON.stringify({ type: "agent_settled" }));
+    }, 5);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "detached-full-log",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+      detached: true,
+      logEvents: "full",
+      maxLogBytes: 600,
+    });
+    const outcome = await run.outcome;
+    const log = readFileSync(run.attempt.logFile, "utf8");
+    const records = log.split("\n").filter(Boolean);
+    assert.ok(Buffer.byteLength(log) > 400);
+    assert.ok(Buffer.byteLength(log) <= 600);
+    assert.ok(records.length < 30, "the generated full event stream must actually hit the cap");
+    for (const record of records) assert.doesNotThrow(() => JSON.parse(record));
+    assert.equal(outcome.finalReport, "café after cap");
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached transport preserves reports within an explicitly raised bound", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-report-limit-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) if (JSON.parse(line).type === "prompt") {
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "x".repeat(17_000) }] } }));
+    console.log(JSON.stringify({ type: "agent_settled" }));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "detached-report-limit",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+      detached: true,
+      maxReportChars: 64_000,
+      maxReportBytes: 64_000,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.finalReport, "x".repeat(17_000));
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached process failures retain bounded stderr and one terminal outcome", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-process-failure-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `process.stdin.on("data", (chunk) => {
+  for (const line of chunk.toString().split("\\n")) {
+    if (line && JSON.parse(line).type === "prompt") {
+      process.stderr.write("x".repeat(20_000) + "END-OF-STDERR");
+      process.exit(7);
+    }
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "detached-process-failure",
+      cwd: root,
+      prompt: "fail",
+      tier: { thinking: "low" },
+      detached: true,
+    });
+    let resolutions = 0;
+    void run.outcome.then(() => {
+      resolutions += 1;
+    });
+    const outcome = await run.outcome;
+    await wait(150);
+    assert.equal(outcome.exitCode, 7);
+    assert.equal(outcome.failureCause, "process");
+    assert.match(outcome.errorMessage ?? "", /END-OF-STDERR/);
+    assert.ok(statSync(run.attempt.stderrFile ?? "").size <= 16_000);
+    assert.equal(resolutions, 1);
+    const terminal = JSON.parse(readFileSync(run.attempt.exitFile ?? "", "utf8")) as {
+      version: number;
+      exitCode: number;
+    };
+    assert.deepEqual(
+      { version: terminal.version, exitCode: terminal.exitCode },
+      { version: 1, exitCode: 7 }
+    );
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached monitor handles UTF-8 splits and log truncation incrementally", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-tail-"));
+  const logFile = join(root, "events.jsonl");
+  const controlFile = join(root, "control.jsonl");
+  const exitFile = join(root, "exit.json");
+  writeFileSync(logFile, "");
+  writeFileSync(controlFile, "");
+  const attempt: Attempt = {
+    index: 1,
+    logFile,
+    thinking: "low",
+    startedAt: Date.now(),
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+    detached: true,
+    pid: process.pid,
+    controlFile,
+    exitFile,
+  };
+  try {
+    const run = reattachDetachedExecutor(attempt, root);
+    const first = Buffer.from(
+      `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "café before truncation" }] } })}\n`
+    );
+    const split = first.indexOf(Buffer.from("é")) + 1;
+    appendFileSync(logFile, first.subarray(0, split));
+    await wait(150);
+    appendFileSync(logFile, first.subarray(split));
+    await wait(150);
+
+    truncateSync(logFile, 0);
+    appendFileSync(
+      logFile,
+      `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "after truncation" }] } })}\n`
+    );
+    await wait(150);
+    writeFileSync(exitFile, `${JSON.stringify({ version: 1, exitCode: 0 })}\n`);
+    const outcome = await run.outcome;
+    assert.equal(outcome.finalReport, "after truncation");
+    assert.equal(outcome.usage.turns, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a clean detached terminal outcome outranks a racing local abort", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-abort-race-"));
+  const logFile = join(root, "events.jsonl");
+  const controlFile = join(root, "control.jsonl");
+  const exitFile = join(root, "exit.json");
+  writeFileSync(logFile, "");
+  writeFileSync(controlFile, "");
+  // A real live process in its own group so abort's group kill has a safe target.
+  const sleeper = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  const attempt: Attempt = {
+    index: 1,
+    logFile,
+    thinking: "low",
+    startedAt: Date.now(),
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+    detached: true,
+    pid: sleeper.pid ?? 0,
+    controlFile,
+    exitFile,
+  };
+  try {
+    const run = reattachDetachedExecutor(attempt, root);
+    run.abort();
+    writeFileSync(
+      exitFile,
+      `${JSON.stringify({ version: 1, exitCode: 0, aborted: false, finalReport: "finished before abort" })}\n`
+    );
+    const outcome = await run.outcome;
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.aborted, false);
+    assert.equal(outcome.failureCause, undefined);
+    assert.equal(outcome.finalReport, "finished before abort");
+  } finally {
+    try {
+      if (sleeper.pid) process.kill(-sleeper.pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("drive abort signals terminate a detached executor", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-signal-abort-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (JSON.parse(line).type === "abort") process.exit(1);
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const controller = new AbortController();
+    const run = startExecutor({
+      stateDir: root,
+      runId: "signal-abort",
+      cwd: root,
+      prompt: "run until aborted",
+      tier: { thinking: "low" },
+      detached: true,
+      signal: controller.signal,
+    });
+    await wait(200);
+    controller.abort();
+    const outcome = await run.outcome;
+    assert.equal(outcome.aborted, true);
+    assert.equal(outcome.failureCause, "user_abort");
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached supervisor survives its launching parent", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-parent-exit-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  const helper = join(root, "launch.mts");
+  const attemptFile = join(root, "attempt.json");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) if (JSON.parse(line).type === "prompt") setTimeout(() => {
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "completed without parent" }] } }));
+    console.log(JSON.stringify({ type: "agent_settled" }));
+  }, 300);
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  writeFileSync(
+    helper,
+    `import { writeFileSync } from "node:fs";
+import { startExecutor } from ${JSON.stringify(new URL("../src/runner.ts", import.meta.url).href)};
+process.argv[1] = ${JSON.stringify(fakePi)};
+const run = startExecutor({ stateDir: ${JSON.stringify(root)}, runId: "orphan", cwd: ${JSON.stringify(root)}, prompt: "run", tier: { thinking: "low" }, detached: true });
+writeFileSync(${JSON.stringify(attemptFile)}, JSON.stringify(run.attempt));
+`
+  );
+  try {
+    execFileSync(process.execPath, ["--import=tsx", helper], { timeout: 5_000 });
+    const attempt = JSON.parse(readFileSync(attemptFile, "utf8")) as Attempt;
+    const run = reattachDetachedExecutor(attempt, root);
+    const outcome = await run.outcome;
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.finalReport, "completed without parent");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached event and stderr write failures still persist terminal failures", async () => {
+  if (process.platform === "win32") return;
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  for (const surface of ["event", "stderr"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `maestro-detached-${surface}-write-`));
+    const runId = `${surface}-write`;
+    const fakePi = join(root, "fake-pi.mjs");
+    const target =
+      surface === "event"
+        ? join(root, "logs", `${runId}.jsonl`)
+        : join(root, "logs", `${runId}.jsonl.stderr`);
+    writeFileSync(
+      fakePi,
+      `import { mkdirSync, rmSync } from "node:fs";
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "prompt") {
+      rmSync(${JSON.stringify(target)}, { force: true });
+      mkdirSync(${JSON.stringify(target)});
+      ${surface === "event" ? 'console.log(JSON.stringify({ type: "agent_start" }));' : 'process.stderr.write("cannot persist stderr");'}
+    }
+    if (command.type === "abort") process.exit(1);
+  }
+});
+`
+    );
+    process.argv[1] = fakePi;
+    try {
+      const run = startExecutor({
+        stateDir: root,
+        runId,
+        cwd: root,
+        prompt: "trigger write failure",
+        tier: { thinking: "low" },
+        detached: true,
+      });
+      const outcome = await run.outcome;
+      assert.equal(outcome.failureCause, "process");
+      assert.match(outcome.errorMessage ?? "", new RegExp(`${surface} log write failed`));
+      assert.ok(existsSync(run.attempt.exitFile ?? ""));
+      const terminal = JSON.parse(readFileSync(run.attempt.exitFile ?? "", "utf8")) as {
+        version: number;
+        failureCause?: string;
+      };
+      assert.equal(terminal.version, 1);
+      assert.equal(terminal.failureCause, "process");
+    } finally {
+      process.argv[1] = originalScript;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Windows process-tree cleanup uses taskkill descendants and force escalation", () => {
+  assert.deepEqual(windowsTaskkillArguments(42, false), ["/pid", "42", "/t"]);
+  assert.deepEqual(windowsTaskkillArguments(42, true), ["/pid", "42", "/t", "/f"]);
+});
+
+test("a large prompt racing an immediately exiting executor does not crash the supervisor", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-epipe-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  // Exits without reading stdin, so queued prompt bytes surface as an
+  // asynchronous EPIPE on the parent's write side.
+  writeFileSync(fakePi, "process.exit(0);\n");
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "epipe",
+      cwd: root,
+      prompt: "x".repeat(8 * 1024 * 1024),
+      tier: { thinking: "low" },
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.exitCode, 0);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached monitor settles by liveness when the terminal file is unreadable", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-exit-unreadable-"));
+  const logFile = join(root, "events.jsonl");
+  writeFileSync(logFile, "");
+  const exitFile = join(root, "exit.json");
+  // A directory here makes existsSync true while readFileSync throws EISDIR.
+  mkdirSync(exitFile);
+  const attempt: Attempt = {
+    index: 1,
+    logFile,
+    thinking: "low",
+    startedAt: Date.now(),
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+    detached: true,
+    pid: 2 ** 22 - 1,
+    controlFile: join(root, "control.jsonl"),
+    exitFile,
+  };
+  try {
+    const run = reattachDetachedExecutor(attempt, root);
+    const outcome = await run.outcome;
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.failureCause, "process");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("detached supervisor settles despite a straggler descendant holding stdout", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-straggler-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `import { spawn } from "node:child_process";
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (JSON.parse(line).type !== "prompt") continue;
+    // Straggler inherits our stdout pipe and ignores SIGTERM.
+    spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "ignore"] });
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done with straggler" }] } }));
+    console.log(JSON.stringify({ type: "agent_settled" }));
+    setTimeout(() => process.exit(0), 50);
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "straggler",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+      detached: true,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.finalReport, "done with straggler");
+    // The drain window must also reap the straggler that held the pipe.
+    await wait(200);
+    assert.equal(detachedAttemptIsLive(run.attempt), false);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a corrupt detached control record is skipped without ending the run", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-control-corrupt-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "marker") {
+      console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "survived corrupt control" }] } }));
+      console.log(JSON.stringify({ type: "agent_settled" }));
+    }
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "control-corrupt",
+      cwd: root,
+      prompt: "wait for control",
+      tier: { thinking: "low" },
+      detached: true,
+    });
+    await wait(300);
+    appendFileSync(run.attempt.controlFile ?? "", 'this is not json\n{"type":"marker"}\n');
+    const outcome = await run.outcome;
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.finalReport, "survived corrupt control");
   } finally {
     process.argv[1] = originalScript;
     rmSync(root, { recursive: true, force: true });
@@ -450,6 +1167,70 @@ process.stdin.on("end", () => process.exit(0));
   }
 });
 
+test("verification log stream failures settle as a failed verification", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-verification-log-error-"));
+  try {
+    const result = await runVerification({
+      cwd: root,
+      stateDir: root,
+      name: "log-error",
+      command: `${process.execPath} -e "console.log('output')"`,
+      timeoutSeconds: 1,
+      createLogStream: () =>
+        new Writable({
+          write(_chunk, _encoding, callback) {
+            callback(new Error("disk full"));
+          },
+        }),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.outputTail, /log write failed: disk full/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("executor log stream failures settle as process failures", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-log-error-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `process.stdin.on("data", (chunk) => {
+  for (const line of chunk.toString().split("\\n")) {
+    if (line && JSON.parse(line).type === "prompt") console.log(JSON.stringify({ type: "agent_settled" }));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "log-error",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+      createLogStream: () =>
+        new Writable({
+          write(_chunk, _encoding, callback) {
+            callback(new Error("log unavailable"));
+          },
+        }),
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.failureCause, "process");
+    assert.match(outcome.errorMessage ?? "", /log write failed|log unavailable/);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("trusted verification bounds output and reports pass, failure, and timeout", async () => {
   const root = mkdtempSync(join(tmpdir(), "maestro-verification-"));
   const passed = await runVerification({
@@ -496,6 +1277,37 @@ test("trusted verification bounds output and reports pass, failure, and timeout"
   }
 });
 
+test("verification timeout kills descendants that ignore graceful termination", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-verification-tree-"));
+  const parent = join(root, "parent.mjs");
+  const heartbeat = join(root, "heartbeat.txt");
+  writeFileSync(
+    parent,
+    `import { spawn } from "node:child_process";
+const script = ${JSON.stringify(`const { appendFileSync } = require("node:fs"); process.on("SIGTERM", () => {}); setInterval(() => appendFileSync(${JSON.stringify(heartbeat)}, "x"), 10);`)};
+spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+setInterval(() => {}, 1000);
+`
+  );
+  try {
+    const result = await runVerification({
+      cwd: root,
+      stateDir: root,
+      name: "tree-timeout",
+      command: `${process.execPath} ${JSON.stringify(parent)}`,
+      timeoutSeconds: 0.08,
+    });
+    assert.equal(result.timedOut, true);
+    await wait(100);
+    const afterKill = existsSync(heartbeat) ? statSync(heartbeat).size : 0;
+    await wait(150);
+    assert.equal(existsSync(heartbeat) ? statSync(heartbeat).size : 0, afterKill);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("wall-clock watchdog steers once and aborts a silent executor as stalled", async () => {
   const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-"));
   const fakePi = join(root, "silent-pi.mjs");
@@ -533,6 +1345,91 @@ process.stdin.on("data", (chunk) => {
     assert.equal(outcome.failureReason?.kind, "stalled");
   } finally {
     process.argv[1] = originalScript;
+  }
+});
+
+test("a stalled executor that exits cleanly on abort still lands as stalled", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-exit0-"));
+  const fakePi = join(root, "polite-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (JSON.parse(line).type === "abort") process.exit(0);
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "stalled-exit0",
+      cwd: root,
+      prompt: "stay silent",
+      tier: { thinking: "low" },
+      watchdogIdleSeconds: 0.02,
+      watchdogTerminationTurns: 1,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.failureCause, "stalled");
+    assert.equal(outcome.aborted, false);
+    assert.notEqual(outcome.exitCode, 0);
+    assert.equal(outcome.failureReason?.kind, "stalled");
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("watchdog grace allows a run to settle after steering", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-grace-"));
+  const fakePi = join(root, "responding-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "steer") {
+      console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "finished after steering" }] } }));
+      console.log(JSON.stringify({ type: "agent_settled" }));
+    }
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "grace",
+      cwd: root,
+      prompt: "wait then finish",
+      tier: { thinking: "low" },
+      watchdogIdleSeconds: 0.02,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 4,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.failureCause, undefined);
+    assert.equal(outcome.aborted, false);
+    assert.equal(outcome.finalReport, "finished after steering");
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

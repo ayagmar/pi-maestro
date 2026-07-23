@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -9,11 +9,17 @@ const sourceDirectory = join(testDirectory, "..", "src");
 const rootDirectory = join(testDirectory, "..");
 
 function sourceFiles(): { name: string; contents: string }[] {
-  return readdirSync(sourceDirectory, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
+  // Recursive: website code under src/pages and src/data must not silently
+  // gain process, Git, or registration capabilities either.
+  return readdirSync(sourceDirectory, { withFileTypes: true, recursive: true })
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        (entry.name.endsWith(".ts") || entry.name.endsWith(".mts") || entry.name.endsWith(".mjs"))
+    )
     .map((entry) => ({
-      name: entry.name,
-      contents: readFileSync(join(sourceDirectory, entry.name), "utf-8"),
+      name: join(relative(sourceDirectory, entry.parentPath), entry.name),
+      contents: readFileSync(join(entry.parentPath, entry.name), "utf-8"),
     }));
 }
 
@@ -27,21 +33,15 @@ function violatingFiles(
     .map((file) => file.name);
 }
 
-test("only runner spawns child processes", () => {
+test("only runner transport modules spawn child processes", () => {
   const files = sourceFiles();
   const spawnCall = /\bspawn\s*\(/;
+  const owners = files
+    .filter((file) => spawnCall.test(file.contents))
+    .map((file) => file.name)
+    .sort();
 
-  assert.match(
-    files.find((file) => file.name === "runner.ts")?.contents ?? "",
-    spawnCall,
-    "src/runner.ts must contain the allowed spawn() call"
-  );
-  const violations = violatingFiles(files, "runner.ts", spawnCall);
-  assert.deepEqual(
-    violations,
-    [],
-    `Only src/runner.ts may call spawn(); violations: ${violations.join(", ")}`
-  );
+  assert.deepEqual(owners, ["detached-supervisor.mjs", "runner.ts"]);
 });
 
 test("only worktree executes git commands", () => {
@@ -61,15 +61,11 @@ test("only worktree executes git commands", () => {
   );
 });
 
-test("only runner and worktree import child process APIs", () => {
+test("only runner transports and worktree import child process APIs", () => {
   const childProcessImport = /(?:from|import\s*\()\s*["']node:child_process["']/;
+  const allowed = new Set(["detached-supervisor.mjs", "runner.ts", "worktree.ts"]);
   const violations = sourceFiles()
-    .filter(
-      (file) =>
-        file.name !== "runner.ts" &&
-        file.name !== "worktree.ts" &&
-        childProcessImport.test(file.contents)
-    )
+    .filter((file) => !allowed.has(file.name) && childProcessImport.test(file.contents))
     .map((file) => file.name);
   assert.deepEqual(violations, []);
 });
