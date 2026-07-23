@@ -35,6 +35,7 @@ import {
   loadBoardView,
   loadStatusHistory,
   normalizeTaskContract,
+  planValidationMessage,
   rejectPlan,
   replaceBoard,
   replaceBoardWithArchive,
@@ -324,6 +325,25 @@ test("validatePlan reports missing dependency references and dependency cycles",
     ],
     invalidTiers: [],
   });
+});
+
+test("validatePlan bounds overlap examples and diagnostics", () => {
+  const board = emptyBoard();
+  for (let index = 0; index < 512; index += 1) {
+    createTask(board, {
+      title: `Task ${index}`,
+      brief: "write the shared path",
+      tier: "standard",
+      writePaths: ["shared.txt"],
+    });
+  }
+  const validation = validatePlan(board);
+  assert.equal(validation.writePathOverlapCount, (512 * 511) / 2);
+  assert.equal(validation.writePathOverlaps?.length, 100);
+  const message = planValidationMessage(validation);
+  assert.ok(message);
+  assert.ok(message.length <= 16_000);
+  assert.match(message, /additional problem/);
 });
 
 test("validatePlan accepts an acyclic plan", () => {

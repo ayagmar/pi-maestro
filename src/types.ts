@@ -245,6 +245,8 @@ export interface PlanValidation {
   dependencyCycles: string[][];
   invalidTiers: Array<{ taskId: string; tier: string }>;
   writePathOverlaps?: Array<{ leftTaskId: string; rightTaskId: string; path: string }>;
+  /** Total overlaps found when the retained examples are capped. */
+  writePathOverlapCount?: number;
   contractErrors?: Array<{ taskId: string; message: string }>;
 }
 

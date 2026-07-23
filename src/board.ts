@@ -46,6 +46,9 @@ const RECIPE_DIRECTORY = "maestro-recipes";
 const BOARD_LOCK_STALE_MS = 30_000;
 let quarantineNotice: string | undefined;
 const BOARD_LOCK_RETRIES = 500;
+const MAX_PLAN_VALIDATION_OVERLAPS = 100;
+const MAX_PLAN_VALIDATION_PROBLEMS = 50;
+const MAX_PLAN_VALIDATION_MESSAGE_CHARS = 16_000;
 export const DISPATCH_LEASE_MS = 30_000;
 export const DETACHED_DISPATCH_LEASE_MS = 7 * 24 * 60 * 60 * 1_000;
 
@@ -1791,6 +1794,7 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
     });
   };
   const writePathOverlaps: NonNullable<PlanValidation["writePathOverlaps"]> = [];
+  let writePathOverlapCount = 0;
   for (let leftIndex = 0; leftIndex < unresolved.length; leftIndex += 1) {
     const left = unresolved[leftIndex];
     if (!left) continue;
@@ -1799,7 +1803,12 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
       const path = left.writePaths?.find((candidate) =>
         right.writePaths?.some((other) => writePathsOverlap(candidate, other))
       );
-      if (path) writePathOverlaps.push({ leftTaskId: left.id, rightTaskId: right.id, path });
+      if (path) {
+        writePathOverlapCount += 1;
+        if (writePathOverlaps.length < MAX_PLAN_VALIDATION_OVERLAPS) {
+          writePathOverlaps.push({ leftTaskId: left.id, rightTaskId: right.id, path });
+        }
+      }
     }
   }
 
@@ -1808,7 +1817,7 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
     dependencyCycles,
     invalidTiers,
     ...(contractErrors.length > 0 ? { contractErrors } : {}),
-    ...(writePathOverlaps.length > 0 ? { writePathOverlaps } : {}),
+    ...(writePathOverlaps.length > 0 ? { writePathOverlaps, writePathOverlapCount } : {}),
   };
 }
 
@@ -1828,26 +1837,48 @@ export function approvePlan(board: Board, availableTiers: Iterable<string>): Pla
 
 export function planValidationMessage(validation: PlanValidation): string | undefined {
   const problems: string[] = [];
+  let characters = "Invalid plan:\n".length;
+  let omitted = Math.max(
+    0,
+    (validation.writePathOverlapCount ?? validation.writePathOverlaps?.length ?? 0) -
+      (validation.writePathOverlaps?.length ?? 0)
+  );
+  const addProblem = (problem: string) => {
+    const bounded = problem.slice(0, 500);
+    const entryLength = bounded.length + 3;
+    if (
+      problems.length >= MAX_PLAN_VALIDATION_PROBLEMS ||
+      characters + entryLength > MAX_PLAN_VALIDATION_MESSAGE_CHARS - 120
+    ) {
+      omitted += 1;
+      return;
+    }
+    problems.push(bounded);
+    characters += entryLength;
+  };
   for (const missing of validation.missingDependencies) {
-    problems.push(`${missing.taskId} references unknown dependency "${missing.dependencyId}"`);
+    addProblem(`${missing.taskId} references unknown dependency "${missing.dependencyId}"`);
   }
   for (const cycle of validation.dependencyCycles) {
-    problems.push(`dependency cycle: ${cycle.join(" → ")}`);
+    addProblem(`dependency cycle: ${cycle.join(" → ")}`);
   }
   for (const invalid of validation.invalidTiers) {
-    problems.push(`${invalid.taskId} uses unknown tier "${invalid.tier}"`);
+    addProblem(`${invalid.taskId} uses unknown tier "${invalid.tier}"`);
   }
   for (const contractError of validation.contractErrors ?? []) {
-    problems.push(
-      `${contractError.taskId} ${contractError.message}; update the task before dispatch`
-    );
+    addProblem(`${contractError.taskId} ${contractError.message}; update the task before dispatch`);
   }
   for (const overlap of validation.writePathOverlaps ?? []) {
-    problems.push(
+    addProblem(
       `${overlap.leftTaskId} and ${overlap.rightTaskId} both write "${overlap.path}"; add a dependency or narrow writePaths`
     );
   }
-  if (problems.length === 0) return undefined;
+  if (problems.length === 0 && omitted === 0) return undefined;
+  if (omitted > 0) {
+    problems.push(
+      `${omitted} additional problem${omitted === 1 ? "" : "s"} omitted; narrow writePaths or inspect tasks in smaller groups`
+    );
+  }
   return `Invalid plan:\n- ${problems.join("\n- ")}`;
 }
 
