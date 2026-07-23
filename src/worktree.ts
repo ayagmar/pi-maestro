@@ -196,7 +196,14 @@ function changedPathsFromPorcelain(output: string): string[] {
     const status = entry.slice(0, 2);
     const path = entry.slice(3);
     paths.push(path);
-    if ((status.includes("R") || status.includes("C")) && entries[index + 1]) index += 1;
+    // Rename/copy records use a second NUL-delimited path (source then
+    // destination). Keep both: the source is a deletion and must remain in
+    // artifact/provenance scope.
+    const pairedPath = entries[index + 1];
+    if ((status.includes("R") || status.includes("C")) && pairedPath) {
+      paths.push(pairedPath);
+      index += 1;
+    }
   }
   return [...new Set(paths.map((path) => path.replaceAll("\\", "/")))].sort();
 }
@@ -251,7 +258,14 @@ export function changedPathsSinceBaseline(
     const paths = [...new Set([...baseline.paths, ...current])];
     const tree = paths.length === 0 ? commitTree(cwd, "HEAD") : snapshotArtifact(cwd, paths);
     if (!tree) return undefined;
-    const output = gitOutput(cwd, ["diff", "--name-only", "-z", baseline.tree, tree]);
+    const output = gitOutput(cwd, [
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "-z",
+      baseline.tree,
+      tree,
+    ]);
     return [
       ...new Set(
         output

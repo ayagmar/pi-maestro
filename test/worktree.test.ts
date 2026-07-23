@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,8 +22,10 @@ import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/types.js";
 import { reviewTask, type StartExecutor } from "../src/workflow.js";
 import {
+  captureChangeBaseline,
   captureDiff,
   changedPaths,
+  changedPathsSinceBaseline,
   cleanupManagedWorktrees,
   createWorktree,
   inspectManagedWorktrees,
@@ -167,6 +178,37 @@ test("changed paths preserve the first character for unstaged tracked files", ()
     writeFileSync(join(cwd, "README.md"), "new\n");
     assert.deepEqual(changedPaths(cwd), ["README.md", "shared.txt"]);
     assert.ok(snapshotArtifact(cwd, changedPaths(cwd)));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("rename attribution preserves both paths through baseline comparison", () => {
+  const cwd = repository();
+  try {
+    const baseline = captureChangeBaseline(cwd);
+    assert.ok(baseline);
+    git(cwd, "mv", "shared.txt", "renamed.txt");
+    assert.deepEqual(changedPaths(cwd), ["renamed.txt", "shared.txt"]);
+    assert.deepEqual(changedPathsSinceBaseline(cwd, baseline), ["renamed.txt", "shared.txt"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("unstaged renames and staged copies retain source and destination attribution", () => {
+  const cwd = repository();
+  try {
+    renameSync(join(cwd, "shared.txt"), join(cwd, "unstaged-renamed.txt"));
+    assert.deepEqual(changedPaths(cwd), ["shared.txt", "unstaged-renamed.txt"]);
+
+    git(cwd, "reset", "--hard", "-q", "HEAD");
+    rmSync(join(cwd, "unstaged-renamed.txt"));
+    git(cwd, "config", "status.renames", "copies");
+    writeFileSync(join(cwd, "shared.txt"), "modified source\n");
+    copyFileSync(join(cwd, "shared.txt"), join(cwd, "copied.txt"));
+    git(cwd, "add", "shared.txt", "copied.txt");
+    assert.deepEqual(changedPaths(cwd), ["copied.txt", "shared.txt"]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
