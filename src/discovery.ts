@@ -6,11 +6,12 @@ import {
   planValidationMessage,
   validatePlan,
 } from "./board.js";
+import { MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import { assertPlanTaskLimit } from "./preflight.js";
 import { type Board, type MaestroConfig, type Task } from "./types.js";
 
 export const DISCOVERY_TOOLS = "read,grep,find,ls";
-export const MAX_DISCOVERY_REPORT_BYTES = 64_000;
+export { MAX_DISCOVERY_REPORT_BYTES };
 export const MAX_DISCOVERY_ITEMS = 32;
 const MAX_DISCOVERY_PREVIEW = 4_000;
 
