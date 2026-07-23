@@ -452,7 +452,7 @@ export class DriveRuntimeController {
 
     if (!board.planPending && unresolved.length > 0) {
       const reviewTier: TierConfig = {
-        ...(config.tiers.review ?? { thinking: "high", tools: "read,bash,grep,find,ls" }),
+        ...(config.tiers.review ?? { thinking: "high", tools: "read,grep,find,ls" }),
       };
       const resolution = resolveTierModels(
         "review",

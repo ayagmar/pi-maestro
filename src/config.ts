@@ -7,7 +7,7 @@ import { type MaestroConfig, type TierConfig } from "./types.js";
 export type ConfigScope = "user" | "project";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-export const REVIEW_TOOLS = "read,bash,grep,find,ls";
+export const REVIEW_TOOLS = "read,grep,find,ls";
 
 /**
  * Works with any provider: executors inherit pi's default model and only

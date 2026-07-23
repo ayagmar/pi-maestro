@@ -955,6 +955,21 @@ test("a command that quarantines a corrupt board warns in the same invocation", 
   );
 });
 
+test("refresh UI tolerates a context invalidated during rendering", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-stale-refresh-"));
+  try {
+    const runtime = loadMaestro(cwd);
+    runtime.ctx.ui.setStatus = () => {
+      throw new Error("stale UI context");
+    };
+    assert.doesNotThrow(() => {
+      runtime.events.get("session_start")?.({ reason: "stale-refresh" }, runtime.ctx);
+    });
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("a stale ctx during quarantine notify does not crash the command and re-stashes the notice", async () => {
   await withBoard(
     (cwd) => {

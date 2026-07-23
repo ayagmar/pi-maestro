@@ -49,6 +49,11 @@ test("mergeConfig overrides top-level worktree settings and merges tiers", () =>
   assert.equal(merged.tiers.review?.tools, REVIEW_TOOLS);
 });
 
+test("default reviewer tools are read-only and exclude shell execution", () => {
+  assert.equal(REVIEW_TOOLS, "read,grep,find,ls");
+  assert.doesNotMatch(REVIEW_TOOLS, /bash|write|edit/);
+});
+
 test("default config has the documented tiers and no model overrides", () => {
   assert.deepEqual(Object.keys(DEFAULT_CONFIG.tiers).sort(), [
     "complex",

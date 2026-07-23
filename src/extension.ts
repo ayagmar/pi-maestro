@@ -137,13 +137,18 @@ export default function maestro(
   });
 
   function refreshUI(ctx: ExtensionContext): void {
-    // Executor stdout events outlive session switches; any access on a stale
-    // ctx throws. Skip — the next session's events arrive with a live ctx.
+    // Executor events can invalidate a captured context between any two UI
+    // operations. Treat the whole refresh as best-effort; the next live
+    // lifecycle or executor event will render fresh persisted state.
     try {
-      if (!ctx.hasUI) return;
+      refreshLiveUI(ctx);
     } catch {
-      return;
+      // Stale Pi context.
     }
+  }
+
+  function refreshLiveUI(ctx: ExtensionContext): void {
+    if (!ctx.hasUI) return;
     // Hot path: refreshUI runs on every executor event. The view is a shared
     // read-only cache entry; nothing below mutates it.
     const board = loadBoardView(ctx.cwd);
