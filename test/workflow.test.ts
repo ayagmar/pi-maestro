@@ -236,6 +236,56 @@ test("confirm policy persists independent approvals and bounded convergence", as
   }
 });
 
+test("reviewer launches receive the configured per-launch cost cap", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-review-cost-cap-"));
+  try {
+    const task = reviewPolicyTask(cwd, "single");
+    const caps: Array<number | undefined> = [];
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      maxCostPerLaunch: 2.5,
+      startExecutor: (options) => {
+        caps.push(options.maxCost);
+        return queuedReviewerReports([{}])(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    // Reviewers were the only launch kind dispatched with no ceiling, so a
+    // runaway reviewer could outspend the executor it was checking.
+    assert.deepEqual(caps, [2.5]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a zero per-launch cost cap leaves reviewer launches uncapped", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-review-cost-uncapped-"));
+  try {
+    const task = reviewPolicyTask(cwd, "single");
+    const caps: Array<number | undefined> = [];
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      maxCostPerLaunch: 0,
+      startExecutor: (options) => {
+        caps.push(options.maxCost);
+        return queuedReviewerReports([{}])(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.deepEqual(caps, [undefined]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("confirm policy stops on a genuine criterion rejection", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-confirm-reject-"));
   try {

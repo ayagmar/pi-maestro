@@ -494,6 +494,7 @@ export async function driveBoard(options: {
               autoCommit: config.autoCommit,
               reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
               maxReviewerLaunches: config.maxReviewerLaunches ?? 4,
+              maxCostPerLaunch: config.maxCostPerTask,
               availableTiers: Object.keys(config.tiers),
               onUpdate,
               trackRun,

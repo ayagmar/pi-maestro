@@ -56,6 +56,8 @@ export async function reviewTask(options: {
   watchdogTerminationTurns?: number | undefined;
   reviewRequiredApprovals?: number;
   maxReviewerLaunches?: number;
+  /** Abort a reviewer launch once its cost (USD) exceeds this. 0 disables the cap. */
+  maxCostPerLaunch?: number;
   availableTiers?: Iterable<string>;
   verificationProfiles?: Record<string, VerificationProfile>;
   signal?: AbortSignal;
@@ -80,6 +82,7 @@ export async function reviewTask(options: {
     watchdogTerminationTurns,
     reviewRequiredApprovals = 2,
     maxReviewerLaunches = 4,
+    maxCostPerLaunch = 0,
     availableTiers,
     verificationProfiles,
     signal,
@@ -374,6 +377,9 @@ export async function reviewTask(options: {
           tier: launchTier,
           sessionLabel: sessionLabel(task, "review", task.attempts.length),
           runKind: "review",
+          // Reviewers were the only launch kind with no cost ceiling, so a
+          // runaway reviewer could outspend the executor it was checking.
+          ...(maxCostPerLaunch > 0 ? { maxCost: maxCostPerLaunch } : {}),
           ...(logEvents === undefined ? {} : { logEvents }),
           ...(maxLogBytes === undefined ? {} : { maxLogBytes }),
           ...(effectiveWatchdogIdleSeconds === undefined
