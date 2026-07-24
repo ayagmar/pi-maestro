@@ -781,6 +781,13 @@ export async function reviewTask(options: {
         delete fresh.reviewNotes;
         // A chosen intervention succeeded; let a later retry start fresh.
         delete fresh.reviewRejections;
+        delete fresh.reviewStagnantRejections;
+        // The approved artifact resolved every outstanding finding. Leaving
+        // them open re-injects fixed feedback into later executor and reviewer
+        // prompts as if it were still outstanding.
+        for (const finding of fresh.findings ?? []) {
+          if (finding.status === "open") finding.status = "verified";
+        }
       } else {
         const notes = verdict.notes || outcome.finalReport;
         transition(fresh, "changes_requested");
@@ -791,6 +798,8 @@ export async function reviewTask(options: {
           .filter(Boolean)
           .slice(0, 8);
         fresh.findings ??= [];
+        const attemptIndex = attempt?.index ?? fresh.attempts.length;
+        let repeatsPriorFinding = false;
         for (const message of messages) {
           const criterion = message.match(/^criterion\s+(\d+)\s*:/i)?.[1];
           const fingerprint = criterion
@@ -801,15 +810,18 @@ export async function reviewTask(options: {
                 .slice(0, 12);
           const existing = fresh.findings.find((finding) => finding.fingerprint === fingerprint);
           if (existing) {
+            // The same defect survived an earlier attempt: this is the
+            // stagnation that justifies stopping for human judgment.
+            if (existing.lastAttempt < attemptIndex) repeatsPriorFinding = true;
             existing.status = "open";
-            existing.lastAttempt = attempt?.index ?? fresh.attempts.length;
+            existing.lastAttempt = attemptIndex;
           } else {
             fresh.findings.push({
               fingerprint,
               message: redactFailureMessage(message).slice(0, 500),
               status: "open",
-              firstAttempt: attempt?.index ?? fresh.attempts.length,
-              lastAttempt: attempt?.index ?? fresh.attempts.length,
+              firstAttempt: attemptIndex,
+              lastAttempt: attemptIndex,
             });
           }
         }
@@ -818,6 +830,12 @@ export async function reviewTask(options: {
         // reviewer judgments and must not advance rejection escalation.
         if (reviewerRequestedChanges && !mechanicalFailure) {
           fresh.reviewRejections = (fresh.reviewRejections ?? 0) + 1;
+          // A rejection that only raises new findings is convergence, not a
+          // stuck task; escalating on it stops work that is still improving.
+          // The counter is always written so a zero (nothing repeated yet) is
+          // distinguishable from a legacy board that never tracked stagnation.
+          fresh.reviewStagnantRejections =
+            (fresh.reviewStagnantRejections ?? 0) + (repeatsPriorFinding ? 1 : 0);
         }
         if (attempt) {
           attempt.reviewNotes = notes;

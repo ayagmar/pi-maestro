@@ -37,10 +37,19 @@ export function terminalReviewConvergence(
   return undefined;
 }
 
+/**
+ * Escalate on stagnation, not on rejection count alone. Reaching the rejection
+ * limit while every rejection raised only *new* findings means the task is
+ * still converging, so it keeps its remaining attempts. Repeating a finding a
+ * previous attempt was already told to fix is the stuck case that needs human
+ * judgment. Legacy boards without a recorded stagnation count keep the old
+ * rejection-only behavior.
+ */
 export function escalatedTask(task: Task): boolean {
-  return (
-    task.status === "changes_requested" && (task.reviewRejections ?? 0) >= REVIEW_REJECTION_LIMIT
-  );
+  if (task.status !== "changes_requested") return false;
+  if ((task.reviewRejections ?? 0) < REVIEW_REJECTION_LIMIT) return false;
+  if (task.reviewStagnantRejections === undefined) return true;
+  return task.reviewStagnantRejections > 0;
 }
 
 export function escalationReason(tasks: Task[], config: MaestroConfig): DriveStopReason {
@@ -49,17 +58,22 @@ export function escalationReason(tasks: Task[], config: MaestroConfig): DriveSto
     const evidence = notes
       ? redactFailureMessage(truncateText(notes, 3))
       : "no reviewer notes recorded";
+    const repeated = (task.findings ?? [])
+      .filter((finding) => finding.status === "open" && finding.firstAttempt < finding.lastAttempt)
+      .map((finding) => finding.fingerprint);
+    const stagnation =
+      repeated.length > 0 ? `\n  repeated across attempts: ${repeated.join(", ")}` : "";
     const rung = TIER_LADDER.indexOf(task.tier as (typeof TIER_LADDER)[number]);
     const nextTier =
       rung >= 0 ? TIER_LADDER.slice(rung + 1).find((name) => config.tiers[name]) : undefined;
     const action = nextTier
       ? `raise the tier to "${nextTier}" with maestro_update`
       : "rewrite, split, or cancel the brief with maestro_update and apply orchestrator judgment";
-    return `${task.id} [tier ${task.tier}]: ${evidence}\n  → ${action}`;
+    return `${task.id} [tier ${task.tier}]: ${evidence}${stagnation}\n  → ${action}`;
   });
   return {
     code: "escalation_required",
-    message: `Reviewer rejected the same work ${REVIEW_REJECTION_LIMIT} times; autonomous retries stopped for orchestrator intervention.\n${details.join("\n")}\nAfter changing the brief/tier (which resets the counter) or an explicit scoped maestro_drive, use /maestro resume.`,
+    message: `Reviewer repeated the same unresolved finding across ${REVIEW_REJECTION_LIMIT} attempts; autonomous retries stopped for orchestrator intervention.\n${details.join("\n")}\nAfter changing the brief/tier (which resets the counter) or an explicit scoped maestro_drive, use /maestro resume.`,
     taskIds: tasks.map((task) => task.id),
   };
 }

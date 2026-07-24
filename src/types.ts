@@ -214,8 +214,14 @@ export interface Task {
   provenance?: ArtifactProvenance;
   /** Versioned proof used to decide whether an approved completion is still reusable. */
   approvedProvenance?: ApprovedProvenance;
-  /** Consecutive genuine reviewer rejections; the autonomous drive escalates at the limit. */
+  /** Consecutive genuine reviewer rejections. */
   reviewRejections?: number;
+  /**
+   * Consecutive rejections that repeated a finding from an earlier attempt.
+   * The autonomous drive escalates on these rather than on rejection count,
+   * so a task raising only new findings is allowed to keep converging.
+   */
+  reviewStagnantRejections?: number;
   /** Exclusive persisted ownership of an executor or reviewer dispatch. */
   dispatchClaim?: DispatchClaim;
   /** Bounded diagnostic recorded when dispatch recovery skips unsafe state. */

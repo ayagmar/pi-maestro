@@ -3600,12 +3600,75 @@ test("second consecutive reviewer rejection escalates instead of re-dispatching"
     assert.equal(result.stoppedBecause.code, "escalation_required");
     assert.equal(executions, 2, "escalation must stop the third executor dispatch");
     assert.deepEqual(result.stoppedBecause.taskIds, [task.id]);
-    assert.match(result.stoppedBecause.message, /Reviewer rejected the same work 2 times/);
+    assert.match(
+      result.stoppedBecause.message,
+      /Reviewer repeated the same unresolved finding across 2 attempts/
+    );
     assert.match(result.stoppedBecause.message, /Still wrong in src\/thing\.ts/);
+    assert.match(result.stoppedBecause.message, /repeated across attempts:/);
     assert.match(result.stoppedBecause.message, /raise the tier to "complex"/);
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "changes_requested");
     assert.equal(persisted?.reviewRejections, 2);
+    assert.equal(persisted?.reviewStagnantRejections, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("rejections that raise only new findings keep converging instead of escalating", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-converging-rejections-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let reviews = 0;
+    let executions = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        reviews += 1;
+        // Each review finds a different real defect, then approves: the task is
+        // improving, so autonomous retries must continue.
+        const report =
+          reviews === 1
+            ? "VERDICT: REQUEST_CHANGES\n1. The first defect is in src/one.ts."
+            : reviews === 2
+              ? "VERDICT: REQUEST_CHANGES\n1. A different defect is in src/two.ts."
+              : "VERDICT: APPROVE";
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: report,
+        })(options);
+      }
+      executions += 1;
+      return executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "done",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 5 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    // Two rejections previously tripped escalation on attempt count alone and
+    // stopped a task that went on to pass.
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.equal(executions, 3);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "approved");
+    // Approval resolves outstanding findings so retries stop re-injecting them.
+    assert.equal(
+      persisted?.findings?.every((finding) => finding.status === "verified"),
+      true
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

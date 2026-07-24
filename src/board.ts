@@ -795,6 +795,7 @@ function isTask(value: unknown): value is Task {
     (value.provenance === undefined || isArtifactProvenance(value.provenance)) &&
     (value.approvedProvenance === undefined || isApprovedProvenance(value.approvedProvenance)) &&
     (value.reviewRejections === undefined || isNumber(value.reviewRejections)) &&
+    (value.reviewStagnantRejections === undefined || isNumber(value.reviewStagnantRejections)) &&
     (value.dispatchNote === undefined || typeof value.dispatchNote === "string") &&
     (value.dispatchClaim === undefined || isDispatchClaim(value.dispatchClaim))
   );
@@ -1999,6 +2000,7 @@ export function applyPlanTaskEdits(
     task.brief = brief;
     delete task.reviewNotes;
     delete task.reviewRejections;
+    delete task.reviewStagnantRejections;
     if (task.status === "changes_requested" || task.status === "failed") {
       forceStatus(task, "todo");
     }
@@ -2013,6 +2015,7 @@ export function applyPlanTaskEdits(
     }
     task.tier = edits.tier;
     delete task.reviewRejections;
+    delete task.reviewStagnantRejections;
   }
   if (edits.dependsOn !== undefined) {
     task.dependsOn = edits.dependsOn.map((id) => id.trim().toUpperCase()).filter(Boolean);
