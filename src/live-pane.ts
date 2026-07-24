@@ -889,13 +889,32 @@ export class LivePaneComponent {
 
   private syncLaunches(): readonly LivePaneLaunch[] {
     const launches = this.options.getLaunches();
+    const appeared: LivePaneLaunch[] = [];
     for (const launch of launches) {
-      if (!this.launchOrder.includes(launch.key)) this.launchOrder.push(launch.key);
+      if (this.launchOrder.includes(launch.key)) continue;
+      this.launchOrder.push(launch.key);
+      appeared.push(launch);
     }
     if (!this.selectedKey) {
       this.selectedKey =
         launches.find((launch) => launch.live !== false)?.key ?? launches.at(-1)?.key;
       if (this.selectedKey) this.settledNotice = undefined;
+    }
+
+    // While following, a newly launched agent is the interesting one. Without
+    // this the pane stays pinned to a settled launch and looks frozen for the
+    // whole next executor/reviewer run.
+    const selectedIsLive = launches.some(
+      (launch) => launch.key === this.selectedKey && launch.live !== false
+    );
+    if (this.followMode && this.mode === "browse" && !selectedIsLive) {
+      const newLive = appeared.find((launch) => launch.live !== false);
+      if (newLive && newLive.key !== this.selectedKey) {
+        this.selectedKey = newLive.key;
+        this.scrollOffset = Number.MAX_SAFE_INTEGER;
+        this.settledNotice = `▸ following ${newLive.taskId} · ${newLive.kind === "review" ? "review" : "execute"}`;
+        this.queuedNotice = undefined;
+      }
     }
 
     const previousSelected = this.selectedKey

@@ -2245,6 +2245,55 @@ test("live pane keeps selection stable and advances once when the selected launc
   }
 });
 
+test("live pane follows the next launch instead of staying on a settled one", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-autofollow-"));
+  const launch = (taskId: string, live: boolean): LivePaneLaunch => {
+    const logFile = join(directory, `${taskId}.jsonl`);
+    writeFileSync(
+      logFile,
+      `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `${taskId} transcript` }] } })}\n`
+    );
+    return {
+      key: `execute:${taskId}`,
+      taskId,
+      title: `Task ${taskId}`,
+      kind: "execute",
+      logFile,
+      turns: 1,
+      cost: 0,
+      lastActivity: live ? "working" : "settled",
+      live,
+    };
+  };
+  let launches = [launch("T1", true)];
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    height: 8,
+  });
+  try {
+    assert.match(pane.render(80).join("\n"), /T1 transcript/);
+
+    // T1 settles with no live sibling yet: the drive settles the executor,
+    // records the attempt, and only then dispatches the reviewer.
+    launches = [launch("T1", false)];
+    assert.match(pane.render(80).join("\n"), /T1 transcript/);
+
+    // The next agent launches on a later refresh. The settle transition is
+    // already history by now, so the pane used to stay pinned to the finished
+    // T1 for the entire next run and looked frozen.
+    launches = [launch("T1", false), launch("T2", true)];
+    const followed = pane.render(80).join("\n");
+    assert.match(followed, /T2 transcript/);
+    assert.match(followed, /following T2/);
+  } finally {
+    pane.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("live pane steers and queues follow-up for the selected launch", () => {
   const launches: LivePaneLaunch[] = ["T1", "T2"].map((taskId) => ({
     key: `execute:${taskId}`,
