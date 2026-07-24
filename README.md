@@ -131,10 +131,14 @@ active executors finish, but no new executor batch starts. `/maestro resume` lat
 task scope from the board's fresh persisted state; `/maestro abort` instead aborts active executors.
 The loop stops when work is complete or when a pause, plan gate, run budget, attempt cap, provider
 block, repeated-rejection escalation, abort, blocked state, error, or its 20-round safety limit
-requires intervention. When the reviewer rejects the same task twice in a row, the drive stops with
-an escalation notice (evidence, current tier, and a recommended next tier or rewrite/split/cancel)
-instead of blindly retrying; changing the brief or tier — or an explicit scoped `/maestro drive` — resets the
-counter so a chosen intervention can continue via `/maestro resume`. At each decision point the
+requires intervention. Escalation is driven by stagnation rather than rejection count: once a task
+reaches the rejection limit, the drive stops only if a reviewer repeated a finding an earlier attempt
+was already told to fix. A task whose reviewer keeps raising genuinely new findings is still
+converging and keeps its remaining attempts. The escalation notice names the repeated finding
+fingerprints alongside the evidence, current tier, and a recommended next tier or
+rewrite/split/cancel; changing the brief or tier — or an explicit scoped `/maestro drive` — resets the
+counters so a chosen intervention can continue via `/maestro resume`. Approving a task marks its
+outstanding findings verified, so resolved feedback is never re-injected into later prompts. At each decision point the
 orchestrator chooses autonomously among the configured fallback/resume, `maestro_update`
 (brief/tier/dependencies), a `maestro_plan` split, cancellation, or asking you when scope or cost
 judgment is required; it never blindly retries a blocked provider or raises the project
@@ -315,8 +319,9 @@ trusted user/default value:
   predecessor and rewires downstream dependencies before saving. Then start a scoped `maestro_drive`
   for the successor and rewired dependents. Never raised automatically as a recovery action — only an explicit edit in
   `/maestro config` changes it.
-- `maxCostPerTask` — abort an executor when a single attempt exceeds this USD cost (default $5;
-  0 disables the cap). Safety net against a stuck executor burning tokens unattended.
+- `maxCostPerTask` — abort a launch when it exceeds this USD cost (default $5; 0 disables the cap).
+  Applies to executor attempts and to each reviewer launch, so a runaway reviewer cannot outspend
+  the executor it is checking. Safety net against a stuck launch burning tokens unattended.
 - `statusWaitSeconds` — interval for mechanical background-drive progress pulses (default 60,
   maximum 240). Routine pulses update persisted/dashboard state without waking the orchestrator;
   only a decision or completion queues a bounded owner-scoped message.
@@ -406,7 +411,7 @@ ctrl+alt+w                open or close the agent-session viewer
 /maestro config           interactive settings editor (user scope)
 /maestro config project   interactive settings editor (repo scope)
 /maestro config show      print the resolved defaults + user + project configuration
-/maestro costs            show attempts, total/average billed cost, models, and providers
+/maestro costs            attempts, total/average billed cost, models, providers, per-task spend
 /maestro insights         compare model/tier approvals, cost, failures, and review rejection
 /maestro reconcile        report board/artifact provenance inconsistencies
 /maestro timeline [id]    show bounded chronological evidence without waking a model
@@ -429,7 +434,9 @@ Completed drives print a compact outcome summary with approved, failed, cancelle
 counts, rounds and attempts, total cost, average cost across billed attempts, and the non-secret
 model/provider identifiers recorded by executors and reviewers. `/maestro costs` prints it directly
 without task details, including executor/reviewer context sizes, omission counts, and a reconciled
-cost breakdown. Zero-cost startup/provider
+cost breakdown. Once more than one task has recorded spend it also ranks tasks most-expensive-first,
+splitting executor from reviewer cost with launch counts, so a board that looks cheap per attempt
+still shows which few tasks consumed the run. Zero-cost startup/provider
 failures count as attempts but are excluded from the meaningful average. `/maestro insights` is a
 bounded, model-free read over the current and archived boards, grouped by executor model and task
 tier; it reports attempts, first-review approval rate, average end-to-end cost per approved task,

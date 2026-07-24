@@ -54,6 +54,18 @@ export function taskUsage(task: Task): Usage {
   return total;
 }
 
+/**
+ * Reviewer spend folded into an attempt's total. Reviewer usage is accumulated
+ * into attempt.usage as launches settle, so executor cost is the remainder.
+ */
+function reviewCost(attempt: Task["attempts"][number]): number {
+  const launches = attempt.reviewLaunches;
+  if (launches && launches.length > 0) {
+    return launches.reduce((sum, launch) => sum + launch.usage.cost, 0);
+  }
+  return attempt.reviewUsage?.cost ?? 0;
+}
+
 export function boardUsage(tasks: Task[]): Usage {
   const total: Usage = { input: 0, output: 0, cost: 0, turns: 0 };
   for (const task of tasks) {
@@ -193,6 +205,43 @@ export function formatCostSummary(tasks: Task[]): string {
   const reconciledCost = [...categorized.values()].reduce((sum, cost) => sum + cost, 0);
   if (usage.totalAttempts > 0) spend.push(`reconciled $${reconciledCost.toFixed(4)}`);
   if (spend.length > 0) parts.push(`spend: ${spend.join(" · ")}`);
+
+  // Where the money actually went. A board can look cheap per attempt while a
+  // few tasks quietly consume most of the run through repeated review panels.
+  const perTask = tasks
+    .map((task) => {
+      const executor = task.attempts.reduce(
+        (sum, attempt) => sum + (attempt.usage.cost - reviewCost(attempt)),
+        0
+      );
+      const review = task.attempts.reduce((sum, attempt) => sum + reviewCost(attempt), 0);
+      const reviewLaunches = task.attempts.reduce(
+        (count, attempt) => count + (attempt.reviewLaunches?.length ?? 0),
+        0
+      );
+      return {
+        id: task.id,
+        total: executor + review,
+        executor,
+        review,
+        attempts: task.attempts.length,
+        reviewLaunches,
+      };
+    })
+    .filter((entry) => entry.total > 0)
+    .sort((left, right) => right.total - left.total);
+  // With one costed task the totals above already say everything; the
+  // breakdown only earns its lines once spend is distributed.
+  if (perTask.length > 1) {
+    const lines = perTask
+      .slice(0, 10)
+      .map(
+        (entry) =>
+          `  ${entry.id} $${entry.total.toFixed(4)} · exec $${entry.executor.toFixed(4)} (${entry.attempts} launch${entry.attempts === 1 ? "" : "es"}) · review $${entry.review.toFixed(4)} (${entry.reviewLaunches} launch${entry.reviewLaunches === 1 ? "" : "es"})`
+      );
+    if (perTask.length > 10) lines.push(`  … ${perTask.length - 10} cheaper task(s) omitted`);
+    parts.push(`per task (most expensive first):\n${lines.join("\n")}`);
+  }
   return parts.join("\n");
 }
 

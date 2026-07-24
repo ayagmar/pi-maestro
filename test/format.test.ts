@@ -121,6 +121,38 @@ test("formatCostSummary stays compact and omits unavailable identities", () => {
   assert.equal(formatCostSummary([]), "run: 0 attempts · $0.0000 total · $0.0000 avg (billed)");
 });
 
+test("formatCostSummary ranks tasks by spend and splits executor from review", () => {
+  const cheap = makeAttempt(0.5, 2);
+  cheap.model = "openai/gpt-5-mini";
+  const expensive = makeAttempt(9, 4);
+  expensive.model = "openai/gpt-5-mini";
+  // Reviewer usage is folded into attempt.usage as launches settle, so review
+  // spend has to be subtracted back out to show real executor cost.
+  expensive.reviewLaunches = [
+    { id: "r1", startedAt: 0, usage: { input: 1, output: 1, cost: 4, turns: 1 } },
+    { id: "r2", startedAt: 0, usage: { input: 1, output: 1, cost: 2, turns: 1 } },
+  ];
+
+  const summary = formatCostSummary([
+    makeTask({ id: "T1", attempts: [cheap] }),
+    makeTask({ id: "T2", attempts: [expensive] }),
+  ]);
+
+  const breakdown = summary.slice(summary.indexOf("per task"));
+  assert.match(
+    breakdown,
+    /T2 \$9\.0000 · exec \$3\.0000 \(1 launch\) · review \$6\.0000 \(2 launches\)/
+  );
+  assert.match(
+    breakdown,
+    /T1 \$0\.5000 · exec \$0\.5000 \(1 launch\) · review \$0\.0000 \(0 launches\)/
+  );
+  assert.ok(
+    breakdown.indexOf("T2") < breakdown.indexOf("T1"),
+    "the most expensive task must come first"
+  );
+});
+
 test("padText aligns by visible terminal width", () => {
   assert.equal(padText("界", 4), "界  ");
   assert.equal(padText("wide", 4), "wide");
