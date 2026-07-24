@@ -29,6 +29,7 @@ import {
   type DriveRuntimeController,
   resolveDriveDecision,
 } from "./drive-controller.js";
+import { formatDrivePulse } from "./drive-summary.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
 import { assertPlanTaskLimit, preflightWorkflow } from "./preflight.js";
 import { canonicalTaskIds } from "./session-control.js";
@@ -52,7 +53,11 @@ export interface ModelToolRuntime {
   startBackgroundDrive(
     ctx: ExtensionContext,
     taskIds: string[] | undefined,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    reportProgress?: (message: string) => void,
+    humanRetryTaskId?: string,
+    humanRetryExpectedRiskToken?: string,
+    settleDecisionWithoutWaking?: boolean
   ): BackgroundDrive;
 }
 
@@ -276,8 +281,12 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
     name: "maestro_drive",
     label: "Maestro Drive",
     description:
-      "Start or inspect a state-aware background drive, or intervene in live work. Routine progress stays in the dashboard; completion and decisions wake the orchestrator.",
+      "Run, inspect, or intervene in the maestro board. action=start runs the whole run/review/retry loop and returns only when the board is settled or a decision needs your judgment — never poll it with sleep or repeated inspect calls while it runs. action=inspect is for a board you are not currently driving.",
     promptSnippet: "Drive mechanical run/review/retry cycles to completion (maestro board)",
+    promptGuidelines: [
+      "maestro_drive action=start blocks until the drive settles: do not follow it with sleep, bash waits, or repeated maestro_drive inspect calls.",
+      "Act on the decision text returned by maestro_drive itself; re-inspecting after it returns re-reads the same evidence and wastes context.",
+    ],
     parameters: Type.Object({
       action: StringEnum(["start", "inspect", "intervene"] as const),
       taskIds: Type.Optional(
@@ -319,7 +328,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       }
       return input;
     },
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const input = params as unknown as DriveToolInput;
       validateDriveToolInput(input);
       const board = loadBoard(ctx.cwd);
@@ -364,8 +373,12 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           selectedIds.has(run.taskId)
         );
         const live = selectedRuns.map((run) => `${run.taskId}: ${run.lastActivity}`).join("\n");
+        // A resolved decision is history: surfacing it as "Decision <id>"
+        // makes the orchestrator act on evidence it already handled and
+        // retry interventions that can only fail as stale.
         const decision =
           board.activeDecision &&
+          !board.activeDecision.resolution &&
           (!taskIds ||
             board.activeDecision.taskIds.length === 0 ||
             board.activeDecision.taskIds.some((id) => selectedIds.has(id)))
@@ -455,19 +468,42 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         };
       }
       if (driveController.hasActive()) throw new Error("An autonomous drive is already active.");
-      startBackgroundDrive(ctx, taskIds, signal);
+      // The drive is awaited here so the orchestrator spends one turn on the
+      // whole run/review/retry loop instead of polling it with sleep+inspect
+      // turns that each re-send the conversation and evict the prompt cache.
+      const operation = startBackgroundDrive(
+        ctx,
+        taskIds,
+        signal,
+        (message) =>
+          onUpdate?.({
+            content: [{ type: "text", text: message }],
+            details: { action: "drive", tasks: [] },
+          }),
+        undefined,
+        undefined,
+        true
+      );
+      await operation.promise;
+      const settledBoard = loadBoard(ctx.cwd);
+      const settledTasks = settledBoard.tasks.filter(
+        (task) => !taskIds || taskIds.includes(task.id)
+      );
+      const summary = operation.summary;
+      const decision = settledBoard.activeDecision;
+      const decisionLine =
+        decision && !decision.resolution && decision.kind !== "completed"
+          ? `Decision ${decision.id} (${decision.kind})\n`
+          : "";
+      const text = summary
+        ? `${decisionLine}${formatDrivePulse(summary)}`
+        : (operation.error ?? "Drive stopped without recording an outcome.");
       return {
-        content: [
-          {
-            type: "text",
-            text: `Drive started for ${taskIds?.join(", ") ?? "the whole board"}. Wait for a completion or decision message.`,
-          },
-        ],
+        content: [{ type: "text", text: text.slice(0, 6000) }],
         details: {
           action: "drive",
-          tasks: loadBoard(ctx.cwd)
-            .tasks.filter((task) => !taskIds || taskIds.includes(task.id))
-            .map((task) => snapshot(task)),
+          tasks: settledTasks.map((task) => snapshot(task)),
+          ...(summary ? { rounds: summary.rounds, stoppedBecause: summary.stoppedBecause } : {}),
         },
       };
     },

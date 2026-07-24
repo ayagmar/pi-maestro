@@ -171,7 +171,14 @@ export class DriveRuntimeController {
     signal?: AbortSignal,
     reportProgress: (message: string) => void = () => {},
     humanRetryTaskId?: string,
-    humanRetryExpectedRiskToken?: string
+    humanRetryExpectedRiskToken?: string,
+    /**
+     * The caller awaits this drive and reports the outcome itself (the
+     * maestro_drive tool). Waking the same conversation with a decision
+     * message would duplicate that outcome, so the decision is marked
+     * delivered instead of sent.
+     */
+    settleDecisionWithoutWaking = false
   ): BackgroundDrive {
     if (this.hasActive()) throw new Error("An autonomous drive is already active.");
     validateDriveStart(ctx, taskIds);
@@ -239,7 +246,11 @@ export class DriveRuntimeController {
           }
         }
         if (persisted && services.isRuntimeActive()) {
-          deliverPendingDecision(ctx.cwd, ownerSession, services.sendDecision);
+          deliverPendingDecision(
+            ctx.cwd,
+            ownerSession,
+            settleDecisionWithoutWaking ? () => {} : services.sendDecision
+          );
         }
       })
       .catch((error) => {
@@ -254,7 +265,11 @@ export class DriveRuntimeController {
             driveId
           );
           if (persisted && services.isRuntimeActive()) {
-            deliverPendingDecision(ctx.cwd, ownerSession, services.sendDecision);
+            deliverPendingDecision(
+              ctx.cwd,
+              ownerSession,
+              settleDecisionWithoutWaking ? () => {} : services.sendDecision
+            );
           }
         } catch (persistenceError) {
           operation.error = `${operation.error}; could not persist internal error: ${String(persistenceError)}`;
@@ -476,7 +491,14 @@ export class DriveRuntimeController {
       startExecutor: services.startExecutor,
       onUpdate: (taskId, update, kind) => this.applyUpdate(ctx, taskId, update, kind, services),
       onRoundUpdate: (round, phase, ids) => {
-        reportProgress(`Round ${round}: ${phase} ${ids.join(", ")}`);
+        const board = loadBoard(ctx.cwd);
+        const titles = ids.map((id) => {
+          const task = findTask(board, id);
+          return task ? `${id} ${task.title.slice(0, 60)}` : id;
+        });
+        reportProgress(
+          `Round ${round} · ${phase === "review" ? "reviewing" : "executing"} ${ids.length} task(s): ${titles.join(" · ")}`
+        );
       },
       trackRun: (run) => this.trackRun(ctx, run, services),
       isLive: (taskId) => this.isTaskLive(taskId),

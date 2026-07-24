@@ -2507,6 +2507,88 @@ test("maestro_drive inspect returns bounded scoped board state without starting 
   );
 });
 
+test("maestro_drive inspect hides an already resolved decision", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Handled",
+        brief: "already addressed",
+        tier: "standard",
+      });
+      board.activeDecision = {
+        id: "resolved-decision",
+        kind: "reviewer_failure",
+        taskIds: [task.id],
+        evidence: "review operation failed for T1",
+        allowedInterventions: ["handoff", "abort"],
+        createdAt: Date.now(),
+        deliveredAt: Date.now(),
+        resolution: { intervention: "resume", resolvedAt: Date.now() },
+      };
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const result = await tools
+        .get("maestro_drive")
+        ?.execute("inspect-resolved", { action: "inspect" }, undefined, undefined, ctx);
+      const text = result?.content[0]?.text ?? "";
+      assert.doesNotMatch(text, /resolved-decision/);
+      assert.doesNotMatch(text, /review operation failed/);
+    }
+  );
+});
+
+test("maestro_drive start streams round progress and returns the settled outcome", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, { title: "Streamed work", brief: "report progress", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const startExecutor: StartExecutor = (options) => ({
+        attempt: executorAttempt(),
+        outcome: Promise.resolve({
+          exitCode: 0,
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: options.runId.includes("-review-") ? "VERDICT: APPROVE" : "done",
+          touchedFiles: [],
+          aborted: false,
+        }),
+        steer: () => {},
+        followUp: () => {},
+        abort: () => {},
+      });
+      const { ctx, tools } = loadMaestro(cwd, startExecutor);
+      const drive = tools.get("maestro_drive");
+      assert.ok(drive);
+      const updates: string[] = [];
+      const result = await drive.execute(
+        "streamed",
+        { action: "start" },
+        undefined,
+        ((update: { content: { text?: string }[] }) => {
+          updates.push(update.content[0]?.text ?? "");
+        }) as never,
+        ctx
+      );
+      assert.ok(
+        updates.some((update) => /Round 1 · executing 1 task\(s\): T1 Streamed work/.test(update)),
+        `expected an executing round update, got ${JSON.stringify(updates)}`
+      );
+      assert.ok(
+        updates.some((update) => /reviewing 1 task\(s\): T1/.test(update)),
+        `expected a reviewing round update, got ${JSON.stringify(updates)}`
+      );
+      // Settled before returning: the orchestrator never has to poll.
+      assert.match(result.content[0]?.text ?? "", /Drive completed/);
+      assert.equal(loadBoard(cwd).activeDrive, undefined);
+    }
+  );
+});
+
 test("maestro_drive inspect preserves no-progress dispatch notes", async () => {
   await withBoard(
     (cwd) => {
@@ -2744,6 +2826,23 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail(message);
+}
+
+/**
+ * maestro_drive action=start resolves only when the board settles. Tests that
+ * deliberately hold executors open observe live state instead, so they must
+ * not await the call; its rejection is still surfaced.
+ */
+function startDriveWithoutWaiting(
+  tool: RegisteredTool | undefined,
+  toolCallId: string,
+  params: unknown,
+  ctx: CommandCtx
+): Promise<unknown> {
+  assert.ok(tool);
+  const pending = tool.execute(toolCallId, params, undefined, undefined, ctx);
+  pending.catch(() => {});
+  return pending;
 }
 
 test("slash drive can pause live work without aborting it, persist ownership, and resume fresh", async () => {
@@ -3520,18 +3619,20 @@ test("completed drives archive and clear tasks by default", async () => {
       const { ctx, tools, events, messages, notices } = loadMaestro(cwd, startExecutor);
       const drive = tools.get("maestro_drive");
       assert.ok(drive);
-      await drive.execute("drive", { action: "start" }, undefined, undefined, ctx);
+      const result = await drive.execute("drive", { action: "start" }, undefined, undefined, ctx);
+      assert.match(result.content[0]?.text ?? "", /Drive completed/);
       await waitFor(() => loadBoard(cwd).tasks.length === 0, "completed board cleanup");
       assert.equal(listArchivedBoards(cwd).length, 1);
       const decision = loadBoard(cwd).activeDecision;
       assert.equal(decision?.kind, "completed");
       assert.ok(decision?.deliveredAt);
-      assert.equal(messages.length, 1);
-      assert.deepEqual(messages[0]?.options, { triggerTurn: true, deliverAs: "followUp" });
+      // The awaited tool result is the outcome; a duplicate wake message would
+      // re-send the same evidence and cost the orchestrator another turn.
+      assert.equal(messages.length, 0);
       assert.ok(notices.some((notice) => notice.includes("Run complete — board archived to")));
 
       events.get("session_start")?.({ previousSessionFile: owner }, ctx);
-      assert.equal(messages.length, 1, "a delivered decision must not wake the owner twice");
+      assert.equal(messages.length, 0, "a delivered decision must not wake the owner");
     }
   );
 });
@@ -3671,32 +3772,21 @@ test("production recovery sequence supersedes, launches, clears stale status, an
         undefined,
         ctx
       );
-      assert.match(started.content[0]?.text ?? "", /Drive started/);
-      const claimedOrSettled = loadBoard(cwd);
-      assert.ok(claimedOrSettled.activeDrive || claimedOrSettled.activeDecision);
-      if (claimedOrSettled.activeDrive) {
-        assert.deepEqual(claimedOrSettled.activeDrive.taskIds, ["T3", "T2"]);
-      }
-      if (claimedOrSettled.activeDecision?.id === "stale-t1-decision") {
-        assert.equal(claimedOrSettled.activeDecision.resolution?.intervention, "resume");
-      } else {
-        assert.notEqual(claimedOrSettled.activeDecision?.id, "stale-t1-decision");
-      }
-      await waitFor(
-        () => launched.some((runId) => runId.startsWith("T3-")),
+      assert.match(started.content[0]?.text ?? "", /Drive completed/);
+      const settled = loadBoard(cwd);
+      assert.notEqual(settled.activeDecision?.id, "stale-t1-decision");
+      assert.ok(
+        launched.some((runId) => runId.startsWith("T3-")),
         "successor did not launch"
       );
 
-      await waitFor(
-        () => loadBoard(cwd).activeDecision?.kind === "completed",
-        "drive started but stopped without a terminal decision"
-      );
+      assert.equal(loadBoard(cwd).activeDecision?.kind, "completed");
       assert.ok(launched.some((runId) => runId.startsWith("T2-")));
       assert.equal(loadBoard(cwd).activeDrive, undefined);
-      assert.equal(messages.length, 1);
+      assert.equal(messages.length, 0, "the awaited tool result is the outcome");
 
       events.get("session_start")?.({ previousSessionFile: owner }, ctx);
-      assert.equal(messages.length, 1, "owner must not receive a duplicate wakeup");
+      assert.equal(messages.length, 0, "owner must not receive a duplicate wakeup");
       const foreign = loadMaestro(cwd, undefined, other);
       foreign.events.get("session_start")?.({ previousSessionFile: owner }, foreign.ctx);
       assert.equal(foreign.messages.length, 0, "foreign session must not consume the wakeup");
@@ -3758,9 +3848,10 @@ test("review disagreement wakes only its owner once and is not redispatched", as
         };
       };
       const ownerRuntime = loadMaestro(cwd, startExecutor, owner);
-      await ownerRuntime.tools
+      const disagreement = await ownerRuntime.tools
         .get("maestro_drive")
         ?.execute("disagreement", { action: "start" }, undefined, undefined, ownerRuntime.ctx);
+      assert.match(disagreement?.content[0]?.text ?? "", /review_disagreement/);
       await waitFor(
         () => loadBoard(cwd).activeDecision !== undefined,
         "review disagreement produced no durable decision"
@@ -3772,13 +3863,13 @@ test("review disagreement wakes only its owner once and is not redispatched", as
         findTask(loadBoard(cwd), "T1")?.attempts.at(-1)?.reviewConvergence?.summary
       );
       assert.equal(reviewerStarts, 2);
-      assert.equal(ownerRuntime.messages.length, 1);
+      assert.equal(ownerRuntime.messages.length, 0, "the awaited tool result is the outcome");
       assert.equal(loadBoard(cwd).activeDecision?.ownerSession, owner);
       await new Promise((resolve) => setTimeout(resolve, 20));
       assert.equal(reviewerStarts, 2, "terminal disagreement must not hot-loop reviewers");
 
       ownerRuntime.events.get("session_start")?.({ reason: "resume" }, ownerRuntime.ctx);
-      assert.equal(ownerRuntime.messages.length, 1, "owner wakeup must be exactly once");
+      assert.equal(ownerRuntime.messages.length, 0, "a delivered decision must not wake the owner");
       const foreign = loadMaestro(cwd, undefined, other);
       foreign.events.get("session_start")?.({ reason: "resume" }, foreign.ctx);
       assert.equal(foreign.messages.length, 0, "foreign session must not receive the decision");
@@ -3820,7 +3911,7 @@ test("active drive shutdown persists owner-scoped internal error for reload deli
       }));
       const drive = first.tools.get("maestro_drive");
       assert.ok(drive);
-      await drive.execute("start", { action: "start" }, undefined, undefined, first.ctx);
+      startDriveWithoutWaiting(drive, "start", { action: "start" }, first.ctx);
       await waitFor(
         () => loadBoard(cwd).activeDrive !== undefined,
         "drive claim was not persisted"
@@ -3874,15 +3965,11 @@ test("asynchronous drive setup failure cannot leave a silent stopped state", asy
         undefined,
         runtime.ctx
       );
-      assert.match(result.content[0]?.text ?? "", /Drive started/);
-      await waitFor(
-        () => loadBoard(cwd).activeDecision !== undefined,
-        "claimed drive failure produced no durable decision"
-      );
+      assert.match(result.content[0]?.text ?? "", /attempt_cap|error|blocked/);
       const board = loadBoard(cwd);
       assert.equal(board.activeDrive, undefined);
       assert.ok(board.activeDecision?.kind);
-      assert.equal(runtime.messages.length, 1);
+      assert.equal(runtime.messages.length, 0, "the awaited tool result is the outcome");
     }
   );
 });
@@ -4165,9 +4252,12 @@ test("passive agent pane and session browser resolve every close", async () => {
         abort: () => {},
       });
       const runtime = loadMaestro(cwd, startExecutor);
-      await runtime.tools
-        .get("maestro_drive")
-        ?.execute("three-live", { action: "start" }, undefined, undefined, runtime.ctx);
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "three-live",
+        { action: "start" },
+        runtime.ctx
+      );
       await waitFor(
         () => finishes.size === 3 && runtime.overlays.length === 1,
         "live pane did not open"
@@ -4291,9 +4381,12 @@ test("passive agent pane renders its recorded session transcript", async () => {
         abort: () => {},
       }));
 
-      await runtime.tools
-        .get("maestro_drive")
-        ?.execute("rich-pane", { action: "start" }, undefined, undefined, runtime.ctx);
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "rich-pane",
+        { action: "start" },
+        runtime.ctx
+      );
       await waitFor(() => runtime.overlays.length === 1, "live pane did not open");
       const pane = runtime.overlays[0];
       assert.ok(pane);
@@ -4367,9 +4460,12 @@ test("review launches update the passive agent pane with transcript actions", as
           abort: () => {},
         };
       });
-      await runtime.tools
-        .get("maestro_drive")
-        ?.execute("watch-review", { action: "start" }, undefined, undefined, runtime.ctx);
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "watch-review",
+        { action: "start" },
+        runtime.ctx
+      );
       await waitFor(
         () => finishExecutor !== undefined && runtime.overlays.length === 1,
         "executor pane did not open"
@@ -4446,9 +4542,12 @@ test("passive agent pane shutdown resolves through done without stale handles", 
         followUp: () => {},
         abort: () => finish?.(aborted),
       }));
-      await runtime.tools
-        .get("maestro_drive")
-        ?.execute("shutdown-pane", { action: "start" }, undefined, undefined, runtime.ctx);
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "shutdown-pane",
+        { action: "start" },
+        runtime.ctx
+      );
       await waitFor(() => runtime.overlays.length === 1, "live pane did not open");
       const pane = runtime.overlays[0];
       assert.ok(pane);
@@ -4486,9 +4585,12 @@ test("shortcut replaces a hidden narrow passive pane with the centered session b
         undefined,
         { columns: 90 }
       );
-      await runtime.tools
-        .get("maestro_drive")
-        ?.execute("narrow-viewer", { action: "start" }, undefined, undefined, runtime.ctx);
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "narrow-viewer",
+        { action: "start" },
+        runtime.ctx
+      );
       await waitFor(() => runtime.overlays.length === 1, "passive pane did not open");
       const passive = runtime.overlays[0];
       assert.ok(passive);
@@ -4546,9 +4648,12 @@ test("manual agent viewer works when automatic panes are disabled", async () => 
         followUp: () => {},
         abort: () => {},
       }));
-      await runtime.tools
-        .get("maestro_drive")
-        ?.execute("disabled-pane", { action: "start" }, undefined, undefined, runtime.ctx);
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "disabled-pane",
+        { action: "start" },
+        runtime.ctx
+      );
       await waitFor(() => finish !== undefined, "executor did not launch");
       assert.equal(runtime.overlays.length, 0);
       assert.notDeepEqual(renderLatestWidget(runtime), []);

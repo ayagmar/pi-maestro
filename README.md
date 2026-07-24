@@ -36,7 +36,7 @@ you ──▶ orchestrator (SOTA model, your session)
 - **Lower cost per run.** The orchestrator (expensive model) only plans, dispatches, and reads
   short reports. Executors run on cheaper models with per-tier thinking levels.
 - **No context rot.** Every executor and reviewer starts with a fresh context containing only its
-  self-contained brief (plus approved dependency reports). Routine progress stays in the dashboard; the orchestrator receives only bounded decision and completion messages.
+  self-contained brief (plus approved dependency reports). Routine progress streams into the live tool result and the dashboard; the orchestrator's context only ever receives one bounded settled outcome per drive.
 - **Independent review by default.** The automated path sends every task through an adversarial
   review with read-only tools before approval. Rejected work is retried with the reviewer's notes
   injected into the next attempt. Manual approval skips that review, and configuring writable
@@ -86,7 +86,7 @@ with these tools:
 |------|--------------|
 | `maestro_plan` | Creates tasks with self-contained briefs, complexity tiers, dependencies, and bounded write scopes |
 | `maestro_update` | Refines or cancels planned work |
-| `maestro_drive` | Starts, inspects, or intervenes in the state-aware background run/review/retry loop |
+| `maestro_drive` | Runs the state-aware run/review/retry loop to settlement, inspects it, or intervenes in live work |
 
 Human-only slash commands and dashboard controls provide planning approval, drive, pause/resume/abort, simulation, timeline, reconciliation, and recovery without adding model-facing tools.
 
@@ -118,7 +118,15 @@ Recommended flow for large goals:
 For small goals, skip the handoff — one session is fine. You can also start the autonomous loop
 from the current session with `/maestro drive` (or let the model call `maestro_drive`). It runs
 independent work in parallel, reviews completed attempts, carries review feedback into retries,
-and waits for approved dependencies before advancing them. Routine progress remains in the dashboard. Completion or a decision point sends one bounded wakeup to the orchestrator; unexpected background failures do too, so the supervisor is never left waiting on a drive that already stopped. `maestro_drive` inspect returns bounded live evidence on demand and accepts an optional task scope. `/maestro pause` requests a safe stop:
+and waits for approved dependencies before advancing them. When the model calls `maestro_drive` action=start,
+that one tool call spans the whole loop: round-by-round progress streams into the live tool result, and the
+call returns only when the board settles or a decision needs orchestrator judgment. The orchestrator therefore
+spends one turn on an entire drive instead of polling it — polling turns re-send the conversation, evict the
+prompt cache, and change nothing. A drive started from `/maestro drive` still reports through a bounded wakeup
+message, as do unexpected background failures, so a supervisor is never left waiting on a drive that already
+stopped. `maestro_drive` inspect returns bounded evidence for a board this session is not currently driving and
+accepts an optional task scope; a decision already resolved is treated as history and is not re-surfaced.
+`/maestro pause` requests a safe stop:
 active executors finish, but no new executor batch starts. `/maestro resume` later continues the same
 task scope from the board's fresh persisted state; `/maestro abort` instead aborts active executors.
 The loop stops when work is complete or when a pause, plan gate, run budget, attempt cap, provider

@@ -241,7 +241,8 @@ export default function maestro(
     signal?: AbortSignal,
     reportProgress: (message: string) => void = () => {},
     humanRetryTaskId?: string,
-    humanRetryExpectedRiskToken?: string
+    humanRetryExpectedRiskToken?: string,
+    settleDecisionWithoutWaking = false
   ): BackgroundDrive {
     return driveController.startBackgroundDrive(
       ctx,
@@ -250,7 +251,8 @@ export default function maestro(
       signal,
       reportProgress,
       humanRetryTaskId,
-      humanRetryExpectedRiskToken
+      humanRetryExpectedRiskToken,
+      settleDecisionWithoutWaking
     );
   }
 
