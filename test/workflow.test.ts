@@ -1406,6 +1406,52 @@ test("raw launch cap blocks a reviewer fallback before persisting its placeholde
   }
 });
 
+test("a deleted recovery checkout fails only its own task, not the whole drive", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-missing-recovery-branch-"));
+  try {
+    execFileSync("git", ["init"], { cwd });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd });
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    execFileSync("git", ["add", "base.txt"], { cwd });
+    execFileSync("git", ["commit", "-m", "base"], { cwd });
+
+    const { board, task } = boardWithTask("changes_requested");
+    const previous = attempt("prior work");
+    // A checkout and branch the user removed outside maestro.
+    previous.worktreePath = join(cwd, ".pi", "maestro", "worktrees", "t1-attempt-1");
+    previous.branch = "maestro/t1-attempt-1";
+    task.attempts.push(previous);
+    task.reviewNotes = "1. Fix the thing.";
+    saveBoard(cwd, board);
+
+    const notices: string[] = [];
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, useWorktrees: true },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: executor({ finalReport: "Verified.\nVERDICT: APPROVE" }),
+      onUpdate,
+      trackRun,
+      onNotice: (message) => notices.push(message),
+    });
+
+    // Previously this threw out of the worktree setup loop and stopped the
+    // entire drive with an opaque "Recovery branch is missing" error.
+    assert.notEqual(result.stoppedBecause.code, "error");
+    assert.ok(
+      notices.some((notice) => /retained recovery checkout could not be restored/.test(notice)),
+      `expected a recovery notice, got ${JSON.stringify(notices)}`
+    );
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.length, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("launch-bounded worktree dispatch creates no checkout for undispatched tasks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-worktree-launch-limit-"));
   try {

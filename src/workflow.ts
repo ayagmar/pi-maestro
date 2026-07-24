@@ -327,7 +327,21 @@ export async function driveBoard(options: {
                 ? { worktreePath: previous.worktreePath, branch: previous.branch }
                 : undefined;
             if (retained) {
-              worktrees.set(task.id, restoreWorktree(cwd, retained));
+              // A checkout the user (or an outside Git command) removed must
+              // not abort the whole drive: only this task loses its retained
+              // recovery state, and it starts from a fresh baseline instead.
+              try {
+                worktrees.set(task.id, restoreWorktree(cwd, retained));
+              } catch (error) {
+                options.onNotice?.(
+                  `${task.id}: retained recovery checkout could not be restored (${error instanceof Error ? error.message : String(error)}); starting a fresh attempt from HEAD.`
+                );
+                if (isolateBatch) {
+                  const ref = createWorktree(cwd, task.id, task.attempts.length + 1);
+                  created.push(ref);
+                  worktrees.set(task.id, ref);
+                }
+              }
             } else if (isolateBatch) {
               const ref = createWorktree(cwd, task.id, task.attempts.length + 1);
               created.push(ref);
