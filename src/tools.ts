@@ -633,6 +633,24 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           if (contract.successCriteria) fresh.successCriteria = contract.successCriteria;
           else delete fresh.successCriteria;
         }
+        // An acknowledged in-flight invalidation must not leave the task
+        // reviewable: reviewing the old artifact against the new contract
+        // fails mechanically forever. Send it back to execution instead.
+        if (
+          wasInFlight &&
+          editsContractField &&
+          cancel !== true &&
+          (fresh.status === "ready_for_review" || fresh.status === "running")
+        ) {
+          forceStatus(fresh, "todo");
+          delete fresh.reviewNotes;
+          delete fresh.reviewRejections;
+          const invalidated = fresh.attempts.at(-1);
+          if (invalidated) {
+            delete invalidated.reviewConvergence;
+            delete invalidated.failureReason;
+          }
+        }
         if (supersedesTaskId) applyTaskSupersession(board, fresh, supersedesTaskId);
         const validationError = planValidationMessage(
           validatePlan(board, Object.keys(config.tiers))
@@ -644,7 +662,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       refreshUI(ctx);
       const text = `${
         wasInFlight && editsContractField
-          ? `Updated: ${taskLine(updated)}\nWarning: $${costSoFar.toFixed(4)} of in-flight attempt/review cost was invalidated with invalidateInFlight: true; ${updated.id} needs re-execution under the new contract.`
+          ? `Updated: ${taskLine(updated)}\nWarning: $${costSoFar.toFixed(4)} of in-flight attempt/review cost was invalidated with invalidateInFlight: true; ${updated.id} was reset to todo and needs re-execution under the new contract.`
           : `Updated: ${taskLine(updated)}`
       }${worktreeWarning}`;
       return {

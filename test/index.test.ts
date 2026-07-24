@@ -2046,6 +2046,56 @@ test("maestro_update applies acknowledged in-flight contract edits with a warnin
   );
 });
 
+test("an invalidated in-flight task is reset to todo instead of staying reviewable", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Reviewing",
+        brief: "work under review",
+        tier: "standard",
+        writePaths: ["src/reviewed.ts"],
+        successCriteria: ["Reviewed behavior works"],
+      });
+      task.status = "ready_for_review";
+      task.reviewNotes = "reviewer rejected the old contract";
+      task.reviewRejections = 1;
+      const attempt = executorAttempt();
+      attempt.usage.cost = 1.5;
+      attempt.failureReason = {
+        kind: "reviewer_failure",
+        message: "stale artifact",
+        retryable: true,
+      };
+      task.attempts.push(attempt);
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const result = await tools.get("maestro_update")?.execute(
+        "invalidate-review",
+        {
+          taskId: "T1",
+          brief: "verify the already-completed implementation",
+          invalidateInFlight: true,
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+
+      // Leaving it ready_for_review makes every later review fail mechanically
+      // against a contract the retained artifact was never built for.
+      const task = findTask(loadBoard(cwd), "T1");
+      assert.equal(task?.status, "todo");
+      assert.equal(task?.reviewNotes, undefined);
+      assert.equal(task?.reviewRejections, undefined);
+      assert.equal(task?.attempts.at(-1)?.failureReason, undefined);
+      assert.match(result?.content[0]?.text ?? "", /reset to todo/);
+    }
+  );
+});
+
 test("maestro_update allows cancellation while a task is in flight", async () => {
   await withBoard(
     (cwd) => {
