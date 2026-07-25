@@ -292,7 +292,11 @@ trusted user/default value:
 - `maxPlanTasks` / `maxDiscoveryGeneratedTasks` — hard workflow task limits (defaults 64 / 32).
 - `maxTotalLaunchesPerRun` — combined raw executor and reviewer launch limit per drive (default 128).
 - `confirmationPlanTasks` / `confirmationTotalLaunches` — explicit scale-confirmation thresholds (defaults 24 / 64).
-- `reviewRequiredApprovals` — fresh approvals required by `confirm` (default 2, range 2–8).
+- `reviewRequiredApprovals` — fresh approvals required by `confirm` (default 2, range 2–8). The
+  full panel is spent on contested work. Once an intact panel has already approved the current
+  attempt, a re-review forced by a mechanical failure (merge conflict, changed artifact, verification
+  retry) charges a single confirmer instead of re-deriving the same verdict at full price; any
+  genuine rejection on the attempt restores the full panel.
 - `maxReviewerLaunches` — hard cap including reviewer provider fallbacks (default 4, range 1–16).
   Dependencies can reduce the number that are runnable at once.
 - `planGate` — when enabled, the initial non-empty `maestro_plan` marks a new board pending and both

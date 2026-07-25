@@ -33,6 +33,7 @@ import { integrateReviewedCandidate, removeIntegratedWorktree } from "./workflow
 import { lastReport, snapshot, type TaskSnapshot } from "./workflow-policy.js";
 import {
   convergenceRecord,
+  effectiveRequiredApprovals,
   findingFingerprint,
   policyReviewPrompt,
   reviewEvidence,
@@ -296,11 +297,7 @@ export async function reviewTask(options: {
           attempt.reviewConvergence = convergenceRecord(
             reviewPolicy,
             "operational_failure",
-            reviewPolicy === "confirm"
-              ? reviewRequiredApprovals
-              : reviewPolicy === "find-and-refute"
-                ? 2
-                : 1,
+            effectiveRequiredApprovals(fresh, reviewPolicy, reviewRequiredApprovals),
             0,
             0,
             notes
@@ -525,12 +522,13 @@ export async function reviewTask(options: {
       return { operationalFailure: "reviewer launch failed" };
     };
 
-    const requiredApprovals =
-      reviewPolicy === "confirm"
-        ? reviewRequiredApprovals
-        : reviewPolicy === "find-and-refute"
-          ? 2
-          : 1;
+    // Re-review of work an intact panel already approved costs one reviewer,
+    // not a fresh panel. Contested work keeps the full policy.
+    const requiredApprovals = effectiveRequiredApprovals(
+      dispatch.task,
+      reviewPolicy,
+      reviewRequiredApprovals
+    );
     const logicalResults: Array<{ verdict: { approved: boolean; notes: string }; report: string }> =
       [];
     let operationalFailure: string | undefined;
@@ -547,7 +545,7 @@ export async function reviewTask(options: {
         else logicalResults.push(refuter);
       }
     } else {
-      const count = reviewPolicy === "confirm" ? reviewRequiredApprovals : 1;
+      const count = reviewPolicy === "confirm" ? requiredApprovals : 1;
       for (let index = 1; index <= count; index += 1) {
         const result = await launchReviewer(
           index,

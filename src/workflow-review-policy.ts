@@ -20,6 +20,35 @@ export function taskCommitMessage(task: Task): string {
 type CriterionEvidence = NonNullable<ReviewLaunch["criterionEvidence"]>;
 
 /**
+ * Independent approvals worth paying for on this attempt.
+ *
+ * A multi-reviewer policy buys confidence in *contested* work. Once an
+ * attempt has already been approved and only re-review after a mechanical
+ * failure (merge conflict, changed artifact, verification retry) remains, the
+ * extra confirmers re-derive a verdict the panel already reached, at full
+ * price. This keeps the first panel intact and charges one reviewer for a
+ * pure re-confirmation.
+ */
+export function effectiveRequiredApprovals(
+  task: Task,
+  policy: ReviewPolicy,
+  configuredApprovals: number
+): number {
+  if (policy !== "confirm") return policy === "find-and-refute" ? 2 : 1;
+  const attempt = task.attempts.at(-1);
+  const launches = attempt?.reviewLaunches ?? [];
+  if (launches.length === 0) return configuredApprovals;
+  // Any genuine rejection on this attempt means the work is contested; the
+  // full panel is exactly what that case needs.
+  if (launches.some((launch) => launch.verdict === "request_changes")) return configuredApprovals;
+  const approvals = new Set(
+    launches.filter((launch) => launch.verdict === "approve").map((launch) => launch.reviewerIndex)
+  ).size;
+  if (approvals < configuredApprovals) return configuredApprovals;
+  return 1;
+}
+
+/**
  * Stable identity for one reviewer finding, used to detect the same defect
  * surviving an attempt.
  *

@@ -274,6 +274,100 @@ test("a criteria-less task under confirm policy honors the plain verdict line", 
   }
 });
 
+test("re-review of an already approved panel costs one confirmer, not a fresh panel", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-confirm-reconfirm-"));
+  try {
+    const task = reviewPolicyTask(cwd, "confirm");
+    // The panel already approved this attempt; only a mechanical retry remains.
+    updateTask(cwd, task.id, (fresh) => {
+      const current = fresh.attempts.at(-1);
+      if (!current) return;
+      current.reviewLaunches = [1, 2].map((reviewerIndex) => ({
+        id: `${fresh.id}-review-1-${reviewerIndex}-${reviewerIndex}`,
+        reviewerIndex,
+        role: "confirmer" as const,
+        startedAt: Date.now(),
+        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+        verdict: "approve" as const,
+      }));
+    });
+    const refreshed = findTask(loadBoard(cwd), task.id);
+    assert.ok(refreshed);
+
+    let reviewerLaunches = 0;
+    const result = await reviewTask({
+      cwd,
+      task: refreshed,
+      tier,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
+      startExecutor: (options) => {
+        reviewerLaunches += 1;
+        return queuedReviewerReports([{}])(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.status, "approved");
+    assert.equal(reviewerLaunches, 1, "re-confirmation must not rerun the whole panel");
+    const reviewed = findTask(loadBoard(cwd), task.id)?.attempts.at(-1);
+    assert.equal(reviewed?.reviewConvergence?.requiredApprovals, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("contested work keeps the full confirm panel", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-confirm-contested-"));
+  try {
+    const task = reviewPolicyTask(cwd, "confirm");
+    updateTask(cwd, task.id, (fresh) => {
+      const current = fresh.attempts.at(-1);
+      if (!current) return;
+      current.reviewLaunches = [
+        {
+          id: `${fresh.id}-review-1-1-1`,
+          reviewerIndex: 1,
+          role: "confirmer" as const,
+          startedAt: Date.now(),
+          usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+          verdict: "approve" as const,
+        },
+        {
+          id: `${fresh.id}-review-1-2-2`,
+          reviewerIndex: 2,
+          role: "confirmer" as const,
+          startedAt: Date.now(),
+          usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+          verdict: "request_changes" as const,
+        },
+      ];
+    });
+    const refreshed = findTask(loadBoard(cwd), task.id);
+    assert.ok(refreshed);
+
+    let reviewerLaunches = 0;
+    await reviewTask({
+      cwd,
+      task: refreshed,
+      tier,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
+      startExecutor: (options) => {
+        reviewerLaunches += 1;
+        return queuedReviewerReports([{}, {}])(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(reviewerLaunches, 2, "a rejected launch means the work is still contested");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("reviewer launches receive the configured per-launch cost cap", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-cost-cap-"));
   try {
