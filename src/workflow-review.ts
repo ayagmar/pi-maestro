@@ -488,8 +488,12 @@ export async function reviewTask(options: {
           outcome.aborted || outcome.exitCode !== 0 || outcome.errorMessage
             ? undefined
             : parseVerdict(outcome.finalReport);
-        if (parsed && reviewPolicy !== "single") {
-          const evidence = reviewEvidence(outcome.finalReport, task.successCriteria?.length ?? 0);
+        const criteriaCount = task.successCriteria?.length ?? 0;
+        // Criterion corroboration is only meaningful when the task states
+        // criteria to corroborate. Investigation and legacy tasks have none,
+        // and demanding evidence there rejected every verdict as malformed.
+        if (parsed && reviewPolicy !== "single" && criteriaCount > 0) {
+          const evidence = reviewEvidence(outcome.finalReport, criteriaCount);
           if (!evidence || parsed.approved !== evidence.every((entry) => entry.passed)) {
             launch.errorMessage = "reviewer returned malformed or inconsistent criterion evidence";
           } else {
@@ -511,7 +515,7 @@ export async function reviewTask(options: {
         if (canFallback) continue;
         if (failureReason) return { operationalFailure: failureReason.message };
         if (!parsed) return { operationalFailure: "reviewer gave no VERDICT line" };
-        if (reviewPolicy !== "single" && !launch.criterionEvidence) {
+        if (reviewPolicy !== "single" && criteriaCount > 0 && !launch.criterionEvidence) {
           return {
             operationalFailure: launch.errorMessage ?? "reviewer criterion evidence invalid",
           };

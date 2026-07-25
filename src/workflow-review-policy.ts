@@ -22,6 +22,12 @@ export function reviewEvidence(
   report: string,
   criteriaCount: number
 ): CriterionEvidence | undefined {
+  // A task with no criteria has nothing for a reviewer to enumerate, so
+  // per-criterion evidence cannot corroborate its verdict either way. Callers
+  // must fall back to the verdict line instead of comparing against an empty
+  // list, where `every` is vacuously true and would read a rejection as an
+  // inconsistency.
+  if (criteriaCount <= 0) return undefined;
   const matches = [...report.matchAll(/^CRITERION\s+(\d+):\s*(PASS|FAIL)\s*(?:—|-)\s*(.+)$/gim)];
   if (matches.length !== criteriaCount) return undefined;
   const evidence = matches.map((match) => ({
@@ -55,6 +61,9 @@ export function policyReviewPrompt(
       : role === "refuter"
         ? `Act as an independent confirmer/refuter. Assess the artifact yourself, then evaluate only this bounded finder evidence:\n${finderReport?.slice(0, 4_000) ?? "(none)"}`
         : "Act as an independent confirmer. Do not assume another reviewer approved the artifact.";
+  // With no stated criteria there is nothing to enumerate; asking for the
+  // lines anyway invites invented criteria that no parser can corroborate.
+  if (!criteria) return `${base}\n\n${roleText}`;
   return `${base}\n\n${roleText}\nReport every criterion exactly once using these lines:\n${criteria}\nThe VERDICT must agree with the criterion lines.`;
 }
 

@@ -236,6 +236,44 @@ test("confirm policy persists independent approvals and bounded convergence", as
   }
 });
 
+test("a criteria-less task under confirm policy honors the plain verdict line", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-confirm-no-criteria-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    task.reviewPolicy = "confirm";
+    // An explicit investigation task has no criteria to enumerate.
+    task.kind = "investigation";
+    task.writePaths = [];
+    delete task.successCriteria;
+    task.attempts.push(attempt("investigation completed"));
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
+
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
+      startExecutor: queuedReviewerReports([
+        { finalReport: "Found a real defect.\nVERDICT: REQUEST_CHANGES\n1. Missing coverage." },
+      ]),
+      onUpdate,
+      trackRun,
+    });
+
+    // With zero criteria, `[].every()` is vacuously true, so comparing it to a
+    // rejection reported the reviewer as malformed and lost a real finding.
+    assert.equal(result.status, "changes_requested");
+    const reviewed = findTask(loadBoard(cwd), task.id)?.attempts.at(-1);
+    assert.equal(reviewed?.reviewConvergence?.status, "changes_requested");
+    assert.equal(reviewed?.reviewLaunches?.at(-1)?.verdict, "request_changes");
+    assert.equal(reviewed?.reviewLaunches?.at(-1)?.errorMessage, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("reviewer launches receive the configured per-launch cost cap", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-cost-cap-"));
   try {
