@@ -180,6 +180,7 @@ export function buildReviewPrompt(task: Task, report: string): string {
       "End your final message with exactly one of:",
       "- `VERDICT: APPROVE` when the work is correct and complete",
       "- `VERDICT: REQUEST_CHANGES` followed by a numbered list of required fixes. Prefix criterion failures with `Criterion N:` and name the file or behavior affected",
+      "Start each required fix with the plain text `Criterion N:` or a short defect name. Do not wrap that leading label in bold, italics, or backticks: the same defect must be recognizable across attempts so a genuinely stuck task can be escalated instead of retried forever.",
     ].join("\n")
   );
   return joinBudgetedSections(sections);

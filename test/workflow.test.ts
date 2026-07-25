@@ -3597,6 +3597,58 @@ test("drive bookkeeping stays fingerprint-fresh across reject with notes, retry,
   }
 });
 
+test("markdown-formatted criterion findings are recognized across attempts", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-markdown-findings-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    // Real reviewers emphasize the criterion label and reword the prose between
+    // attempts. Both defeated the old bare-prefix match and raw-text hash, so a
+    // stuck task never escalated and silently consumed every attempt.
+    const rejections = [
+      "1. **Criterion 1 — `src/profiles/execute.ts`:** Include unknown diagnostics in apply summaries.",
+      "1. **Criterion 1 — `src/profiles/execute.ts`:** Include the unknown diagnostics in the apply summaries.",
+    ];
+    let reviews = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        const notes = rejections[Math.min(reviews++, rejections.length - 1)];
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: `VERDICT: REQUEST_CHANGES\n${notes}`,
+        })(options);
+      }
+      return executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "done",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 5 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "escalation_required");
+    const persisted = findTask(loadBoard(cwd), task.id);
+    // One finding identity, recognized twice — not two unrelated findings.
+    assert.deepEqual(
+      persisted?.findings?.map((finding) => finding.fingerprint),
+      ["criterion-1"]
+    );
+    assert.equal(persisted?.reviewStagnantRejections, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("second consecutive reviewer rejection escalates instead of re-dispatching", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-escalation-test-"));
   try {

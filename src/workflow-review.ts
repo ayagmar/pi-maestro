@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { artifactFindings, captureApprovedProvenance, taskFingerprint } from "./artifact-policy.js";
 import {
   findTask,
@@ -34,6 +33,7 @@ import { integrateReviewedCandidate, removeIntegratedWorktree } from "./workflow
 import { lastReport, snapshot, type TaskSnapshot } from "./workflow-policy.js";
 import {
   convergenceRecord,
+  findingFingerprint,
   policyReviewPrompt,
   reviewEvidence,
   sessionLabel,
@@ -805,13 +805,7 @@ export async function reviewTask(options: {
         const attemptIndex = attempt?.index ?? fresh.attempts.length;
         let repeatsPriorFinding = false;
         for (const message of messages) {
-          const criterion = message.match(/^criterion\s+(\d+)\s*:/i)?.[1];
-          const fingerprint = criterion
-            ? `criterion-${criterion}`
-            : createHash("sha256")
-                .update(message.toLowerCase().replace(/\s+/g, " "))
-                .digest("hex")
-                .slice(0, 12);
+          const fingerprint = findingFingerprint(message);
           const existing = fresh.findings.find((finding) => finding.fingerprint === fingerprint);
           if (existing) {
             // The same defect survived an earlier attempt: this is the

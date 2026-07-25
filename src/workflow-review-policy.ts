@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { type taskFingerprint } from "./artifact-policy.js";
 import { buildReviewPrompt } from "./prompts.js";
 import { redactFailureMessage } from "./runner.js";
@@ -17,6 +18,33 @@ export function taskCommitMessage(task: Task): string {
 }
 
 type CriterionEvidence = NonNullable<ReviewLaunch["criterionEvidence"]>;
+
+/**
+ * Stable identity for one reviewer finding, used to detect the same defect
+ * surviving an attempt.
+ *
+ * Reviewers write Markdown: `**Criterion 1 — \`src/x.ts\`:** …`. Matching a
+ * bare `criterion N:` prefix missed all of it and fell through to hashing the
+ * raw text, which any rewording defeated — so a genuinely stuck task looked
+ * like it was converging and quietly consumed every attempt. Emphasis and
+ * incidental punctuation are normalized away before both checks.
+ */
+export function findingFingerprint(message: string): string {
+  const plain = message
+    .replace(/[*_`]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // A criterion reference is the strongest identity available: the same
+  // criterion failing twice is the same unmet requirement regardless of prose.
+  const criterion = plain.match(/^criterion\s+(\d+)\b/i)?.[1];
+  if (criterion) return `criterion-${criterion}`;
+  const normalized = plain
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
+}
 
 export function reviewEvidence(
   report: string,
