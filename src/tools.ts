@@ -29,7 +29,7 @@ import {
   type DriveRuntimeController,
   resolveDriveDecision,
 } from "./drive-controller.js";
-import { formatDrivePulse } from "./drive-summary.js";
+import { formatDrivePulse, startDriveHeartbeat } from "./drive-summary.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
 import { assertPlanTaskLimit, preflightWorkflow } from "./preflight.js";
 import { canonicalTaskIds } from "./session-control.js";
@@ -471,20 +471,40 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       // The drive is awaited here so the orchestrator spends one turn on the
       // whole run/review/retry loop instead of polling it with sleep+inspect
       // turns that each re-send the conversation and evict the prompt cache.
+      const stream = (message: string): void => {
+        onUpdate?.({
+          content: [{ type: "text", text: message }],
+          details: { action: "drive", tasks: [] },
+        });
+      };
+      let lastRound = "starting";
       const operation = startBackgroundDrive(
         ctx,
         taskIds,
         signal,
-        (message) =>
-          onUpdate?.({
-            content: [{ type: "text", text: message }],
-            details: { action: "drive", tasks: [] },
-          }),
+        (message) => {
+          lastRound = message;
+          stream(message);
+        },
         undefined,
         undefined,
         true
       );
-      await operation.promise;
+      // A single round can run for many minutes. Without a heartbeat the tool
+      // call looks hung, which is what drove the sleep+inspect polling in the
+      // first place. The pulse is a live tool update, so it never enters the
+      // model's context or costs a turn.
+      const heartbeat = startDriveHeartbeat(
+        ctx.cwd,
+        driveController,
+        loadConfig(ctx.cwd),
+        (pulse) => stream(`${lastRound}\n${pulse}`)
+      );
+      try {
+        await operation.promise;
+      } finally {
+        heartbeat();
+      }
       const settledBoard = loadBoard(ctx.cwd);
       const settledTasks = settledBoard.tasks.filter(
         (task) => !taskIds || taskIds.includes(task.id)

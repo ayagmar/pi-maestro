@@ -16,6 +16,7 @@ import {
   persistDriveDecision,
   resolveDriveDecision,
 } from "../src/drive-controller.js";
+import { startDriveHeartbeat } from "../src/drive-summary.js";
 import { type Board, type DriveDecision } from "../src/types.js";
 
 const owner = "/tmp/maestro-owner.jsonl";
@@ -334,5 +335,92 @@ test("completed-board cleanup preserves terminal decision and ownership evidence
     assert.equal(cleaned.activeDecision?.id, "decision-1");
     assert.equal(cleaned.activeDrive?.id, "drive-1");
     assert.equal(listArchivedBoards(cwd).length, 1);
+  });
+});
+
+test("drive heartbeat pulses live agents, spend, and status deltas without waking the model", () => {
+  withBoard((cwd) => {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    createTask(board, { title: "Streaming", brief: "work", tier: "standard" });
+    saveBoard(cwd, board);
+
+    const attempt = {
+      index: 1,
+      logFile: "run.jsonl",
+      thinking: "low" as const,
+      startedAt: Date.now(),
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+      touchedFiles: [] as string[],
+    };
+    const controller = new DriveRuntimeController();
+    controller.registerLiveRun({
+      taskId: "T1",
+      kind: "execute",
+      turns: 7,
+      cost: 1.25,
+      lastActivity: "bash",
+      handle: {
+        attempt,
+        outcome: new Promise(() => {}),
+        steer: () => {},
+        followUp: () => {},
+        abort: () => {},
+      },
+    });
+
+    // An injected scheduler keeps the test off real time and off host timers.
+    let tick: (() => void) | undefined;
+    let stopped = false;
+    const pulses: string[] = [];
+    const stop = startDriveHeartbeat(
+      cwd,
+      controller,
+      { ...DEFAULT_CONFIG, statusWaitSeconds: 60 },
+      (message) => pulses.push(message),
+      (callback) => {
+        tick = callback;
+        return {
+          stop: () => {
+            stopped = true;
+          },
+        };
+      }
+    );
+
+    assert.ok(tick, "a positive statusWaitSeconds must schedule a pulse");
+    tick();
+    assert.match(pulses[0] ?? "", /Drive running · 1 live agent\(s\)/);
+    assert.match(pulses[0] ?? "", /T1 running · 7 turns · \$1\.2500 · bash/);
+
+    // The second pulse reports what actually advanced since the first.
+    updateBoard(cwd, (current) => {
+      const task = current.tasks[0];
+      if (task) task.status = "ready_for_review";
+      return true;
+    });
+    tick();
+    assert.match(pulses[1] ?? "", /Advanced since last pulse: T1 todo → ready for review/);
+
+    stop();
+    assert.equal(stopped, true);
+  });
+});
+
+test("drive heartbeat is disabled when the pulse interval is zero", () => {
+  withBoard((cwd) => {
+    let scheduled = false;
+    const stop = startDriveHeartbeat(
+      cwd,
+      new DriveRuntimeController(),
+      { ...DEFAULT_CONFIG, statusWaitSeconds: 0 },
+      () => {},
+      (callback) => {
+        scheduled = true;
+        void callback;
+        return { stop: () => {} };
+      }
+    );
+    assert.equal(scheduled, false);
+    stop();
   });
 });

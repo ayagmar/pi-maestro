@@ -1,6 +1,6 @@
 import { findTask, loadBoard } from "./board.js";
-import { truncateText } from "./format.js";
-import { type Board } from "./types.js";
+import { boardUsage, describeProgressDelta, truncateText } from "./format.js";
+import { type Board, type MaestroConfig, type TaskStatus } from "./types.js";
 import { type DriveSummary, formatDriveSummary, lastReport, snapshot } from "./workflow.js";
 
 export function unexpectedDriveSummary(
@@ -56,4 +56,54 @@ export function reportPreview(board: Board, taskId: string, maxLines: number): s
   const report = task ? lastReport(task) : undefined;
   if (!report) return "";
   return `\nReport:\n${truncateText(report, maxLines)}`;
+}
+
+/**
+ * Emit a live progress pulse while an awaited drive is running, so a long
+ * round is visibly alive. `statusWaitSeconds` is the pulse interval; 0
+ * disables pulsing. Returns a stop function.
+ */
+/** Just the live-run projection a pulse needs, so this stays off the controller. */
+export interface HeartbeatRuns {
+  liveRunCount(): number;
+  liveRunValues(): Iterable<{
+    taskId: string;
+    kind: "execute" | "review";
+    turns: number;
+    cost: number;
+    lastActivity: string;
+  }>;
+}
+
+export function startDriveHeartbeat(
+  cwd: string,
+  runs: HeartbeatRuns,
+  config: MaestroConfig,
+  emit: (message: string) => void,
+  schedule: (callback: () => void, intervalMs: number) => { stop: () => void } = defaultInterval
+): () => void {
+  const seconds = config.statusWaitSeconds;
+  if (!seconds || seconds <= 0) return () => {};
+  let previous: Map<string, TaskStatus> | undefined;
+  const timer = schedule(() => {
+    const tasks = loadBoard(cwd).tasks;
+    const delta = describeProgressDelta(previous, tasks);
+    previous = new Map(tasks.map((task) => [task.id, task.status] as const));
+    const live = [...runs.liveRunValues()]
+      .map(
+        (run) =>
+          `${run.taskId} ${run.kind === "review" ? "reviewing" : "running"} · ${run.turns} turns · $${run.cost.toFixed(4)} · ${run.lastActivity}`
+      )
+      .join("\n");
+    const usage = boardUsage(tasks);
+    const header = `Drive running · ${live ? `${runs.liveRunCount()} live agent(s)` : "no live agent"} · $${usage.cost.toFixed(4)} so far`;
+    emit([header, live, delta].filter(Boolean).join("\n"));
+  }, seconds * 1000);
+  return () => timer.stop();
+}
+
+function defaultInterval(callback: () => void, intervalMs: number): { stop: () => void } {
+  const timer = setInterval(callback, intervalMs);
+  timer.unref();
+  return { stop: () => clearInterval(timer) };
 }

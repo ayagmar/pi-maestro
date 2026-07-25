@@ -326,9 +326,11 @@ trusted user/default value:
 - `maxCostPerTask` — abort a launch when it exceeds this USD cost (default $5; 0 disables the cap).
   Applies to executor attempts and to each reviewer launch, so a runaway reviewer cannot outspend
   the executor it is checking. Safety net against a stuck launch burning tokens unattended.
-- `statusWaitSeconds` — interval for mechanical background-drive progress pulses (default 60,
-  maximum 240). Routine pulses update persisted/dashboard state without waking the orchestrator;
-  only a decision or completion queues a bounded owner-scoped message.
+- `statusWaitSeconds` — heartbeat interval for an awaited drive (default 60, maximum 240; 0
+  disables it). Each pulse reports live agents, spend so far, and which tasks advanced since the
+  previous pulse. Pulses are live tool updates: they keep a long round visibly alive without
+  entering the orchestrator's context or costing a turn. Only a decision or completion becomes a
+  bounded message.
 - `maxRunCost` — gate new executor batches once total cost recorded across the board exceeds this
   USD amount (default $25; 0 disables the cap). The settings editor offers off, $5, $10, $25, and $50. A blocked
   `/maestro drive` reports the budget warning and stops before another batch; `maestro_drive` stops

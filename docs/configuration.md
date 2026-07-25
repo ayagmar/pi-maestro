@@ -27,7 +27,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `maxReviewerLaunches` | 4 | Integer 1–16; includes provider fallback launches |
 | `maxCostPerTask` | 5 | USD; 0 disables |
 | `maxRunCost` | 25 | USD; 0 disables |
-| `statusWaitSeconds` | 60 | 0–240; 0 disables waiting |
+| `statusWaitSeconds` | 60 | 0–240; awaited-drive heartbeat interval, 0 disables pulsing |
 | `logEvents` | `compact` | `compact` or `full` |
 | `maxLogBytesPerRun` | 1000000 | 0 means unlimited |
 | `watchdogIdleSeconds` | 120 | 0–86400 |
