@@ -312,6 +312,12 @@ trusted user/default value:
   recovery notes; the next retry reuses that worktree (default false).
 - `detachedExecutors` — opt-in Unix executor survivability (default false). Git projects force each detached executor into its own task worktree. Because Pi RPC is stdio-only and cannot reconnect to an abandoned pipe, Maestro uses a detached supervisor with persisted JSONL event/control files. The supervisor auto-cancels UI requests, applies watchdog and cost-cap termination, enforces compact/full complete-line logging and byte caps while the parent is absent, records an atomic terminal outcome, and lets `session_start` reattach by incremental log tail. Reattached runs remain steerable and abortable; if they settle while Maestro is absent, startup reconstructs their outcome before review. Reviewer launches remain attached to the supervising runtime, and Windows falls back to the normal attached transport with `taskkill /t` descendant cleanup on abort/timeout; that Windows path remains best-effort until a hosted Windows run passes.
 - `autoCommit` — commit each task's approved work as one conventional commit (default on).
+  Maestro's own commits (attempt checkpoints and reviewed integrations) are always created with
+  `--no-gpg-sign`. They are mechanical bookkeeping, and signing them would make the drive depend on
+  an interactive passphrase: with `commit.gpgsign = true` and no reachable signing key, gpg blocks on
+  a pinentry prompt that cannot appear from a remote or headless session. Your own commits are
+  unaffected. Every git invocation also runs with a timeout and `GIT_TERMINAL_PROMPT=0`, so no git
+  command can ever hang the editor.
   The commit message comes from the task's `commitMessage` (the orchestrator plans one per
   task, e.g. `fix: handle empty board`) or falls back to `feat: <title>`. Main-tree runs
   commit only the files the executor touched; worktree runs use the message for the merge

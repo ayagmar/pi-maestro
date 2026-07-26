@@ -4,6 +4,10 @@
 
 ### Correctness
 
+- Maestro's own git commits (attempt checkpoints, reviewed integrations, and worktree merges) are created with `--no-gpg-sign`, and every git invocation runs with a timeout and `GIT_TERMINAL_PROMPT=0`. Previously a user with `commit.gpgsign = true` working away from their signing key hit gpg waiting on a pinentry prompt that could never appear; because git runs synchronously on Pi's main thread with no timeout, that blocked the entire editor indefinitely and left the session unresumable.
+- Parking a task checkout now refuses to remove it when its changes cannot be checkpointed onto the task branch, instead of force-removing the checkout and deleting the branch. A failed checkpoint previously discarded uncommitted executor work permanently.
+- Reading an agent session transcript or run log is blocked before execution. Reading the orchestrator's own session appended a copy of the conversation to the file being read, so each read grew the next one; one real run reached ~178k tokens across four reads and could no longer be resumed.
+- Isolated task checkouts are built from committed content, so uncommitted files a brief points at do not exist for the executor. A drive that isolates tasks now warns which uncommitted paths are invisible instead of letting every executor report itself blocked on a file the user can plainly see.
 - Parallel non-worktree batches now auto-isolate in per-task worktrees (with a user notice) so concurrent executors can never cross-attribute each other's file changes; single-task dispatch keeps the shared checkout, and non-Git projects keep legacy behavior.
 - Investigation runs that legitimately write a long report across turns without tool calls now count meaningful report growth as watchdog progress.
 - Legacy investigation-phrased briefs (empty writePaths without `kind: "investigation"`) now produce an explicit deprecation notice at planning; the explicit kind is the supported path.

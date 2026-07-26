@@ -48,6 +48,7 @@ import {
   removeUnreferencedCleanWorktree,
   removeWorktree,
   restoreWorktree,
+  uncommittedPathsInvisibleToWorktrees,
   type WorktreeRef,
 } from "./worktree.js";
 
@@ -149,6 +150,7 @@ export async function driveBoard(options: {
   let rounds = 0;
   let rawLaunches = 0;
   let humanExecuteDispatched = false;
+  let warnedInvisiblePaths = false;
   const transientProviderRetries = new Set<string>();
   const currentFingerprintConfig = (): MaestroConfig => loadConfig(cwd);
   const humanRetryId = humanRetryTaskId?.trim().toUpperCase();
@@ -315,6 +317,19 @@ export async function driveBoard(options: {
           options.onNotice?.(
             `Parallel batch of ${dispatchable.length} tasks isolated in per-task worktrees to keep change attribution exact (useWorktrees is off).`
           );
+        }
+        // An isolated checkout only contains committed content. Uncommitted
+        // files a brief points at (plans, specs, notes) are invisible there,
+        // and the executor reports itself blocked on a file the user can see.
+        if (isolateBatch && !warnedInvisiblePaths) {
+          const invisible = uncommittedPathsInvisibleToWorktrees(cwd);
+          if (invisible.length > 0) {
+            warnedInvisiblePaths = true;
+            const shown = invisible.slice(0, 10).join(", ");
+            options.onNotice?.(
+              `${invisible.length} uncommitted path(s) are invisible to isolated task checkouts and executors cannot read them: ${shown}${invisible.length > 10 ? `, +${invisible.length - 10} more` : ""}. Commit or stash them if a task brief depends on them.`
+            );
+          }
         }
         try {
           for (const task of dispatchable) {

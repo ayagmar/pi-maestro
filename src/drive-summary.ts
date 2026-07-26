@@ -37,7 +37,7 @@ export function formatDrivePulse(summary: DriveSummary): string {
     return `${base}\n\nResolve the disagreement deliberately: use maestro_update to change the task reviewPolicy, or split/cancel the task after inspecting both retained reviewer reports. Then start maestro_drive for the corrected scope.`;
   }
   if (code === "reviewer_failure") {
-    return `${base}\n\nInspect the retained reviewer launch and artifact/verification evidence, correct the operational cause, then start maestro_drive for the affected task. Operational failures do not count as reviewer rejection or disagreement.`;
+    return `${base}\n\nUse maestro_drive inspect for the reviewer verdict, convergence, and failure evidence, correct the operational cause, then start maestro_drive for the affected task. Never open a raw session or log file to investigate: those transcripts are megabytes of replayed tool output, and reading one into this conversation destroys the context and prompt cache. Operational failures do not count as reviewer rejection or disagreement.`;
   }
   if (code === "attempt_cap") {
     return `${base}\n\nThe capped predecessor cannot run again because its consumed attempts remain. Create a narrowly scoped successor with maestro_plan and set supersedesTaskId to the capped task. Maestro atomically preserves the predecessor as cancelled and rewires downstream dependencies. Then start maestro_drive for the successor and rewired dependents. Do not perform cancellation/rewiring as separate calls or raise maxAttempts.`;
