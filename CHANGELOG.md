@@ -18,6 +18,12 @@
 - Stale board locks now record the owner's kernel process start time on Linux, so a recycled PID can no longer keep a dead lock alive.
 - Main-tree identity checks exclude `.pi/maestro.json` and `.pi/maestro-recipes/`, so editing maestro config or recipes mid-review no longer fails promotion with a spurious "main checkout changed".
 
+### Testing
+
+- Added `test/executor-integration.test.ts`: real `pi --mode rpc` executors driven end to end against a local scripted model server, covering the RPC transport, session writing, Git attribution, and integration commits with no provider account, no tokens, and no outbound network. It reproduces the mandatory-signing failure that froze the editor.
+- Removed 24 structural assertions that only checked which file a function lives in. Gutting a function's body while keeping its name left every one of them passing, so they taxed refactors without protecting behavior; `test/boundaries.test.ts` now asserts capability boundaries only.
+- Shared executor fakes moved to `test/helpers/executors.ts` instead of being re-declared per test.
+
 ### Security
 
 - Project-local `.pi/maestro.json` is honored only for pi-trusted projects; untrusted repositories can no longer influence budgets, attempt caps, tier models, or tier tool lists.

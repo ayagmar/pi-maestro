@@ -362,6 +362,12 @@ export function createExecutorSessionDir(projectCwd: string, runId: string): str
 }
 
 function piInvocation(args: string[]): { command: string; args: string[] } {
+  // Re-executing the current script only reproduces pi when that script *is*
+  // pi. Integration tests run under a test runner whose argv[1] is the test
+  // file, so they select the installed binary explicitly.
+  if (process.env.PI_MAESTRO_EXECUTOR_COMMAND) {
+    return { command: process.env.PI_MAESTRO_EXECUTOR_COMMAND, args };
+  }
   const currentScript = process.argv[1];
   if (currentScript && existsSync(currentScript)) {
     return { command: process.execPath, args: [currentScript, ...args] };
@@ -496,6 +502,17 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
   const args = ["--mode", "rpc", "--session-dir", sessionDir, "--thinking", options.tier.thinking];
   if (options.tier.model) args.push("--model", options.tier.model);
   if (options.tier.tools) args.push("--tools", options.tier.tools);
+  // Integration tests replace the user's environment with a scripted model
+  // provider so the real RPC transport can be exercised without a provider
+  // account or the developer's own installed packages. Nothing in normal
+  // operation sets this.
+  const testExtensions = (process.env.PI_MAESTRO_EXECUTOR_EXTENSIONS ?? "")
+    .split(",")
+    .filter(Boolean);
+  if (testExtensions.length > 0) {
+    args.push("--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files");
+    for (const extension of testExtensions) args.push("--extension", extension);
+  }
 
   const invocation = piInvocation(args);
   if (options.detached && process.platform !== "win32") {
