@@ -92,6 +92,9 @@ test("configuration docs match runtime defaults and commands remain documented",
   for (const [key, value] of defaults) {
     assert.ok(plainConfig.includes(`| ${key} | ${String(value)} |`));
   }
+  // Documented commands must be reachable. Nested leaves such as "plan diff"
+  // are completed after their parent noun rather than listed up front, so the
+  // check is on the parent the menu actually offers.
   for (const command of [
     "retry",
     "timeline",
@@ -101,13 +104,18 @@ test("configuration docs match runtime defaults and commands remain documented",
     "recipe preview",
     "agents",
     "workflows",
-  ] as const) {
-    assert.ok(MAESTRO_COMMANDS.includes(command));
+  ]) {
+    const parent = command.split(" ")[0] as (typeof MAESTRO_COMMANDS)[number];
+    assert.ok(MAESTRO_COMMANDS.includes(parent), `${command} must be reachable`);
     assert.ok(read("README.md").includes(`/maestro ${command}`));
   }
   assert.equal(MAESTRO_COMMANDS.includes("plan compare" as never), false);
   assert.equal(MAESTRO_COMMANDS.includes("watch" as never), false);
-  assert.equal(MAESTRO_COMMANDS.length, 40);
+  // The first menu a newcomer sees stays short enough to read.
+  assert.ok(
+    MAESTRO_COMMANDS.length <= 25,
+    `top-level menu grew to ${MAESTRO_COMMANDS.length} entries`
+  );
   assert.doesNotMatch(read("README.md"), /\/maestro list\b|plan compare|\/maestro watch\b/);
   assert.doesNotMatch(read("docs/operations.md"), /plan compare/);
 });

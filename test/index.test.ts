@@ -1015,6 +1015,22 @@ test("multi-word static and dynamic argument completions are combined", async ()
       assert.ok(
         command.getArgumentCompletions?.("doctor ")?.some((item) => item.value === "doctor cleanup")
       );
+      // The opening menu offers one entry per action, so nested leaves and
+      // aliases must not crowd it.
+      const opening = command.getArgumentCompletions?.("") ?? [];
+      assert.ok(opening.length <= 25, `opening menu listed ${opening.length} entries`);
+      assert.equal(
+        opening.some((item) => item.value.includes(" ")),
+        false,
+        "nested leaves must wait until their parent is typed"
+      );
+      assert.equal(
+        opening.some((item) => item.value === "dashboard" || item.value === "dash"),
+        false,
+        "aliases must not compete with the name they alias"
+      );
+      // Aliases still dispatch.
+      assert.ok(opening.some((item) => item.value === "board"));
     }
   );
 });

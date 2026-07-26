@@ -18,6 +18,13 @@
 - Stale board locks now record the owner's kernel process start time on Linux, so a recycled PID can no longer keep a dead lock alive.
 - Main-tree identity checks exclude `.pi/maestro.json` and `.pi/maestro-recipes/`, so editing maestro config or recipes mid-review no longer fails promotion with a spurious "main checkout changed".
 
+### Changed
+
+- Settings are grouped by how often they are worth revisiting. "Essentials" holds the preset, concurrency, spend cap, plan gate, auto-commit, and attempt limit; "How work runs" holds isolation and cleanup; runaway guards moved to "Safety limits", which most users never need to open. The previous layout put fifteen unrelated controls in one flat "Execution and safety" list.
+- The subcommand menu offers one entry per action (25, down from 44). Nested leaves such as `plan export` are completed after their parent noun, and the `dash`/`dashboard` aliases still dispatch without competing with `board` in the list.
+- `/maestro` help leads with the four commands most runs need, then groups the rest by situation instead of presenting one flat list.
+- Presets now spread `DEFAULT_CONFIG` and state only what they change. Each previously restated all 24 settings, so adding one meant editing six presets; 132 lines of duplication removed with no behavior change.
+
 ### Testing
 
 - Added `test/executor-integration.test.ts`: real `pi --mode rpc` executors driven end to end against a local scripted model server, covering the RPC transport, session writing, Git attribution, and integration commits with no provider account, no tokens, and no outbound network. It reproduces the mandatory-signing failure that froze the editor.
