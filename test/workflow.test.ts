@@ -3961,3 +3961,52 @@ test("escalation clears and the drive continues after the counter is reset", asy
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("a drive blocked by a cancelled dependency names the blocker and the remedy", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-dead-dependency-"));
+  execFileSync("git", ["init", "-q"], { cwd });
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const blocker = createTask(board, { title: "blocker", brief: "b", tier: "standard" });
+  blocker.status = "cancelled";
+  const middle = createTask(board, {
+    title: "middle",
+    brief: "b",
+    tier: "standard",
+    dependsOn: [blocker.id],
+  });
+  createTask(board, {
+    title: "downstream",
+    brief: "b",
+    tier: "standard",
+    dependsOn: [middle.id],
+  });
+  saveBoard(cwd, board);
+
+  const result = await driveBoard({
+    cwd,
+    config: { ...config },
+    resolvedTiers: new Map([
+      ["standard", tier],
+      ["review", tier],
+    ]),
+    startExecutor: () => {
+      throw new Error("permanently blocked tasks must not launch executors");
+    },
+    onUpdate,
+    trackRun,
+  });
+
+  assert.equal(result.stoppedBecause.code, "no_progress");
+  // The direct dependent and the one behind it both trace to the same dead
+  // root, which is the fact a user cannot derive from "no dispatch attempted".
+  assert.match(
+    result.stoppedBecause.message,
+    /T2 \(todo\): permanently blocked by T1 \(cancelled\)/
+  );
+  assert.match(
+    result.stoppedBecause.message,
+    /T3 \(todo\): permanently blocked by T1 \(cancelled\)/
+  );
+  assert.match(result.stoppedBecause.message, /supersedesTaskId/);
+  rmSync(cwd, { recursive: true, force: true });
+});

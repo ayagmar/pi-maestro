@@ -10,6 +10,31 @@ import {
   TIER_LADDER,
 } from "./workflow-policy.js";
 
+/**
+ * A dependency that can never reach `approved` blocks its dependents forever.
+ * Reporting only "no dispatch was attempted" leaves the user to trace the
+ * chain by hand, so name the unreachable root and say it is permanent.
+ */
+function deadDependencies(tasks: Task[], task: Task): string[] {
+  const byId = new Map(tasks.map((candidate) => [candidate.id.toUpperCase(), candidate]));
+  const dead: string[] = [];
+  const seen = new Set<string>();
+  const visit = (id: string): void => {
+    const key = id.trim().toUpperCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const dependency = byId.get(key);
+    if (!dependency) return;
+    if (dependency.status === "cancelled" || dependency.status === "failed") {
+      dead.push(`${dependency.id} (${dependency.status})`);
+      return;
+    }
+    if (dependency.status !== "approved") for (const next of dependency.dependsOn) visit(next);
+  };
+  for (const id of task.dependsOn) visit(id);
+  return dead;
+}
+
 export function noProgressReason(tasks: Task[], dispatchResults: TaskSnapshot[]): DriveStopReason {
   const notes = new Map(
     dispatchResults.map((result) => [
@@ -18,12 +43,25 @@ export function noProgressReason(tasks: Task[], dispatchResults: TaskSnapshot[])
     ])
   );
   const pending = tasks.filter((task) => !["approved", "cancelled"].includes(task.status));
-  const details = pending.map(
-    (task) => `${task.id} (${task.status}): ${notes.get(task.id) ?? "no dispatch was attempted"}`
+  const stuck = new Map(
+    pending
+      .map((task) => [task.id, deadDependencies(tasks, task)] as const)
+      .filter(([, d]) => d.length > 0)
   );
+  const details = pending.map((task) => {
+    const dead = stuck.get(task.id);
+    if (dead) {
+      return `${task.id} (${task.status}): permanently blocked by ${dead.join(", ")}; no dependency can reach approved`;
+    }
+    return `${task.id} (${task.status}): ${notes.get(task.id) ?? "no dispatch was attempted"}`;
+  });
+  const remedy =
+    stuck.size > 0
+      ? `\n\n${stuck.size} task(s) cannot run until their cancelled or failed dependencies are resolved. Retry the blocking task, replace it with a successor via supersedesTaskId, or drop the dependency.`
+      : "";
   return {
     code: "no_progress",
-    message: `Drive stopped because no executor or reviewer launched and no selected task changed status.\n${details.join("\n")}`,
+    message: `Drive stopped because no executor or reviewer launched and no selected task changed status.\n${details.join("\n")}${remedy}`,
     taskIds: pending.map((task) => task.id),
   };
 }

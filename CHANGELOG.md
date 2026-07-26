@@ -18,6 +18,10 @@
 - Stale board locks now record the owner's kernel process start time on Linux, so a recycled PID can no longer keep a dead lock alive.
 - Main-tree identity checks exclude `.pi/maestro.json` and `.pi/maestro-recipes/`, so editing maestro config or recipes mid-review no longer fails promotion with a spurious "main checkout changed".
 
+### Fixed
+
+- A drive whose remaining tasks all depend on a cancelled or failed task now names the unreachable root and how to clear it. It previously reported only `no dispatch was attempted` per task, leaving the user to trace the dependency chain by hand to discover the board could never progress.
+
 ### Changed
 
 - Settings are grouped by how often they are worth revisiting. "Essentials" holds the preset, concurrency, spend cap, plan gate, auto-commit, and attempt limit; "How work runs" holds isolation and cleanup; runaway guards moved to "Safety limits", which most users never need to open. The previous layout put fifteen unrelated controls in one flat "Execution and safety" list.
