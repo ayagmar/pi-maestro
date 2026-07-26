@@ -17,6 +17,7 @@ import {
   sessionCanControlDrive,
   sessionSwitchBlocked,
 } from "./session-control.js";
+import { guardTranscriptRead } from "./transcript-guard.js";
 import { type Board } from "./types.js";
 import { settleReattachedDetachedAttempt } from "./workflow-execution.js";
 import { type WorkflowRun } from "./workflow-runtime.js";
@@ -65,6 +66,21 @@ export function registerMaestroLifecycle(
   dependencies: LifecycleDependencies
 ): void {
   const { driveController, state } = dependencies;
+
+  // Loading an agent transcript into this conversation is never useful and can
+  // make the session unresumable; bounded evidence is available from
+  // maestro_drive inspect. Blocked before execution so nothing is read.
+  pi.on("tool_call", (event, ctx) => {
+    if (loadBoard(maestroBoardCwd(ctx.cwd)).tasks.length === 0) return;
+    const ownSession = ctx.sessionManager.getSessionFile();
+    const decision = guardTranscriptRead(
+      event.toolName,
+      event.input as Record<string, unknown> | undefined,
+      ownSession
+    );
+    if (!decision.blocked) return;
+    return { block: true, ...(decision.reason ? { reason: decision.reason } : {}) };
+  });
 
   pi.on("turn_end", (_event, ctx) => {
     if (state.hasShownContextNudge()) return;
