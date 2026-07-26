@@ -75,12 +75,33 @@ export interface WorktreeParkingResult {
   warnings: string[];
 }
 
+/**
+ * Git runs synchronously on Pi's main thread, so a command that blocks
+ * freezes the whole editor rather than just the drive. Two guards keep that
+ * impossible:
+ *
+ * - A wall-clock timeout. `execFileSync` defaults to waiting forever.
+ * - Never prompting. A signed commit invokes gpg, which waits on a pinentry
+ *   prompt that cannot appear from a headless/remote session; `GIT_TERMINAL_PROMPT=0`
+ *   and a pinentry-less gpg agent turn that infinite wait into a fast error.
+ *
+ * Callers that must not fail on a signing problem pass `--no-gpg-sign`.
+ */
+const GIT_TIMEOUT_MS = 120_000;
+
 function gitOutput(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
     cwd,
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: GIT_TIMEOUT_MS,
     ...(env ? { env } : {}),
+    env: {
+      ...(env ?? process.env),
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_OPTIONAL_LOCKS: (env ?? process.env).GIT_OPTIONAL_LOCKS ?? "1",
+      GPG_TTY: "",
+    },
   });
 }
 
@@ -125,6 +146,34 @@ export function worktreeRef(mainCwd: string, taskId: string, attempt: number): W
     worktreePath: resolve(mainCwd, ".pi", "maestro", "worktrees", name),
     branch: `maestro/${name}`,
   };
+}
+
+/**
+ * Files present in the main checkout but absent from an isolated worktree.
+ *
+ * `worktree add` checks out a commit, so uncommitted files — typically the very
+ * plan or spec documents a brief tells the executor to read — simply do not
+ * exist there. The executor then correctly reports itself blocked on a missing
+ * file the user can plainly see, which looks like a maestro bug. Surfacing the
+ * list lets the caller warn before burning launches.
+ */
+export function uncommittedPathsInvisibleToWorktrees(mainCwd: string): string[] {
+  try {
+    const output = gitOutput(mainCwd, [
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--untracked-files=all",
+      "--",
+      ".",
+      `:(exclude)${STATE_DIR}/**`,
+      ":(exclude).pi/maestro.json",
+      ":(exclude).pi/maestro-recipes/**",
+    ]);
+    return changedPathsFromPorcelain(output);
+  } catch {
+    return [];
+  }
 }
 
 export function createWorktree(mainCwd: string, taskId: string, attempt: number): WorktreeRef {
@@ -375,6 +424,16 @@ export function captureDiff(cwd: string, paths?: string[]): string {
   return diff.slice(0, MAX_INJECTED_CONTEXT_LENGTH);
 }
 
+/**
+ * Maestro's commits are mechanical bookkeeping: attempt checkpoints and
+ * reviewed integrations. Signing them buys nothing and couples them to an
+ * interactive passphrase, so a `commit.gpgsign = true` user working away from
+ * their signing key had gpg block on a pinentry prompt that could never
+ * appear — freezing Pi's main thread indefinitely. Signing is therefore always
+ * disabled for these commits; the user's own commits are unaffected.
+ */
+const COMMIT_ARGS = ["commit", "--no-gpg-sign"] as const;
+
 /** Commit staged-and-unstaged changes in a tree. Returns false when there was nothing to commit. */
 export function commitAll(cwd: string, message: string, paths?: string[]): boolean {
   if (paths?.length === 0) return false;
@@ -387,7 +446,7 @@ export function commitAll(cwd: string, message: string, paths?: string[]): boole
       // At least one task-scoped path is staged; unrelated staged files are ignored.
     }
     // Only commit what this task touched; unrelated files remain untouched.
-    git(cwd, ["commit", "-m", message, "--", ...paths]);
+    git(cwd, [...COMMIT_ARGS, "-m", message, "--", ...paths]);
     return true;
   }
   git(cwd, ["add", "-A"]);
@@ -395,7 +454,7 @@ export function commitAll(cwd: string, message: string, paths?: string[]): boole
     git(cwd, ["diff", "--cached", "--quiet"]);
     return false;
   } catch {
-    git(cwd, ["commit", "-m", message]);
+    git(cwd, [...COMMIT_ARGS, "-m", message]);
     return true;
   }
 }
@@ -425,6 +484,7 @@ export function prepareMainTreeIntegration(
   const baseCommit = mainIdentity.head;
   const integratedCommit = git(mainCwd, [
     "commit-tree",
+    "--no-gpg-sign",
     candidateTree,
     "-p",
     baseCommit,
@@ -459,7 +519,7 @@ export function prepareWorktreeIntegration(
   const tempRef = integrationWorktreeRef();
   try {
     git(mainCwd, ["worktree", "add", "-b", tempRef.branch, tempRef.worktreePath, baseCommit]);
-    git(tempRef.worktreePath, ["merge", "--no-edit", taskRef.branch]);
+    git(tempRef.worktreePath, ["merge", "--no-edit", "--no-gpg-sign", taskRef.branch]);
     if (changedPaths(tempRef.worktreePath).length > 0) {
       throw new Error("prepared integration checkout is not Git-clean");
     }
@@ -548,7 +608,7 @@ export function promotePreparedIntegration(
   }
   try {
     git(mainCwd, ["merge-base", "--is-ancestor", prepared.baseCommit, prepared.integratedCommit]);
-    git(mainCwd, ["merge", "--ff-only", prepared.integratedCommit]);
+    git(mainCwd, ["merge", "--ff-only", "--no-gpg-sign", prepared.integratedCommit]);
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -563,7 +623,7 @@ export function removePreparedIntegration(mainCwd: string, prepared: PreparedInt
 export function mergeWorktree(mainCwd: string, ref: WorktreeRef, message?: string): MergeResult {
   try {
     commitWorktreeChanges(ref, message);
-    git(mainCwd, ["merge", "--no-edit", ref.branch]);
+    git(mainCwd, ["merge", "--no-edit", "--no-gpg-sign", ref.branch]);
     return { ok: true };
   } catch (error) {
     try {
@@ -602,8 +662,24 @@ export function parkWorktree(mainCwd: string, ref: WorktreeRef): "parked" | "rem
 
   const branch = registeredBranch(mainCwd, ref.worktreePath) ?? ref.branch;
   const effectiveRef = { ...ref, branch };
+  // The checkout is about to be force-removed, so the checkpoint is the only
+  // thing that preserves this attempt's work. If it cannot be committed, keep
+  // the physical checkout: destroying unreferenced uncommitted work is worse
+  // than leaving a directory behind for the user to inspect.
   if (changedPaths(ref.worktreePath).length > 0) {
-    commitAll(ref.worktreePath, `chore(maestro): checkpoint ${branch}`);
+    let checkpointed = false;
+    try {
+      checkpointed = commitAll(ref.worktreePath, `chore(maestro): checkpoint ${branch}`);
+    } catch (error) {
+      throw new Error(
+        `refusing to remove ${ref.worktreePath}: its changes could not be checkpointed on ${branch} (${error instanceof Error ? error.message : String(error)}). The checkout is preserved; commit or copy the work, then clean it up.`
+      );
+    }
+    if (!checkpointed && changedPaths(ref.worktreePath).length > 0) {
+      throw new Error(
+        `refusing to remove ${ref.worktreePath}: its changes are still uncommitted after checkpointing on ${branch}. The checkout is preserved so the work can be recovered.`
+      );
+    }
   }
   git(mainCwd, ["worktree", "remove", "--force", ref.worktreePath]);
   git(mainCwd, ["worktree", "prune"]);

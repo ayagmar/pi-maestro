@@ -4,6 +4,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   renameSync,
@@ -25,17 +26,21 @@ import {
   captureChangeBaseline,
   captureDiff,
   changedPaths,
+  commitAll,
   changedPathsSinceBaseline,
   cleanupManagedWorktrees,
   createWorktree,
   inspectManagedWorktrees,
+  mergeWorktree,
   parkInactiveWorktrees,
+  parkWorktree,
   prepareMainTreeIntegration,
   promotePreparedMainTreeIntegration,
   removePreparedIntegration,
   restoreWorktree,
   snapshotArtifact,
   sweepWorktrees,
+  uncommittedPathsInvisibleToWorktrees,
   worktreeRecoveryExists,
   worktreeRef,
 } from "../src/worktree.js";
@@ -907,6 +912,122 @@ test("merge conflict aborts and retains recoverable worktree metadata and notes"
     assert.deepEqual(readFileSync(join(cwd, "unstaged.txt")), unstagedBytes);
     assert.deepEqual(readFileSync(join(cwd, "untracked.txt")), untrackedBytes);
     assertNoPreparedIntegration(cwd);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("maestro commits succeed when the user requires GPG signing they cannot perform", () => {
+  const cwd = repository();
+  try {
+    // Exactly the reported setup: signing is on, but the key cannot be used
+    // non-interactively — away from the signing machine, with no pinentry.
+    // Plain `git commit` fails (or worse, blocks on a prompt) here.
+    git(cwd, "config", "commit.gpgsign", "true");
+    git(cwd, "config", "user.signingkey", "DEADBEEFDEADBEEF");
+    writeFileSync(join(cwd, "shared.txt"), "executor change\n");
+
+    assert.equal(commitAll(cwd, "chore(maestro): checkpoint"), true);
+    assert.equal(changedPaths(cwd).length, 0, "the checkpoint must actually land");
+    assert.match(git(cwd, "log", "-1", "--pretty=%s"), /chore\(maestro\): checkpoint/);
+    // The commit exists and is simply unsigned; the user's own commits are
+    // unaffected because only maestro's own git invocations pass --no-gpg-sign.
+    assert.equal(git(cwd, "log", "-1", "--pretty=%G?"), "N");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("reviewed integration completes under mandatory GPG signing", () => {
+  const cwd = repository();
+  try {
+    git(cwd, "config", "commit.gpgsign", "true");
+    git(cwd, "config", "user.signingkey", "DEADBEEFDEADBEEF");
+    writeFileSync(join(cwd, "shared.txt"), "reviewed change\n");
+    const tree = snapshotArtifact(cwd, ["shared.txt"]);
+    assert.ok(tree);
+
+    // commit-tree and the fast-forward merge both honor commit.gpgsign, so
+    // both had to stop signing for integration to survive this config.
+    const prepared = prepareMainTreeIntegration(cwd, tree, "feat: reviewed work");
+    const promoted = promotePreparedMainTreeIntegration(cwd, prepared, ["shared.txt"]);
+    removePreparedIntegration(cwd, prepared);
+
+    assert.equal(promoted.ok, true, promoted.error);
+    assert.match(git(cwd, "log", "-1", "--pretty=%s"), /feat: reviewed work/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("uncommitted paths invisible to isolated checkouts are reported", () => {
+  const cwd = repository();
+  try {
+    // A plan document the user can see but has not committed. `worktree add`
+    // checks out a commit, so an executor never sees this file and reports
+    // itself blocked on something that plainly exists in the main checkout.
+    writeFileSync(join(cwd, "plan-012.md"), "# Plan 012\n");
+    writeFileSync(join(cwd, "shared.txt"), "local edit\n");
+    // Maestro's own runtime state is not user content and must not be listed.
+    mkdirSync(join(cwd, ".pi", "maestro"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "maestro", "board.json"), "{}\n");
+
+    const invisible = uncommittedPathsInvisibleToWorktrees(cwd);
+    assert.ok(invisible.includes("plan-012.md"), JSON.stringify(invisible));
+    assert.ok(invisible.includes("shared.txt"), JSON.stringify(invisible));
+    assert.equal(
+      invisible.some((path) => path.startsWith(".pi/maestro")),
+      false,
+      "maestro runtime state is not user content"
+    );
+
+    const ref = createWorktree(cwd, "T1", 1);
+    assert.equal(existsSync(join(ref.worktreePath, "plan-012.md")), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("worktree merge integration completes under mandatory GPG signing", () => {
+  const cwd = repository();
+  try {
+    const ref = createWorktree(cwd, "T1", 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "worktree change\n");
+    // Advance the main branch so integration needs a real merge commit rather
+    // than a fast-forward; a merge commit is signed when commit.gpgsign is set.
+    writeFileSync(join(cwd, "staged.txt"), "main moved\n");
+    git(cwd, "commit", "-qam", "main moves ahead");
+    git(cwd, "config", "commit.gpgsign", "true");
+    git(cwd, "config", "user.signingkey", "DEADBEEFDEADBEEF");
+
+    const merged = mergeWorktree(cwd, ref, "feat: merged work");
+
+    assert.equal(merged.ok, true, merged.error);
+    assert.match(readFileSync(join(cwd, "shared.txt"), "utf-8"), /worktree change/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("parking preserves a checkout whose work cannot be checkpointed", () => {
+  const cwd = repository();
+  try {
+    const ref = createWorktree(cwd, "T1", 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "irreplaceable executor work\n");
+    // Make the checkpoint commit fail the way a broken commit configuration
+    // does. The checkpoint is the only copy of this work, so parking must not
+    // proceed to force-remove the checkout and delete its branch.
+    git(ref.worktreePath, "config", "core.hooksPath", ".githooks");
+    mkdirSync(join(ref.worktreePath, ".githooks"), { recursive: true });
+    const hook = join(ref.worktreePath, ".githooks", "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+    chmodSync(hook, 0o755);
+
+    assert.throws(() => parkWorktree(cwd, ref), /refusing to remove/);
+
+    // The work survived: both the checkout and its content are still present.
+    assert.equal(existsSync(ref.worktreePath), true);
+    assert.match(readFileSync(join(ref.worktreePath, "shared.txt"), "utf-8"), /irreplaceable/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
