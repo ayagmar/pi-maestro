@@ -201,7 +201,10 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           if (contract.successCriteria) taskInput.successCriteria = contract.successCriteria;
           if (discovery) taskInput.discovery = discovery;
           if (verificationProfile) taskInput.verificationProfile = verificationProfile;
-          if (input.reviewPolicy) taskInput.reviewPolicy = input.reviewPolicy;
+          // A plan that states no policy inherits the project default, so a
+          // repository can choose its review cost once instead of per task.
+          const reviewPolicy = input.reviewPolicy ?? config.reviewPolicy;
+          if (reviewPolicy) taskInput.reviewPolicy = reviewPolicy;
           const task = createTask(board, taskInput);
           created.push(task);
           if (contract.legacyInvestigationBrief) legacyInvestigationTaskIds.push(task.id);

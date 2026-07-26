@@ -23,6 +23,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `maxTotalLaunchesPerRun` | 128 | 1–4096 raw executor and reviewer launches |
 | `confirmationPlanTasks` | 24 | Explicit confirmation above this task count; no greater than `maxPlanTasks` |
 | `confirmationTotalLaunches` | 64 | Explicit confirmation above this raw-launch upper bound; no greater than `maxTotalLaunchesPerRun` |
+| `reviewPolicy` | `single` | `single`, `confirm`, or `find-and-refute`; inherited by new tasks that do not state one |
 | `reviewRequiredApprovals` | 2 | Integer 2–8; cannot exceed `maxReviewerLaunches` |
 | `maxReviewerLaunches` | 4 | Integer 1–16; includes provider fallback launches |
 | `maxCostPerTask` | 5 | USD; 0 disables |
@@ -40,7 +41,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 
 `tiers` must define valid thinking levels. The built-in tiers are `trivial`, `standard`, `complex`, and read-only `review`. Each tier may set `watchdogIdleSeconds` (0–86400), `watchdogWarningTurns` (0–10000), and `watchdogTerminationTurns` (0–10000); those values override the corresponding global watchdog thresholds only for launches on that tier. Omitted tier fields inherit the global values, including on the `review` tier.
 
-Tasks may select `reviewPolicy: "single" | "confirm" | "find-and-refute"`. `single` is the legacy default. `confirm` requires the configured number of fresh independent approvals. `find-and-refute` runs one finder and one independent confirmer/refuter.
+Tasks may select `reviewPolicy: "single" | "confirm" | "find-and-refute"`. A task that states no policy inherits the project-wide `reviewPolicy` setting (default `single`), so a repository chooses its review cost once instead of per task; an explicit value on a task always wins. `confirm` requires the configured number of fresh independent approvals. `find-and-refute` runs one finder and one independent confirmer/refuter.
 
 The task fingerprint includes the effective task tier, configured tier model patterns/fallbacks,
 review tier, review policy, confirmation count when relevant, and trusted verification profile.

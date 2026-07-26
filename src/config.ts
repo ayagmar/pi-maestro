@@ -27,6 +27,7 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   maxTotalLaunchesPerRun: 128,
   confirmationPlanTasks: 24,
   confirmationTotalLaunches: 64,
+  reviewPolicy: "single",
   reviewRequiredApprovals: 2,
   maxReviewerLaunches: 4,
   maxCostPerTask: 5,
@@ -206,6 +207,7 @@ export function mergeConfig(
     maxTotalLaunchesPerRun: override.maxTotalLaunchesPerRun ?? base.maxTotalLaunchesPerRun,
     confirmationPlanTasks: override.confirmationPlanTasks ?? base.confirmationPlanTasks,
     confirmationTotalLaunches: override.confirmationTotalLaunches ?? base.confirmationTotalLaunches,
+    reviewPolicy: override.reviewPolicy ?? base.reviewPolicy ?? "single",
     reviewRequiredApprovals: override.reviewRequiredApprovals ?? base.reviewRequiredApprovals ?? 2,
     maxReviewerLaunches: override.maxReviewerLaunches ?? base.maxReviewerLaunches ?? 4,
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
@@ -254,6 +256,7 @@ const CONFIG_KEYS = new Set([
   "maxTotalLaunchesPerRun",
   "confirmationPlanTasks",
   "confirmationTotalLaunches",
+  "reviewPolicy",
   "reviewRequiredApprovals",
   "maxReviewerLaunches",
   "maxCostPerTask",
@@ -287,6 +290,12 @@ export function validateConfig(value: unknown): string | undefined {
   for (const key of booleanKeys) {
     if (config[key] !== undefined && typeof config[key] !== "boolean")
       return `${key} must be boolean`;
+  }
+  if (
+    config.reviewPolicy !== undefined &&
+    !["single", "confirm", "find-and-refute"].includes(config.reviewPolicy as string)
+  ) {
+    return "reviewPolicy must be single, confirm, or find-and-refute";
   }
   const ranges: Record<string, [number, number]> = {
     maxParallel: [1, 64],

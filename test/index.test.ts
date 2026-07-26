@@ -4663,3 +4663,47 @@ test("completed task cleanup can be disabled", async () => {
     }
   );
 });
+
+test("planned tasks inherit the project review policy unless the plan states one", async () => {
+  await withBoard(
+    (cwd) => {
+      // A repository that has decided its default review cost once.
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, reviewPolicy: "confirm" });
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const plan = tools.get("maestro_plan");
+      assert.ok(plan);
+      await plan.execute(
+        "inherit",
+        {
+          tasks: [
+            {
+              title: "Inherits",
+              brief: "work",
+              tier: "standard",
+              writePaths: ["src/a.ts"],
+              successCriteria: ["done"],
+            },
+            {
+              title: "Overrides",
+              brief: "work",
+              tier: "standard",
+              writePaths: ["src/b.ts"],
+              successCriteria: ["done"],
+              reviewPolicy: "single",
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+
+      const tasks = loadBoard(cwd).tasks;
+      assert.equal(tasks[0]?.reviewPolicy, "confirm", "an unstated policy takes the project value");
+      // "single" is the storage default, so an explicit override clears the field.
+      assert.equal(tasks[1]?.reviewPolicy, undefined, "an explicit policy wins over the default");
+    }
+  );
+});

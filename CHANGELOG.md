@@ -18,6 +18,10 @@
 - Stale board locks now record the owner's kernel process start time on Linux, so a recycled PID can no longer keep a dead lock alive.
 - Main-tree identity checks exclude `.pi/maestro.json` and `.pi/maestro-recipes/`, so editing maestro config or recipes mid-review no longer fails promotion with a spurious "main checkout changed".
 
+### Added
+
+- `reviewPolicy` is now a project setting under Review, so a repository picks `single`, `confirm`, or `find-and-refute` once and new tasks inherit it. It was previously per-task only, settable at plan time or one task at a time in `/maestro plan`, which is how a whole board silently ended up on the most expensive policy. An explicit policy on a task still wins.
+
 ### Fixed
 
 - A drive whose remaining tasks all depend on a cancelled or failed task now names the unreachable root and how to clear it. It previously reported only `no dispatch was attempted` per task, leaving the user to trace the dependency chain by hand to discover the board could never progress.

@@ -136,6 +136,36 @@ function tierDescription(name: string): string {
 }
 
 /** Apply one UI setting to a resolved config. Presets replace the full config. */
+/**
+ * Section summaries are the only thing visible without opening a section, so
+ * they state what a drive will actually do and call out the settings that
+ * spend money or switch a safety net off.
+ */
+export function essentialsSummary(config: MaestroConfig): string {
+  const parts = [matchingPreset(config), `${config.maxParallel} at a time`];
+  parts.push(config.maxRunCost === 0 ? "no spend cap" : `$${config.maxRunCost} cap`);
+  if (config.planGate) parts.push("plans need approval");
+  if (!config.autoCommit) parts.push("no auto-commit");
+  return parts.join(" · ");
+}
+
+export function executionSummary(config: MaestroConfig): string {
+  const parts = [config.useWorktrees ? "isolated checkouts" : "shared checkout"];
+  if (config.detachedExecutors) parts.push("survives exit");
+  if (config.livePanes) parts.push("live panes");
+  if (config.cleanupCompletedTasks === false) parts.push("board kept");
+  return parts.join(" · ");
+}
+
+export function limitsSummary(config: MaestroConfig): string {
+  const off: string[] = [];
+  if (config.maxCostPerTask === 0) off.push("attempt cost");
+  if (config.maxRunCost === 0) off.push("run cost");
+  // Silence is the wrong signal when a guard has been switched off.
+  if (off.length > 0) return `${off.join(" and ")} cap off`;
+  return `$${config.maxCostPerTask}/attempt · ${config.maxAttempts} tries · ${config.maxTotalLaunchesPerRun} launches`;
+}
+
 export function applySettingsChange(
   currentConfig: MaestroConfig,
   id: string,
@@ -164,6 +194,8 @@ export function applySettingsChange(
     config.confirmationPlanTasks = Number(value);
   } else if (id === "confirmationTotalLaunches") {
     config.confirmationTotalLaunches = Number(value);
+  } else if (id === "reviewPolicy") {
+    config.reviewPolicy = value as MaestroConfig["reviewPolicy"];
   } else if (id === "reviewRequiredApprovals") {
     config.reviewRequiredApprovals = Number(value);
   } else if (id === "maxReviewerLaunches") {
@@ -497,11 +529,29 @@ export async function showSettings(
       }
       return [
         {
+          id: "reviewPolicy",
+          label: "Review policy for new tasks",
+          currentValue: config.reviewPolicy ?? "single",
+          values: ["single", "confirm", "find-and-refute"],
+          description:
+            config.reviewPolicy === "confirm"
+              ? `confirm: ${config.reviewRequiredApprovals ?? 2} independent reviewers must agree. Thorough, and the most expensive.`
+              : config.reviewPolicy === "find-and-refute"
+                ? "find-and-refute: one reviewer hunts for problems, a second tries to disprove them. Costly; reserve for risky work."
+                : "single: one reviewer per attempt. Cheapest, and enough for most tasks. Raise it per task in /maestro plan.",
+        },
+        {
           id: "reviewRequiredApprovals",
           label: "Required confirming approvals",
-          currentValue: String(config.reviewRequiredApprovals ?? 2),
+          currentValue:
+            config.reviewPolicy === "confirm"
+              ? String(config.reviewRequiredApprovals ?? 2)
+              : `${config.reviewRequiredApprovals ?? 2} (unused)`,
           values: ["2", "3", "4"],
-          description: "Independent approvals required by the confirm review policy.",
+          description:
+            config.reviewPolicy === "confirm"
+              ? "Independent approvals required before a task is approved."
+              : "Only applies to tasks using the confirm policy.",
         },
         {
           id: "maxReviewerLaunches",
@@ -566,24 +616,22 @@ export async function showSettings(
       {
         id: "general",
         label: "Essentials",
-        currentValue: `${matchingPreset(config)} · ${config.maxParallel} parallel${
-          config.maxRunCost === 0 ? "" : ` · $${config.maxRunCost} cap`
-        }`,
-        description: "The handful of settings worth revisiting: models, concurrency, spend.",
+        currentValue: essentialsSummary(config),
+        description: "Models, how much runs at once, and how much it may spend.",
         submenu: (_current, close) => createSection("general", close),
       },
       {
         id: "execution",
         label: "How work runs",
-        currentValue: config.useWorktrees ? "isolated checkouts" : "shared checkout",
-        description: "Isolation, live panes, and cleanup after a drive.",
+        currentValue: executionSummary(config),
+        description: "Isolation, live panes, and what happens after a drive finishes.",
         submenu: (_current, close) => createSection("execution", close),
       },
       {
         id: "limits",
         label: "Safety limits",
-        currentValue: "defaults are sensible",
-        description: "Runaway guards. Change these only after a real run hits one.",
+        currentValue: limitsSummary(config),
+        description: "Runaway guards. Leave these alone until a real run trips one.",
         submenu: (_current, close) => createSection("limits", close),
       },
       {
@@ -595,14 +643,14 @@ export async function showSettings(
       },
       {
         id: "review",
-        label: "Review settings",
-        currentValue: displayModelValue(
+        label: "Review",
+        currentValue: `${config.reviewPolicy ?? "single"} · ${displayModelValue(
           ctx.modelRegistry,
           modelChoices.model,
           config.tiers.review?.model ?? "(pi default)",
           preferredProvider
-        ),
-        description: "Primary model, fallback, and thinking level for adversarial review.",
+        )}`,
+        description: "How hard new tasks are reviewed, and which model does it.",
         submenu: (_current, close) => createSection("review", close),
       },
     ];

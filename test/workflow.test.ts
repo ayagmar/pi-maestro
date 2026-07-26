@@ -49,6 +49,7 @@ const config: MaestroConfig = {
   maxDiscoveryGeneratedTasks: 32,
   maxTotalLaunchesPerRun: 128,
   confirmationPlanTasks: 24,
+  reviewPolicy: "single",
   confirmationTotalLaunches: 64,
   reviewRequiredApprovals: 2,
   maxReviewerLaunches: 4,

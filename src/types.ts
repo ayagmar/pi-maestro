@@ -414,6 +414,8 @@ export interface MaestroConfig {
   maxTotalLaunchesPerRun: number;
   confirmationPlanTasks: number;
   confirmationTotalLaunches: number;
+  /** Review policy new tasks inherit when a plan does not state one. */
+  reviewPolicy: ReviewPolicy;
   /** Independent approvals required by the confirm review policy. */
   reviewRequiredApprovals: number;
   /** Raw reviewer process cap, including provider fallbacks. */
