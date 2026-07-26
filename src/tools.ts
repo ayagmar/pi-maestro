@@ -87,7 +87,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           writePaths: Type.Array(Type.String(), {
             maxItems: 64,
             description:
-              "Repository-relative files or directory/** scopes this task may change. Use [] only for explicit investigation/no-file work.",
+              "Repository-relative files or directory/** scopes this task may change. Two tasks that share a path must be chained with dependsOn, so keep scopes disjoint: list only the paths this task truly edits rather than a broad directory, and do not repeat shared files such as README.md on every task. Use [] only for explicit investigation/no-file work.",
           }),
           successCriteria: Type.Optional(
             Type.Array(Type.String({ maxLength: 500 }), {
@@ -129,10 +129,16 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             })
           ),
           dependsOn: Type.Optional(
-            Type.Array(Type.String({ description: "Task id like T1" }), {
-              description:
-                "Tasks that must be approved before this one runs. Also chain tasks that would edit the same files: parallel executors on one working tree conflict.",
-            })
+            Type.Array(
+              Type.String({
+                description:
+                  "An assigned task id like T1. Never invent one from a plan/issue number or filename.",
+              }),
+              {
+                description:
+                  "Ids that must be approved before this task runs. Ids are assigned by maestro, not chosen here: tasks in this call become T<next>, T<next+1>, ... in array order, continuing the board's existing numbering. To depend on the task listed immediately before this one in the same call, use that position's id, not a plan number, issue number, or filename. Also chain tasks that would edit the same files: parallel executors on one working tree conflict.",
+              }
+            )
           ),
         }),
         { description: "Tasks to add to the board" }
@@ -775,8 +781,16 @@ function applyTaskSupersession(
     predecessor.status !== "cancelled" &&
     predecessor.status !== "changes_requested"
   ) {
+    // Superseding is for work that stopped. A task still in flight has to be
+    // stopped first, and which command does that depends on the status.
+    const remedy =
+      predecessor.status === "ready_for_review"
+        ? " Let the review finish, or cancel it with maestro_update, before replacing it."
+        : predecessor.status === "running"
+          ? " Wait for it to finish or abort the drive first."
+          : " Cancel it with maestro_update first if it should not run.";
     throw new Error(
-      `${predecessor.id} cannot be superseded while ${predecessor.status}; only failed, cancelled, or changes-requested tasks can be replaced.`
+      `${predecessor.id} cannot be superseded while ${predecessor.status}; only failed, cancelled, or changes-requested tasks can be replaced.${remedy}`
     );
   }
   if (

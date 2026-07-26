@@ -318,6 +318,7 @@ test("validatePlan reports missing dependency references and dependency cycles",
   });
 
   assert.deepEqual(validatePlan(board), {
+    knownTaskIds: ["T1", "T2", "T3"],
     missingDependencies: [{ taskId: "T1", dependencyId: "missing" }],
     dependencyCycles: [
       ["T1", "T2", "T1"],
@@ -357,6 +358,7 @@ test("validatePlan accepts an acyclic plan", () => {
   });
 
   assert.deepEqual(validatePlan(board), {
+    knownTaskIds: ["T1", "T2"],
     missingDependencies: [],
     dependencyCycles: [],
     invalidTiers: [],
@@ -1388,4 +1390,28 @@ test("loadBoard archives a corrupt board before returning an empty board", () =>
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("a plan that guesses ids from plan numbers is told what the real ids are", () => {
+  // Reproduces a real rejection: seven tasks titled "Plan 012".."Plan 018"
+  // whose dependsOn used the plan numbers, which are not task ids.
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  for (const planNumber of [12, 13, 14, 15, 16, 17, 18]) {
+    createTask(board, {
+      title: `Plan 0${planNumber}`,
+      brief: "work",
+      tier: "standard",
+      writePaths: [`plans/0${planNumber}.md`, "README.md"],
+      dependsOn: planNumber > 12 ? [`T${planNumber - 1}`] : [],
+    });
+  }
+
+  const message = planValidationMessage(validatePlan(board)) ?? "";
+  assert.match(message, /T2 references unknown dependency "T12"/);
+  assert.match(message, /valid ids are T1, T2, T3, T4, T5, T6, T7/);
+  assert.match(message, /not taken from plan or issue numbers/);
+  // One shared file previously produced a line per task pair. Twenty-one
+  // near-identical lines buried every other problem in the same message.
+  assert.match(message, /T1, T2, T3, T4, T5, T6, T7 all write "README\.md"/);
+  assert.equal(message.split("\n").filter((line) => line.includes("README.md")).length, 1);
 });

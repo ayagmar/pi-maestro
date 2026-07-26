@@ -247,6 +247,8 @@ export interface MissingDependency {
 
 export interface PlanValidation {
   missingDependencies: MissingDependency[];
+  /** Ids that exist on the board, so a rejection can name what was actually available. */
+  knownTaskIds?: string[];
   /** Each cycle repeats its first task ID at the end, for example T1 → T2 → T1. */
   dependencyCycles: string[][];
   invalidTiers: Array<{ taskId: string; tier: string }>;

@@ -1814,6 +1814,7 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
   }
 
   return {
+    knownTaskIds: board.tasks.map((task) => task.id),
     missingDependencies,
     dependencyCycles,
     invalidTiers,
@@ -1860,6 +1861,16 @@ export function planValidationMessage(validation: PlanValidation): string | unde
   for (const missing of validation.missingDependencies) {
     addProblem(`${missing.taskId} references unknown dependency "${missing.dependencyId}"`);
   }
+  if (validation.missingDependencies.length > 0) {
+    // Planners reach for plan, issue, or file numbers here. Naming the ids
+    // that actually exist turns a guess-and-retry loop into one correction.
+    const known = validation.knownTaskIds ?? [];
+    addProblem(
+      known.length > 0
+        ? `ids are assigned by maestro in array order, not taken from plan or issue numbers; valid ids are ${known.slice(0, 24).join(", ")}${known.length > 24 ? ", ..." : ""}`
+        : "ids are assigned by maestro in array order, not taken from plan or issue numbers"
+    );
+  }
   for (const cycle of validation.dependencyCycles) {
     addProblem(`dependency cycle: ${cycle.join(" → ")}`);
   }
@@ -1869,9 +1880,21 @@ export function planValidationMessage(validation: PlanValidation): string | unde
   for (const contractError of validation.contractErrors ?? []) {
     addProblem(`${contractError.taskId} ${contractError.message}; update the task before dispatch`);
   }
+  // One shared file such as README.md produces a pair per task combination,
+  // which buries the other problems. Report the file once with its claimants.
+  const overlapsByPath = new Map<string, Set<string>>();
   for (const overlap of validation.writePathOverlaps ?? []) {
+    const claimants = overlapsByPath.get(overlap.path) ?? new Set<string>();
+    claimants.add(overlap.leftTaskId);
+    claimants.add(overlap.rightTaskId);
+    overlapsByPath.set(overlap.path, claimants);
+  }
+  for (const [path, claimantSet] of overlapsByPath) {
+    const claimants = [...claimantSet].sort();
     addProblem(
-      `${overlap.leftTaskId} and ${overlap.rightTaskId} both write "${overlap.path}"; add a dependency or narrow writePaths`
+      claimants.length > 2
+        ? `${claimants.join(", ")} all write "${path}"; give it to one task or chain them with dependsOn`
+        : `${claimants.join(" and ")} both write "${path}"; add a dependency or narrow writePaths`
     );
   }
   if (problems.length === 0 && omitted === 0) return undefined;

@@ -27,6 +27,10 @@
 
 ### Fixed
 
+- Plan rejections now explain how ids work. A real plan of seven tasks titled `Plan 012`..`Plan 018` set `dependsOn: ["T12"]`, because nothing said ids are assigned by maestro in array order rather than taken from plan or issue numbers. The `dependsOn` schema now states this, and a rejection names the ids that actually exist.
+- Overlapping `writePaths` are reported once per file with all claimants, instead of once per task pair. One shared `README.md` across seven tasks produced twenty-one near-identical lines that buried every other problem in the same message.
+- Superseding a task that is not replaceable now names the way out, which differs for `ready_for_review` and `running`.
+
 - A drive whose remaining tasks all depend on a cancelled or failed task now names the unreachable root and how to clear it. It previously reported only `no dispatch was attempted` per task, leaving the user to trace the dependency chain by hand to discover the board could never progress.
 
 ### Changed
