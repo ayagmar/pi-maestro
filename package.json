@@ -47,16 +47,16 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "^0.80.10",
-    "@earendil-works/pi-coding-agent": "^0.80.10",
-    "@earendil-works/pi-tui": "^0.80.10",
+    "@earendil-works/pi-ai": "^0.82.1",
+    "@earendil-works/pi-coding-agent": "^0.82.1",
+    "@earendil-works/pi-tui": "^0.82.1",
     "typebox": "^1.1.38"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.9",
-    "@earendil-works/pi-ai": "^0.80.10",
-    "@earendil-works/pi-coding-agent": "^0.80.10",
-    "@earendil-works/pi-tui": "^0.80.10",
+    "@earendil-works/pi-ai": "^0.82.1",
+    "@earendil-works/pi-coding-agent": "^0.82.1",
+    "@earendil-works/pi-tui": "^0.82.1",
     "@types/node": "^22.19.10",
     "astro": "^7.0.9",
     "tsx": "^4.21.0",

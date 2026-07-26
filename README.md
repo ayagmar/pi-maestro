@@ -2,7 +2,7 @@
 
 [![MIT licensed](https://img.shields.io/badge/license-MIT-d9a520.svg)](LICENSE)
 [![Node.js 22 or 24](https://img.shields.io/badge/node-22%20%7C%2024-2f6f44.svg)](package.json)
-[![Pi 0.80.x](https://img.shields.io/badge/pi-0.80.x-243746.svg)](https://github.com/badlogic/pi-mono)
+[![Pi 0.82.x](https://img.shields.io/badge/pi-0.82.x-243746.svg)](https://github.com/badlogic/pi-mono)
 
 Orchestrator/executor workflows for [pi](https://github.com/badlogic/pi-mono).
 
@@ -60,7 +60,7 @@ pi install /path/to/pi-maestro
 
 ## Compatibility and support
 
-Pi Maestro requires Node.js 22 or 24 and is tested against the `0.80.x` Pi package line. Its peer ranges intentionally stop before `0.81.0`; newer Pi releases require an explicit compatibility update rather than being accepted silently. Before `1.0.0`, only the latest published `0.1.x` release receives fixes.
+Pi Maestro requires Node.js 22 or 24 and is tested against the `0.82.x` Pi package line. Its peer ranges intentionally stop before `0.83.0`; newer Pi releases require an explicit compatibility update rather than being accepted silently. Before `1.0.0`, only the latest published `0.1.x` release receives fixes.
 
 Report bugs through [GitHub Issues](https://github.com/ayagmar/pi-maestro/issues). Report suspected vulnerabilities privately using the repository Security tab; see [SECURITY.md](SECURITY.md).
 
