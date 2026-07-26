@@ -384,7 +384,10 @@ export async function showSettings(
           label: `${name} · thinking`,
           currentValue: tier.thinking,
           values: [...THINKING_LEVELS],
-          description: `Reasoning effort for ${name} executors. Start medium and raise only when quality requires it.`,
+          description:
+            tier.thinking === "max"
+              ? `max reasoning for ${name}. The slowest and most expensive level; use it for work that genuinely stalls at xhigh.`
+              : `Reasoning effort for ${name} executors. Start medium and raise only when quality requires it. The ladder tops out at max.`,
         });
       }
       return items;

@@ -336,7 +336,7 @@ export interface TierConfig {
   model?: string;
   /** Ordered model patterns tried when the primary has a provider failure. */
   fallbacks?: string[];
-  /** Thinking level: off, minimal, low, medium, high, xhigh. */
+  /** Thinking level: off, minimal, low, medium, high, xhigh, max. */
   thinking: string;
   /** Comma-separated tool allowlist passed to the executor. Omit for all tools. */
   tools?: string;

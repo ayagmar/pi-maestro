@@ -20,6 +20,9 @@
 
 ### Added
 
+- Upgraded to the Pi 0.82.x package line (from 0.80.10), with peer ranges moved to `^0.82.1`. The real-executor integration tests pass against a 0.82.1 subprocess.
+- `max` is now selectable as a thinking level. Pi has accepted `off`…`max` for some time, but maestro stopped its ladder at `xhigh`, so the strongest reasoning setting was unreachable from a tier. Config validation had a second hardcoded copy of the ladder that would have rejected `max` outright; it now derives from `THINKING_LEVELS`, and an invalid level names the accepted values instead of saying only "invalid thinking".
+
 - `reviewPolicy` is now a project setting under Review, so a repository picks `single`, `confirm`, or `find-and-refute` once and new tasks inherit it. It was previously per-task only, settable at plan time or one task at a time in `/maestro plan`, which is how a whole board silently ended up on the most expensive policy. An explicit policy on a task still wins.
 
 ### Fixed

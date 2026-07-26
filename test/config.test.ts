@@ -27,6 +27,7 @@ import {
   resolveTierModels,
   saveConfig,
   setProjectConfigTrust,
+  THINKING_LEVELS,
   validateConfig,
 } from "../src/config.js";
 
@@ -534,4 +535,22 @@ test("loadConfig resolves defaults, then user, then project, in that precedence 
     rmSync(cwd, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
   }
+});
+
+test("the thinking ladder matches pi and accepts its highest level", () => {
+  // pi --thinking accepts: off, minimal, low, medium, high, xhigh, max.
+  // Capping maestro below that silently denies the strongest reasoning
+  // setting to reviewers on hard work.
+  assert.deepEqual(
+    [...THINKING_LEVELS],
+    ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+  );
+  assert.equal(
+    validateConfig({ ...DEFAULT_CONFIG, tiers: { standard: { thinking: "max" } } }),
+    undefined
+  );
+  assert.match(
+    validateConfig({ ...DEFAULT_CONFIG, tiers: { standard: { thinking: "ultra" } } }) ?? "",
+    /thinking must be one of/
+  );
 });

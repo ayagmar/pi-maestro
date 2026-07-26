@@ -6,7 +6,12 @@ import { type MaestroConfig, type TierConfig } from "./types.js";
 
 export type ConfigScope = "user" | "project";
 
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+/**
+ * Mirrors pi's own ladder (`pi --thinking`). `max` exists upstream and is the
+ * level a reviewer on genuinely hard work wants; omitting it silently capped
+ * maestro at xhigh with no way to ask for more.
+ */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const REVIEW_TOOLS = "read,grep,find,ls";
 
 /**
@@ -434,9 +439,9 @@ export function validateConfig(value: unknown): string | undefined {
       const tier = rawTier as Record<string, unknown>;
       if (
         typeof tier.thinking !== "string" ||
-        !["off", "minimal", "low", "medium", "high", "xhigh"].includes(tier.thinking)
+        !(THINKING_LEVELS as readonly string[]).includes(tier.thinking)
       )
-        return `tier ${name} has invalid thinking`;
+        return `tier ${name} thinking must be one of: ${THINKING_LEVELS.join(", ")}`;
       if (tier.model !== undefined && typeof tier.model !== "string")
         return `tier ${name} model must be a string`;
       if (tier.tools !== undefined && typeof tier.tools !== "string")
