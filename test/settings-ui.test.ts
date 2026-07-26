@@ -144,8 +144,14 @@ test("settings model search owns focus only while its picker is active", async (
           handleInput(data: string): void;
         };
         component.focused = true;
-        component.handleInput("\x1b[B");
-        component.handleInput("\x1b[B");
+        // Open the tier section, whose first row is a model picker. Its index
+        // is derived from the rendered menu so reorganising sections cannot
+        // silently retarget this focus test at some other control.
+        const menu = component.render(100).join("\n").split("\n");
+        const tierRow = menu.findIndex((line) => line.includes("Tier model settings"));
+        const firstRow = menu.findIndex((line) => line.includes("Essentials"));
+        assert.ok(tierRow > 0 && firstRow > 0, "the tier section must appear in the menu");
+        for (let step = 0; step < tierRow - firstRow; step += 1) component.handleInput("\x1b[B");
         component.handleInput("\r");
         component.handleInput("\r");
 

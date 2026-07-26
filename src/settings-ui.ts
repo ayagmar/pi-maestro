@@ -375,10 +375,13 @@ export async function showSettings(
             values: ["1", "2", "3", "4", "6", "8"],
             description: "How many independent executors may run at once.",
           },
-        ];
-      }
-      if (section === "execution") {
-        return [
+          {
+            id: "maxRunCost",
+            label: "Run cost cap (USD)",
+            currentValue: config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`,
+            values: ["off", "$5", "$10", "$25", "$50"],
+            description: "Stop starting new executors after the board exceeds this cost.",
+          },
           {
             id: "planGate",
             label: "Approve plans before running",
@@ -386,6 +389,24 @@ export async function showSettings(
             values: ["off", "on"],
             description: "Pause newly planned tasks until you approve them with /maestro plan.",
           },
+          {
+            id: "autoCommit",
+            label: "Auto-commit approved tasks",
+            currentValue: config.autoCommit ? "on" : "off",
+            values: ["on", "off"],
+            description: "Commit each approved task with one conventional commit.",
+          },
+          {
+            id: "maxAttempts",
+            label: "Max attempts per task",
+            currentValue: String(config.maxAttempts),
+            values: ["1", "2", "3", "4", "5"],
+            description: "Hard cap on execution attempts before a task fails.",
+          },
+        ];
+      }
+      if (section === "execution") {
+        return [
           {
             id: "livePanes",
             label: "Auto-open passive agent pane",
@@ -409,13 +430,6 @@ export async function showSettings(
             description: "Unix only. Keep isolated executor RPC processes alive across Pi exits.",
           },
           {
-            id: "autoCommit",
-            label: "Auto-commit approved tasks",
-            currentValue: config.autoCommit ? "on" : "off",
-            values: ["on", "off"],
-            description: "Commit each approved task with one conventional commit.",
-          },
-          {
             id: "cleanupCompletedTasks",
             label: "Clear completed live board",
             currentValue: (config.cleanupCompletedTasks ?? true) ? "on" : "off",
@@ -423,12 +437,17 @@ export async function showSettings(
             description: "Archive and remove live tasks after a drive completes successfully.",
           },
           {
-            id: "maxAttempts",
-            label: "Max attempts per task",
-            currentValue: String(config.maxAttempts),
-            values: ["1", "2", "3", "4", "5"],
-            description: "Hard cap on execution attempts before a task fails.",
+            id: "statusWaitSeconds",
+            label: "Progress pulse interval",
+            currentValue: `${config.statusWaitSeconds}`,
+            values: ["15", "30", "60", "90", "120", "180"],
+            description:
+              "Seconds the human status command waits before returning live executor progress.",
           },
+        ];
+      }
+      if (section === "limits") {
+        return [
           {
             id: "maxPlanTasks",
             label: "Maximum plan tasks",
@@ -471,21 +490,6 @@ export async function showSettings(
             values: ["off", "$1", "$2", "$5", "$10"],
             description: "Abort one executor attempt after it exceeds this cost.",
           },
-          {
-            id: "maxRunCost",
-            label: "Run cost cap (USD)",
-            currentValue: config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`,
-            values: ["off", "$5", "$10", "$25", "$50"],
-            description: "Stop starting new executors after the board exceeds this cost.",
-          },
-          {
-            id: "statusWaitSeconds",
-            label: "Progress pulse interval",
-            currentValue: `${config.statusWaitSeconds}`,
-            values: ["15", "30", "60", "90", "120", "180"],
-            description:
-              "Seconds the human status command waits before returning live executor progress.",
-          },
         ];
       }
       if (section === "tiers") {
@@ -514,8 +518,12 @@ export async function showSettings(
     const updateNavigationValues = () => {
       navigation.updateValue("general", matchingPreset(config));
       navigation.updateValue(
+        "general",
+        `${matchingPreset(config)} · ${config.maxParallel} parallel`
+      );
+      navigation.updateValue(
         "execution",
-        `${config.maxParallel} parallel · ${config.maxAttempts} attempts`
+        config.useWorktrees ? "isolated checkouts" : "shared checkout"
       );
       navigation.updateValue(
         "tiers",
@@ -557,17 +565,26 @@ export async function showSettings(
     const navigationItems: SettingItem[] = [
       {
         id: "general",
-        label: "General settings",
-        currentValue: matchingPreset(config),
-        description: "Preset and executor concurrency.",
+        label: "Essentials",
+        currentValue: `${matchingPreset(config)} · ${config.maxParallel} parallel${
+          config.maxRunCost === 0 ? "" : ` · $${config.maxRunCost} cap`
+        }`,
+        description: "The handful of settings worth revisiting: models, concurrency, spend.",
         submenu: (_current, close) => createSection("general", close),
       },
       {
         id: "execution",
-        label: "Execution and safety",
-        currentValue: `${config.maxParallel} parallel · ${config.maxAttempts} attempts`,
-        description: "Plan approval, worktrees, commits, retries, and cost limits.",
+        label: "How work runs",
+        currentValue: config.useWorktrees ? "isolated checkouts" : "shared checkout",
+        description: "Isolation, live panes, and cleanup after a drive.",
         submenu: (_current, close) => createSection("execution", close),
+      },
+      {
+        id: "limits",
+        label: "Safety limits",
+        currentValue: "defaults are sensible",
+        description: "Runaway guards. Change these only after a real run hits one.",
+        submenu: (_current, close) => createSection("limits", close),
       },
       {
         id: "tiers",
