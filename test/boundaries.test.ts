@@ -4,6 +4,17 @@ import { dirname, join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+/**
+ * Capability boundaries that source text is the only practical way to check:
+ * which modules may spawn processes, execute Git, or own persistence, plus the
+ * shape of the published package.
+ *
+ * These deliberately do not assert where ordinary functions live. Such checks
+ * pass on completely broken code — gutting a function while keeping its name
+ * left all of them green — so they only taxed refactors without protecting
+ * behavior. Module composition is covered by the behavioral suites instead.
+ */
+
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const sourceDirectory = join(testDirectory, "..", "src");
 const rootDirectory = join(testDirectory, "..");
@@ -34,9 +45,8 @@ function violatingFiles(
 }
 
 test("only runner transport modules spawn child processes", () => {
-  const files = sourceFiles();
   const spawnCall = /\bspawn\s*\(/;
-  const owners = files
+  const owners = sourceFiles()
     .filter((file) => spawnCall.test(file.contents))
     .map((file) => file.name)
     .sort();
@@ -59,6 +69,30 @@ test("only worktree executes git commands", () => {
     [],
     `Only src/worktree.ts may execute git commands; violations: ${violations.join(", ")}`
   );
+});
+
+test("git execution cannot hang the editor on a prompt", () => {
+  // Git runs synchronously on Pi's main thread. A command that waits for input
+  // (a signing passphrase, credentials) freezes the whole editor, so every
+  // invocation is bounded and non-interactive, and maestro's own commits and
+  // merges never request a signature.
+  const worktree = readFileSync(join(sourceDirectory, "worktree.ts"), "utf-8");
+  assert.match(worktree, /timeout: GIT_TIMEOUT_MS/);
+  assert.match(worktree, /GIT_TERMINAL_PROMPT: "0"/);
+  assert.match(
+    worktree,
+    /const COMMIT_ARGS = \["commit", "--no-gpg-sign"\]/,
+    "maestro's commits must never request a signature"
+  );
+  const rawCommits = worktree.match(/\["commit"(?!-tree)[^\]]*\]/g) ?? [];
+  assert.deepEqual(
+    rawCommits.filter((call) => !call.includes("--no-gpg-sign")),
+    [],
+    "every commit invocation must go through COMMIT_ARGS"
+  );
+  for (const merge of worktree.match(/\["merge", "--no-edit"[^\]]*\]/g) ?? []) {
+    assert.match(merge, /--no-gpg-sign/, `merge commit must not be signed: ${merge}`);
+  }
 });
 
 test("only runner transports and worktree import child process APIs", () => {
@@ -87,369 +121,6 @@ test("only board owns the board persistence name", () => {
   );
 });
 
-test("pure policy modules do not import Pi, TUI, process, runner, or Git adapters", () => {
-  const pureFiles = new Set([
-    "artifact-policy.ts",
-    "dashboard-evidence.ts",
-    "dashboard-launches.ts",
-    "dashboard-navigation.ts",
-    "insights.ts",
-    "plan-review.ts",
-    "plan-serialization.ts",
-    "status.ts",
-    "timeline.ts",
-    "workflow-policy.ts",
-  ]);
-  const forbidden = /@earendil-works\/pi-|node:child_process|\.\/runner\.js|\.\/worktree\.js/;
-  const violations = sourceFiles()
-    .filter((file) => pureFiles.has(file.name) && forbidden.test(file.contents))
-    .map((file) => file.name);
-  assert.deepEqual(violations, []);
-});
-
-test("dashboard help and footer rendering live outside the controller", () => {
-  const files = sourceFiles();
-  const dashboard = files.find((file) => file.name === "dashboard.ts")?.contents ?? "";
-  assert.doesNotMatch(dashboard, /for \(const binding of DASHBOARD_BINDINGS\)|bindingLabel\(/);
-
-  const rendering = files.find((file) => file.name === "dashboard-render.ts")?.contents ?? "";
-  assert.match(rendering, /function renderDashboardHelp/);
-  assert.match(rendering, /function renderDashboardFooter/);
-  assert.match(rendering, /DASHBOARD_BINDINGS/);
-  assert.match(rendering, /bindingLabel\(/);
-});
-
-test("dashboard navigation projection lives outside the TUI controller", () => {
-  const files = sourceFiles();
-  const dashboard = files.find((file) => file.name === "dashboard.ts")?.contents ?? "";
-  assert.match(dashboard, /stableTaskSelection/);
-  assert.match(dashboard, /stableLaunchSelection/);
-  assert.doesNotMatch(
-    dashboard,
-    /tasks\.findIndex\(\(task\) => task\.id === this\.selectedTaskId|function taskListWindow/
-  );
-
-  const navigation = files.find((file) => file.name === "dashboard-navigation.ts")?.contents ?? "";
-  assert.match(navigation, /function visibleDashboardTasks/);
-  assert.match(navigation, /function stableTaskSelection/);
-  assert.match(navigation, /function stableLaunchSelection/);
-  assert.match(navigation, /function taskListWindow/);
-  assert.match(navigation, /function visibleSelectionWindow/);
-});
-
-test("dashboard overlay action wiring lives outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /new Dashboard|DashboardTaskAction|findSessionFile/);
-
-  const controller = files.find((file) => file.name === "dashboard-controller.ts")?.contents ?? "";
-  assert.match(controller, /function showDashboard/);
-  assert.match(controller, /new Dashboard/);
-  assert.match(controller, /manuallyApproveTask/);
-  assert.match(controller, /findSessionFile/);
-});
-
-test("live pane overlay composition lives outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /new LivePaneComponent|suppressedAutoPaneDriveId/);
-
-  const controller = files.find((file) => file.name === "live-pane-controller.ts")?.contents ?? "";
-  assert.match(controller, /class LivePaneController/);
-  assert.match(controller, /new LivePaneComponent/);
-  assert.match(controller, /suppressedAutoPaneDriveId/);
-  assert.match(controller, /sessionSwitchBlocked/);
-});
-
-test("dashboard session IO lives outside the dashboard controller", () => {
-  const dashboard = sourceFiles().find((file) => file.name === "dashboard.ts")?.contents ?? "";
-  assert.doesNotMatch(dashboard, /node:fs|SessionManager|buildSessionContext/);
-
-  const livePane = sourceFiles().find((file) => file.name === "live-pane.ts")?.contents ?? "";
-  assert.match(livePane, /SessionManager/);
-});
-
-test("plan command UI and mutations live outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /applyPlanTaskEdits|new SelectList|new Editor|approvePlan\(/);
-
-  const commandUi = files.find((file) => file.name === "command-ui.ts")?.contents ?? "";
-  assert.match(commandUi, /new SelectList/);
-  assert.match(commandUi, /new Editor/);
-
-  const planEditor = files.find((file) => file.name === "plan-task-editor.ts")?.contents ?? "";
-  assert.match(planEditor, /applyPlanTaskEdits/);
-
-  const planReview =
-    files.find((file) => file.name === "plan-review-controller.ts")?.contents ?? "";
-  assert.match(planReview, /approvePlan\(/);
-});
-
-test("command dispatcher owns slash-command routing", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /parseCommand|switch \(subcommand\)|handleStartCommand/);
-
-  const dispatcher = files.find((file) => file.name === "command-dispatcher.ts")?.contents ?? "";
-  assert.match(dispatcher, /class MaestroCommandDispatcher/);
-  assert.match(dispatcher, /switch \(subcommand\)/);
-  assert.match(dispatcher, /handleStartCommand/);
-  assert.match(dispatcher, /handleRecovery|handleDoctorCommand/);
-});
-
-test("run-control commands live outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(
-    extension,
-    /buildOrchestratorBriefing|buildSupervisorBriefing|canonicalTaskIds/
-  );
-
-  const commands = files.find((file) => file.name === "command-run-control.ts")?.contents ?? "";
-  assert.match(commands, /function handleStartCommand/);
-  assert.match(commands, /function handleDriveCommand/);
-  assert.match(commands, /function handlePauseCommand/);
-  assert.match(commands, /function handleResumeCommand/);
-  assert.match(commands, /function handleAbortCommand/);
-  assert.match(commands, /function handleHandoffCommand/);
-});
-
-test("plan file commands live outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /exportPlan|importPlan|comparePlans/);
-
-  const commands = files.find((file) => file.name === "command-plans.ts")?.contents ?? "";
-  assert.match(commands, /function handlePlanCommand/);
-  assert.match(commands, /exportPlan/);
-  assert.match(commands, /importPlan/);
-  assert.match(commands, /comparePlans/);
-});
-
-test("recovery commands own cleanup, replay, history, and reset workflows", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(
-    extension,
-    /cleanupManagedWorktrees|restoreArchivedBoard|formatStatusHistory|inspectLogRetention/
-  );
-
-  const commands = files.find((file) => file.name === "command-recovery.ts")?.contents ?? "";
-  assert.match(commands, /function handleDoctorCommand/);
-  assert.match(commands, /function handleHistoryCommand/);
-  assert.match(commands, /function handleReplayCommand/);
-  assert.match(commands, /function handleResetCommand/);
-});
-
-test("inspection and configuration commands live outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(
-    extension,
-    /completionFreshness|formatCostSummary|deriveRunTimeline|showSettings\(/
-  );
-
-  const commands = files.find((file) => file.name === "command-inspection.ts")?.contents ?? "";
-  assert.match(commands, /function handleSimulationCommand/);
-  assert.match(commands, /function handleInsightsCommand/);
-  assert.match(commands, /function handleReconcileCommand/);
-  assert.match(commands, /function handleTimelineCommand/);
-  assert.match(commands, /function handleConfigCommand/);
-});
-
-test("recipe and discovery commands live outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(
-    extension,
-    /expandRecipe|resolveRecipe|buildDiscoveryBoard|parseDiscoveryOutput/
-  );
-
-  const commands = files.find((file) => file.name === "command-recipes.ts")?.contents ?? "";
-  assert.match(commands, /function handleRecipeCommand/);
-  assert.match(commands, /function handleDiscoveryCommand/);
-  assert.match(commands, /buildDiscoveryBoard/);
-  assert.match(commands, /expandRecipe/);
-});
-
-test("workflow and task browsers own their command coordination", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /workflowMarkdown|showTaskActions/);
-
-  const workflowBrowser = files.find((file) => file.name === "workflow-browser.ts")?.contents ?? "";
-  assert.match(workflowBrowser, /saveRecipeFromBoard/);
-  assert.match(workflowBrowser, /replaceBoardWithArchive/);
-
-  const taskBrowser = files.find((file) => file.name === "task-browser.ts")?.contents ?? "";
-  assert.match(taskBrowser, /humanRetryEligibility/);
-  assert.match(taskBrowser, /pruneTaskLogs/);
-});
-
-test("drive runtime controller is the single owner of live-run state", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /new (?:Map|Set)<string, WorkflowRun>/);
-  assert.doesNotMatch(extension, /liveRuns\.(?:set|delete|clear)/);
-  assert.doesNotMatch(
-    extension,
-    /function runControlledDrive|function runDriveWorkflow|function trackRun|function applyUpdate|function requestHumanRetry/
-  );
-
-  const controller = files.find((file) => file.name === "drive-controller.ts")?.contents ?? "";
-  assert.match(controller, /private readonly liveRuns = new Set<LiveRun>/);
-  assert.match(controller, /registerLiveRun/);
-  assert.match(controller, /removeLiveRun/);
-  assert.match(controller, /startBackgroundDrive/);
-  assert.match(controller, /private async runControlledDrive/);
-  assert.match(controller, /private async runDriveWorkflow/);
-  assert.match(controller, /async requestHumanRetry/);
-
-  const tools = files.find((file) => file.name === "tools.ts")?.contents ?? "";
-  assert.doesNotMatch(tools, /liveRuns: Map<string, WorkflowRun>/);
-});
-
-test("drive preflight, summaries, and manual approval live outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(
-    extension,
-    /function validateDriveStart|function confirmDriveScale|function formatDrivePulse|function manuallyApproveTask/
-  );
-
-  const preflight = files.find((file) => file.name === "drive-preflight.ts")?.contents ?? "";
-  assert.match(preflight, /function validateDriveStart/);
-  assert.match(preflight, /function confirmDriveScale/);
-
-  const summary = files.find((file) => file.name === "drive-summary.ts")?.contents ?? "";
-  assert.match(summary, /function formatDrivePulse/);
-
-  const approval = files.find((file) => file.name === "manual-approval.ts")?.contents ?? "";
-  assert.match(approval, /captureApprovedProvenance/);
-  assert.match(approval, /snapshotArtifact/);
-});
-
-test("command completion caching lives outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /completionBoard|completionRecipes|COMPLETION_CACHE_MS/);
-
-  const completions = files.find((file) => file.name === "command-completions.ts")?.contents ?? "";
-  assert.match(completions, /class MaestroCommandCompletions/);
-  assert.match(completions, /loadBoard/);
-  assert.match(completions, /loadRecipeListings/);
-});
-
-test("session navigation state lives outside the extension root", () => {
-  const files = sourceFiles();
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, /let previousSession|function switchWithReturn/);
-
-  const navigator = files.find((file) => file.name === "session-navigator.ts")?.contents ?? "";
-  assert.match(navigator, /class SessionNavigator/);
-  assert.match(navigator, /private previousSession/);
-  assert.match(navigator, /sessionSwitchBlocked/);
-});
-
-test("review launch and convergence lifecycle lives outside drive orchestration", () => {
-  const files = sourceFiles();
-  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
-  assert.doesNotMatch(workflow, /launchReviewer|reviewIdentityMatches|reviewLaunches/);
-
-  const review = files.find((file) => file.name === "workflow-review.ts")?.contents ?? "";
-  assert.match(review, /function reviewTask/);
-  assert.match(review, /launchReviewer/);
-  assert.match(review, /convergenceRecord/);
-  assert.match(review, /integrateReviewedCandidate/);
-});
-
-test("executor attempt lifecycle lives outside workflow orchestration", () => {
-  const files = sourceFiles();
-  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
-  assert.doesNotMatch(workflow, /buildExecutorPrompt|DISCOVERY_TOOLS|inferredProviderFailure/);
-
-  const execution = files.find((file) => file.name === "workflow-execution.ts")?.contents ?? "";
-  assert.match(execution, /function executeTask/);
-  assert.match(execution, /claimDispatchLifecycle/);
-  assert.match(execution, /inferredProviderFailure/);
-  assert.match(execution, /attempt\.consumesAttempt/);
-});
-
-test("dispatch claims and lease renewal live outside workflow orchestration", () => {
-  const files = sourceFiles();
-  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
-  assert.doesNotMatch(workflow, /claimTaskDispatch|renewTaskDispatch|releaseTaskDispatch/);
-
-  const dispatch = files.find((file) => file.name === "workflow-dispatch.ts")?.contents ?? "";
-  assert.match(dispatch, /function claimDispatchLifecycle/);
-  assert.match(dispatch, /claimTaskDispatch/);
-  assert.match(dispatch, /renewTaskDispatch/);
-  assert.match(dispatch, /releaseTaskDispatch/);
-});
-
-test("candidate integration transactions live outside workflow orchestration", () => {
-  const files = sourceFiles();
-  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
-  assert.doesNotMatch(
-    workflow,
-    /prepareWorktreeIntegration|prepareMainTreeIntegration|promotePreparedIntegration|mainTreeOperationTails/
-  );
-
-  const integration = files.find((file) => file.name === "workflow-integration.ts")?.contents ?? "";
-  assert.match(integration, /function integrateReviewedCandidate/);
-  assert.match(integration, /prepareWorktreeIntegration/);
-  assert.match(integration, /prepareMainTreeIntegration/);
-  assert.match(integration, /mainTreeOperationTails/);
-});
-
-test("review prompt and convergence policy live outside workflow effects", () => {
-  const files = sourceFiles();
-  const workflow = files.find((file) => file.name === "workflow.ts")?.contents ?? "";
-  assert.doesNotMatch(workflow, /function reviewEvidence|function convergenceRecord/);
-
-  const policy = files.find((file) => file.name === "workflow-review-policy.ts")?.contents ?? "";
-  assert.match(policy, /function reviewEvidence/);
-  assert.match(policy, /function convergenceRecord/);
-  assert.match(policy, /function staleExecutionInputsMessage/);
-});
-
-test("only the lifecycle adapter registers session events", () => {
-  const files = sourceFiles();
-  const sessionRegistration = /\.on\(\s*"session_(?:start|shutdown|before_switch|before_fork)"/;
-  const owners = files
-    .filter((file) => sessionRegistration.test(file.contents))
-    .map((file) => file.name);
-  assert.deepEqual(owners, ["extension-lifecycle.ts"]);
-
-  const extension = files.find((file) => file.name === "extension.ts")?.contents ?? "";
-  assert.doesNotMatch(extension, sessionRegistration);
-  const lifecycle = files.find((file) => file.name === "extension-lifecycle.ts")?.contents ?? "";
-  assert.match(lifecycle, /registerMaestroLifecycle/);
-  assert.match(lifecycle, /sweepDispatchState/);
-  assert.match(lifecycle, /persistDriveDecision/);
-});
-
-test("index is a composition entry point and adapters own registrations", () => {
-  const files = sourceFiles();
-  const index = files.find((file) => file.name === "index.ts")?.contents ?? "";
-  assert.ok(index.split("\n").length <= 10, "src/index.ts must remain a small composition root");
-  assert.doesNotMatch(index, /registerTool|registerCommand|newSession/);
-
-  const toolRegistrations = files
-    .filter((file) => /\.registerTool\s*</.test(file.contents))
-    .map((file) => file.name);
-  assert.deepEqual(toolRegistrations, ["tools.ts"]);
-  const commandRegistrations = files
-    .filter((file) => /\.registerCommand\s*\(/.test(file.contents))
-    .map((file) => file.name);
-  assert.deepEqual(commandRegistrations, ["commands.ts"]);
-  const sessionReplacement = files
-    .filter((file) => /\.newSession\s*\(/.test(file.contents))
-    .map((file) => file.name);
-  assert.deepEqual(sessionReplacement, ["handoff.ts"]);
-});
-
 test("board-facing modules do not depend on the coding agent", () => {
   const codingAgentImport =
     /\bfrom\s*["']@earendil-works\/pi-coding-agent["']|\bimport\s*(?:\(\s*)?["']@earendil-works\/pi-coding-agent["']/;
@@ -463,6 +134,15 @@ test("board-facing modules do not depend on the coding agent", () => {
     [],
     `Board-facing modules must not import @earendil-works/pi-coding-agent; violations: ${violations.join(", ")}`
   );
+});
+
+test("only the lifecycle adapter registers session events", () => {
+  const sessionRegistration = /pi\.on\(\s*["']session_(?:start|shutdown)["']/;
+  const owners = sourceFiles()
+    .filter((file) => sessionRegistration.test(file.contents))
+    .map((file) => file.name)
+    .sort();
+  assert.deepEqual(owners, ["extension-lifecycle.ts"]);
 });
 
 test("the model surface remains exactly three named tools", () => {
@@ -498,10 +178,4 @@ test("repository config and recipes cannot introduce executable commands", () =>
   assert.match(config, /verificationProfiles:\s*_ignoredCommands/);
   const taskKeys = recipes.match(/const TASK_KEYS = new Set\(\[([\s\S]*?)\]\);/)?.[1] ?? "";
   assert.doesNotMatch(taskKeys, /command|script|hook|executable/);
-});
-
-test("empty attributed paths are explicit no-op staging", () => {
-  const worktree = readFileSync(join(sourceDirectory, "worktree.ts"), "utf-8");
-  assert.match(worktree, /function commitAll[\s\S]*if \(paths\?\.length === 0\) return false;/);
-  assert.match(worktree, /function captureDiff[\s\S]*if \(paths\?\.length === 0\) return "";/);
 });
