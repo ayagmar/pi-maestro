@@ -34,6 +34,7 @@ import { saveRecipeFromBoard } from "../src/recipes.js";
 import { type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board } from "../src/types.js";
 import { type StartExecutor } from "../src/workflow.js";
+import { executorAttempt, settlingExecutor, waitFor } from "./helpers/executors.js";
 
 const owner = "/sessions/orchestrator.jsonl";
 const executor = "/sessions/executor.jsonl";
@@ -2548,19 +2549,7 @@ test("maestro_drive start streams round progress and returns the settled outcome
       saveBoard(cwd, board);
     },
     async (cwd) => {
-      const startExecutor: StartExecutor = (options) => ({
-        attempt: executorAttempt(),
-        outcome: Promise.resolve({
-          exitCode: 0,
-          usage: { input: 1, output: 1, cost: 0, turns: 1 },
-          finalReport: options.runId.includes("-review-") ? "VERDICT: APPROVE" : "done",
-          touchedFiles: [],
-          aborted: false,
-        }),
-        steer: () => {},
-        followUp: () => {},
-        abort: () => {},
-      });
+      const startExecutor = settlingExecutor();
       const { ctx, tools } = loadMaestro(cwd, startExecutor);
       const drive = tools.get("maestro_drive");
       assert.ok(drive);
@@ -2808,25 +2797,6 @@ test("maestro_drive start rejects unknown scoped task ids before reserving owner
     }
   );
 });
-
-function executorAttempt(): Attempt {
-  return {
-    index: 0,
-    logFile: "test.jsonl",
-    thinking: "low",
-    startedAt: Date.now(),
-    usage: { input: 0, output: 0, cost: 0, turns: 0 },
-    touchedFiles: [],
-  };
-}
-
-async function waitFor(predicate: () => boolean, message: string): Promise<void> {
-  for (let index = 0; index < 100; index += 1) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  assert.fail(message);
-}
 
 /**
  * maestro_drive action=start resolves only when the board settles. Tests that
@@ -3603,19 +3573,7 @@ test("completed drives archive and clear tasks by default", async () => {
       saveBoard(cwd, board);
     },
     async (cwd) => {
-      const startExecutor: StartExecutor = (options) => ({
-        attempt: executorAttempt(),
-        outcome: Promise.resolve({
-          exitCode: 0,
-          usage: { input: 1, output: 1, cost: 0, turns: 1 },
-          finalReport: options.runId.includes("-review-") ? "VERDICT: APPROVE" : "done",
-          touchedFiles: [],
-          aborted: false,
-        }),
-        steer: () => {},
-        followUp: () => {},
-        abort: () => {},
-      });
+      const startExecutor = settlingExecutor();
       const { ctx, tools, events, messages, notices } = loadMaestro(cwd, startExecutor);
       const drive = tools.get("maestro_drive");
       assert.ok(drive);
@@ -3645,19 +3603,7 @@ test("post-persist completion UI failures do not replace the successful decision
       saveBoard(cwd, board);
     },
     async (cwd) => {
-      const startExecutor: StartExecutor = (options) => ({
-        attempt: executorAttempt(),
-        outcome: Promise.resolve({
-          exitCode: 0,
-          usage: { input: 1, output: 1, cost: 0, turns: 1 },
-          finalReport: options.runId.includes("-review-") ? "VERDICT: APPROVE" : "done",
-          touchedFiles: [],
-          aborted: false,
-        }),
-        steer: () => {},
-        followUp: () => {},
-        abort: () => {},
-      });
+      const startExecutor = settlingExecutor();
       const { ctx, tools } = loadMaestro(cwd, startExecutor);
       ctx.ui.notify = () => {
         throw new Error("stale session context");
