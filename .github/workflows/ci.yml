@@ -44,6 +44,11 @@ jobs:
       - name: Run tests
         run: pnpm run test
 
+      # Spawns real `pi --mode rpc` subprocesses against a local scripted model
+      # server. No provider account, no tokens, no outbound network.
+      - name: Run integration tests
+        run: pnpm run test:integration
+
       - name: Lint (Biome)
         run: pnpm run lint
 

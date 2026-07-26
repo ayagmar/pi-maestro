@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { createTask, loadBoard, saveBoard } from "../src/board.js";
-import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
-import { startExecutor } from "../src/runner.js";
-import { type Board, type MaestroConfig } from "../src/types.js";
-import { driveBoard } from "../src/workflow.js";
-import { startStubModelServer } from "./helpers/stub-model-server.js";
+import { createTask, loadBoard, saveBoard } from "../../src/board.js";
+import { DEFAULT_CONFIG, saveConfig } from "../../src/config.js";
+import { startExecutor } from "../../src/runner.js";
+import { type Board, type MaestroConfig } from "../../src/types.js";
+import { driveBoard } from "../../src/workflow.js";
+import { startStubModelServer } from "../helpers/stub-model-server.js";
 
 /**
  * End-to-end coverage with a real `pi --mode rpc` subprocess.
@@ -26,20 +26,24 @@ import { startStubModelServer } from "./helpers/stub-model-server.js";
  * makes no outbound request.
  */
 
-const fixtures = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
+const fixtures = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 const stubExtension = join(fixtures, "stub-provider-extension.ts");
 
-/** These spawn the installed pi binary; skip rather than fail where it is absent. */
-function piIsInstalled(): boolean {
+/**
+ * These spawn a real pi binary. It ships as a devDependency, so `pnpm install`
+ * always provides one and CI runs these for real. Only an explicit opt-out
+ * skips them; silently skipping is how a broken integration layer stays green.
+ */
+function missingPiBinary(): string | false {
   try {
     execFileSync("pi", ["--version"], { stdio: "ignore", timeout: 30_000 });
-    return true;
-  } catch {
     return false;
+  } catch {
+    return "pi binary not runnable; run pnpm install";
   }
 }
 
-const skip = piIsInstalled() ? false : "the pi binary is not installed";
+const skip = process.env.MAESTRO_SKIP_INTEGRATION === "1" ? "opted out" : missingPiBinary();
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();

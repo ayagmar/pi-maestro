@@ -35,7 +35,8 @@
     "smoke-test": "node ./scripts/run-isolated.mjs node --import=tsx ./scripts/smoke-test.mjs",
     "package-smoke-test": "node ./scripts/package-smoke-test.mjs",
     "test": "node ./scripts/run-isolated.mjs node --import=tsx --test ./test/*.test.ts",
-    "check": "pnpm run typecheck && pnpm run smoke-test && pnpm run package-smoke-test && pnpm test && pnpm run lint && pnpm run format:check",
+    "test:integration": "node ./scripts/run-isolated.mjs node --import=tsx --test ./test/integration/*.test.ts",
+    "check": "pnpm run typecheck && pnpm run smoke-test && pnpm run package-smoke-test && pnpm test && pnpm run test:integration && pnpm run lint && pnpm run format:check",
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview"
