@@ -167,3 +167,30 @@ export function staleExecutionInputsMessage(
       : "Task, configured execution, verification, or dependency inputs";
   return `${subject} changed after execution — the attempt ran under the old contract. Retry the task to re-execute under the current one.`;
 }
+
+/**
+ * An executor's own statement that it did not finish.
+ *
+ * A real task was approved while the plan document it produced said
+ * "State: BLOCKED — the clean full non-device gate failed twice", and the
+ * board then unblocked six dependents on that foundation. A reviewer may
+ * reasonably judge partial work acceptable, but it must not do so silently
+ * against the executor's explicit self-report: the words below are a claim of
+ * incompletion, not a stylistic choice.
+ */
+const SELF_REPORTED_INCOMPLETE =
+  /^[^\S\n]*(?:[-*>|#\s]*)?(?:\**)(?:state|status|result|outcome)(?:\**)\s*[:|]\s*(?:\**)\s*(BLOCKED|INCOMPLETE|NOT DONE|FAILED)\b/gim;
+
+export function selfReportedBlocker(report: string): string | undefined {
+  const match = [...report.matchAll(SELF_REPORTED_INCOMPLETE)].at(0);
+  if (!match) return undefined;
+  // The match can start on the newline that begins the line, so take the
+  // first non-empty line from it rather than the literal first segment.
+  const line =
+    report
+      .slice(match.index ?? 0)
+      .split("\n")
+      .map((candidate) => candidate.trim())
+      .find((candidate) => candidate.length > 0) ?? "";
+  return line.slice(0, 300);
+}

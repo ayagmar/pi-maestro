@@ -15,6 +15,7 @@ import {
   updateTask,
 } from "../src/board.js";
 import { loadConfig, saveConfig } from "../src/config.js";
+import { selfReportedBlocker } from "../src/workflow-review-policy.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import {
   type Attempt,
@@ -4056,4 +4057,60 @@ test("a task stopped by the cost cap is not launched again", async () => {
   assert.match(result.stoppedBecause.message, /T1 \(failed\): cost cap exceeded/);
   assert.match(result.stoppedBecause.message, /maxCostPerTask/);
   rmSync(cwd, { recursive: true, force: true });
+});
+
+test("an executor that reports itself blocked is detected", () => {
+  // The exact line from a real plan document that was approved anyway,
+  // unblocking six dependent tasks on work its own author called blocked.
+  assert.match(
+    selfReportedBlocker(
+      "## Status\n\n- State: BLOCKED — the clean full non-device gate failed twice\n- Priority: P0"
+    ) ?? "",
+    /State: BLOCKED/
+  );
+  // Common shapes of the same claim.
+  assert.ok(selfReportedBlocker("Status: INCOMPLETE"));
+  assert.ok(selfReportedBlocker("| Status | FAILED |"));
+  assert.ok(selfReportedBlocker("**Status:** blocked"));
+  assert.ok(selfReportedBlocker("- State: NOT DONE"));
+
+  // Finished work, and prose that merely mentions the word, must pass.
+  assert.equal(selfReportedBlocker("- State: DONE (device acceptance pending)"), undefined);
+  assert.equal(
+    selfReportedBlocker("The retry path no longer blocks when the queue is full."),
+    undefined
+  );
+  assert.equal(
+    selfReportedBlocker("Removed the blocked-state banner and its failed-request handler."),
+    undefined
+  );
+});
+
+test("a reviewer cannot approve work the executor reported as blocked", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-self-blocked-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    // The executor states plainly that it did not finish.
+    task.attempts.push(attempt("## Status\n\n- State: BLOCKED — the full gate failed twice\n"));
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
+
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 1 },
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      // A reviewer that approves regardless, which is what happened for real.
+      startExecutor: executor({ finalReport: "Looks good.\nVERDICT: APPROVE" }),
+      onUpdate,
+      trackRun,
+    });
+
+    assert.notEqual(loadBoard(cwd).tasks[0]?.status, "approved");
+    assert.match(JSON.stringify(result), /reported the work as unfinished/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

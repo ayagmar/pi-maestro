@@ -37,6 +37,7 @@ import {
   findingFingerprint,
   policyReviewPrompt,
   reviewEvidence,
+  selfReportedBlocker,
   sessionLabel,
   staleExecutionInputsMessage,
 } from "./workflow-review-policy.js";
@@ -600,6 +601,16 @@ export async function reviewTask(options: {
     if (candidateTree && snapshotArtifact(candidateCwd, candidatePaths) !== candidateTree) {
       mechanicalFailure = "Candidate files changed while under review; integration was skipped.";
       verdict = { approved: false, notes: mechanicalFailure };
+    }
+    // An executor that states it is blocked has said the work is unfinished.
+    // Approving over that silently marks the task done and unblocks its
+    // dependents on a foundation the executor itself disclaimed.
+    if (verdict?.approved) {
+      const selfReported = selfReportedBlocker(report);
+      if (selfReported) {
+        mechanicalFailure = `The executor reported the work as unfinished ("${selfReported}"), so approval was withheld. Finish the work, or restate the report if the blocker no longer applies.`;
+        verdict = { approved: false, notes: mechanicalFailure };
+      }
     }
     let integrationAuthorized = false;
     updateTask(cwd, task.id, (fresh) => {
