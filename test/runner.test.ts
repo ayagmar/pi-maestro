@@ -1770,3 +1770,23 @@ test("mapWithConcurrencyLimit preserves order and limits concurrency", async () 
 test("mapWithConcurrencyLimit handles empty input", async () => {
   assert.deepEqual(await mapWithConcurrencyLimit([], 4, async () => 1), []);
 });
+
+test("a cost cap failure is not retryable and says how to recover", () => {
+  // A real board spent $12.14 on one task: three attempts, two of them killed
+  // at the same $5 cap. The second was doomed the moment the first hit the
+  // wall, because nothing about the task or the cap had changed.
+  const outcome: RunOutcome = {
+    exitCode: 1,
+    usage: { input: 0, output: 0, cost: 5.3949, turns: 52 },
+    finalReport: "",
+    touchedFiles: [],
+    aborted: false,
+    errorMessage: "cost cap exceeded: $5.3949 > $5 (maxCostPerTask)",
+    failureCause: "cost_cap",
+  };
+
+  const failure = classifyFailure(outcome);
+  assert.equal(failure?.kind, "cost_cap");
+  assert.equal(failure?.retryable, false, "an identical retry hits the identical cap");
+  assert.match(failure?.message ?? "", /Raise maxCostPerTask or split the task/);
+});

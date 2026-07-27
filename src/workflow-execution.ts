@@ -35,7 +35,13 @@ import {
   type TierConfig,
 } from "./types.js";
 import { claimDispatchLifecycle } from "./workflow-dispatch.js";
-import { consumesMaxAttempt, lastReport, snapshot, type TaskSnapshot } from "./workflow-policy.js";
+import {
+  consumesMaxAttempt,
+  endedUnretryably,
+  lastReport,
+  snapshot,
+  type TaskSnapshot,
+} from "./workflow-policy.js";
 import { sessionLabel } from "./workflow-review-policy.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
 import {
@@ -83,6 +89,22 @@ export async function executeTask(options: {
   const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
   if (validationError) throw new Error(validationError);
   if (board.planPending) throw new Error("Plan approval is pending.");
+
+  // A cost cap is not a defect in the work: the attempt was cut off mid-flight
+  // with its edits intact. Sending the user to write a successor brief hides
+  // that the fix is usually one number.
+  const terminal = endedUnretryably(task) ? task.attempts.at(-1)?.failureReason : undefined;
+  if (terminal?.kind === "cost_cap") {
+    const updated = updateTask(cwd, task.id, (fresh) => {
+      forceStatus(fresh, "failed");
+    });
+    const spent = task.attempts.at(-1)?.usage.cost ?? 0;
+    const guidance = `stopped by the per-attempt cost cap at $${spent.toFixed(2)} (maxCostPerTask $${config.maxCostPerTask}); its edits are kept. Raise maxCostPerTask for a task this size, or split it into smaller tasks. Retrying unchanged stops at the same point.`;
+    const result = snapshot(updated ?? task, guidance);
+    delete result.retryAction;
+    result.note = guidance;
+    return result;
+  }
 
   const consumedAttempts = task.attempts.filter(consumesMaxAttempt).length;
   if (consumedAttempts >= config.maxAttempts) {

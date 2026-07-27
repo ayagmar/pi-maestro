@@ -4011,3 +4011,49 @@ test("a drive blocked by a cancelled dependency names the blocker and the remedy
   assert.match(result.stoppedBecause.message, /supersedesTaskId/);
   rmSync(cwd, { recursive: true, force: true });
 });
+
+test("a task stopped by the cost cap is not launched again", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-cost-cap-terminal-"));
+  execFileSync("git", ["init", "-q"], { cwd });
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const task = createTask(board, { title: "Expensive", brief: "b", tier: "standard" });
+  task.status = "failed";
+  task.attempts.push({
+    index: 0,
+    logFile: "a.jsonl",
+    thinking: "low",
+    startedAt: Date.now(),
+    usage: { input: 0, output: 0, cost: 5.3949, turns: 52 },
+    touchedFiles: ["src/a.ts"],
+    errorMessage: "cost cap exceeded: $5.3949 > $5 (maxCostPerTask)",
+    failureReason: {
+      kind: "cost_cap",
+      message: "cost cap exceeded: $5.3949 > $5 (maxCostPerTask)",
+      retryable: false,
+    },
+  });
+  saveBoard(cwd, board);
+
+  const result = await driveBoard({
+    cwd,
+    // Two attempts remain under maxAttempts, so only the terminal failure
+    // can stop another launch.
+    config: { ...config, maxAttempts: 3, maxCostPerTask: 5 },
+    resolvedTiers: new Map([
+      ["standard", tier],
+      ["review", tier],
+    ]),
+    startExecutor: () => {
+      throw new Error("a cost-capped task must not be retried at the same cap");
+    },
+    onUpdate,
+    trackRun,
+  });
+
+  assert.notEqual(result.stoppedBecause.code, "completed");
+  // The stop reason itself must name the cap. "no dispatch was attempted"
+  // sent a real user looking for a fault in the brief that was not there.
+  assert.match(result.stoppedBecause.message, /T1 \(failed\): cost cap exceeded/);
+  assert.match(result.stoppedBecause.message, /maxCostPerTask/);
+  rmSync(cwd, { recursive: true, force: true });
+});

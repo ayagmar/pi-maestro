@@ -129,6 +129,16 @@ export const REVIEW_REJECTION_LIMIT = 2;
 /** Built-in tiers, cheapest first, used to recommend the next rung on escalation. */
 export const TIER_LADDER = ["trivial", "standard", "complex"] as const;
 
+/**
+ * A task whose last attempt failed for a reason a rerun cannot change. The
+ * classifier marks these `retryable: false`; scheduling another identical
+ * attempt only bills for the same wall a second time.
+ */
+export function endedUnretryably(task: Task): boolean {
+  if (task.status !== "failed") return false;
+  return task.attempts.at(-1)?.failureReason?.retryable === false;
+}
+
 export function consumesMaxAttempt(attempt: Attempt): boolean {
   return attempt.consumesAttempt ?? !attempt.providerFailure;
 }
@@ -210,7 +220,8 @@ export function calculateSchedulingWave(
   );
   const capped = tasks.filter(
     (task) =>
-      task.attempts.filter(consumesMaxAttempt).length >= config.maxAttempts &&
+      (task.attempts.filter(consumesMaxAttempt).length >= config.maxAttempts ||
+        endedUnretryably(task)) &&
       task.status !== "approved"
   );
   const runnable = tasks.filter(

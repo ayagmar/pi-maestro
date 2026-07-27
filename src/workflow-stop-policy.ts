@@ -49,6 +49,12 @@ export function noProgressReason(tasks: Task[], dispatchResults: TaskSnapshot[])
       .filter(([, d]) => d.length > 0)
   );
   const details = pending.map((task) => {
+    // A task cut off by a cap did not fail on its merits, and the note the
+    // scheduler leaves ("no dispatch was attempted") hides why it is stuck.
+    const terminal = task.attempts.at(-1)?.failureReason;
+    if (terminal && terminal.retryable === false) {
+      return `${task.id} (${task.status}): ${terminal.message}`;
+    }
     const dead = stuck.get(task.id);
     if (dead) {
       return `${task.id} (${task.status}): permanently blocked by ${dead.join(", ")}; no dependency can reach approved`;

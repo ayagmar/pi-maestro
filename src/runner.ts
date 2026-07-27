@@ -258,7 +258,15 @@ export function classifyFailure(
     outcome.errorMessage ?? `${phase} exited with code ${outcome.exitCode}`
   );
   if (outcome.failureCause === "cost_cap" || message.startsWith("cost cap exceeded:")) {
-    return { kind: "cost_cap", message, retryable: true };
+    // Retrying the same task under the same cap reproduces the same wall and
+    // bills for it again. A real board did this twice, spending $10.46 across
+    // two doomed attempts. Recovery needs a bigger cap or a smaller task, both
+    // of which are human decisions.
+    return {
+      kind: "cost_cap",
+      message: `${message}. Raise maxCostPerTask or split the task into smaller ones; retrying unchanged will stop at the same point.`,
+      retryable: false,
+    };
   }
   if (outcome.failureCause === "stalled") {
     return {
