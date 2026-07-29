@@ -86,6 +86,8 @@
 
 ### Reliability
 
+- Delivered decisions get a watchdog. A decision wakes the orchestrator with exactly one model turn — and when that turn died mid-stream (one provider "overloaded" error was enough), nothing ever re-raised it: the board sat blocked for an hour while the orchestrator looked idly AFK, and the eventual wake-up re-billed the whole context as a cold cache. If a delivered decision stays unresolved with no board activity and no live launches for `decisionNudgeMinutes` (default 5), the owner session is re-nudged with the decision evidence, up to three times; any board write or launch resets the quiet interval, and a session reload re-arms the watchdog for a decision delivered by a dead process.
+
 - Opt-in Unix detached executors now survive Pi exit through persisted JSONL control/event transport, PID+start-time recovery, long bounded dispatch leases, forced Git worktree isolation, and startup log-tail reattachment; reviewers and Windows retain attached RPC behavior.
 - Verification logs are streamed to disk as output arrives, so a hard kill of pi retains partial verification evidence.
 - Added a best-effort (non-blocking) Windows CI job for typecheck and tests.

@@ -211,6 +211,8 @@ export function applySettingsChange(
     config.maxRunCost = value === "off" ? 0 : Number(value.slice(1));
   } else if (id === "statusWaitSeconds") {
     config.statusWaitSeconds = Number(value);
+  } else if (id === "decisionNudgeMinutes") {
+    config.decisionNudgeMinutes = value === "off" ? 0 : Number(value);
   } else {
     const [kind, tierName] = id.split(":");
     const tier = tierName ? config.tiers[tierName] : undefined;
@@ -491,6 +493,17 @@ export async function showSettings(
             values: ["15", "30", "60", "90", "120", "180"],
             description:
               "Seconds the human status command waits before returning live executor progress.",
+          },
+          {
+            id: "decisionNudgeMinutes",
+            label: "Decision reminder (minutes)",
+            currentValue:
+              (config.decisionNudgeMinutes ?? 5) === 0
+                ? "off"
+                : `${config.decisionNudgeMinutes ?? 5}`,
+            values: ["off", "3", "5", "10", "20"],
+            description:
+              "Re-nudge the owner session when a delivered decision sits unresolved with no board activity.",
           },
         ];
       }

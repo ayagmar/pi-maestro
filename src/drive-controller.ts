@@ -26,6 +26,7 @@ import {
 import { assertKnownTaskIds } from "./session-control.js";
 import {
   type ActiveDriveState,
+  type Board,
   type DriveDecision,
   type PausedDriveState,
   type Task,
@@ -249,7 +250,8 @@ export class DriveRuntimeController {
           deliverPendingDecision(
             ctx.cwd,
             ownerSession,
-            settleDecisionWithoutWaking ? () => {} : services.sendDecision
+            settleDecisionWithoutWaking ? () => {} : services.sendDecision,
+            settleDecisionWithoutWaking ? undefined : this.decisionNudgeOptions(ctx.cwd, services)
           );
         }
       })
@@ -268,7 +270,8 @@ export class DriveRuntimeController {
             deliverPendingDecision(
               ctx.cwd,
               ownerSession,
-              settleDecisionWithoutWaking ? () => {} : services.sendDecision
+              settleDecisionWithoutWaking ? () => {} : services.sendDecision,
+              settleDecisionWithoutWaking ? undefined : this.decisionNudgeOptions(ctx.cwd, services)
             );
           }
         } catch (persistenceError) {
@@ -281,6 +284,17 @@ export class DriveRuntimeController {
         if (services.isRuntimeActive()) services.refreshUI(ctx);
       });
     return this.getBackground() ?? operation;
+  }
+
+  decisionNudgeOptions(
+    cwd: string,
+    services: Pick<DriveRuntimeServices, "isRuntimeActive">
+  ): DecisionNudgeOptions {
+    return {
+      minutes: loadConfig(cwd).decisionNudgeMinutes ?? 5,
+      isRuntimeActive: () => services.isRuntimeActive(),
+      isBusy: () => this.hasActive() || this.liveRunCount() > 0,
+    };
   }
 
   savePausedDrive(cwd: string, pausedDrive: PausedDriveState | undefined): void {
@@ -618,10 +632,109 @@ export function resolveDriveDecision(
   });
 }
 
+export interface DecisionNudgeOptions {
+  /** Minutes of delivered-but-unresolved silence before a reminder turn; 0 disables. */
+  minutes: number;
+  isRuntimeActive(): boolean;
+  /** A live drive or executor means the decision is being acted on mechanically. */
+  isBusy(): boolean;
+  /** Test seam for deterministic timers. */
+  scheduleTimer?: (callback: () => void, delayMs: number) => { stop(): void };
+}
+
+const DECISION_NUDGE_LIMIT = 3;
+const activeDecisionNudges = new Map<string, { stop(): void }>();
+
+function defaultNudgeTimer(callback: () => void, delayMs: number): { stop(): void } {
+  const timer = setTimeout(callback, delayMs);
+  timer.unref();
+  return { stop: () => clearTimeout(timer) };
+}
+
+/**
+ * Watchdog for the orchestrator itself. A delivered decision triggers one
+ * model turn — and if that turn dies mid-stream (a provider "overloaded"
+ * error is enough), nothing ever re-raises the decision: the board sits
+ * blocked while the session looks idly "AFK". Executors have watchdogs;
+ * this is the same guarantee for the decision consumer. A reminder fires
+ * only after a full quiet interval — any board write or live launch resets
+ * the clock — and gives up after a bounded number of attempts.
+ */
+function armDecisionNudge(
+  cwd: string,
+  decisionId: string,
+  send: (evidence: string, decisionId: string) => void,
+  options: DecisionNudgeOptions,
+  attempt: number,
+  quietRevision: number
+): void {
+  if (options.minutes <= 0 || attempt > DECISION_NUDGE_LIMIT) return;
+  activeDecisionNudges.get(cwd)?.stop();
+  const schedule = options.scheduleTimer ?? defaultNudgeTimer;
+  const timer = schedule(() => {
+    activeDecisionNudges.delete(cwd);
+    if (!options.isRuntimeActive()) return;
+    let board: Board;
+    try {
+      board = loadBoard(cwd);
+    } catch {
+      return;
+    }
+    const decision = board.activeDecision;
+    if (!decision || decision.id !== decisionId || decision.resolution) return;
+    const revision = board.revision ?? 0;
+    if (options.isBusy() || revision !== quietRevision) {
+      // Something is happening; restart the quiet interval without spending
+      // a reminder attempt.
+      armDecisionNudge(cwd, decisionId, send, options, attempt, revision);
+      return;
+    }
+    try {
+      send(
+        `Reminder ${attempt}/${DECISION_NUDGE_LIMIT}: decision ${decision.id} (${decision.kind}) has waited ${options.minutes} minute(s) with no recorded action — the previous turn may have been cut off by a provider failure. Act on it now: maestro_update or maestro_plan (supersedesTaskId) to correct the board, then maestro_drive action=start; or resolve it with maestro_drive action=intervene.\n\n${truncateText(decision.evidence, 20)}`,
+        decisionId
+      );
+    } catch {
+      return;
+    }
+    let nextRevision = revision;
+    try {
+      nextRevision = loadBoard(cwd).revision ?? revision;
+    } catch {
+      return;
+    }
+    armDecisionNudge(cwd, decisionId, send, options, attempt + 1, nextRevision);
+  }, options.minutes * 60_000);
+  activeDecisionNudges.set(cwd, timer);
+}
+
+/**
+ * Arm the nudge watchdog for a decision that is already delivered but still
+ * unresolved — the reload path, where the delivering process may be long gone.
+ */
+export function armDeliveredDecisionNudge(
+  cwd: string,
+  currentSession: string | undefined,
+  send: (evidence: string, decisionId: string) => void,
+  options: DecisionNudgeOptions
+): void {
+  let board: Board;
+  try {
+    board = loadBoard(cwd);
+  } catch {
+    return;
+  }
+  const decision = board.activeDecision;
+  if (!decision || !decision.deliveredAt || decision.resolution) return;
+  if (decision.ownerSession && decision.ownerSession !== currentSession) return;
+  armDecisionNudge(cwd, decision.id, send, options, 1, board.revision ?? 0);
+}
+
 export function deliverPendingDecision(
   cwd: string,
   currentSession: string | undefined,
-  send: (evidence: string, decisionId: string) => void
+  send: (evidence: string, decisionId: string) => void,
+  nudge?: DecisionNudgeOptions
 ): void {
   const claimId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   let evidence: string | undefined;
@@ -660,6 +773,15 @@ export function deliverPendingDecision(
     delete decision.deliveryClaim;
     return true;
   });
+  if (nudge && decisionId) {
+    let revision = 0;
+    try {
+      revision = loadBoard(cwd).revision ?? 0;
+    } catch {
+      return;
+    }
+    armDecisionNudge(cwd, decisionId, send, nudge, 1, revision);
+  }
 }
 
 export function acknowledgeDeliveredDecision(cwd: string, decisionId: string): boolean {

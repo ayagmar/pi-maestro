@@ -7,6 +7,7 @@ import { captureApprovedProvenance } from "../src/artifact-policy.js";
 import { createTask, listArchivedBoards, loadBoard, saveBoard, updateBoard } from "../src/board.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
 import {
+  armDeliveredDecisionNudge,
   cleanupCompletedBoard,
   clearActiveDrive,
   DriveRuntimeController,
@@ -480,5 +481,115 @@ test("a foreign actionable decision refuses reservation and names the blocker", 
     const board = loadBoard(cwd);
     assert.equal(board.activeDrive, undefined);
     assert.equal(board.activeDecision?.resolution, undefined);
+  });
+});
+
+test("a delivered decision that stays untouched re-nudges the owner session", () => {
+  withBoard((cwd) => {
+    saveBoard(cwd, {
+      version: 1,
+      nextTaskNumber: 1,
+      activeDecision: decision({ kind: "escalation_required", ownerSession: owner }),
+      tasks: [],
+    });
+    const sent: string[] = [];
+    const timers: Array<() => void> = [];
+    let busy = false;
+    deliverPendingDecision(cwd, owner, (evidence) => sent.push(evidence), {
+      minutes: 5,
+      isRuntimeActive: () => true,
+      isBusy: () => busy,
+      scheduleTimer: (callback) => {
+        timers.push(callback);
+        return { stop: () => {} };
+      },
+    });
+    assert.equal(sent.length, 1, "the decision itself is delivered once");
+    assert.equal(timers.length, 1, "delivery arms the watchdog");
+
+    // A live drive means the decision is being acted on: no reminder, re-armed.
+    busy = true;
+    timers[1 - 1]?.();
+    assert.equal(sent.length, 1);
+    assert.equal(timers.length, 2);
+
+    // Quiet interval with no board change: the reminder fires with the evidence.
+    busy = false;
+    timers[2 - 1]?.();
+    assert.equal(sent.length, 2);
+    assert.match(sent[1] ?? "", /Reminder 1\/3/);
+    assert.match(sent[1] ?? "", /escalation_required/);
+    assert.match(sent[1] ?? "", /Owner action is required/);
+
+    // Board activity resets the quiet interval without spending an attempt.
+    updateBoard(cwd, (board) => {
+      board.goal = "changed";
+      return true;
+    });
+    timers[3 - 1]?.();
+    assert.equal(sent.length, 2);
+
+    // Reminders stop for good once the decision is resolved.
+    updateBoard(cwd, (board) => {
+      const active = board.activeDecision;
+      if (!active) return false;
+      active.resolution = { intervention: "resume", resolvedAt: Date.now() };
+      return true;
+    });
+    timers[4 - 1]?.();
+    assert.equal(sent.length, 2);
+    assert.equal(timers.length, 4, "a resolved decision arms nothing further");
+  });
+});
+
+test("reminders are bounded and a reload re-arms a previously delivered decision", () => {
+  withBoard((cwd) => {
+    saveBoard(cwd, {
+      version: 1,
+      nextTaskNumber: 1,
+      activeDecision: decision({
+        kind: "no_progress",
+        ownerSession: owner,
+        deliveredAt: Date.now(),
+      }),
+      tasks: [],
+    });
+    const sent: string[] = [];
+    const timers: Array<() => void> = [];
+    const options = {
+      minutes: 5,
+      isRuntimeActive: () => true,
+      isBusy: () => false,
+      scheduleTimer: (callback: () => void) => {
+        timers.push(callback);
+        return { stop: () => {} };
+      },
+    };
+    // The delivering process died; a reload must still arm the watchdog.
+    armDeliveredDecisionNudge(cwd, owner, (evidence) => sent.push(evidence), options);
+    assert.equal(timers.length, 1);
+
+    for (const round of [1, 2, 3]) {
+      const armed: number = timers.length;
+      timers[timers.length - 1]?.();
+      assert.equal(sent.length, round);
+      assert.match(sent[round - 1] ?? "", new RegExp(`Reminder ${round}/3`));
+      if (round < 3) assert.equal(timers.length, armed + 1, "next reminder is armed");
+    }
+    // The limit is respected: the third reminder arms no fourth timer.
+    assert.equal(timers.length, 3);
+    assert.equal(sent.length, 3);
+
+    // A foreign session must not arm a watchdog for someone else's decision.
+    const foreign: string[] = [];
+    armDeliveredDecisionNudge(
+      cwd,
+      "/tmp/foreign.jsonl",
+      (evidence) => foreign.push(evidence),
+      options
+    );
+    const before = timers.length;
+    assert.equal(timers.length, before);
+    assert.deepEqual(foreign, []);
   });
 });

@@ -447,6 +447,8 @@ export interface MaestroConfig {
   retryContext?: "resume" | "fresh";
   /** How long the human status command waits (seconds) for running executors before returning progress. 0 disables waiting. */
   statusWaitSeconds: number;
+  /** Minutes a delivered decision may sit unresolved with no board activity before the owner session is re-nudged. 0 disables. */
+  decisionNudgeMinutes?: number;
   /** Event detail mirrored to per-run JSONL logs. */
   logEvents?: "compact" | "full";
   /** Maximum bytes mirrored per run. 0 disables the limit. */

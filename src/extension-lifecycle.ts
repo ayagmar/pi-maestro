@@ -4,6 +4,7 @@ import { loadConfig, setProjectConfigTrust } from "./config.js";
 import { COMMAND, CONTEXT_NUDGE_PERCENT, MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import {
   acknowledgeDeliveredDecision,
+  armDeliveredDecisionNudge,
   type DriveRuntimeController,
   deliverPendingDecision,
   persistDriveDecision,
@@ -276,10 +277,22 @@ export function registerMaestroLifecycle(
       acknowledgeDeliveredDecision(boardCwd, pendingDecision.id);
       recovered = loadBoard(boardCwd);
     }
+    const nudgeOptions = driveController.decisionNudgeOptions(boardCwd, {
+      isRuntimeActive: () => state.isActive(),
+    });
     deliverPendingDecision(
       boardCwd,
       ctx.sessionManager.getSessionFile(),
-      dependencies.sendDecision
+      dependencies.sendDecision,
+      nudgeOptions
+    );
+    // A decision delivered by a previous process that died before it was
+    // acted on must get the same watchdog, or the board stays silently stuck.
+    armDeliveredDecisionNudge(
+      boardCwd,
+      ctx.sessionManager.getSessionFile(),
+      dependencies.sendDecision,
+      nudgeOptions
     );
 
     const parking = parkInactiveWorktrees(boardCwd, recovered);

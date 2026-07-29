@@ -32,6 +32,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `reviewRejectionLimit` | 2 | Integer 1–10; consecutive genuine reviewer rejections before a task escalates instead of retrying. One rejection spanning 4+ distinct criteria escalates immediately as an omnibus-task signal. |
 | `retryContext` | resume | `resume` continues a review-rejected attempt's own session, so the model keeps everything it already read and providers bill the history at cached rates; `fresh` restarts every attempt with a clean context. Provider fallbacks, human retries, and discovery tasks always start fresh. |
 | `statusWaitSeconds` | 60 | 0–240; awaited-drive heartbeat interval, 0 disables pulsing |
+| `decisionNudgeMinutes` | 5 | 0–240; minutes a delivered decision may sit unresolved with no board activity before the owner session is re-nudged (up to 3 reminders). A provider failure can kill the turn a decision triggered; without the nudge the board sits blocked while the orchestrator looks idle. 0 disables. |
 | `logEvents` | `compact` | `compact` or `full` |
 | `maxLogBytesPerRun` | 1000000 | 0 means unlimited |
 | `watchdogIdleSeconds` | 120 | 0–86400 |
