@@ -4385,19 +4385,32 @@ test("passive agent pane and session browser resolve every close", async () => {
       cycle(foreignCtx);
       assert.equal(firstPane.focused, false, "a foreign session cannot focus the owner pane");
 
+      // ctrl+alt+w on the docked pane replaces it with the centered focused
+      // viewer instead of focusing it in place against the right edge.
       cycle(runtime.ctx);
-      assert.equal(firstPane.focused, true);
+      await waitFor(() => firstPane.closed, "docked pane did not yield to the centered viewer");
+      await waitFor(() => runtime.overlays.length === 2, "centered pane did not open");
+      const centered = runtime.overlays[1];
+      assert.ok(centered);
+      assert.equal(centered.focused, true);
+      assert.deepEqual(centered.options.overlayOptions, {
+        anchor: "center",
+        width: "92%",
+        maxHeight: "92%",
+        margin: 1,
+      });
       assert.equal(runtime.isEditorFocused(), false);
-      firstPane.component.handleInput("\x1b\x17");
-      await waitFor(() => firstPane.closed, "shortcut did not dismiss the focused passive pane");
-      assert.equal(firstPane.hideCalls, 0, "OverlayHandle.hide must never close a custom pane");
+      centered.component.handleInput("\x1b\x17");
+      await waitFor(() => centered.closed, "shortcut did not dismiss the centered pane");
+      assert.equal(centered.hideCalls, 0, "OverlayHandle.hide must never close a custom pane");
       assert.equal(firstPane.disposeCalls, 1);
+      assert.equal(centered.disposeCalls, 1);
       assert.equal(runtime.isEditorFocused(), true);
       assert.notDeepEqual(renderLatestWidget(runtime), []);
 
       cycle(runtime.ctx);
-      await waitFor(() => runtime.overlays.length === 2, "agent-session viewer did not open");
-      const viewer = runtime.overlays[1];
+      await waitFor(() => runtime.overlays.length === 3, "agent-session viewer did not open");
+      const viewer = runtime.overlays[2];
       assert.ok(viewer);
       assert.equal(viewer.focused, true);
       assert.deepEqual(viewer.options.overlayOptions, {
@@ -4572,15 +4585,20 @@ test("review launches update the passive agent pane with transcript actions", as
       const output = reviewerPane.component.render?.(80).join("\n") ?? "";
       assert.match(output, /T1 · Review this · review #1 · single \[review\/model\]/);
       assert.match(output, /reviewer is checking/);
+      // The shortcut swaps the docked pane for the centered focused viewer;
+      // steering happens there.
       runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
-      reviewerPane.component.handleInput("s");
-      reviewerPane.component.handleInput("\r");
-      reviewerPane.component.handleInput("F");
-      for (const character of "summarize review") reviewerPane.component.handleInput(character);
-      reviewerPane.component.handleInput("\r");
+      await waitFor(() => runtime.overlays.length === 2, "centered reviewer pane did not open");
+      const focusedPane = runtime.overlays[1];
+      assert.ok(focusedPane);
+      assert.equal(focusedPane.focused, true);
+      focusedPane.component.handleInput("s");
+      focusedPane.component.handleInput("\r");
+      focusedPane.component.handleInput("F");
+      for (const character of "summarize review") focusedPane.component.handleInput(character);
+      focusedPane.component.handleInput("\r");
       assert.match(steered[0] ?? "", /^review:Stop - wrong approach/);
       assert.deepEqual(followedUp, ["review:summarize review"]);
-      reviewerPane.component.handleInput("\x1b");
 
       finishReviewer?.({
         exitCode: 0,
@@ -4593,11 +4611,10 @@ test("review launches update the passive agent pane with transcript actions", as
         () => loadBoard(cwd).tasks[0]?.status === "approved",
         "reviewer settlement did not approve the task"
       );
-      assert.equal(reviewerPane.closed, false, "review session should remain inspectable");
-      runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
-      reviewerPane.component.handleInput("\x1b\x17");
-      await waitFor(() => reviewerPane.closed, "reviewer pane did not close");
-      assert.equal(reviewerPane.hideCalls, 0);
+      assert.equal(focusedPane.closed, false, "review session should remain inspectable");
+      focusedPane.component.handleInput("\x1b\x17");
+      await waitFor(() => focusedPane.closed, "reviewer pane did not close");
+      assert.equal(focusedPane.hideCalls, 0);
     }
   );
 });

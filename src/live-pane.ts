@@ -794,7 +794,11 @@ export class LivePaneComponent {
             : " · open after drive settles"
           : " · /maestro agents to open in Pi"
         : "";
-    const hints = `←/→ session · j/k scroll · g/G top/end${actions}${open} · esc close`;
+    // An unfocused docked pane receives no keys, so interactive hints there
+    // are lies; the only reachable action is the global toggle.
+    const hints = this.focused
+      ? `←/→ session · j/k scroll · g/G top/end${actions}${open} · esc close`
+      : "ctrl+alt+w expand · twice to close";
     return this.theme.fg("dim", truncateToWidth(`${position} ${follow} · ${hints}`, width));
   }
 

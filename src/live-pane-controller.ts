@@ -80,8 +80,12 @@ export class LivePaneController {
             tui,
             cwd: ctx.cwd,
             onEscape: () => {
-              if (focused) this.close();
-              else pane.handle?.unfocus();
+              // The footer promises "esc close", so escape must actually close
+              // — and stay closed. Without suppression, sync() re-opened the
+              // auto pane on the next update tick, which read as "this pane
+              // cannot be closed".
+              this.suppressedAutoPaneDriveId = this.currentDriveId();
+              this.close();
               this.dependencies.refreshUI(ctx);
             },
             onCycleVisibility: () => this.cycle(ctx),
@@ -182,20 +186,15 @@ export class LivePaneController {
       return;
     }
     if (this.pane) {
-      if (!this.pane.isResponsiveVisible?.()) {
-        this.suppressedAutoPaneDriveId = this.currentDriveId();
-        this.close();
-        this.open(ctx, true);
-        this.dependencies.refreshUI(ctx);
-        return;
-      }
-      if (!this.pane.handle?.isFocused()) {
-        this.pane.handle?.focus();
-        this.dependencies.refreshUI(ctx);
-        return;
-      }
+      const wasFocused = this.pane.handle?.isFocused() ?? false;
+      const wasVisible = this.pane.isResponsiveVisible?.() ?? true;
+      // One key, one ladder: docked side pane → centered focused viewer →
+      // closed (suppressed until the next drive). Focusing the docked pane
+      // in place left it glued to the right edge over truncated chat text,
+      // which is exactly what users reported as broken.
       this.suppressedAutoPaneDriveId = this.currentDriveId();
       this.close();
+      if (!wasFocused || !wasVisible) this.open(ctx, true);
       this.dependencies.refreshUI(ctx);
       return;
     }

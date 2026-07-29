@@ -417,7 +417,7 @@ The compact activity widget remains visible while agents run. Set `livePanes` to
 /maestro board            phase-first project dashboard (aliases: dash, dashboard; also ctrl+alt+b)
 /maestro agents           browse rich live and completed executor/reviewer sessions
 /maestro workflows        browse, inspect, preview, run, save, or remove reusable workflows
-ctrl+alt+w                open or close the agent-session viewer
+ctrl+alt+w                cycle the agent viewer: docked pane → centered → closed
 /maestro open <taskId>    switch into an executor's session
 /maestro back             switch back to the previous session (after open/reviewer open)
 /maestro config           interactive settings editor (user scope)
