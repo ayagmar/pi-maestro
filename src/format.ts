@@ -310,6 +310,12 @@ export function taskLine(task: Task): string {
   return `${glyph} ${task.id} ${task.title} · ${STATUS_LABELS[task.status]}${attempts}${cost}`;
 }
 
+/** Character bound for text that is injected into a model conversation. */
+export function truncateCharacters(text: string, maxCharacters: number): string {
+  if (text.length <= maxCharacters) return text;
+  return `${text.slice(0, maxCharacters)}… (${text.length - maxCharacters} more characters)`;
+}
+
 export function truncateText(text: string, maxLines: number): string {
   const lines = text.split("\n");
   if (lines.length <= maxLines) return text;

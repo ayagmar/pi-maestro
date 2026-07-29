@@ -64,7 +64,7 @@ export function noProgressReason(tasks: Task[], dispatchResults: TaskSnapshot[])
   });
   const remedy =
     stuck.size > 0
-      ? `\n\n${stuck.size} task(s) cannot run until their cancelled or failed dependencies are resolved. Retry the blocking task, replace it with a successor via supersedesTaskId, or drop the dependency.`
+      ? `\n\n${stuck.size} task(s) cannot run until their cancelled or failed dependencies are resolved. Retry the blocking task, replace it with a successor via supersedesTaskId, or — when the cancellation was accidental (an aborted drive) — reactivate it with maestro_update { taskId, cancelled: false } and drive again.`
       : "";
   return {
     code: "no_progress",

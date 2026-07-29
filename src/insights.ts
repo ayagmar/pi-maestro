@@ -22,6 +22,12 @@ export interface ModelTierInsight {
   failures: Partial<Record<FailureKind, number>>;
   reviewerVerdicts: number;
   reviewerRejections: number;
+  /** Rejection retries that continued the predecessor's session. */
+  resumedRetries: number;
+  resumedRetryExecutorCost: number;
+  /** Rejection retries that started with a fresh context. */
+  freshRetries: number;
+  freshRetryExecutorCost: number;
 }
 
 export interface ModelInsights {
@@ -48,6 +54,24 @@ export function deriveModelInsights(boards: readonly Board[]): ModelInsights {
         seenAttempts.add(identity);
         const group = ensureGroup(groups, task.tier, model);
         group.attempts += 1;
+        // Retry economics: how much a second attempt costs when it resumes
+        // the rejected session versus re-deriving everything fresh. Reviewer
+        // spend is folded into attempt usage, so subtract it to compare the
+        // executor side alone.
+        if (attempt.index > 1) {
+          const reviewSpend = (attempt.reviewLaunches ?? []).reduce(
+            (sum, launch) => sum + launch.usage.cost,
+            0
+          );
+          const executorSpend = Math.max(0, attempt.usage.cost - reviewSpend);
+          if (attempt.resumed) {
+            group.resumedRetries += 1;
+            group.resumedRetryExecutorCost += executorSpend;
+          } else {
+            group.freshRetries += 1;
+            group.freshRetryExecutorCost += executorSpend;
+          }
+        }
         if (attempt.failureReason) {
           const kind = attempt.failureReason.kind;
           group.failures[kind] = (group.failures[kind] ?? 0) + 1;
@@ -104,11 +128,15 @@ export function formatModelInsights(
     const failures = FAILURE_KINDS.filter((kind) => group.failures[kind])
       .map((kind) => `${kind}:${group.failures[kind]}`)
       .join(", ");
+    const retryEconomics =
+      group.resumedRetries > 0 || group.freshRetries > 0
+        ? `\n  retries: resumed ${group.resumedRetries} ($${average(group.resumedRetryExecutorCost, group.resumedRetries)} avg exec) · fresh ${group.freshRetries} ($${average(group.freshRetryExecutorCost, group.freshRetries)} avg exec)`
+        : "";
     return [
       `${group.tier} · ${group.model}`,
       `  attempts ${group.attempts} · first-review approval ${firstReviewRate}`,
       `  avg cost / approved task ${averageApprovedCost}`,
-      `  reviewer rejection ${rejectionRate} · failures ${failures || "none"}`,
+      `  reviewer rejection ${rejectionRate} · failures ${failures || "none"}${retryEconomics}`,
     ].join("\n");
   });
 
@@ -147,6 +175,10 @@ function ensureGroup(
     failures: {},
     reviewerVerdicts: 0,
     reviewerRejections: 0,
+    resumedRetries: 0,
+    resumedRetryExecutorCost: 0,
+    freshRetries: 0,
+    freshRetryExecutorCost: 0,
     approvedTaskKeys: new Set<string>(),
   };
   groups.set(key, created);
@@ -167,6 +199,10 @@ function taskKey(task: Task): string {
 
 function attemptKey(taskIdentity: string, attempt: Task["attempts"][number]): string {
   return `${taskIdentity}\u0000${attempt.sessionFile ?? attempt.logFile}\u0000${attempt.startedAt}\u0000${attempt.index}`;
+}
+
+function average(total: number, count: number): string {
+  return count > 0 ? (total / count).toFixed(4) : "0.0000";
 }
 
 function rate(numerator: number, denominator: number): string {

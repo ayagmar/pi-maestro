@@ -87,6 +87,10 @@ test("model insights aggregate attempts, review outcomes, costs, and failures by
       failures: { provider_failure: 1 },
       reviewerVerdicts: 0,
       reviewerRejections: 0,
+      resumedRetries: 0,
+      resumedRetryExecutorCost: 0,
+      freshRetries: 0,
+      freshRetryExecutorCost: 0,
     },
     {
       model: "openai/model-a",
@@ -99,6 +103,10 @@ test("model insights aggregate attempts, review outcomes, costs, and failures by
       failures: { reviewer_rejection: 1 },
       reviewerVerdicts: 2,
       reviewerRejections: 1,
+      resumedRetries: 0,
+      resumedRetryExecutorCost: 0,
+      freshRetries: 1,
+      freshRetryExecutorCost: 0.2,
     },
   ]);
 
@@ -130,4 +138,34 @@ test("model insights render empty and bounded reports", () => {
   const bounded = formatModelInsights(deriveModelInsights(boards), 0, 450);
   assert.ok(bounded.length <= 450);
   assert.match(bounded, /group\(s\) omitted by report bound/);
+});
+
+test("insights compare resumed and fresh retry executor economics", () => {
+  const first = attempt(1, "model-a", 10, "request_changes");
+  const resumedRetry = attempt(2, "model-a", 3.5, "approve");
+  resumedRetry.resumed = true;
+  const firstB = attempt(1, "model-a", 9, "request_changes");
+  const freshRetry = attempt(2, "model-a", 12.5, "approve");
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [
+      task("T1", "standard", "approved", [first, resumedRetry]),
+      task("T2", "standard", "approved", [firstB, freshRetry]),
+    ],
+  };
+
+  const insights = deriveModelInsights([board]);
+  const group = insights.groups.find((entry) => entry.model === "openai/model-a");
+  assert.ok(group);
+  assert.equal(group.resumedRetries, 1);
+  assert.equal(group.resumedRetryExecutorCost, 3.5);
+  assert.equal(group.freshRetries, 1);
+  assert.equal(group.freshRetryExecutorCost, 12.5);
+  // First attempts are not retries.
+  const report = formatModelInsights(insights, 0);
+  assert.match(
+    report,
+    /retries: resumed 1 \(\$3\.5000 avg exec\) · fresh 1 \(\$12\.5000 avg exec\)/
+  );
 });

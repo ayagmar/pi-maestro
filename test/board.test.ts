@@ -1448,3 +1448,22 @@ test("a write overlap with stopped work suggests superseding it in the same call
   assert.match(plain, /T1 and T2 both write "src\/x\.ts"/);
   assert.doesNotMatch(plain, /supersedesTaskId/);
 });
+
+test("a broad glob in writePaths is named as the overlap cause", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  createTask(board, {
+    title: "Specific",
+    brief: "one file",
+    tier: "standard",
+    writePaths: ["app/src/test/One.kt"],
+  });
+  createTask(board, {
+    title: "Omnibus glob",
+    brief: "everything",
+    tier: "standard",
+    writePaths: ["app/src/test/**"],
+  });
+  const message = planValidationMessage(validatePlan(board)) ?? "";
+  assert.match(message, /claims every file under that tree/);
+  assert.match(message, /list the specific files each task edits/);
+});

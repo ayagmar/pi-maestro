@@ -29,6 +29,8 @@
 
 ### Fixed
 
+- Decision evidence injected into the owner conversation is character-bounded. The old bound counted lines, which a single enormous line (or a multi-task escalation with executor-report tails) never hit.
+- A write-scope overlap caused by a broad glob now names the glob: "app/src/test/**" claims every file under that tree, and a real recovery plan burned a full model turn discovering that. The no_progress remedy for tasks blocked by an accidentally cancelled dependency (an aborted drive) now names the one-step fix: reactivate it with maestro_update cancelled: false.
 - The auto-opened live agent pane can actually be dismissed now. Its footer promised "esc close" while escape only unfocused it, and the auto-open re-created it on the next update, so the pane read as unclosable. Escape now closes and suppresses it for the current drive, `ctrl+alt+w` cycles docked pane → centered focused viewer → closed instead of focusing the docked pane in place against the right edge, and the docked pane's footer shows the only hint that is actually reachable while it is unfocused.
 - Typing a goal after `/maestro plan` on a new project no longer falls through to the empty review view with "Board is empty. Plan tasks with maestro_plan" — advice addressed to the model. The command now points at `/maestro start` with the typed goal intact, and the empty-board review warning names the human entry point.
 - A terminal "completed" decision left unresolved by a closed session no longer blocks every other session from starting a drive; it is auto-resolved when a new drive reserves the board. Actionable decisions (escalations, blocks) keep their ownership guard, and the refusal now names the real blocker — which decision kind, which owning session, and the remedy — instead of the misleading "another session already owns an active or paused drive".
@@ -72,6 +74,8 @@
 - Executor and review tiers may now override idle-seconds, warning-turn, and termination-turn watchdog thresholds while omitted values inherit the global settings.
 
 ### Observability
+
+- Resumed rejection retries are marked on the attempt and `/maestro insights` compares retry economics per model/tier: average executor cost of retries that resumed the rejected session versus retries that started fresh, so the `retryContext` saving is measured instead of assumed.
 
 - `/maestro insights` now renders a bounded, model-free aggregation over current and archived boards with per-model/tier attempts, first-review approval, approved-task cost, failure kinds, and reviewer rejection rates.
 - Plan approval and drive scale preflight now show a clearly labeled projected-cost estimate, preferring archived per-model-and-tier launch averages before model pricing metadata and a documented static fallback.

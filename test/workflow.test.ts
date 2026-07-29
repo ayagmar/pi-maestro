@@ -4360,6 +4360,10 @@ test("a rejection retry resumes the prior attempt's session with a findings-only
 
     assert.equal(result.stoppedBecause.code, "completed");
     assert.equal(launches.length, 2);
+    // The retry is recorded as resumed so insights can compare retry economics.
+    const attempts = loadBoard(cwd).tasks[0]?.attempts ?? [];
+    assert.equal(attempts[0]?.resumed, undefined);
+    assert.equal(attempts[1]?.resumed, true);
     // First attempt: fresh full prompt, no resume.
     assert.equal(launches[0]?.resumeSessionFile, undefined);
     assert.match(launches[0]?.prompt ?? "", /## Task T1/);

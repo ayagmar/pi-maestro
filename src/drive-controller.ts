@@ -16,7 +16,7 @@ import {
 import { loadConfig, resolveTierModels } from "./config.js";
 import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
-import { truncateText } from "./format.js";
+import { truncateCharacters, truncateText } from "./format.js";
 import { preflightWorkflow } from "./preflight.js";
 import {
   type startExecutor as defaultStartExecutor,
@@ -593,7 +593,11 @@ export function persistDriveDecision(
         0,
         64
       ),
-      evidence: truncateText(evidence, 4000),
+      // Evidence is injected verbatim into the owner conversation. The line
+      // bound alone never bit (an escalation with executor-report tails is
+      // hundreds of lines but well under 4000), so a character bound keeps a
+      // multi-task decision from flooding the orchestrator's context.
+      evidence: truncateCharacters(truncateText(evidence, 200), 12_000),
       allowedInterventions: summary.stoppedBecause.code === "completed" ? [] : ["handoff", "abort"],
       createdAt: Date.now(),
     };

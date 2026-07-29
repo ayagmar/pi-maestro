@@ -72,6 +72,8 @@ export interface Attempt {
   model?: string;
   /** Provider parsed from the resolved model id, when available. */
   provider?: string;
+  /** This attempt continued the rejected predecessor's session instead of starting fresh. */
+  resumed?: boolean;
   /** Opt-in detached RPC transport metadata used for PID-safe startup recovery. */
   detached?: boolean;
   pid?: number;
@@ -256,6 +258,8 @@ export interface PlanValidation {
     leftTaskId: string;
     rightTaskId: string;
     path: string;
+    /** The other claimant's matching path when it differs (globs overlap unequal paths). */
+    counterpartPath?: string;
     /** Claimant statuses, so the message can suggest superseding stopped work. */
     leftStatus?: TaskStatus;
     rightStatus?: TaskStatus;

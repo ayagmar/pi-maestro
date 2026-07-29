@@ -1801,16 +1801,26 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
     if (!left) continue;
     for (const right of unresolved.slice(leftIndex + 1)) {
       if (dependsTransitively(left, right.id) || dependsTransitively(right, left.id)) continue;
-      const path = left.writePaths?.find((candidate) =>
-        right.writePaths?.some((other) => writePathsOverlap(candidate, other))
-      );
-      if (path) {
+      let path: string | undefined;
+      let counterpartPath: string | undefined;
+      for (const candidate of left.writePaths ?? []) {
+        const other = right.writePaths?.find((entry) => writePathsOverlap(candidate, entry));
+        if (other !== undefined) {
+          path = candidate;
+          counterpartPath = other;
+          break;
+        }
+      }
+      if (path !== undefined) {
         writePathOverlapCount += 1;
         if (writePathOverlaps.length < MAX_PLAN_VALIDATION_OVERLAPS) {
           writePathOverlaps.push({
             leftTaskId: left.id,
             rightTaskId: right.id,
             path,
+            ...(counterpartPath !== undefined && counterpartPath !== path
+              ? { counterpartPath }
+              : {}),
             leftStatus: left.status,
             rightStatus: right.status,
           });
@@ -1890,6 +1900,7 @@ export function planValidationMessage(validation: PlanValidation): string | unde
   // which buries the other problems. Report the file once with its claimants.
   const overlapsByPath = new Map<string, Set<string>>();
   const claimantStatuses = new Map<string, string>();
+  const globsByPath = new Map<string, Set<string>>();
   for (const overlap of validation.writePathOverlaps ?? []) {
     const claimants = overlapsByPath.get(overlap.path) ?? new Set<string>();
     claimants.add(overlap.leftTaskId);
@@ -1897,6 +1908,13 @@ export function planValidationMessage(validation: PlanValidation): string | unde
     overlapsByPath.set(overlap.path, claimants);
     if (overlap.leftStatus) claimantStatuses.set(overlap.leftTaskId, overlap.leftStatus);
     if (overlap.rightStatus) claimantStatuses.set(overlap.rightTaskId, overlap.rightStatus);
+    for (const candidate of [overlap.path, overlap.counterpartPath]) {
+      if (candidate?.includes("**")) {
+        const globs = globsByPath.get(overlap.path) ?? new Set<string>();
+        globs.add(candidate);
+        globsByPath.set(overlap.path, globs);
+      }
+    }
   }
   // A conflict with stopped work is usually a replacement, and superseding it
   // both cancels the predecessor and releases its write scope in one call.
@@ -1904,10 +1922,18 @@ export function planValidationMessage(validation: PlanValidation): string | unde
   for (const [path, claimantSet] of overlapsByPath) {
     const claimants = [...claimantSet].sort();
     const stopped = claimants.filter((id) => supersedable.has(claimantStatuses.get(id) ?? ""));
-    const hint =
-      stopped.length > 0
-        ? `; ${stopped.join(", ")} ${stopped.length === 1 ? "is" : "are"} stopped — if the new task replaces it, set supersedesTaskId in the same maestro_plan call`
+    // A broad glob claims every file under a tree and therefore conflicts
+    // with every task touching it; a real plan rejection burned a full model
+    // turn discovering that "app/src/test/**" was the problem.
+    const globs = [...(globsByPath.get(path) ?? [])];
+    const globHint =
+      globs.length > 0
+        ? `; ${globs.map((glob) => `"${glob}"`).join(" and ")} claims every file under that tree — list the specific files each task edits instead of a broad glob`
         : "";
+    const hint =
+      (stopped.length > 0
+        ? `; ${stopped.join(", ")} ${stopped.length === 1 ? "is" : "are"} stopped — if the new task replaces it, set supersedesTaskId in the same maestro_plan call`
+        : "") + globHint;
     addProblem(
       claimants.length > 2
         ? `${claimants.join(", ")} all write "${path}"; give it to one task or chain them with dependsOn${hint}`

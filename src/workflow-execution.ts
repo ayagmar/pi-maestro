@@ -282,6 +282,7 @@ export async function executeTask(options: {
       return snapshot(failed ?? task, message);
     }
     run.attempt.index = attemptIndex;
+    if (resumeSessionFile) run.attempt.resumed = true;
     if (executionFingerprint) run.attempt.executionFingerprint = executionFingerprint;
     if (executionComponentHashes) run.attempt.executionComponentHashes = executionComponentHashes;
     run.attempt.promptCharacters = promptContext.characters;

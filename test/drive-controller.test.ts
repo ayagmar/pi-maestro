@@ -593,3 +593,24 @@ test("reminders are bounded and a reload re-arms a previously delivered decision
     assert.deepEqual(foreign, []);
   });
 });
+
+test("decision evidence is bounded by characters, not only lines", () => {
+  withBoard((cwd) => {
+    saveBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+    // One enormous single line defeated the old line-based bound entirely.
+    const flood = `escalated: ${"x".repeat(50_000)}`;
+    persistDriveDecision(
+      cwd,
+      owner,
+      {
+        rounds: 1,
+        tasks: [],
+        stoppedBecause: { code: "escalation_required", message: flood },
+      },
+      flood
+    );
+    const evidence = loadBoard(cwd).activeDecision?.evidence ?? "";
+    assert.ok(evidence.length <= 12_100, `evidence is ${evidence.length} characters`);
+    assert.match(evidence, /more characters\)/);
+  });
+});
