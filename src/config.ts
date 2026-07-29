@@ -36,7 +36,10 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   reviewRequiredApprovals: 2,
   maxReviewerLaunches: 4,
   maxCostPerTask: 5,
+  maxCostPerReview: 0,
   maxRunCost: 25,
+  reviewRejectionLimit: 2,
+  retryContext: "resume",
   statusWaitSeconds: 60,
   logEvents: "compact",
   maxLogBytesPerRun: 1_000_000,
@@ -216,7 +219,10 @@ export function mergeConfig(
     reviewRequiredApprovals: override.reviewRequiredApprovals ?? base.reviewRequiredApprovals ?? 2,
     maxReviewerLaunches: override.maxReviewerLaunches ?? base.maxReviewerLaunches ?? 4,
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
+    maxCostPerReview: override.maxCostPerReview ?? base.maxCostPerReview ?? 0,
     maxRunCost: override.maxRunCost ?? base.maxRunCost,
+    reviewRejectionLimit: override.reviewRejectionLimit ?? base.reviewRejectionLimit ?? 2,
+    retryContext: override.retryContext ?? base.retryContext ?? "resume",
     statusWaitSeconds: override.statusWaitSeconds ?? base.statusWaitSeconds,
     logEvents: override.logEvents ?? base.logEvents ?? "compact",
     maxLogBytesPerRun: override.maxLogBytesPerRun ?? base.maxLogBytesPerRun ?? 1_000_000,
@@ -265,7 +271,10 @@ const CONFIG_KEYS = new Set([
   "reviewRequiredApprovals",
   "maxReviewerLaunches",
   "maxCostPerTask",
+  "maxCostPerReview",
   "maxRunCost",
+  "reviewRejectionLimit",
+  "retryContext",
   "statusWaitSeconds",
   "logEvents",
   "maxLogBytesPerRun",
@@ -302,6 +311,12 @@ export function validateConfig(value: unknown): string | undefined {
   ) {
     return "reviewPolicy must be single, confirm, or find-and-refute";
   }
+  if (
+    config.retryContext !== undefined &&
+    !["resume", "fresh"].includes(config.retryContext as string)
+  ) {
+    return "retryContext must be resume or fresh";
+  }
   const ranges: Record<string, [number, number]> = {
     maxParallel: [1, 64],
     maxAttempts: [1, 100],
@@ -313,7 +328,9 @@ export function validateConfig(value: unknown): string | undefined {
     reviewRequiredApprovals: [2, 8],
     maxReviewerLaunches: [1, 16],
     maxCostPerTask: [0, 1_000_000],
+    maxCostPerReview: [0, 1_000_000],
     maxRunCost: [0, 1_000_000],
+    reviewRejectionLimit: [1, 10],
     statusWaitSeconds: [0, 240],
     maxLogBytesPerRun: [0, 1_000_000_000],
     watchdogIdleSeconds: [0, 86_400],
@@ -343,6 +360,7 @@ export function validateConfig(value: unknown): string | undefined {
     "confirmationTotalLaunches",
     "reviewRequiredApprovals",
     "maxReviewerLaunches",
+    "reviewRejectionLimit",
   ]) {
     if (config[key] !== undefined && !Number.isInteger(config[key])) {
       return `${key} must be an integer`;
@@ -616,7 +634,10 @@ export function describeConfig(config: MaestroConfig): string {
     `reviewRequiredApprovals: ${config.reviewRequiredApprovals ?? 2}`,
     `maxReviewerLaunches: ${config.maxReviewerLaunches ?? 4}`,
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
+    `maxCostPerReview: ${!config.maxCostPerReview ? "inherit maxCostPerTask" : `$${config.maxCostPerReview}`}`,
     `maxRunCost: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,
+    `reviewRejectionLimit: ${config.reviewRejectionLimit ?? 2}`,
+    `retryContext: ${config.retryContext ?? "resume"}`,
     `statusWaitSeconds: ${config.statusWaitSeconds}`,
     `logEvents: ${config.logEvents ?? "compact"}`,
     `maxLogBytesPerRun: ${config.maxLogBytesPerRun === 0 ? "unlimited" : (config.maxLogBytesPerRun ?? 1_000_000)}`,

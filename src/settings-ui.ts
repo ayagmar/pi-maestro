@@ -182,6 +182,7 @@ export function applySettingsChange(
   else if (id === "maxParallel") config.maxParallel = Number(value);
   else if (id === "useWorktrees") config.useWorktrees = value === "on";
   else if (id === "detachedExecutors") config.detachedExecutors = value === "on";
+  else if (id === "retryContext") config.retryContext = value === "fresh" ? "fresh" : "resume";
   else if (id === "autoCommit") config.autoCommit = value === "on";
   else if (id === "cleanupCompletedTasks") config.cleanupCompletedTasks = value === "on";
   else if (id === "maxAttempts") config.maxAttempts = Number(value);
@@ -202,6 +203,10 @@ export function applySettingsChange(
     config.maxReviewerLaunches = Number(value);
   } else if (id === "maxCostPerTask") {
     config.maxCostPerTask = value === "off" ? 0 : Number(value.slice(1));
+  } else if (id === "maxCostPerReview") {
+    config.maxCostPerReview = value === "inherit" ? 0 : Number(value.slice(1));
+  } else if (id === "reviewRejectionLimit") {
+    config.reviewRejectionLimit = Number(value);
   } else if (id === "maxRunCost") {
     config.maxRunCost = value === "off" ? 0 : Number(value.slice(1));
   } else if (id === "statusWaitSeconds") {
@@ -465,6 +470,14 @@ export async function showSettings(
             description: "Unix only. Keep isolated executor RPC processes alive across Pi exits.",
           },
           {
+            id: "retryContext",
+            label: "Rejection retry context",
+            currentValue: config.retryContext ?? "resume",
+            values: ["resume", "fresh"],
+            description:
+              "resume continues the rejected attempt's session (cached history, no re-reading); fresh restarts every attempt with a clean context.",
+          },
+          {
             id: "cleanupCompletedTasks",
             label: "Clear completed live board",
             currentValue: (config.cleanupCompletedTasks ?? true) ? "on" : "off",
@@ -562,6 +575,22 @@ export async function showSettings(
           currentValue: String(config.maxReviewerLaunches ?? 4),
           values: ["2", "3", "4", "6", "8"],
           description: "Hard bound including provider fallbacks for one review attempt.",
+        },
+        {
+          id: "maxCostPerReview",
+          label: "Cost cap per reviewer launch (USD)",
+          currentValue: !config.maxCostPerReview ? "inherit" : `$${config.maxCostPerReview}`,
+          values: ["inherit", "$1", "$2", "$5", "$10"],
+          description:
+            "Abort one reviewer launch after it exceeds this cost. Inherit uses the per-attempt cap.",
+        },
+        {
+          id: "reviewRejectionLimit",
+          label: "Rejections before escalation",
+          currentValue: String(config.reviewRejectionLimit ?? 2),
+          values: ["1", "2", "3", "4"],
+          description:
+            "Consecutive genuine reviewer rejections before a task escalates instead of retrying.",
         },
         ...modelItems(config.tiers.review ? ["review"] : []),
       ];

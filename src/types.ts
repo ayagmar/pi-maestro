@@ -424,8 +424,20 @@ export interface MaestroConfig {
   maxReviewerLaunches: number;
   /** Abort an executor once its attempt cost (USD) exceeds this. 0 disables the cap. */
   maxCostPerTask: number;
-  /** Stop starting executor batches once total board cost (USD) exceeds this. 0 disables the cap. */
+  /** Abort one reviewer launch once its cost (USD) exceeds this. 0 inherits maxCostPerTask. */
+  maxCostPerReview?: number;
+  /** Stop starting executor batches once active (non-cancelled) board cost (USD) exceeds this. 0 disables the cap. */
   maxRunCost: number;
+  /** Consecutive genuine reviewer rejections before a task escalates instead of retrying. */
+  reviewRejectionLimit?: number;
+  /**
+   * Context strategy for review-rejection retries. "resume" continues the
+   * rejected attempt's own session (the model keeps everything it already
+   * read, and providers bill the history at cached rates); "fresh" starts
+   * every attempt with a clean context. Provider fallbacks, human retries,
+   * and discovery tasks always start fresh.
+   */
+  retryContext?: "resume" | "fresh";
   /** How long the human status command waits (seconds) for running executors before returning progress. 0 disables waiting. */
   statusWaitSeconds: number;
   /** Event detail mirrored to per-run JSONL logs. */

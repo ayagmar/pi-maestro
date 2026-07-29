@@ -57,6 +57,8 @@
 
 ### Configuration
 
+- `maxCostPerReview` caps one reviewer launch separately from `maxCostPerTask` (0 inherits it), `reviewRejectionLimit` makes the escalation threshold configurable (integer 1–10, default 2), and `retryContext` chooses between resuming a review-rejected attempt's session and fresh-context retries. All three are validated, shown by `/maestro config`, and editable in the settings UI.
+
 - Executor and review tiers may now override idle-seconds, warning-turn, and termination-turn watchdog thresholds while omitted values inherit the global settings.
 
 ### Observability
