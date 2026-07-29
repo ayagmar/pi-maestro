@@ -4833,3 +4833,23 @@ test("planned tasks inherit the project review policy unless the plan states one
     }
   );
 });
+
+test("typing a goal after /maestro plan points at /maestro start with the text intact", async () => {
+  await withBoard(
+    (cwd) => {
+      saveBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+    },
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+      await command.handler("plan build a health endpoint with tests", ctx);
+      const notice = notices.at(-1) ?? "";
+      assert.match(notice, /\/maestro start build a health endpoint with tests/);
+      assert.doesNotMatch(notice, /maestro_plan/);
+
+      // The bare review command on an empty board names the human entry point
+      // instead of advising the human to call a model tool.
+      await command.handler("plan", ctx);
+      assert.match(notices.at(-1) ?? "", /Start a goal with \/maestro start <goal>/);
+    }
+  );
+});

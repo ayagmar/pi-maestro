@@ -118,5 +118,19 @@ export async function handlePlanCommand(
     return;
   }
 
+  // "/maestro plan <goal text>" is the most natural first thing to type on a
+  // new project, and it used to fall through to the review view, which then
+  // warned about an empty board with advice addressed to the model. Name the
+  // command that actually starts planning, with the user's own text intact.
+  if (planAction !== undefined) {
+    const goal = restParts.join(" ");
+    notify(
+      ctx,
+      `/${COMMAND} plan reviews a pending plan (subcommands: export, import, diff). To plan a new goal, use: /${COMMAND} start ${goal}`,
+      "warning"
+    );
+    return;
+  }
+
   await runtime.reviewPlan(ctx);
 }

@@ -39,7 +39,11 @@ export async function showPlanReview(
   while (true) {
     const board = loadBoard(ctx.cwd);
     if (board.tasks.length === 0) {
-      notify(ctx, "Board is empty. Plan tasks with maestro_plan.", "warning");
+      notify(
+        ctx,
+        "Board is empty. Start a goal with /maestro start <goal>; the model then plans tasks for review here.",
+        "warning"
+      );
       return;
     }
     if (!board.planPending) {
