@@ -187,7 +187,7 @@ test("active drive reservation cannot replace a foreign active or paused owner",
         id: "drive-foreign",
         ownerSession: "/tmp/foreign.jsonl",
         startedAt: 2,
-      }),
+      }).ok,
       false
     );
     assert.equal(loadBoard(cwd).activeDrive?.id, "drive-owner");
@@ -203,7 +203,7 @@ test("active drive reservation cannot replace a foreign active or paused owner",
         id: "drive-foreign",
         ownerSession: "/tmp/foreign.jsonl",
         startedAt: 2,
-      }),
+      }).ok,
       false
     );
     assert.equal(loadBoard(cwd).pausedDrive?.ownerSession, owner);
@@ -422,5 +422,63 @@ test("drive heartbeat is disabled when the pulse interval is zero", () => {
     );
     assert.equal(scheduled, false);
     stop();
+  });
+});
+
+test("a foreign completed decision cannot deadlock a new drive reservation", () => {
+  withBoard((cwd) => {
+    // The exact production deadlock: a drive completed, its terminal
+    // "completed" decision was delivered to a session that is now gone, and
+    // every other session was refused with a misleading ownership error.
+    saveBoard(cwd, {
+      version: 1,
+      nextTaskNumber: 1,
+      activeDecision: decision({
+        kind: "completed",
+        ownerSession: "/tmp/dead-session.jsonl",
+        deliveredAt: Date.now(),
+      }),
+      tasks: [],
+    });
+
+    const reserved = persistActiveDrive(cwd, {
+      id: "drive-new",
+      ownerSession: owner,
+      startedAt: Date.now(),
+    });
+    assert.equal(reserved.ok, true);
+    const board = loadBoard(cwd);
+    assert.equal(board.activeDrive?.id, "drive-new");
+    assert.equal(board.activeDecision?.resolution?.intervention, "resume");
+  });
+});
+
+test("a foreign actionable decision refuses reservation and names the blocker", () => {
+  withBoard((cwd) => {
+    saveBoard(cwd, {
+      version: 1,
+      nextTaskNumber: 1,
+      activeDecision: decision({
+        kind: "escalation_required",
+        ownerSession: "/tmp/sessions/other-owner.jsonl",
+      }),
+      tasks: [],
+    });
+
+    const reserved = persistActiveDrive(cwd, {
+      id: "drive-new",
+      ownerSession: owner,
+      startedAt: Date.now(),
+    });
+    assert.equal(reserved.ok, false);
+    if (!reserved.ok) {
+      assert.match(reserved.reason, /escalation_required decision/);
+      assert.match(reserved.reason, /other-owner\.jsonl/);
+      assert.match(reserved.reason, /act on it from that session/);
+    }
+    // The pending judgment is preserved untouched for its owner.
+    const board = loadBoard(cwd);
+    assert.equal(board.activeDrive, undefined);
+    assert.equal(board.activeDecision?.resolution, undefined);
   });
 });

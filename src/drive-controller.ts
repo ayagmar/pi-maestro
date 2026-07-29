@@ -202,7 +202,7 @@ export class DriveRuntimeController {
       ...(taskIds ? { taskIds } : {}),
       startedAt: Date.now(),
     });
-    if (!reserved) throw new Error("Another session already owns an active or paused drive.");
+    if (!reserved.ok) throw new Error(`Drive not started: ${reserved.reason}`);
 
     try {
       this.begin(control);
@@ -673,15 +673,47 @@ export function acknowledgeDeliveredDecision(cwd: string, decisionId: string): b
   });
 }
 
-export function persistActiveDrive(cwd: string, activeDrive: ActiveDriveState): boolean {
-  let persisted = false;
+export type DriveReservation = { ok: true } | { ok: false; reason: string };
+
+function describeOwnerSession(ownerSession: string | undefined): string {
+  return ownerSession ? `session ${basename(ownerSession)}` : "an unidentified session";
+}
+
+export function persistActiveDrive(cwd: string, activeDrive: ActiveDriveState): DriveReservation {
+  let result: DriveReservation = {
+    ok: false,
+    reason: "the board changed concurrently; inspect it and try again",
+  };
   updateBoard(cwd, (board) => {
-    if (board.activeDrive && board.activeDrive.id !== activeDrive.id) return false;
+    if (board.activeDrive && board.activeDrive.id !== activeDrive.id) {
+      result = {
+        ok: false,
+        reason: `an active drive is owned by ${describeOwnerSession(board.activeDrive.ownerSession)}; wait for it, or abort it from that session`,
+      };
+      return false;
+    }
     if (board.pausedDrive && board.pausedDrive.ownerSession !== activeDrive.ownerSession) {
+      result = {
+        ok: false,
+        reason: `a paused drive is owned by ${describeOwnerSession(board.pausedDrive.ownerSession)}; resume it from that session, or /maestro reset`,
+      };
       return false;
     }
     if (board.activeDecision && !board.activeDecision.resolution) {
-      if (board.activeDecision.ownerSession !== activeDrive.ownerSession) return false;
+      const foreignDecision = board.activeDecision.ownerSession !== activeDrive.ownerSession;
+      // A "completed" decision is a terminal notification, not a pending
+      // judgment. Requiring its (possibly long-dead) owner session to
+      // acknowledge it before anyone else may drive deadlocked the board
+      // behind a message nobody can read anymore. Actionable decisions keep
+      // their ownership guard so a foreign session cannot steal a pending
+      // escalation.
+      if (foreignDecision && board.activeDecision.kind !== "completed") {
+        result = {
+          ok: false,
+          reason: `an unresolved ${board.activeDecision.kind} decision is owned by ${describeOwnerSession(board.activeDecision.ownerSession)}; act on it from that session, or /maestro reset to archive the board`,
+        };
+        return false;
+      }
       if (board.activeDecision.kind !== "stale_completion") {
         board.activeDecision.resolution = { intervention: "resume", resolvedAt: Date.now() };
         delete board.activeDecision.deliveryClaim;
@@ -689,10 +721,10 @@ export function persistActiveDrive(cwd: string, activeDrive: ActiveDriveState): 
     }
     delete board.pausedDrive;
     board.activeDrive = activeDrive;
-    persisted = true;
+    result = { ok: true };
     return true;
   });
-  return persisted;
+  return result;
 }
 
 export function clearActiveDrive(cwd: string, driveId: string): boolean {

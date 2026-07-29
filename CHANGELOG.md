@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- A terminal "completed" decision left unresolved by a closed session no longer blocks every other session from starting a drive; it is auto-resolved when a new drive reserves the board. Actionable decisions (escalations, blocks) keep their ownership guard, and the refusal now names the real blocker — which decision kind, which owning session, and the remedy — instead of the misleading "another session already owns an active or paused drive".
 - The run budget counts only active tasks, so spend sunk in cancelled or superseded predecessors no longer starves their own recovery tasks; the warning reports the sunk amount separately. Every executor and reviewer launch is additionally capped at the remaining run budget, so a launch dispatched just under the cap cannot overshoot it by a full attempt, and reviewer launches honor `maxCostPerReview`.
 - Drive summaries count reviewer processes as launches, split executor from review spend, price the average billed launch over real launches, and report the per-drive delta beside board-lifetime totals — a no-op resume previously re-printed the whole board's historical spend as if it had just happened.
 - Escalation decisions carry bounded executor evidence (report, touched files, per-task spend) beside the reviewer findings, one rejection failing four or more distinct criteria escalates immediately as an omnibus-task signal instead of re-billing a full retry cycle, and the recovery guidance distinguishes brief edits (resume) from supersession (drive the successor).
