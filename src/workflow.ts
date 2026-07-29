@@ -11,7 +11,7 @@ import {
   validatePlan,
 } from "./board.js";
 import { loadConfig, resolveTierModels } from "./config.js";
-import { runBudgetWarning } from "./format.js";
+import { boardUsage, remainingRunBudget, runBudgetWarning } from "./format.js";
 import { mapWithConcurrencyLimit } from "./runner.js";
 import { type MaestroConfig, type Task, type TierConfig } from "./types.js";
 import {
@@ -163,10 +163,14 @@ export async function driveBoard(options: {
   };
 
   const selectedTasks = (): Task[] => loadBoard(cwd).tasks.filter(isSelected);
+  // Task totals in the summary are board-lifetime; the per-drive delta keeps
+  // a no-op resume from re-reporting historical spend as fresh cost.
+  const boardCostAtStart = boardUsage(loadBoard(cwd).tasks).cost;
   const finish = (stoppedBecause: DriveStopReason): DriveSummary => ({
     rounds,
     tasks: selectedTasks().map((task) => snapshot(task)),
     stoppedBecause,
+    driveCost: Math.max(0, boardUsage(loadBoard(cwd).tasks).cost - boardCostAtStart),
   });
 
   // A new, explicit drive invocation is the retry boundary for an operational
@@ -368,6 +372,10 @@ export async function driveBoard(options: {
           throw error;
         }
 
+        // A launch that starts with less run budget than its per-attempt cap
+        // must stop at the budget, not sail past it: the run cap is otherwise
+        // only enforced between rounds, after the money is spent.
+        const executeBudget = remainingRunBudget(loadBoard(cwd).tasks, config.maxRunCost);
         const executeResults = await mapWithConcurrencyLimit(
           dispatchable,
           config.maxParallel,
@@ -386,6 +394,7 @@ export async function driveBoard(options: {
               onUpdate,
               trackRun,
             };
+            if (executeBudget !== undefined) executeOptions.remainingRunBudget = executeBudget;
             const worktree = worktrees.get(task.id);
             if (worktree) executeOptions.worktree = worktree;
             if (signal) executeOptions.signal = signal;
@@ -496,6 +505,17 @@ export async function driveBoard(options: {
           0,
           Math.max(0, config.maxTotalLaunchesPerRun - rawLaunches)
         );
+        // Reviews on hard tiers can cost nearly as much as the attempts they
+        // judge; maxCostPerReview lets an operator cap that separately, and the
+        // remaining run budget bounds the launch either way.
+        const reviewCostCap =
+          config.maxCostPerReview && config.maxCostPerReview > 0
+            ? config.maxCostPerReview
+            : config.maxCostPerTask;
+        const reviewBudget = remainingRunBudget(afterRuns.tasks, config.maxRunCost);
+        const reviewLaunchCaps = [reviewCostCap, reviewBudget].filter(
+          (cap): cap is number => cap !== undefined && cap > 0
+        );
         const reviewResults = await mapWithConcurrencyLimit(
           reviewDispatchable,
           config.maxParallel,
@@ -509,7 +529,7 @@ export async function driveBoard(options: {
               autoCommit: config.autoCommit,
               reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
               maxReviewerLaunches: config.maxReviewerLaunches ?? 4,
-              maxCostPerLaunch: config.maxCostPerTask,
+              maxCostPerLaunch: reviewLaunchCaps.length > 0 ? Math.min(...reviewLaunchCaps) : 0,
               availableTiers: Object.keys(config.tiers),
               onUpdate,
               trackRun,

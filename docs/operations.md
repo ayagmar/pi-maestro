@@ -11,7 +11,7 @@ Maestro preserves board state, attempts, logs, sessions, and checkpoint branches
 | `attempt_cap` | Create a narrow successor with `supersedesTaskId`; Maestro atomically cancels the predecessor and rewires dependents, then drive the successor scope. Do not raise the cap. | Capped predecessor and every attempt. |
 | `escalation_required` / `reviewer_rejection` | Refine criteria/brief/tier, split, cancel, or hand off; then resume. | Findings and review launches. |
 | `stalled` | Inspect the session/log; steer, abort, or refine before retrying. | Watchdog failure reason and log. |
-| `cost_cap` / `budget_blocked` | Inspect `/maestro costs`; explicitly change scope or operator config. | Usage and prompt accounting. |
+| `cost_cap` / `budget_blocked` | Inspect `/maestro costs`; explicitly change scope or operator config. The run budget counts active tasks only: spend sunk in cancelled or superseded tasks is reported separately and does not starve successor tasks. | Usage and prompt accounting. |
 | `launch_limit` | Inspect retained launches, narrow the scope, or explicitly start another bounded drive. | Every executor and reviewer launch attempted by the drive. |
 | `stale_completion` | Inspect the component reason, then `/maestro retry <taskId>` or create a successor. | Legacy approval, prior artifact, provenance, attempts, and dependency identities. |
 | `user_abort` / `aborted` | Resume or explicitly retry only after checking partial work. | Attempt metadata and a checkpoint branch; the idle checkout is removed. |

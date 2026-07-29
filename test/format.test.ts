@@ -169,11 +169,24 @@ test("formatBoardProgress excludes cancelled tasks from active progress", () => 
   assert.equal(formatBoardProgress(tasks.slice(0, 2)), "2/2");
 });
 
-test("run budget gates only when total board cost exceeds a positive cap", () => {
+test("run budget gates only when active board cost exceeds a positive cap", () => {
   const tasks = [makeTask({ attempts: [makeAttempt(5, 1)] })];
   assert.equal(runBudgetWarning(tasks, 0), undefined);
   assert.equal(runBudgetWarning(tasks, 5), undefined);
-  assert.equal(runBudgetWarning(tasks, 4), "run budget exceeded ($5.0000 of $4)");
+  assert.equal(
+    runBudgetWarning(tasks, 4),
+    "run budget exceeded ($5.0000 of $4 across active tasks)"
+  );
+});
+
+test("run budget excludes sunk cost of cancelled tasks but reports it", () => {
+  const active = makeTask({ attempts: [makeAttempt(3, 1)] });
+  const cancelled = makeTask({ status: "cancelled", attempts: [makeAttempt(36, 2)] });
+  // The cancelled predecessor's spend must not starve its successors.
+  assert.equal(runBudgetWarning([active, cancelled], 4), undefined);
+  const warning = runBudgetWarning([active, cancelled], 2);
+  assert.match(warning ?? "", /run budget exceeded \(\$3\.0000 of \$2 across active tasks/);
+  assert.match(warning ?? "", /\$36\.0000 is sunk in cancelled tasks and no longer counts/);
 });
 
 test("formatUsage renders compact parts", () => {

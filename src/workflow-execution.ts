@@ -62,6 +62,8 @@ export async function executeTask(options: {
   worktree?: WorktreeRef;
   startExecutor: StartExecutor;
   canStartExecutor?: () => boolean;
+  /** USD left before the run budget blocks the drive; bounds this launch's cost cap. */
+  remainingRunBudget?: number;
   humanRetry?: boolean;
   humanRetryExpectedRiskToken?: string;
   humanRetryOwnerSession?: string;
@@ -78,6 +80,7 @@ export async function executeTask(options: {
     worktree,
     startExecutor,
     canStartExecutor = () => true,
+    remainingRunBudget,
     humanRetry = false,
     humanRetryExpectedRiskToken,
     humanRetryOwnerSession,
@@ -230,7 +233,13 @@ export async function executeTask(options: {
       },
     };
     if (signal) runOptions.signal = signal;
-    if (config.maxCostPerTask > 0) runOptions.maxCost = config.maxCostPerTask;
+    // The per-attempt cap and the remaining run budget both bound this launch;
+    // without the run-budget bound, a launch dispatched just under the run cap
+    // could overshoot it by a full attempt before the next between-round check.
+    const launchCostCaps = [config.maxCostPerTask, remainingRunBudget].filter(
+      (cap): cap is number => cap !== undefined && cap > 0
+    );
+    if (launchCostCaps.length > 0) runOptions.maxCost = Math.min(...launchCostCaps);
 
     let run: ExecutorHandle;
     try {

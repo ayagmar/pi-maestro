@@ -74,6 +74,8 @@ export interface DriveSummary {
   rounds: number;
   tasks: TaskSnapshot[];
   stoppedBecause: DriveStopReason;
+  /** USD spent by this drive invocation alone; task totals are board-lifetime. */
+  driveCost?: number;
 }
 
 export function formatDriveSummary(summary: DriveSummary): string {
@@ -87,13 +89,27 @@ export function formatDriveSummary(summary: DriveSummary): string {
     0
   );
   const totalCost = summary.tasks.reduce((total, task) => total + task.cost, 0);
-  const billedAttempts = summary.tasks
-    .flatMap((task) => task.history)
-    .filter((item) => item.cost > 0);
-  const averageCost =
-    billedAttempts.length === 0
-      ? 0
-      : billedAttempts.reduce((total, item) => total + item.cost, 0) / billedAttempts.length;
+  // One "launch" is one executor or reviewer process. Attempt cost folds
+  // reviewer spend in, so averaging attempt cost over attempt count reported
+  // roughly double the real per-launch price under a different name.
+  const history = summary.tasks.flatMap((task) => task.history);
+  const reviewCost = history.reduce(
+    (total, item) =>
+      total + (item.reviewLaunches ?? []).reduce((sum, launch) => sum + launch.usage.cost, 0),
+    0
+  );
+  const executorCost = Math.max(0, totalCost - reviewCost);
+  const billedLaunches = history.reduce((count, item) => {
+    const itemReviewCost = (item.reviewLaunches ?? []).reduce(
+      (sum, launch) => sum + launch.usage.cost,
+      0
+    );
+    const billedReviews = (item.reviewLaunches ?? []).filter(
+      (launch) => launch.usage.cost > 0
+    ).length;
+    return count + (item.cost - itemReviewCost > 0 ? 1 : 0) + billedReviews;
+  }, 0);
+  const averageCost = billedLaunches === 0 ? 0 : totalCost / billedLaunches;
   const models = new Set(
     summary.tasks.flatMap((task) =>
       task.history.flatMap((item) =>
@@ -113,9 +129,13 @@ export function formatDriveSummary(summary: DriveSummary): string {
     providers.size > 0 ? `providers: ${[...providers].join(", ")}` : "",
   ].filter(Boolean);
 
+  // Task totals are board-lifetime; without the per-drive delta a no-op
+  // resume re-printed the whole board's historical spend as if it just happened.
+  const driveCost =
+    summary.driveCost === undefined ? "" : ` · $${summary.driveCost.toFixed(4)} this drive`;
   return [
     `Drive ${summary.stoppedBecause.code} after ${summary.rounds} round(s): ${approved} approved · ${failed} failed · ${cancelled} cancelled · ${blocked} blocked`,
-    `${attempts} consuming attempt${attempts === 1 ? "" : "s"} · ${launches} launch${launches === 1 ? "" : "es"} · $${totalCost.toFixed(4)} total · $${averageCost.toFixed(4)} avg billed launch`,
+    `${attempts} consuming attempt${attempts === 1 ? "" : "s"} · ${launches} launch${launches === 1 ? "" : "es"} · $${totalCost.toFixed(4)} total (executor $${executorCost.toFixed(4)} · review $${reviewCost.toFixed(4)})${driveCost} · $${averageCost.toFixed(4)} avg billed launch`,
     ...identity,
     summary.stoppedBecause.message,
   ].join("\n");
@@ -170,7 +190,13 @@ export function snapshot(task: Task, note?: string): TaskSnapshot {
     status: task.status,
     tier: task.tier,
     attempts: task.attempts.filter(consumesMaxAttempt).length,
-    launches: task.attempts.length,
+    // Raw processes launched for this task: every executor attempt plus every
+    // reviewer launch. Counting executors alone under-reported the work while
+    // the cost figure beside it included reviewer spend.
+    launches: task.attempts.reduce(
+      (count, attempt) => count + 1 + (attempt.reviewLaunches?.length ?? 0),
+      0
+    ),
     cost: usage.cost,
     turns: usage.turns,
     history,

@@ -27,6 +27,9 @@
 
 ### Fixed
 
+- The run budget counts only active tasks, so spend sunk in cancelled or superseded predecessors no longer starves their own recovery tasks; the warning reports the sunk amount separately. Every executor and reviewer launch is additionally capped at the remaining run budget, so a launch dispatched just under the cap cannot overshoot it by a full attempt, and reviewer launches honor `maxCostPerReview`.
+- Drive summaries count reviewer processes as launches, split executor from review spend, price the average billed launch over real launches, and report the per-drive delta beside board-lifetime totals — a no-op resume previously re-printed the whole board's historical spend as if it had just happened.
+
 - A reviewer can no longer approve work whose own report states it is unfinished. A real task was approved while the plan document it produced read `State: BLOCKED — the clean full non-device gate failed twice`, marking it done and unblocking six dependents on a foundation its author had disclaimed. Approval is now withheld when the executor report declares BLOCKED, INCOMPLETE, NOT DONE, or FAILED as its state, and the withheld verdict says so.
 
 - A task stopped by `maxCostPerTask` is no longer retried at the same cap. The classifier marked cost-cap failures retryable, so a real board spent $12.14 on one task across three attempts, two of them killed at the identical $5 wall; the second was doomed the moment the first hit it. Recovery needs a larger cap or a smaller task, both human decisions.

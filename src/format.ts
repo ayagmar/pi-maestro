@@ -274,10 +274,32 @@ export function formatBoardProgress(tasks: Task[]): string {
   return `${approved}/${active}${cancelledPart}`;
 }
 
+/**
+ * Spend that still counts against the run budget. Cancelled tasks (including
+ * superseded predecessors) are sunk cost: counting them permanently starved
+ * their own replacement tasks, so a board that escalated near budget could
+ * never dispatch the recovery work it was told to create.
+ */
+export function activeRunCost(tasks: Task[]): number {
+  return boardUsage(tasks.filter((task) => task.status !== "cancelled")).cost;
+}
+
+/** USD left before the run budget blocks dispatch, or undefined when the cap is off. */
+export function remainingRunBudget(tasks: Task[], maxRunCost: number): number | undefined {
+  if (maxRunCost <= 0) return undefined;
+  return Math.max(0, maxRunCost - activeRunCost(tasks));
+}
+
 export function runBudgetWarning(tasks: Task[], maxRunCost: number): string | undefined {
-  const totalCost = boardUsage(tasks).cost;
-  if (maxRunCost <= 0 || totalCost <= maxRunCost) return undefined;
-  return `run budget exceeded ($${totalCost.toFixed(4)} of $${maxRunCost})`;
+  if (maxRunCost <= 0) return undefined;
+  const active = activeRunCost(tasks);
+  if (active <= maxRunCost) return undefined;
+  const sunk = boardUsage(tasks).cost - active;
+  const sunkNote =
+    sunk > 0
+      ? `; a further $${sunk.toFixed(4)} is sunk in cancelled tasks and no longer counts`
+      : "";
+  return `run budget exceeded ($${active.toFixed(4)} of $${maxRunCost} across active tasks${sunkNote})`;
 }
 
 export function taskLine(task: Task): string {

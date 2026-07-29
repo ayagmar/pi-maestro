@@ -927,7 +927,7 @@ test("formatDriveSummary reports outcomes, attempts, meaningful cost, and identi
   assert.match(summary, /1 approved · 1 failed · 0 cancelled · 1 blocked/);
   assert.match(
     summary,
-    /2 consuming attempts · 2 launches · \$0\.0600 total · \$0\.0600 avg billed launch/
+    /2 consuming attempts · 2 launches · \$0\.0600 total \(executor \$0\.0600 · review \$0\.0000\) · \$0\.0600 avg billed launch/
   );
   assert.match(summary, /models: openai\/gpt-5, anthropic\/claude/);
   assert.match(summary, /providers: openai, anthropic/);
@@ -3294,7 +3294,9 @@ test("persistent quota failures stop drive without consuming maxAttempts or hot-
     assert.equal(resumed.stoppedBecause.code, "completed");
     assert.equal(calls, 3, "an explicit fresh drive may retry and then review");
     assert.equal(resumed.tasks[0]?.attempts, 1);
-    assert.equal(resumed.tasks[0]?.launches, 2);
+    // Raw launches now count reviewer processes too: one failed executor
+    // launch, one successful executor launch, one reviewer launch.
+    assert.equal(resumed.tasks[0]?.launches, 3);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -4114,3 +4116,104 @@ test("a reviewer cannot approve work the executor reported as blocked", async ()
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("formatDriveSummary separates per-drive spend from board-lifetime totals", () => {
+  const summary = formatDriveSummary({
+    rounds: 0,
+    driveCost: 0,
+    tasks: [
+      {
+        id: "T1",
+        title: "Cancelled predecessor",
+        status: "cancelled",
+        tier: "complex",
+        attempts: 2,
+        launches: 4,
+        cost: 35.99,
+        turns: 10,
+        history: [
+          {
+            attempt: 1,
+            turns: 5,
+            cost: 18.33,
+            touchedFiles: [],
+            reviewLaunches: [
+              {
+                reviewerIndex: 1,
+                role: "single",
+                startedAt: 0,
+                logFile: "r1.jsonl",
+                usage: { input: 1, output: 1, cost: 8.45, turns: 1 },
+              },
+            ],
+          },
+          {
+            attempt: 2,
+            turns: 5,
+            cost: 17.66,
+            touchedFiles: [],
+            reviewLaunches: [
+              {
+                reviewerIndex: 1,
+                role: "single",
+                startedAt: 0,
+                logFile: "r2.jsonl",
+                usage: { input: 1, output: 1, cost: 4.72, turns: 1 },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    stoppedBecause: { code: "completed", message: "all selected tasks are settled" },
+  });
+  // 4 raw launches billed: 2 executor remainders + 2 reviewer launches.
+  assert.match(summary, /4 launches/);
+  assert.match(summary, /\$35\.9900 total \(executor \$22\.8200 · review \$13\.1700\)/);
+  assert.match(summary, /\$0\.0000 this drive/);
+  assert.match(summary, /\$8\.9975 avg billed launch/);
+});
+
+test("launch cost caps combine the per-role cap with the remaining run budget", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-launch-cost-caps-"));
+  try {
+    const { board } = boardWithTask();
+    saveBoard(cwd, board);
+    const capsByRun = new Map<string, number | undefined>();
+    const startExecutor: StartExecutor = (options) => {
+      capsByRun.set(options.runId, options.maxCost);
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0.5, turns: 1 },
+          finalReport: "Looks correct.\nVERDICT: APPROVE",
+        })(options);
+      }
+      return executor({
+        usage: { input: 1, output: 1, cost: 1, turns: 1 },
+        finalReport: "done",
+        touchedFiles: ["src/a.ts"],
+      })(options);
+    };
+
+    await driveBoard({
+      cwd,
+      config: { ...config, maxCostPerTask: 5, maxCostPerReview: 2.5, maxRunCost: 3 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    // Remaining run budget ($3) bounds the executor below its own cap ($5).
+    assert.equal(capsByRun.get("T1-attempt-1"), 3);
+    // After the executor spent $1, the reviewer cap is min($2.5, $2 remaining).
+    const reviewCap = [...capsByRun.entries()].find(([runId]) => runId.includes("-review-"))?.[1];
+    assert.equal(reviewCap, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
