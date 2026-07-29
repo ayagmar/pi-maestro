@@ -100,6 +100,16 @@ export function buildExecutorPrompt(
     sections.push(
       `## Review feedback\nA reviewer rejected the previous attempt. Address every point:\n${truncateInjectedContext(feedback)}`
     );
+    // A fresh-context retry otherwise rediscovers its own predecessor's work
+    // from the working tree file by file. The prior report names what was
+    // done and how it was verified, so the retry starts from knowledge
+    // instead of archaeology.
+    const previousReport = task.attempts.at(-1)?.finalReport;
+    if (previousReport) {
+      sections.push(
+        `## Previous attempt's report\nThe working tree already contains that attempt's changes; continue from them.\n${truncateContext(previousReport, 2_500)}`
+      );
+    }
   }
 
   const uniqueDependencies = dependencyReports.filter(
@@ -143,6 +153,31 @@ export function buildExecutorPrompt(
   );
 
   return joinBudgetedSections(sections);
+}
+
+/**
+ * Follow-up prompt for a retry that resumes the rejected attempt's own
+ * session. The model already holds the brief, the criteria, everything it
+ * read, and its own report — re-sending them would only duplicate context —
+ * so this carries exactly what is new: the reviewer's findings.
+ */
+export function buildRetryFollowUpPrompt(task: Task): string {
+  const feedback =
+    openFindingsFeedback(task) ?? task.reviewNotes ?? "(no reviewer notes were recorded)";
+  const criteria = task.successCriteria?.length
+    ? `\n\n## Success criteria (unchanged)\n${task.successCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n")}`
+    : "";
+  return joinBudgetedSections([
+    `A reviewer rejected your work on Task ${task.id} (${task.title}). Your changes are still in the working tree; continue from them rather than starting over.`,
+    `## Review feedback\nAddress every point:\n${truncateInjectedContext(feedback)}${criteria}`,
+    [
+      "## Stop rule",
+      "Fix each finding, re-run the most relevant verification, and check the acceptance criteria again. If a finding is wrong, say why with evidence instead of complying blindly.",
+      "",
+      "## Report",
+      "End your final message with a fresh `## Report` section: what changed since the rejected attempt, how each finding was addressed, and how it was verified.",
+    ].join("\n"),
+  ]);
 }
 
 /** Prompt for an adversarial reviewer with read-only tools and a fresh context. */

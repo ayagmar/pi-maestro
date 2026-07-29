@@ -1790,3 +1790,52 @@ test("a cost cap failure is not retryable and says how to recover", () => {
   assert.equal(failure?.retryable, false, "an identical retry hits the identical cap");
   assert.match(failure?.message ?? "", /Raise maxCostPerTask or split the task/);
 });
+
+test("a resumed launch reuses the recorded session file and its directory", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-resume-"));
+  const projectCwd = join(root, "project");
+  const fakePi = join(root, "fake-pi.mjs");
+  const argsFile = join(root, "args.json");
+  mkdirSync(projectCwd, { recursive: true });
+  const priorSessionDir = join(root, "prior-session");
+  mkdirSync(priorSessionDir, { recursive: true });
+  const priorSessionFile = join(priorSessionDir, "attempt-1.jsonl");
+  writeFileSync(priorSessionFile, "{}\n");
+  writeFileSync(
+    fakePi,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+process.stdin.on("data", () => {});
+process.stdin.on("end", () => process.exit(0));
+setTimeout(() => process.exit(0), 200);
+`
+  );
+
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: join(projectCwd, ".pi", "maestro"),
+      runId: "T1-attempt-2",
+      cwd: projectCwd,
+      projectCwd,
+      prompt: "address the review findings",
+      tier: { thinking: "low" },
+      resumeSessionFile: priorSessionFile,
+    });
+    await run.outcome;
+
+    // The resumed attempt shares the prior launch's session directory instead
+    // of creating a fresh empty one its transcript would never live in.
+    assert.equal(run.attempt.sessionDir, priorSessionDir);
+    const invocationArgs = JSON.parse(readFileSync(argsFile, "utf8")) as string[];
+    const sessionIndex = invocationArgs.indexOf("--session");
+    assert.notEqual(sessionIndex, -1, "--session must be passed for a resumed launch");
+    assert.equal(invocationArgs[sessionIndex + 1], priorSessionFile);
+    assert.equal(invocationArgs[invocationArgs.indexOf("--session-dir") + 1], priorSessionDir);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

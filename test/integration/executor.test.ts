@@ -215,3 +215,92 @@ test("a real executor drive completes when the user requires GPG signing", {
     rmSync(agentDir, { recursive: true, force: true });
   }
 });
+
+test("a rejection retry resumes the real executor session with its history intact", {
+  timeout: 240_000,
+  skip,
+}, async () => {
+  const cwd = repository();
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-integration-agent-"));
+  // attempt 1: edits the file wrong and reports; review 1: rejects with one
+  // criterion finding; attempt 2 (resumed session): fixes it; review 2 (and
+  // any overflow turns): approves.
+  const server = await startStubModelServer([
+    { bash: "printf 'first-pass\\n' > target.txt" },
+    { text: "## Report\nWrote first-pass into target.txt." },
+    { text: "VERDICT: REQUEST_CHANGES\n1. Criterion 1: target.txt must contain the word final." },
+    { bash: "printf 'final\\n' > target.txt" },
+    { text: "## Report\nReplaced first-pass with final as the reviewer required." },
+    { text: "Verified target.txt contains final.\nVERDICT: APPROVE" },
+  ]);
+
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    createTask(board, {
+      title: "Write final into the target file",
+      brief: "Replace the contents of target.txt with the word final.",
+      tier: "standard",
+      writePaths: ["target.txt"],
+      successCriteria: ["target.txt contains final"],
+    });
+    saveBoard(cwd, board);
+    const config = integrationConfig({ maxAttempts: 2 });
+    saveConfig("project", cwd, config);
+
+    const summary = await withStubEnvironment(server.baseUrl, agentDir, () =>
+      driveBoard({
+        cwd,
+        config,
+        resolvedTiers: new Map([
+          ["standard", config.tiers.standard as { thinking: "off"; model: string }],
+          ["review", config.tiers.review as { thinking: "off"; model: string }],
+        ]),
+        startExecutor,
+        onUpdate: () => {},
+        trackRun: () => () => {},
+      })
+    );
+
+    assert.equal(summary.stoppedBecause.code, "completed", summary.stoppedBecause.message);
+    const task = loadBoard(cwd).tasks[0];
+    assert.equal(task?.status, "approved");
+    assert.equal(task?.attempts.length, 2);
+
+    // The retry appended to the first attempt's transcript instead of
+    // starting a new session.
+    const firstSession = task?.attempts[0]?.sessionFile;
+    const secondSession = task?.attempts[1]?.sessionFile;
+    assert.ok(firstSession, "attempt 1 must record its session file");
+    assert.equal(secondSession, firstSession, "the retry must resume the same session");
+    const transcript = readFileSync(firstSession ?? "", "utf-8");
+    assert.match(transcript, /first-pass/);
+    assert.match(transcript, /as the reviewer required/);
+
+    // The resumed model request carried the conversation history (the brief
+    // from attempt 1) plus the findings-only follow-up — no re-sent brief, no
+    // re-reading of the repository.
+    const resumedRequest = server.requests.find((request) =>
+      request.includes("A reviewer rejected your work")
+    );
+    assert.ok(resumedRequest, "the retry must send the findings follow-up");
+    assert.match(resumedRequest ?? "", /Replace the contents of target\.txt/);
+    assert.equal(
+      (resumedRequest ?? "").split("A reviewer rejected your work").length,
+      2,
+      "the follow-up must appear exactly once in the resumed request"
+    );
+
+    // Usage on the resumed attempt counts only its own new messages; replayed
+    // history must not be re-billed into the attempt record.
+    const retryTurns = task?.attempts[1]?.usage.turns ?? 0;
+    assert.ok(retryTurns >= 1 && retryTurns <= 4, `retry recorded ${retryTurns} turns`);
+
+    // The reviewer's demanded fix actually landed and was committed.
+    assert.match(readFileSync(join(cwd, "target.txt"), "utf-8"), /final/);
+    assert.equal(git(cwd, "status", "--porcelain"), "");
+  } finally {
+    await server.close();
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});

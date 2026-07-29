@@ -46,6 +46,21 @@ Maestro preserves board state, attempts, logs, sessions, and checkpoint branches
 - `/maestro plan diff <file> [taskId]` and `/maestro recipe preview <name> [JSON]` are
   validated read-only inspections. Their deterministic references identify bounded omitted detail.
 
+## Context reuse
+
+A model's context window cannot be persisted across processes with hosted providers, so "saving
+context" means reusing conversations and reports, not raw KV state. Maestro reuses context in
+three places. Review-rejection retries continue the rejected attempt's own session by default
+(`retryContext: "resume"`): the follow-up prompt carries only the reviewer's findings, the model
+keeps everything it already read, and providers bill the replayed history at cached input rates
+instead of the executor re-reading the repository. Dependency reports flow into dependent
+executors' prompts, so shared investigation belongs in one explicit investigation task that
+dependents consume as a report. Escalation decisions and single-task `maestro_drive` inspect carry
+the executor report, touched files, and structured findings, so the orchestrator can replan
+without re-reading source files. Reviewers, provider fallbacks, human retries, and discovery tasks
+deliberately keep fresh contexts: adversarial review is only worth its cost while the reviewer
+re-derives the evidence independently.
+
 ## Agent-session storage
 
 Every raw executor and reviewer launch gets a unique directory beneath Pi's normal per-project

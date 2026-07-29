@@ -4310,3 +4310,128 @@ test("launch cost caps combine the per-role cap with the remaining run budget", 
   }
 });
 
+test("a rejection retry resumes the prior attempt's session with a findings-only prompt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-retry-resume-"));
+  try {
+    const { board } = boardWithTask();
+    saveBoard(cwd, board);
+    const priorSessionFile = join(cwd, "attempt-1.jsonl");
+    writeFileSync(priorSessionFile, "{}\n");
+
+    const launches: Array<{ prompt: string; resumeSessionFile?: string }> = [];
+    let reviews = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        reviews += 1;
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport:
+            reviews === 1
+              ? "VERDICT: REQUEST_CHANGES\n1. Criterion 1: still wrong in src/thing.ts."
+              : "Looks correct.\nVERDICT: APPROVE",
+        })(options);
+      }
+      const entry: { prompt: string; resumeSessionFile?: string } = { prompt: options.prompt };
+      if (options.resumeSessionFile !== undefined) {
+        entry.resumeSessionFile = options.resumeSessionFile;
+      }
+      launches.push(entry);
+      const handle = executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "## Report\ndone",
+      })(options);
+      // The real transport records the session file via get_state; the fake
+      // must persist it for the retry to find.
+      handle.attempt.sessionFile = priorSessionFile;
+      return handle;
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 3 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.equal(launches.length, 2);
+    // First attempt: fresh full prompt, no resume.
+    assert.equal(launches[0]?.resumeSessionFile, undefined);
+    assert.match(launches[0]?.prompt ?? "", /## Task T1/);
+    // Retry: continues the recorded session and carries only what is new.
+    assert.equal(launches[1]?.resumeSessionFile, priorSessionFile);
+    assert.match(launches[1]?.prompt ?? "", /A reviewer rejected your work/);
+    assert.match(launches[1]?.prompt ?? "", /still wrong in src\/thing\.ts/);
+    assert.doesNotMatch(
+      launches[1]?.prompt ?? "",
+      /## Task T1/,
+      "a resumed retry must not re-send the brief the session already contains"
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("retryContext fresh keeps clean-context retries and injects the prior report", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-retry-fresh-"));
+  try {
+    const { board } = boardWithTask();
+    saveBoard(cwd, board);
+    const priorSessionFile = join(cwd, "attempt-1.jsonl");
+    writeFileSync(priorSessionFile, "{}\n");
+
+    const launches: Array<{ prompt: string; resumeSessionFile?: string }> = [];
+    let reviews = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        reviews += 1;
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport:
+            reviews === 1
+              ? "VERDICT: REQUEST_CHANGES\n1. Criterion 1: still wrong."
+              : "Looks correct.\nVERDICT: APPROVE",
+        })(options);
+      }
+      const entry: { prompt: string; resumeSessionFile?: string } = { prompt: options.prompt };
+      if (options.resumeSessionFile !== undefined) {
+        entry.resumeSessionFile = options.resumeSessionFile;
+      }
+      launches.push(entry);
+      const handle = executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "## Report\nrewrote src/thing.ts and verified with tests",
+      })(options);
+      handle.attempt.sessionFile = priorSessionFile;
+      return handle;
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 3, retryContext: "fresh" },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.equal(launches.length, 2);
+    assert.equal(launches[1]?.resumeSessionFile, undefined);
+    // The fresh retry still gets the full brief plus its predecessor's report
+    // so it starts from knowledge instead of re-reading the working tree.
+    assert.match(launches[1]?.prompt ?? "", /## Task T1/);
+    assert.match(launches[1]?.prompt ?? "", /## Previous attempt's report/);
+    assert.match(launches[1]?.prompt ?? "", /rewrote src\/thing\.ts and verified with tests/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

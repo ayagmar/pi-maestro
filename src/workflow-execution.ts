@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { taskFingerprint } from "./artifact-policy.js";
 import {
   DETACHED_DISPATCH_LEASE_MS,
@@ -18,7 +19,7 @@ import {
 import { loadConfig } from "./config.js";
 import { MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import { DISCOVERY_TOOLS, discoveryInstructions } from "./discovery.js";
-import { accountPromptContext, buildExecutorPrompt } from "./prompts.js";
+import { accountPromptContext, buildExecutorPrompt, buildRetryFollowUpPrompt } from "./prompts.js";
 import {
   classifyFailure,
   type ExecutorHandle,
@@ -190,7 +191,26 @@ export async function executeTask(options: {
     else attemptTier.model = model;
     if (task.discovery) attemptTier.tools = DISCOVERY_TOOLS;
 
-    const basePrompt = buildExecutorPrompt(task, dependencyReports);
+    // A review-rejection retry continues the rejected attempt's own session:
+    // the model keeps everything it already read (billed at cached rates) and
+    // only the reviewer's findings are new. Provider fallbacks (modelIndex > 0)
+    // start fresh — a resumed launch that hits a provider failure therefore
+    // falls back to a clean launch instead of a half-poisoned transcript — and
+    // human retries keep their deliberately isolated rerun semantics.
+    const previousAttempt = task.attempts.at(-1);
+    const resumeSessionFile =
+      config.retryContext !== "fresh" &&
+      modelIndex === 0 &&
+      !humanRetry &&
+      !task.discovery &&
+      task.status === "changes_requested" &&
+      previousAttempt?.sessionFile !== undefined &&
+      existsSync(previousAttempt.sessionFile)
+        ? previousAttempt.sessionFile
+        : undefined;
+    const basePrompt = resumeSessionFile
+      ? buildRetryFollowUpPrompt(task)
+      : buildExecutorPrompt(task, dependencyReports);
     const prompt = task.discovery
       ? `${basePrompt}\n\n${discoveryInstructions(task.discovery.allowedWritePaths)}`
       : basePrompt;
@@ -217,6 +237,7 @@ export async function executeTask(options: {
       ...(watchdogWarningTurns === undefined ? {} : { watchdogWarningTurns }),
       ...(watchdogTerminationTurns === undefined ? {} : { watchdogTerminationTurns }),
       runKind: isReadOnlyTask(task) ? "investigation" : "implementation",
+      ...(resumeSessionFile ? { resumeSessionFile } : {}),
       ...(task.discovery
         ? { maxReportChars: MAX_DISCOVERY_REPORT_BYTES, maxReportBytes: MAX_DISCOVERY_REPORT_BYTES }
         : {}),

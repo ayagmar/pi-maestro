@@ -4,6 +4,7 @@ import {
   accountPromptContext,
   buildExecutorPrompt,
   buildOrchestratorBriefing,
+  buildRetryFollowUpPrompt,
   buildReviewPrompt,
   buildSupervisorBriefing,
   MAX_INJECTED_CONTEXT_LENGTH,
@@ -349,3 +350,51 @@ test("prompts disclose open findings beyond the injected bound", () => {
   assert.doesNotMatch(buildExecutorPrompt(bounded, []), /more open finding/);
 });
 
+test("retry follow-up prompt carries only the findings, criteria, and report contract", () => {
+  const task = makeTask({
+    successCriteria: ["endpoint returns 200"],
+    reviewNotes: "1. Criterion 1: /health returns 500 under load.",
+    attempts: [
+      {
+        index: 1,
+        logFile: "a.jsonl",
+        thinking: "medium",
+        startedAt: 0,
+        usage: { input: 1, output: 1, cost: 1, turns: 1 },
+        touchedFiles: [],
+        finalReport: "## Report\nImplemented /health.",
+      },
+    ],
+  });
+  const prompt = buildRetryFollowUpPrompt(task);
+  assert.match(prompt, /A reviewer rejected your work on Task T1/);
+  assert.match(prompt, /\/health returns 500 under load/);
+  assert.match(prompt, /1\. endpoint returns 200/);
+  assert.match(prompt, /## Report/);
+  // The resumed session already contains the brief; re-sending it would only
+  // duplicate context the provider bills again.
+  assert.doesNotMatch(prompt, /Add GET \/health returning 200/);
+});
+
+test("a fresh retry prompt includes the predecessor attempt's report", () => {
+  const task = makeTask({
+    reviewNotes: "1. Criterion 1: broken.",
+    attempts: [
+      {
+        index: 1,
+        logFile: "a.jsonl",
+        thinking: "medium",
+        startedAt: 0,
+        usage: { input: 1, output: 1, cost: 1, turns: 1 },
+        touchedFiles: [],
+        finalReport: "## Report\nRewrote the handler and added tests.",
+      },
+    ],
+  });
+  const prompt = buildExecutorPrompt(task, []);
+  assert.match(prompt, /## Previous attempt's report/);
+  assert.match(prompt, /Rewrote the handler and added tests/);
+  // A first attempt has no feedback and must not gain the section.
+  const first = buildExecutorPrompt(makeTask(), []);
+  assert.doesNotMatch(first, /## Previous attempt's report/);
+});

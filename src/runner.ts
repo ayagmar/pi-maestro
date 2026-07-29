@@ -461,6 +461,12 @@ export interface StartExecutorOptions {
   tier: TierConfig;
   /** Human-readable session name shown in pi's session picker (e.g. "T3 · add replay command"). */
   sessionLabel?: string;
+  /**
+   * Continue this recorded session instead of starting a fresh one. The
+   * launch appends to that transcript, so the model keeps everything the
+   * prior launch read and providers bill the history at cached rates.
+   */
+  resumeSessionFile?: string;
   /** Abort the run when attempt cost exceeds this (USD). 0 disables the cap. */
   maxCost?: number;
   /** Event detail mirrored to the run log. Compact keeps lifecycle, tool, and final events. */
@@ -489,7 +495,12 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
   ensurePrivateDirectory(options.stateDir);
   ensurePrivateDirectory(dirname(logFile));
 
-  const sessionDir = createExecutorSessionDir(options.projectCwd ?? options.cwd, options.runId);
+  // A resumed launch appends to the prior launch's transcript, so it shares
+  // that session directory; giving it a fresh empty one would leave the
+  // transcript unreachable from the attempt record.
+  const sessionDir = options.resumeSessionFile
+    ? dirname(options.resumeSessionFile)
+    : createExecutorSessionDir(options.projectCwd ?? options.cwd, options.runId);
   const attempt: Attempt = {
     index: 0,
     logFile,
@@ -508,6 +519,7 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
   // Sessions stay under Pi's normal root for recursive usage accounting, but
   // one level below the files indexed by the ordinary /resume picker.
   const args = ["--mode", "rpc", "--session-dir", sessionDir, "--thinking", options.tier.thinking];
+  if (options.resumeSessionFile) args.push("--session", options.resumeSessionFile);
   if (options.tier.model) args.push("--model", options.tier.model);
   if (options.tier.tools) args.push("--tools", options.tier.tools);
   // Integration tests replace the user's environment with a scripted model

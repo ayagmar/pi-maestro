@@ -20,6 +20,8 @@
 
 ### Added
 
+- Review-rejection retries resume the rejected attempt's own session by default (`retryContext: "resume"`): the follow-up prompt carries only the reviewer's findings, the model keeps everything it already read, and providers bill the replayed history at cached rates instead of the executor re-reading the repository. Provider fallbacks, human retries, and discovery tasks always start fresh, and fresh retries include the predecessor attempt's report so they start from knowledge instead of archaeology. Validated end to end against a real pi executor: the retry appends to the same transcript, the resumed request carries the conversation history plus only the findings, and usage counts only new messages.
+
 - Upgraded to the Pi 0.82.x package line (from 0.80.10), with peer ranges moved to `^0.82.1`. The real-executor integration tests pass against a 0.82.1 subprocess.
 - `max` is now selectable as a thinking level. Pi has accepted `off`…`max` for some time, but maestro stopped its ladder at `xhigh`, so the strongest reasoning setting was unreachable from a tier. Config validation had a second hardcoded copy of the ladder that would have rejected `max` outright; it now derives from `THINKING_LEVELS`, and an invalid level names the accepted values instead of saying only "invalid thinking".
 
