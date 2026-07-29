@@ -32,14 +32,55 @@ export interface LivePaneControllerDependencies {
 
 const responsiveVisibility = (width: number): boolean => width >= 100;
 
+/** Rows shown in the below-editor agent selector, matched by the shortcut cycle. */
+export const AGENT_SELECTOR_ROWS = 6;
+
 export class LivePaneController {
   private pane: LivePaneRuntime | undefined;
   private suppressedAutoPaneDriveId: string | undefined;
+  private sharedSelection: string | undefined;
 
   constructor(private readonly dependencies: LivePaneControllerDependencies) {}
 
   launches(ctx: ExtensionContext): LivePaneLaunch[] {
     return collectLivePaneLaunches(ctx.cwd, this.dependencies.driveController.liveRunValues());
+  }
+
+  /**
+   * The bounded, ordered agent list shared by the below-editor selector widget
+   * and the ctrl+alt+j/k cycle: live launches first (board order), then the
+   * most recent settled ones. One ordering for both, or the selection marker
+   * would point at rows the widget does not show.
+   */
+  selectorLaunches(ctx: ExtensionContext): LivePaneLaunch[] {
+    const launches = this.launches(ctx);
+    const live = launches.filter((launch) => launch.live !== false);
+    const settled = launches
+      .filter((launch) => launch.live === false)
+      .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0));
+    return [...live, ...settled].slice(0, AGENT_SELECTOR_ROWS);
+  }
+
+  selectedLaunchKey(ctx: ExtensionContext): string | undefined {
+    const rows = this.selectorLaunches(ctx);
+    if (rows.some((launch) => launch.key === this.sharedSelection)) return this.sharedSelection;
+    return rows.find((launch) => launch.live !== false)?.key ?? rows[0]?.key;
+  }
+
+  /** Move the shared agent selection without opening anything. */
+  selectAdjacent(ctx: ExtensionContext, offset: -1 | 1): void {
+    const rows = this.selectorLaunches(ctx);
+    if (rows.length === 0) {
+      notify(ctx, `No Maestro agent sessions yet. Start a drive, then use /${COMMAND} agents.`);
+      return;
+    }
+    const current = this.selectedLaunchKey(ctx);
+    const index = rows.findIndex((launch) => launch.key === current);
+    const next = rows[(Math.max(0, index) + offset + rows.length) % rows.length];
+    if (!next) return;
+    this.sharedSelection = next.key;
+    this.pane?.component?.selectKey(next.key);
+    this.dependencies.refreshUI(ctx);
   }
 
   isVisible(_width: number): boolean {
@@ -77,6 +118,10 @@ export class LivePaneController {
             getLaunches: () => this.launches(ctx),
             getHeight: () => Math.max(1, Math.floor(tui.terminal.rows * 0.8)),
             requestRender: () => tui.requestRender(),
+            ...(this.sharedSelection ? { initialSelectedKey: this.sharedSelection } : {}),
+            onSelectionChange: (key) => {
+              this.sharedSelection = key;
+            },
             tui,
             cwd: ctx.cwd,
             onEscape: () => {

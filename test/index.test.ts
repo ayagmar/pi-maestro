@@ -4870,3 +4870,93 @@ test("typing a goal after /maestro plan points at /maestro start with the text i
     }
   );
 });
+
+test("the below-editor agent selector marks a selection the shortcuts can move", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        livePanes: false,
+        maxParallel: 2,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      for (const index of [1, 2]) {
+        createTask(board, {
+          title: `Agent ${index}`,
+          brief: `run agent task ${index}`,
+          tier: "standard",
+          writePaths: [`src/${index}.ts`],
+          successCriteria: [`task ${index} settles`],
+        });
+      }
+      board.ownerSessions = [owner];
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const finishes = new Map<string, (outcome: RunOutcome) => void>();
+      const startExecutor: StartExecutor = (options) => ({
+        attempt: { ...executorAttempt(), logFile: `${options.runId}.jsonl` },
+        outcome: new Promise<RunOutcome>((resolve) => finishes.set(options.runId, resolve)),
+        steer: () => {},
+        followUp: () => {},
+        abort: () => {},
+      });
+      const runtime = loadMaestro(cwd, startExecutor);
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "selector-drive",
+        { action: "start" },
+        runtime.ctx
+      );
+      await waitFor(() => finishes.size === 2, "both executors did not start");
+
+      const lines = renderLatestWidget(runtime);
+      const rows = lines.filter((line) => line.includes("T1") || line.includes("T2"));
+      assert.equal(rows.length, 2, "one selector row per live agent");
+      assert.match(rows[0] ?? "", /❯.*T1.*Agent 1/);
+      assert.doesNotMatch(rows[1] ?? "", /❯/);
+      assert.match(rows[0] ?? "", /execute · /);
+      assert.match(rows[0] ?? "", /\$0\.00/);
+      assert.match(lines.at(-1) ?? "", /ctrl\+alt\+j\/k select · ctrl\+alt\+w view/);
+
+      // ctrl+alt+j moves the marker to the next agent; ctrl+alt+k wraps back.
+      runtime.shortcuts.get("ctrl+alt+j")?.(runtime.ctx);
+      const moved = renderLatestWidget(runtime).filter(
+        (line) => line.includes("T1") || line.includes("T2")
+      );
+      assert.doesNotMatch(moved[0] ?? "", /❯/);
+      assert.match(moved[1] ?? "", /❯.*T2.*Agent 2/);
+      runtime.shortcuts.get("ctrl+alt+k")?.(runtime.ctx);
+      const wrapped = renderLatestWidget(runtime).filter(
+        (line) => line.includes("T1") || line.includes("T2")
+      );
+      assert.match(wrapped[0] ?? "", /❯.*T1/);
+
+      // The viewer opens on the shared selection.
+      runtime.shortcuts.get("ctrl+alt+j")?.(runtime.ctx);
+      runtime.shortcuts.get("ctrl+alt+w")?.(runtime.ctx);
+      await waitFor(() => runtime.overlays.length === 1, "viewer did not open");
+      const viewer = runtime.overlays[0];
+      assert.ok(viewer);
+      assert.match(viewer.component.render?.(120).join("\n") ?? "", /▶ T2 run/);
+
+      viewer.component.handleInput("\x1b\x17");
+      await waitFor(() => viewer.closed, "viewer did not close");
+      for (const finish of finishes.values()) {
+        finish({
+          exitCode: 1,
+          usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+          finalReport: "cancelled",
+          touchedFiles: [],
+          aborted: true,
+          failureCause: "user_abort",
+        });
+      }
+      await waitFor(
+        () => loadBoard(cwd).tasks.every((task) => !task.dispatchClaim),
+        "executors did not settle"
+      );
+    }
+  );
+});

@@ -310,6 +310,16 @@ export function taskLine(task: Task): string {
   return `${glyph} ${task.id} ${task.title} · ${STATUS_LABELS[task.status]}${attempts}${cost}`;
 }
 
+/** Compact "4m12s" wall-clock for agent selector rows. */
+export function formatElapsed(startedAt: number | undefined, endedAt?: number): string {
+  if (startedAt === undefined || !Number.isFinite(startedAt)) return "";
+  const seconds = Math.max(0, Math.floor(((endedAt ?? Date.now()) - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m${String(seconds % 60).padStart(2, "0")}s`;
+  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
 /** Character bound for text that is injected into a model conversation. */
 export function truncateCharacters(text: string, maxCharacters: number): string {
   if (text.length <= maxCharacters) return text;

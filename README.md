@@ -418,6 +418,7 @@ The compact activity widget remains visible while agents run. Set `livePanes` to
 /maestro agents           browse rich live and completed executor/reviewer sessions
 /maestro workflows        browse, inspect, preview, run, save, or remove reusable workflows
 ctrl+alt+w                cycle the agent viewer: docked pane → centered → closed
+ctrl+alt+j / ctrl+alt+k   move the agent selector under the editor (next/previous)
 /maestro open <taskId>    switch into an executor's session
 /maestro back             switch back to the previous session (after open/reviewer open)
 /maestro config           interactive settings editor (user scope)

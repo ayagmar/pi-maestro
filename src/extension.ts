@@ -4,7 +4,7 @@ import {
   type ExtensionContext,
   getMarkdownTheme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, type SelectItem, Text } from "@earendil-works/pi-tui";
+import { Container, Markdown, type SelectItem, Text, visibleWidth } from "@earendil-works/pi-tui";
 import {
   consumeQuarantineNotice,
   findTask,
@@ -22,7 +22,7 @@ import { COMMAND, MESSAGE_TYPE } from "./constants.js";
 import { showDashboard as showDashboardOverlay } from "./dashboard-controller.js";
 import { type BackgroundDrive, DriveRuntimeController } from "./drive-controller.js";
 import { ExtensionLifecycleState, registerMaestroLifecycle } from "./extension-lifecycle.js";
-import { boardUsage, formatBoardProgress } from "./format.js";
+import { boardUsage, formatBoardProgress, formatElapsed } from "./format.js";
 import { notify } from "./handoff.js";
 import { LivePaneController } from "./live-pane-controller.js";
 import { manuallyApproveTask } from "./manual-approval.js";
@@ -194,23 +194,46 @@ export default function maestro(
       return;
     }
     ctx.ui.setWorkingMessage(`maestro · ${running} executor(s) · $${usage.cost.toFixed(2)}`);
+    // Claude-style agent selector under the editor: one row per launch, a
+    // movable selection marker, and the stats right-aligned. ctrl+alt+j/k
+    // moves the selection; ctrl+alt+w opens the viewer on it.
     ctx.ui.setWidget(COMMAND, (tui, theme) => {
-      const lines = [...driveController.liveRunValues()].map((run) => {
-        const task = findTask(board, run.taskId);
-        const title = task ? task.title : run.taskId;
-        const label = run.kind === "review" ? "reviewing" : "running";
-        return (
-          theme.fg("warning", "◐ ") +
-          theme.fg("accent", `${run.taskId} `) +
-          title +
-          theme.fg(
+      const buildLines = (width: number): string[] => {
+        const rows = livePaneController.selectorLaunches(ctx);
+        if (rows.length === 0) return [];
+        const selectedKey = livePaneController.selectedLaunchKey(ctx);
+        const lines = rows.map((launch) => {
+          const selected = launch.key === selectedKey;
+          const marker = selected ? theme.fg("accent", "❯ ") : "  ";
+          const glyph = launch.live ? theme.fg("warning", "◐ ") : theme.fg("success", "○ ");
+          const id = theme.fg(selected ? "accent" : "muted", `${launch.taskId} `);
+          const kind = launch.kind === "review" ? "review" : "execute";
+          const activity = launch.live ? launch.lastActivity : "settled";
+          const stats = theme.fg(
             "dim",
-            ` · ${label} · ${run.turns} turns · $${run.cost.toFixed(4)} · ${run.lastActivity}`
-          )
-        );
-      });
+            [
+              kind,
+              formatElapsed(launch.startedAt, launch.endedAt) || undefined,
+              `${launch.turns} turns`,
+              `$${launch.cost.toFixed(2)}`,
+              activity,
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          );
+          const left = `${marker}${glyph}${id}${launch.title}`;
+          const gap = Math.max(2, width - visibleWidth(left) - visibleWidth(stats));
+          const line = `${left}${" ".repeat(gap)}${stats}`;
+          return visibleWidth(line) > width ? `${marker}${glyph}${id}${launch.title}` : line;
+        });
+        lines.push(theme.fg("dim", "  ctrl+alt+j/k select · ctrl+alt+w view · ctrl+alt+b board"));
+        return lines;
+      };
       return {
-        render: () => (livePaneController.isVisible(tui.terminal.columns) ? [] : lines),
+        render: (width?: number) =>
+          livePaneController.isVisible(tui.terminal.columns)
+            ? []
+            : buildLines(width ?? tui.terminal.columns),
         invalidate: () => {},
       };
     });
@@ -347,6 +370,16 @@ export default function maestro(
   pi.registerShortcut("ctrl+alt+w", {
     description: "Open or close Maestro agent sessions",
     handler: (ctx) => livePaneController.cycle(ctx),
+  });
+
+  pi.registerShortcut("ctrl+alt+j", {
+    description: "Select the next Maestro agent",
+    handler: (ctx) => livePaneController.selectAdjacent(ctx, 1),
+  });
+
+  pi.registerShortcut("ctrl+alt+k", {
+    description: "Select the previous Maestro agent",
+    handler: (ctx) => livePaneController.selectAdjacent(ctx, -1),
   });
 
   function openDashboard(ctx: ExtensionContext): Promise<void> {

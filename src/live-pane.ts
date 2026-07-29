@@ -85,6 +85,8 @@ export interface LivePaneLaunch {
   cost: number;
   lastActivity: string;
   live?: boolean;
+  startedAt?: number;
+  endedAt?: number;
 }
 
 export interface LivePaneOptions {
@@ -92,6 +94,10 @@ export interface LivePaneOptions {
   requestRender(): void;
   onEscape(): void;
   onCycleVisibility(): void;
+  /** Seed the selection from the shared agent selector so pane and widget agree. */
+  initialSelectedKey?: string;
+  /** Keep the shared agent selector in sync when the pane switches sessions. */
+  onSelectionChange?(key: string | undefined): void;
   onSteer?(launch: LivePaneLaunch, message: string): void;
   onFollowUp?(launch: LivePaneLaunch, message: string): void;
   canOpenSession?(launch: LivePaneLaunch): boolean;
@@ -201,6 +207,25 @@ export class LivePaneComponent {
     };
     this.timer = setInterval(() => options.requestRender(), REFRESH_MS);
     this.timer.unref();
+    if (options.initialSelectedKey) this.selectedKey = options.initialSelectedKey;
+  }
+
+  private updateSelection(key: string | undefined): void {
+    this.selectedKey = key;
+    this.options.onSelectionChange?.(key);
+  }
+
+  /** External selection move from the shared agent selector while the pane is open. */
+  selectKey(key: string): void {
+    if (key === this.selectedKey) return;
+    if (!this.options.getLaunches().some((launch) => launch.key === key)) return;
+    this.updateSelection(key);
+    this.followMode = true;
+    this.scrollOffset = Number.MAX_SAFE_INTEGER;
+    this.settledNotice = undefined;
+    this.queuedNotice = undefined;
+    this.mode = "browse";
+    this.options.requestRender();
   }
 
   get focused(): boolean {
@@ -882,7 +907,7 @@ export class LivePaneComponent {
     const next = (Math.max(0, selected) + offset + launches.length) % launches.length;
     const launch = launches[next];
     if (!launch || launch.key === this.selectedKey) return;
-    this.selectedKey = launch.key;
+    this.updateSelection(launch.key);
     this.followMode = true;
     this.scrollOffset = Number.MAX_SAFE_INTEGER;
     this.settledNotice = undefined;
@@ -900,8 +925,9 @@ export class LivePaneComponent {
       appeared.push(launch);
     }
     if (!this.selectedKey) {
-      this.selectedKey =
-        launches.find((launch) => launch.live !== false)?.key ?? launches.at(-1)?.key;
+      this.updateSelection(
+        launches.find((launch) => launch.live !== false)?.key ?? launches.at(-1)?.key
+      );
       if (this.selectedKey) this.settledNotice = undefined;
     }
 
@@ -914,7 +940,7 @@ export class LivePaneComponent {
     if (this.followMode && this.mode === "browse" && !selectedIsLive) {
       const newLive = appeared.find((launch) => launch.live !== false);
       if (newLive && newLive.key !== this.selectedKey) {
-        this.selectedKey = newLive.key;
+        this.updateSelection(newLive.key);
         this.scrollOffset = Number.MAX_SAFE_INTEGER;
         this.settledNotice = `▸ following ${newLive.taskId} · ${newLive.kind === "review" ? "review" : "execute"}`;
         this.queuedNotice = undefined;
@@ -927,7 +953,7 @@ export class LivePaneComponent {
     const currentSelected = launches.find((launch) => launch.key === this.selectedKey);
     const nextLive = launches.find((launch) => launch.live && launch.key !== this.selectedKey);
     if (previousSelected?.live && currentSelected?.live === false && nextLive) {
-      this.selectedKey = nextLive.key;
+      this.updateSelection(nextLive.key);
       this.settledNotice = `✓ ${previousSelected.taskId} settled · following ${nextLive.taskId}`;
       this.followMode = true;
       this.scrollOffset = Number.MAX_SAFE_INTEGER;
