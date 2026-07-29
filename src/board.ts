@@ -1807,7 +1807,13 @@ export function validatePlan(board: Board, availableTiers?: Iterable<string>): P
       if (path) {
         writePathOverlapCount += 1;
         if (writePathOverlaps.length < MAX_PLAN_VALIDATION_OVERLAPS) {
-          writePathOverlaps.push({ leftTaskId: left.id, rightTaskId: right.id, path });
+          writePathOverlaps.push({
+            leftTaskId: left.id,
+            rightTaskId: right.id,
+            path,
+            leftStatus: left.status,
+            rightStatus: right.status,
+          });
         }
       }
     }
@@ -1883,18 +1889,29 @@ export function planValidationMessage(validation: PlanValidation): string | unde
   // One shared file such as README.md produces a pair per task combination,
   // which buries the other problems. Report the file once with its claimants.
   const overlapsByPath = new Map<string, Set<string>>();
+  const claimantStatuses = new Map<string, string>();
   for (const overlap of validation.writePathOverlaps ?? []) {
     const claimants = overlapsByPath.get(overlap.path) ?? new Set<string>();
     claimants.add(overlap.leftTaskId);
     claimants.add(overlap.rightTaskId);
     overlapsByPath.set(overlap.path, claimants);
+    if (overlap.leftStatus) claimantStatuses.set(overlap.leftTaskId, overlap.leftStatus);
+    if (overlap.rightStatus) claimantStatuses.set(overlap.rightTaskId, overlap.rightStatus);
   }
+  // A conflict with stopped work is usually a replacement, and superseding it
+  // both cancels the predecessor and releases its write scope in one call.
+  const supersedable = new Set(["failed", "changes_requested"]);
   for (const [path, claimantSet] of overlapsByPath) {
     const claimants = [...claimantSet].sort();
+    const stopped = claimants.filter((id) => supersedable.has(claimantStatuses.get(id) ?? ""));
+    const hint =
+      stopped.length > 0
+        ? `; ${stopped.join(", ")} ${stopped.length === 1 ? "is" : "are"} stopped — if the new task replaces it, set supersedesTaskId in the same maestro_plan call`
+        : "";
     addProblem(
       claimants.length > 2
-        ? `${claimants.join(", ")} all write "${path}"; give it to one task or chain them with dependsOn`
-        : `${claimants.join(" and ")} both write "${path}"; add a dependency or narrow writePaths`
+        ? `${claimants.join(", ")} all write "${path}"; give it to one task or chain them with dependsOn${hint}`
+        : `${claimants.join(" and ")} both write "${path}"; add a dependency or narrow writePaths${hint}`
     );
   }
   if (problems.length === 0 && omitted === 0) return undefined;

@@ -2373,6 +2373,9 @@ test("maestro_plan atomically supersedes a stopped task and rewires its dependen
         writePaths: ["src/dependent.ts"],
         successCriteria: ["dependent works"],
       });
+      // A drive paused on the predecessor: resuming this stale scope after the
+      // supersession would drive only a cancelled task and report a no-op.
+      board.pausedDrive = { taskIds: [predecessor.id], ownerSession: owner };
       saveBoard(cwd, board);
     },
     async (cwd) => {
@@ -2403,6 +2406,129 @@ test("maestro_plan atomically supersedes a stopped task and rewires its dependen
       assert.deepEqual(findTask(board, "T2")?.dependsOn, ["T3"]);
       assert.equal(findTask(board, "T3")?.status, "todo");
       assert.equal(findTask(board, "T3")?.supersedes, "T1");
+      assert.deepEqual(
+        board.pausedDrive?.taskIds,
+        ["T3"],
+        "the paused drive scope must follow the successor"
+      );
+    }
+  );
+});
+
+test("mid-run successor plans do not re-enter the plan gate on workflow scale", async () => {
+  await withBoard(
+    (cwd) => {
+      // Any plan on this board exceeds the launch confirmation threshold.
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        confirmationTotalLaunches: 1,
+      });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const existing = createTask(board, {
+        title: "Already running work",
+        brief: "first task",
+        tier: "standard",
+        writePaths: ["src/first.ts"],
+        successCriteria: ["first works"],
+      });
+      forceStatus(existing, "changes_requested");
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const result = await tools.get("maestro_plan")?.execute(
+        "recovery",
+        {
+          tasks: [
+            {
+              title: "Recovery successor",
+              brief: "narrow replacement task",
+              tier: "standard",
+              supersedesTaskId: "T1",
+              writePaths: ["src/first.ts"],
+              successCriteria: ["replacement works"],
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+      // Scale is confirmed once at drive start; freezing recovery behind a
+      // second human plan approval is exactly the mid-escalation stall.
+      assert.doesNotMatch(result?.content[0]?.text ?? "", /Plan awaits user approval/);
+      assert.notEqual(loadBoard(cwd).planPending, true);
+    }
+  );
+});
+
+test("an initial plan above the scale threshold still requires approval", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        confirmationTotalLaunches: 1,
+      });
+      saveBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const result = await tools.get("maestro_plan")?.execute(
+        "initial",
+        {
+          tasks: [
+            {
+              title: "First task",
+              brief: "initial work",
+              tier: "standard",
+              writePaths: ["src/first.ts"],
+              successCriteria: ["first works"],
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(result?.content[0]?.text ?? "", /Plan awaits user approval/);
+      assert.equal(loadBoard(cwd).planPending, true);
+    }
+  );
+});
+
+test("a repeated identical inspect is labeled so orchestrators stop polling", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, {
+        title: "Waiting work",
+        brief: "idle",
+        tier: "standard",
+        writePaths: ["src/idle.ts"],
+        successCriteria: ["idle works"],
+      });
+      forceStatus(task, "changes_requested");
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const drive = tools.get("maestro_drive");
+      const first = await drive?.execute("i1", { action: "inspect" }, undefined, undefined, ctx);
+      const second = await drive?.execute("i2", { action: "inspect" }, undefined, undefined, ctx);
+      assert.doesNotMatch(first?.content[0]?.text ?? "", /unchanged since the previous inspect/);
+      assert.match(second?.content[0]?.text ?? "", /unchanged since the previous inspect/);
+      // A single-task inspect carries executor-side recovery evidence.
+      const single = await drive?.execute(
+        "i3",
+        { action: "inspect", taskIds: ["T1"] },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(single?.content[0]?.text ?? "", /"touchedFiles"/);
+      assert.match(single?.content[0]?.text ?? "", /"findings"/);
     }
   );
 });

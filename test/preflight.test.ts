@@ -6,6 +6,7 @@ import {
   assertPlanTaskLimit,
   formatWorkflowPreflight,
   preflightWorkflow,
+  taskShapeWarnings,
 } from "../src/preflight.js";
 import { type Board, type MaestroConfig } from "../src/types.js";
 
@@ -95,4 +96,41 @@ test("approved work is omitted and satisfies unresolved dependency waves", () =>
   const completed = preflightWorkflow(board, config(), [successor.id]);
   assert.equal(completed.taskCount, 0);
   assert.equal(completed.totalLaunchUpperBound, 0);
+});
+
+test("taskShapeWarnings flags omnibus tasks and stays quiet for narrow ones", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const narrow = createTask(board, {
+    title: "Narrow",
+    brief: "one thing",
+    tier: "standard",
+    writePaths: ["src/a.ts", "test/a.test.ts"],
+    successCriteria: ["a works", "a is tested"],
+  });
+  const manyCriteria = createTask(board, {
+    title: "Omnibus criteria",
+    brief: "many things",
+    tier: "complex",
+    writePaths: ["src/b.ts"],
+    successCriteria: Array.from({ length: 6 }, (_, index) => `outcome ${index + 1}`),
+  });
+  const manyPaths = createTask(board, {
+    title: "Omnibus paths",
+    brief: "many files",
+    tier: "complex",
+    writePaths: Array.from({ length: 8 }, (_, index) => `src/file-${index + 1}.ts`),
+    successCriteria: ["everything works"],
+  });
+
+  assert.deepEqual(taskShapeWarnings([narrow]), []);
+  const criteriaWarnings = taskShapeWarnings([manyCriteria]);
+  assert.equal(criteriaWarnings.length, 1);
+  assert.match(criteriaWarnings[0] ?? "", /6 success criteria/);
+  assert.match(criteriaWarnings[0] ?? "", /consider splitting/);
+  const pathWarnings = taskShapeWarnings([manyPaths]);
+  assert.equal(pathWarnings.length, 1);
+  assert.match(pathWarnings[0] ?? "", /8 write paths/);
+  // The workflow preflight surfaces the same warnings.
+  const preflight = preflightWorkflow(board, config());
+  assert.ok(preflight.warnings.some((warning) => warning.includes("6 success criteria")));
 });

@@ -1,10 +1,11 @@
 import { updateTask } from "./board.js";
-import { truncateText } from "./format.js";
+import { taskUsage, truncateText } from "./format.js";
 import { redactFailureMessage } from "./runner.js";
 import { type MaestroConfig, type Task } from "./types.js";
 import {
   consumesMaxAttempt,
   type DriveStopReason,
+  lastReport,
   REVIEW_REJECTION_LIMIT,
   type TaskSnapshot,
   TIER_LADDER,
@@ -82,42 +83,89 @@ export function terminalReviewConvergence(
 }
 
 /**
+ * A first review that fails this many *distinct* success criteria is a strong
+ * signal the task bundles several independent pieces of work. Retrying the
+ * whole omnibus re-bills the full attempt and review for every defect at
+ * once; splitting is almost always cheaper than a second full cycle.
+ */
+export const OMNIBUS_ESCALATION_CRITERIA = 4;
+
+function distinctOpenCriterionFindings(task: Task): number {
+  return new Set(
+    (task.findings ?? [])
+      .filter((finding) => finding.status === "open" && /^criterion-\d+$/.test(finding.fingerprint))
+      .map((finding) => finding.fingerprint)
+  ).size;
+}
+
+/** A genuine rejection spanning many independent criteria: split, don't retry. */
+export function omnibusRejection(task: Task): boolean {
+  if (task.status !== "changes_requested") return false;
+  if ((task.reviewRejections ?? 0) < 1) return false;
+  return distinctOpenCriterionFindings(task) >= OMNIBUS_ESCALATION_CRITERIA;
+}
+
+/**
  * Escalate on stagnation, not on rejection count alone. Reaching the rejection
  * limit while every rejection raised only *new* findings means the task is
  * still converging, so it keeps its remaining attempts. Repeating a finding a
  * previous attempt was already told to fix is the stuck case that needs human
  * judgment. Legacy boards without a recorded stagnation count keep the old
- * rejection-only behavior.
+ * rejection-only behavior. A single rejection that fails many independent
+ * criteria escalates immediately: it is a task-shape problem, and a brief or
+ * tier edit (which resets the counters) is the recovery for both cases.
  */
-export function escalatedTask(task: Task): boolean {
+export function escalatedTask(task: Task, rejectionLimit = REVIEW_REJECTION_LIMIT): boolean {
   if (task.status !== "changes_requested") return false;
-  if ((task.reviewRejections ?? 0) < REVIEW_REJECTION_LIMIT) return false;
+  if (omnibusRejection(task)) return true;
+  if ((task.reviewRejections ?? 0) < rejectionLimit) return false;
   if (task.reviewStagnantRejections === undefined) return true;
   return task.reviewStagnantRejections > 0;
 }
 
 export function escalationReason(tasks: Task[], config: MaestroConfig): DriveStopReason {
+  const rejectionLimit = config.reviewRejectionLimit ?? REVIEW_REJECTION_LIMIT;
   const details = tasks.map((task) => {
     const notes = task.reviewNotes ?? task.attempts.at(-1)?.reviewNotes;
     const evidence = notes
-      ? redactFailureMessage(truncateText(notes, 3))
+      ? redactFailureMessage(truncateText(notes, 12))
       : "no reviewer notes recorded";
     const repeated = (task.findings ?? [])
       .filter((finding) => finding.status === "open" && finding.firstAttempt < finding.lastAttempt)
       .map((finding) => finding.fingerprint);
     const stagnation =
       repeated.length > 0 ? `\n  repeated across attempts: ${repeated.join(", ")}` : "";
+    const omnibusCriteria = distinctOpenCriterionFindings(task);
+    const omnibus = omnibusRejection(task)
+      ? `\n  one review failed ${omnibusCriteria} distinct criteria — this task bundles independent work; split it instead of retrying the whole`
+      : "";
+    // Executor-side evidence. Without what the executor changed and claimed,
+    // the orchestrator re-reads the repository to reconstruct it at full
+    // context cost before it can replan.
+    const usage = taskUsage(task);
+    const spent = `\n  spent: $${usage.cost.toFixed(4)} across ${task.attempts.length} attempt(s)`;
+    const touchedFiles = task.attempts.at(-1)?.touchedFiles ?? [];
+    const touched =
+      touchedFiles.length > 0
+        ? `\n  last attempt touched: ${touchedFiles.slice(0, 15).join(", ")}${touchedFiles.length > 15 ? `, +${touchedFiles.length - 15} more` : ""}`
+        : "";
+    const report = lastReport(task);
+    const reportTail = report
+      ? `\n  executor report (bounded):\n  ${redactFailureMessage(truncateText(report, 10)).split("\n").join("\n  ")}`
+      : "";
     const rung = TIER_LADDER.indexOf(task.tier as (typeof TIER_LADDER)[number]);
     const nextTier =
       rung >= 0 ? TIER_LADDER.slice(rung + 1).find((name) => config.tiers[name]) : undefined;
-    const action = nextTier
-      ? `raise the tier to "${nextTier}" with maestro_update`
-      : "rewrite, split, or cancel the brief with maestro_update and apply orchestrator judgment";
-    return `${task.id} [tier ${task.tier}]: ${evidence}${stagnation}\n  → ${action}`;
+    const action = omnibusRejection(task)
+      ? "split it with maestro_plan (one task per independent defect, supersedesTaskId on one of them)"
+      : nextTier
+        ? `raise the tier to "${nextTier}" with maestro_update`
+        : "rewrite, split, or cancel the brief with maestro_update and apply orchestrator judgment";
+    return `${task.id} [tier ${task.tier}]: ${evidence}${stagnation}${omnibus}${spent}${touched}${reportTail}\n  → ${action}`;
   });
   return {
     code: "escalation_required",
-    message: `Reviewer repeated the same unresolved finding across ${REVIEW_REJECTION_LIMIT} attempts; autonomous retries stopped for orchestrator intervention.\n${details.join("\n")}\nAfter changing the brief/tier (which resets the counter) or an explicit scoped maestro_drive, use /maestro resume.`,
+    message: `Reviewer rejections stopped autonomous retries (stagnant after ${rejectionLimit} rejection(s), or one rejection spanning ${OMNIBUS_ESCALATION_CRITERIA}+ criteria); orchestrator intervention required.\n${details.join("\n")}\nAfter a brief/tier edit (which resets the counters), use /maestro resume. After superseding or splitting, start maestro_drive for the successor scope — a paused drive scope is rewired to the successor automatically.`,
     taskIds: tasks.map((task) => task.id),
   };
 }

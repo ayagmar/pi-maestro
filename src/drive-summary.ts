@@ -31,7 +31,7 @@ export function formatDrivePulse(summary: DriveSummary): string {
     return `${base}\n\nChoose a recovery: configure another fallback in /maestro config then /maestro resume, or maestro_update the task, or ask the user if the block is a cost/quota decision. Do not blindly retry the same provider.`;
   }
   if (code === "escalation_required") {
-    return `${base}\n\nChoose one: maestro_update to raise the tier or rewrite the brief, maestro_plan to split the task, cancel it, or ask the user when scope/cost judgment is required, then /maestro resume. Do not blindly retry or raise maxAttempts.`;
+    return `${base}\n\nChoose one: maestro_update to raise the tier or rewrite the brief (then /maestro resume — the edit resets the rejection counters), maestro_plan to split the task with supersedesTaskId (then start maestro_drive for the successor scope; a paused drive scope rewires to the successor automatically), cancel it, or ask the user when scope/cost judgment is required. Do not blindly retry or raise maxAttempts.`;
   }
   if (code === "review_disagreement") {
     return `${base}\n\nResolve the disagreement deliberately: use maestro_update to change the task reviewPolicy, or split/cancel the task after inspecting both retained reviewer reports. Then start maestro_drive for the corrected scope.`;

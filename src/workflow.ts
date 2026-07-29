@@ -263,7 +263,8 @@ export async function driveBoard(options: {
       // fresh drive or /maestro resume only continues after the orchestrator
       // changes the brief/tier (which resets the counter) or retries explicitly.
       const escalated = tasks.filter(
-        (task) => task.id.toUpperCase() !== humanRetryId && escalatedTask(task)
+        (task) =>
+          task.id.toUpperCase() !== humanRetryId && escalatedTask(task, config.reviewRejectionLimit)
       );
       if (escalated.length > 0) return finish(escalationReason(escalated, config));
 

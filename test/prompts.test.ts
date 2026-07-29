@@ -318,3 +318,34 @@ test("orchestrator briefing embeds the goal, tier guidance, and workflow tools",
   assert.match(gated, /\/maestro plan/);
   assert.doesNotMatch(briefing, /planGate is enabled/);
 });
+
+test("prompts disclose open findings beyond the injected bound", () => {
+  const task = makeTask({
+    findings: Array.from({ length: 11 }, (_, index) => ({
+      fingerprint: `criterion-${index + 1}`,
+      message: `defect ${index + 1}`,
+      status: "open" as const,
+      firstAttempt: 1,
+      lastAttempt: 1,
+    })),
+  });
+  const executorPrompt = buildExecutorPrompt(task, []);
+  const reviewPrompt = buildReviewPrompt(task, "done");
+  for (const prompt of [executorPrompt, reviewPrompt]) {
+    assert.match(prompt, /\[criterion-8\]/);
+    assert.doesNotMatch(prompt, /\[criterion-9\]/);
+    assert.match(prompt, /\+3 more open findings recorded on the board/);
+  }
+  // Exactly eight findings need no disclosure.
+  const bounded = makeTask({
+    findings: Array.from({ length: 8 }, (_, index) => ({
+      fingerprint: `criterion-${index + 1}`,
+      message: `defect ${index + 1}`,
+      status: "open" as const,
+      firstAttempt: 1,
+      lastAttempt: 1,
+    })),
+  });
+  assert.doesNotMatch(buildExecutorPrompt(bounded, []), /more open finding/);
+});
+

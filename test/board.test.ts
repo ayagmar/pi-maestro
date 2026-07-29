@@ -1415,3 +1415,36 @@ test("a plan that guesses ids from plan numbers is told what the real ids are", 
   assert.match(message, /T1, T2, T3, T4, T5, T6, T7 all write "README\.md"/);
   assert.equal(message.split("\n").filter((line) => line.includes("README.md")).length, 1);
 });
+
+test("a write overlap with stopped work suggests superseding it in the same call", () => {
+  // Reproduces a real rejection: the recovery plan's first task conflicted
+  // with the escalated task it was meant to replace, and the planner needed a
+  // second round trip to discover supersedesTaskId.
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const stopped = createTask(board, {
+    title: "Escalated omnibus",
+    brief: "old work",
+    tier: "complex",
+    writePaths: ["plans/013.md"],
+  });
+  forceStatus(stopped, "changes_requested");
+  createTask(board, {
+    title: "Recovery successor",
+    brief: "replacement",
+    tier: "trivial",
+    writePaths: ["plans/013.md"],
+  });
+
+  const message = planValidationMessage(validatePlan(board)) ?? "";
+  assert.match(message, /T1 and T2 both write "plans\/013\.md"/);
+  assert.match(message, /T1 is stopped/);
+  assert.match(message, /set supersedesTaskId in the same maestro_plan call/);
+
+  // Overlaps between two runnable tasks keep the plain guidance.
+  const runnable: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  createTask(runnable, { title: "A", brief: "a", tier: "standard", writePaths: ["src/x.ts"] });
+  createTask(runnable, { title: "B", brief: "b", tier: "standard", writePaths: ["src/x.ts"] });
+  const plain = planValidationMessage(validatePlan(runnable)) ?? "";
+  assert.match(plain, /T1 and T2 both write "src\/x\.ts"/);
+  assert.doesNotMatch(plain, /supersedesTaskId/);
+});

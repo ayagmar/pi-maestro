@@ -16,6 +16,7 @@ import {
 } from "../src/board.js";
 import { loadConfig, saveConfig } from "../src/config.js";
 import { selfReportedBlocker } from "../src/workflow-review-policy.js";
+import { escalatedTask, omnibusRejection } from "../src/workflow-stop-policy.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import {
   type Attempt,
@@ -3788,13 +3789,12 @@ test("second consecutive reviewer rejection escalates instead of re-dispatching"
     assert.equal(result.stoppedBecause.code, "escalation_required");
     assert.equal(executions, 2, "escalation must stop the third executor dispatch");
     assert.deepEqual(result.stoppedBecause.taskIds, [task.id]);
-    assert.match(
-      result.stoppedBecause.message,
-      /Reviewer repeated the same unresolved finding across 2 attempts/
-    );
+    assert.match(result.stoppedBecause.message, /stagnant after 2 rejection\(s\)/);
     assert.match(result.stoppedBecause.message, /Still wrong in src\/thing\.ts/);
     assert.match(result.stoppedBecause.message, /repeated across attempts:/);
     assert.match(result.stoppedBecause.message, /raise the tier to "complex"/);
+    assert.match(result.stoppedBecause.message, /spent: \$/);
+    assert.match(result.stoppedBecause.message, /executor report \(bounded\)/);
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "changes_requested");
     assert.equal(persisted?.reviewRejections, 2);
@@ -4112,6 +4112,99 @@ test("a reviewer cannot approve work the executor reported as blocked", async ()
 
     assert.notEqual(loadBoard(cwd).tasks[0]?.status, "approved");
     assert.match(JSON.stringify(result), /reported the work as unfinished/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("escalatedTask honors a configurable rejection limit and omnibus rejections", () => {
+  const { task } = boardWithTask("changes_requested");
+  task.reviewRejections = 1;
+  task.reviewStagnantRejections = 1;
+  // Below the default limit of 2 this is still converging.
+  assert.equal(escalatedTask(task), false);
+  // An operator who can only afford one full cycle may lower the limit.
+  assert.equal(escalatedTask(task, 1), true);
+  task.reviewRejections = 3;
+  assert.equal(escalatedTask(task, 4), false);
+  assert.equal(escalatedTask(task, 3), true);
+});
+
+test("one rejection spanning many distinct criteria escalates as an omnibus task", () => {
+  const { task } = boardWithTask("changes_requested");
+  task.reviewRejections = 1;
+  task.reviewStagnantRejections = 0;
+  const finding = (fingerprint: string, status: "open" | "verified" = "open") => ({
+    fingerprint,
+    message: `${fingerprint} failed`,
+    status,
+    firstAttempt: 1,
+    lastAttempt: 1,
+  });
+  // Three distinct criteria: a normal contested review, keep retrying.
+  task.findings = [finding("criterion-1"), finding("criterion-2"), finding("criterion-3")];
+  assert.equal(omnibusRejection(task), false);
+  assert.equal(escalatedTask(task), false);
+  // Four distinct open criteria: the task bundles independent work.
+  task.findings = [
+    finding("criterion-1"),
+    finding("criterion-2"),
+    finding("criterion-3"),
+    finding("criterion-4"),
+    // Verified findings and non-criterion hashes do not count.
+    finding("criterion-5", "verified"),
+    finding("15579961cfb4"),
+  ];
+  assert.equal(omnibusRejection(task), true);
+  assert.equal(escalatedTask(task), true);
+  // Without a genuine rejection (e.g. after a brief edit reset the counter),
+  // stale open findings alone must not escalate.
+  delete task.reviewRejections;
+  assert.equal(omnibusRejection(task), false);
+});
+
+test("a first review failing four criteria stops the drive instead of retrying the omnibus", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-omnibus-escalation-"));
+  try {
+    const { board } = boardWithTask();
+    saveBoard(cwd, board);
+    const notes = [
+      "1. Criterion 1: run guard missing in src/a.ts.",
+      "2. Criterion 2: spinner never resolves in src/b.ts.",
+      "3. Criterion 3: transport not rebound in src/c.ts.",
+      "4. Criterion 4: paths leak in src/d.ts.",
+    ].join("\n");
+    let executions = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: `VERDICT: REQUEST_CHANGES\n${notes}`,
+        })(options);
+      }
+      executions += 1;
+      return executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "done",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 5 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "escalation_required");
+    assert.equal(executions, 1, "an omnibus rejection must not re-bill a full retry cycle");
+    assert.match(result.stoppedBecause.message, /distinct criteria/);
+    assert.match(result.stoppedBecause.message, /split it with maestro_plan/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

@@ -57,6 +57,27 @@ export function accountPromptContext(prompt: string): PromptContextAccounting {
  * - lean prompts: no repeated style/process instructions
  */
 
+/**
+ * Open reviewer findings as prompt feedback, bounded to the first eight.
+ * The bound is disclosed: an agent told "address every point" must not be
+ * able to claim completeness while findings it never saw stay open.
+ */
+function openFindingsFeedback(task: Task): string | undefined {
+  const open = task.findings?.filter((finding) => finding.status === "open") ?? [];
+  if (open.length === 0) return undefined;
+  const shown = open.slice(0, 8);
+  const omitted = open.length - shown.length;
+  const lines = shown.map(
+    (finding) => `- [${finding.fingerprint}] ${finding.message.slice(0, 500)}`
+  );
+  if (omitted > 0) {
+    lines.push(
+      `- (+${omitted} more open finding${omitted === 1 ? "" : "s"} recorded on the board; do not claim completeness beyond the points listed here)`
+    );
+  }
+  return lines.join("\n");
+}
+
 /** Prompt for a fresh-context executor. The task brief must be self-contained. */
 export function buildExecutorPrompt(
   task: Task,
@@ -74,12 +95,7 @@ export function buildExecutorPrompt(
     );
   }
 
-  const openFindings = task.findings?.filter((finding) => finding.status === "open").slice(0, 8);
-  const feedback = openFindings?.length
-    ? openFindings
-        .map((finding) => `- [${finding.fingerprint}] ${finding.message.slice(0, 500)}`)
-        .join("\n")
-    : task.reviewNotes;
+  const feedback = openFindingsFeedback(task) ?? task.reviewNotes;
   if (feedback) {
     sections.push(
       `## Review feedback\nA reviewer rejected the previous attempt. Address every point:\n${truncateInjectedContext(feedback)}`
@@ -141,15 +157,10 @@ export function buildReviewPrompt(task: Task, report: string): string {
       `## Success criteria\n${task.successCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n")}`
     );
   }
-  const openFindings = task.findings?.filter((finding) => finding.status === "open").slice(0, 8);
-  const feedback = openFindings?.length
-    ? openFindings
-        .map((finding) => `- [${finding.fingerprint}] ${finding.message.slice(0, 500)}`)
-        .join("\n")
-    : task.reviewNotes;
-  if (feedback) {
+  const reviewFeedback = openFindingsFeedback(task) ?? task.reviewNotes;
+  if (reviewFeedback) {
     sections.push(
-      `## Previous review findings\nExplicitly verify every prior finding:\n${truncateInjectedContext(feedback)}`
+      `## Previous review findings\nExplicitly verify every prior finding:\n${truncateInjectedContext(reviewFeedback)}`
     );
   }
   sections.push(`## Executor report\n${truncateContext(report, 4_000)}`);

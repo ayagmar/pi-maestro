@@ -252,7 +252,14 @@ export interface PlanValidation {
   /** Each cycle repeats its first task ID at the end, for example T1 → T2 → T1. */
   dependencyCycles: string[][];
   invalidTiers: Array<{ taskId: string; tier: string }>;
-  writePathOverlaps?: Array<{ leftTaskId: string; rightTaskId: string; path: string }>;
+  writePathOverlaps?: Array<{
+    leftTaskId: string;
+    rightTaskId: string;
+    path: string;
+    /** Claimant statuses, so the message can suggest superseding stopped work. */
+    leftStatus?: TaskStatus;
+    rightStatus?: TaskStatus;
+  }>;
   /** Total overlaps found when the retained examples are capped. */
   writePathOverlapCount?: number;
   contractErrors?: Array<{ taskId: string; message: string }>;

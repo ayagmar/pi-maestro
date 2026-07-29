@@ -21,6 +21,34 @@ export interface WorkflowPreflight {
   signature: string;
 }
 
+/** Success-criteria count above which a task looks like several tasks in one. */
+export const OMNIBUS_CRITERIA_WARNING = 6;
+/** Write-path count above which a task looks like several tasks in one. */
+export const OMNIBUS_WRITE_PATH_WARNING = 8;
+
+/**
+ * Non-blocking shape warnings for tasks that bundle many independent
+ * outcomes. An omnibus task fails review as a unit: every retry re-bills the
+ * full attempt and review for all defects at once, and one stuck criterion
+ * escalates the whole bundle.
+ */
+export function taskShapeWarnings(tasks: readonly Task[]): string[] {
+  const warnings: string[] = [];
+  for (const task of tasks) {
+    const criteria = task.successCriteria?.length ?? 0;
+    const paths = task.writePaths?.length ?? 0;
+    const reasons: string[] = [];
+    if (criteria >= OMNIBUS_CRITERIA_WARNING) reasons.push(`${criteria} success criteria`);
+    if (paths >= OMNIBUS_WRITE_PATH_WARNING) reasons.push(`${paths} write paths`);
+    if (reasons.length > 0) {
+      warnings.push(
+        `${task.id} bundles ${reasons.join(" and ")}; omnibus tasks fail review as a unit and re-bill every retry — consider splitting it into independently verifiable tasks`
+      );
+    }
+  }
+  return warnings;
+}
+
 export function assertPlanTaskLimit(taskCount: number, config: MaestroConfig): void {
   if (taskCount > config.maxPlanTasks) {
     throw new Error(
@@ -73,6 +101,7 @@ export function preflightWorkflow(
   if (totalLaunchUpperBound > config.maxTotalLaunchesPerRun) {
     warnings.push(`runtime will stop at maxTotalLaunchesPerRun=${config.maxTotalLaunchesPerRun}`);
   }
+  warnings.push(...taskShapeWarnings(selected).slice(0, 5));
   const size = workflowSize(selected.length);
 
   return {

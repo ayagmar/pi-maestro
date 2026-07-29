@@ -52,6 +52,11 @@ Changing one of those values deliberately makes an existing approved completion 
 silently reused. Runtime-only limits such as concurrency and attempt caps affect preflight and
 dispatch, but do not invalidate an otherwise identical artifact fingerprint.
 
+Scale confirmation (`confirmationPlanTasks`, `confirmationTotalLaunches`) gates the initial plan
+and every drive start. Mid-run successor plans (recovery splits, `supersedesTaskId` replacements)
+do not re-enter the plan gate; their scale is confirmed once at the next drive start instead of
+freezing autonomous recovery behind a second human approval.
+
 Preflight classifies up to 8 tasks as small, 9–24 as medium, and larger plans as large. It reports
 dependency waves, configured/effective concurrency, executor and reviewer launch upper bounds,
 verification-profile usage, confirmation thresholds, and a clearly labeled projected-cost estimate.

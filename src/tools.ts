@@ -31,11 +31,17 @@ import {
 } from "./drive-controller.js";
 import { formatDrivePulse, startDriveHeartbeat } from "./drive-summary.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
-import { assertPlanTaskLimit, preflightWorkflow } from "./preflight.js";
+import { assertPlanTaskLimit, preflightWorkflow, taskShapeWarnings } from "./preflight.js";
 import { canonicalTaskIds } from "./session-control.js";
 import { formatStatusProjection, projectStatus } from "./status.js";
 import { type Task, type TaskStatus } from "./types.js";
-import { type DriveSummary, formatDriveSummary, snapshot, type TaskSnapshot } from "./workflow.js";
+import {
+  type DriveSummary,
+  formatDriveSummary,
+  lastReport,
+  snapshot,
+  type TaskSnapshot,
+} from "./workflow.js";
 import { parkInactiveWorktrees } from "./worktree.js";
 
 interface MaestroDetails {
@@ -63,6 +69,9 @@ export interface ModelToolRuntime {
 
 export function registerMaestroTools(runtime: ModelToolRuntime): void {
   const { pi, adoptBoard, refreshUI, driveController, startBackgroundDrive } = runtime;
+  // Evidence of the previous inspect, so an identical repeat can be labeled:
+  // orchestrators that poll re-read the same bytes at full context cost.
+  let lastInspect: { key: string; text: string } | undefined;
   pi.registerTool<ReturnType<typeof Type.Object>, MaestroDetails>({
     name: "maestro_plan",
     label: "Maestro Plan",
@@ -237,7 +246,13 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         if (config.planGate && created.length > 0 && initialTaskCount === 0) {
           board.planPending = true;
         }
-        if (preflightWorkflow(board, config).requiresConfirmation) board.planPending = true;
+        // Scale confirmation on a mid-run successor plan is drive preflight's
+        // job (validateDriveStart/confirmDriveScale): re-gating the whole board
+        // here froze autonomous recovery behind a second human approval exactly
+        // when the orchestrator was fixing an escalation.
+        if (initialTaskCount === 0 && preflightWorkflow(board, config).requiresConfirmation) {
+          board.planPending = true;
+        }
         return {
           created,
           supersessions,
@@ -251,6 +266,10 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
 
       const { created, supersessions } = result;
       const lines = created.map((task) => `${task.id}: ${task.title} (${task.tier})`);
+      const shapeWarnings = taskShapeWarnings(created).slice(0, 5);
+      const shapeNotice = shapeWarnings.length
+        ? `\n${shapeWarnings.map((warning) => `Warning: ${warning}`).join("\n")}`
+        : "";
       const approval = result.planPending
         ? `\n\nPlan awaits user approval via /${COMMAND} plan. Do not start maestro_drive yet.`
         : "";
@@ -266,7 +285,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         content: [
           {
             type: "text",
-            text: `Created ${created.length} task(s):\n${lines.join("\n")}${replacement}${legacyKindNotice}${approval}${worktreeWarning}`,
+            text: `Created ${created.length} task(s):\n${lines.join("\n")}${replacement}${shapeNotice}${legacyKindNotice}${approval}${worktreeWarning}`,
           },
         ],
         details: { action: "plan", tasks: created.map((task) => snapshot(task)) },
@@ -346,6 +365,15 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         const selectedTasks = board.tasks.filter((task) => !taskIds || taskIds.includes(task.id));
         const tasks = selectedTasks.map((task) => snapshot(task));
         const selectedIds = new Set(selectedTasks.map((task) => task.id));
+        // These are character bounds: the evidence is serialized to one JSON
+        // line, so the line-based truncateText never bounded any of it.
+        const bounded = (value: string, maxCharacters: number): string =>
+          value.length <= maxCharacters ? value : `${value.slice(0, maxCharacters)}…`;
+        // A single-task inspect is the recovery path after an escalation or
+        // failure. Include the executor-side evidence (report, touched files,
+        // structured findings) so the orchestrator can replan without
+        // re-reading the repository at full context cost.
+        const singleTask = selectedTasks.length === 1;
         const evidence = selectedTasks.map((task) => ({
           taskId: task.id,
           attempts: task.attempts.length,
@@ -356,7 +384,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           failureReason: task.attempts.at(-1)?.failureReason
             ? {
                 kind: task.attempts.at(-1)?.failureReason?.kind,
-                message: truncateText(task.attempts.at(-1)?.failureReason?.message ?? "", 500),
+                message: bounded(task.attempts.at(-1)?.failureReason?.message ?? "", 500),
               }
             : undefined,
           reviews: task.attempts.flatMap((attempt) =>
@@ -369,14 +397,27 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             ? {
                 policy: task.attempts.at(-1)?.reviewConvergence?.policy,
                 status: task.attempts.at(-1)?.reviewConvergence?.status,
-                summary: truncateText(task.attempts.at(-1)?.reviewConvergence?.summary ?? "", 500),
+                summary: bounded(task.attempts.at(-1)?.reviewConvergence?.summary ?? "", 500),
               }
             : undefined,
           reviewNotes: task.reviewNotes
-            ? truncateText(task.reviewNotes, 500)
+            ? bounded(task.reviewNotes, singleTask ? 1500 : 500)
             : task.attempts.at(-1)?.reviewNotes
-              ? truncateText(task.attempts.at(-1)?.reviewNotes ?? "", 500)
+              ? bounded(task.attempts.at(-1)?.reviewNotes ?? "", singleTask ? 1500 : 500)
               : undefined,
+          ...(singleTask
+            ? {
+                report: lastReport(task) ? bounded(lastReport(task) ?? "", 2000) : undefined,
+                touchedFiles: (task.attempts.at(-1)?.touchedFiles ?? []).slice(0, 30),
+                findings: (task.findings ?? []).map((finding) => ({
+                  fingerprint: finding.fingerprint,
+                  status: finding.status,
+                  firstAttempt: finding.firstAttempt,
+                  lastAttempt: finding.lastAttempt,
+                  message: bounded(finding.message, 300),
+                })),
+              }
+            : {}),
         }));
         const selectedRuns = [...driveController.liveRunValues()].filter((run) =>
           selectedIds.has(run.taskId)
@@ -406,14 +447,21 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             new Map(selectedRuns.map((run) => [run.taskId, run.kind] as const))
           )
         );
+        const text = bounded(
+          `${decisionText}${statusText}\n${live || "No live executors."}\nReview evidence:\n${JSON.stringify(evidence)}`,
+          singleTask ? 8000 : 4000
+        );
+        const inspectKey = `${ctx.cwd}\u0000${[...selectedIds].sort().join(",")}`;
+        const repeated =
+          lastInspect !== undefined && lastInspect.key === inspectKey && lastInspect.text === text;
+        lastInspect = { key: inspectKey, text };
         return {
           content: [
             {
               type: "text",
-              text: truncateText(
-                `${decisionText}${statusText}\n${live || "No live executors."}\nReview evidence:\n${JSON.stringify(evidence)}`,
-                4000
-              ),
+              text: repeated
+                ? `(unchanged since the previous inspect — act on this evidence instead of re-inspecting)\n${text}`
+                : text,
             },
           ],
           details: { action: "drive", tasks },
@@ -810,6 +858,20 @@ function applyTaskSupersession(
       ...new Set(
         dependent.dependsOn.map((dependencyId) =>
           dependencyId.toUpperCase() === predecessor.id.toUpperCase() ? successor.id : dependencyId
+        )
+      ),
+    ];
+  }
+  // A paused-drive scope recorded before the supersession still names the
+  // predecessor: /maestro resume would drive only a cancelled task and report
+  // a no-op "completed". Rewire it like dependencies. The active decision is
+  // deliberately left alone — its evidence is history about the predecessor
+  // and must not follow the successor.
+  if (board.pausedDrive?.taskIds?.length) {
+    board.pausedDrive.taskIds = [
+      ...new Set(
+        board.pausedDrive.taskIds.map((id) =>
+          id.toUpperCase() === predecessor.id.toUpperCase() ? successor.id : id
         )
       ),
     ];
