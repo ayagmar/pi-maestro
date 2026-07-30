@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- A watchdog kill caused by complete provider silence (not one event, not one turn after steering) is classified as a provider failure instead of a stall, so an OpenAI outage no longer consumes one of the task's real attempts — the launch falls back or retries without burning the cap. The post-steer grace period also anchors to the last event instead of the steer time, so a model that is still streaming reasoning is never killed mid-thought. Turn-producing no-progress stalls still consume attempts.
 - Reviewer notes are distilled into findings from their numbered list items only; preamble lines ("Static review confirms:"), section headers, and the VERDICT line itself no longer become findings that get re-injected into retry prompts as if they were defects.
 - Decision evidence injected into the owner conversation is character-bounded. The old bound counted lines, which a single enormous line (or a multi-task escalation with executor-report tails) never hit.
 - A write-scope overlap caused by a broad glob now names the glob: "app/src/test/**" claims every file under that tree, and a real recovery plan burned a full model turn discovering that. The no_progress remedy for tasks blocked by an accidentally cancelled dependency (an aborted drive) now names the one-step fix: reactivate it with maestro_update cancelled: false.

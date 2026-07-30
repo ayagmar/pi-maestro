@@ -620,9 +620,23 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
         const terminationTurns = options.watchdogTerminationTurns ?? 4;
         const postSteerTurns = attempt.usage.turns - watchdogSteeredAt;
         const postSteerSilenceMs = idleMs * Math.max(1, terminationTurns);
+        // Anchor the grace period to the last event, not the steer: a model
+        // that is still streaming reasoning is alive, and killing it counted
+        // real work as a stall.
         const silenceGraceExpired =
-          idleMs > 0 && Date.now() - watchdogSteeredTime >= postSteerSilenceMs;
+          idleMs > 0 &&
+          Date.now() - Math.max(watchdogSteeredTime, lastEventAt) >= postSteerSilenceMs;
         if (postSteerTurns >= terminationTurns || silenceGraceExpired) {
+          // Complete silence since the steer — not one event, not one turn —
+          // means the provider stopped answering, not that the task is hard.
+          // Recording it as a stall consumed one of the task's real attempts
+          // for an outage it did not cause; a provider failure is retried on
+          // the fallback model without consuming the attempt.
+          if (silenceGraceExpired && postSteerTurns <= 0 && lastEventAt <= watchdogSteeredTime) {
+            result.errorMessage =
+              "no provider events after watchdog steering; the provider is silent or overloaded";
+            result.failureCause = "provider";
+          }
           abortWithCause("stalled");
         }
       }
@@ -842,7 +856,11 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       // A cost-cap abort carries an errorMessage and must land as a failure
       // (retryable, visible reason), not as a user cancellation.
       result.aborted = abortCause === "user_abort";
-      if (abortCause) result.failureCause = abortCause;
+      // A stall already classified as provider silence keeps that cause; the
+      // kill mechanics were the same but the accountability is not.
+      if (abortCause && !(abortCause === "stalled" && result.failureCause === "provider")) {
+        result.failureCause = abortCause;
+      }
       // Pi can flush and exit 0 after a graceful abort; a stalled or capped
       // run must still land as a failure, matching the detached supervisor.
       if (abortCause && abortCause !== "user_abort" && result.exitCode === 0) result.exitCode = 1;

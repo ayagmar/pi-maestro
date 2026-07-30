@@ -1308,7 +1308,7 @@ setInterval(() => {}, 1000);
   }
 });
 
-test("wall-clock watchdog steers once and aborts a silent executor as stalled", async () => {
+test("wall-clock watchdog aborts a fully silent executor as a provider failure", async () => {
   const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-"));
   const fakePi = join(root, "silent-pi.mjs");
   writeFileSync(
@@ -1341,14 +1341,17 @@ process.stdin.on("data", (chunk) => {
       watchdogTerminationTurns: 4,
     });
     const outcome = await run.outcome;
-    assert.equal(outcome.failureCause, "stalled");
-    assert.equal(outcome.failureReason?.kind, "stalled");
+    // Not one event since the steer: the provider went silent, and that must
+    // not consume one of the task's real attempts as a "stall".
+    assert.equal(outcome.failureCause, "provider");
+    assert.equal(outcome.failureReason?.kind, "provider_failure");
+    assert.match(outcome.errorMessage ?? "", /provider is silent or overloaded/);
   } finally {
     process.argv[1] = originalScript;
   }
 });
 
-test("a stalled executor that exits cleanly on abort still lands as stalled", async () => {
+test("a stalled executor that exits cleanly on abort still lands as a failure", async () => {
   const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-exit0-"));
   const fakePi = join(root, "polite-pi.mjs");
   writeFileSync(
@@ -1378,9 +1381,56 @@ process.stdin.on("data", (chunk) => {
       watchdogTerminationTurns: 1,
     });
     const outcome = await run.outcome;
-    assert.equal(outcome.failureCause, "stalled");
+    // Fully silent while alive → provider silence, and a clean exit on abort
+    // must still land as a failure, never a success.
+    assert.equal(outcome.failureCause, "provider");
     assert.equal(outcome.aborted, false);
     assert.notEqual(outcome.exitCode, 0);
+    assert.equal(outcome.failureReason?.kind, "provider_failure");
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("post-steer turns without progress remain a genuine consuming stall", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-turn-stall-"));
+  const fakePi = join(root, "looping-pi.mjs");
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "steer") {
+      // Keep answering with turns that make no progress.
+      const emit = () => console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "still thinking about it" }] } }));
+      emit(); setTimeout(emit, 10); setTimeout(emit, 20);
+    }
+    if (command.type === "abort") process.exit(1);
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "turn-stall",
+      cwd: root,
+      prompt: "loop",
+      tier: { thinking: "low" },
+      watchdogIdleSeconds: 0.02,
+      watchdogWarningTurns: 12,
+      watchdogTerminationTurns: 2,
+    });
+    const outcome = await run.outcome;
+    assert.equal(outcome.failureCause, "stalled");
     assert.equal(outcome.failureReason?.kind, "stalled");
   } finally {
     process.argv[1] = originalScript;

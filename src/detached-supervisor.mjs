@@ -158,10 +158,20 @@ const evaluateWatchdog = () => {
   }
   if (watchdogSteeredAt === undefined || watchdogSteeredTime === undefined) return;
   const postSteerTurns = state.usage.turns - watchdogSteeredAt;
+  // Grace anchors to the last event so a still-streaming model is never
+  // killed mid-thought; see the attached transport for the same policy.
   const silenceGraceExpired =
     idleMs > 0 &&
-    Date.now() - watchdogSteeredTime >= idleMs * Math.max(1, config.watchdogTerminationTurns);
+    Date.now() - Math.max(watchdogSteeredTime, lastEventAt) >=
+      idleMs * Math.max(1, config.watchdogTerminationTurns);
   if (postSteerTurns >= config.watchdogTerminationTurns || silenceGraceExpired) {
+    // Complete silence since the steer is a provider outage, not a stall;
+    // it must not consume one of the task's real attempts.
+    if (silenceGraceExpired && postSteerTurns <= 0 && lastEventAt <= watchdogSteeredTime) {
+      errorMessage =
+        "no provider events after watchdog steering; the provider is silent or overloaded";
+      failureCause = "provider";
+    }
     abortWithCause("stalled");
   }
 };
@@ -333,7 +343,10 @@ const finish = (code, signal, viaDrain = false) => {
   if (drainTimer) clearTimeout(drainTimer);
   stdoutBuffer += stdoutDecoder.end();
   if (stdoutBuffer.trim()) processStdoutLine(stdoutBuffer);
-  if (abortCause === "cost_cap" || abortCause === "stalled") failureCause = abortCause;
+  // A stall already classified as provider silence keeps that cause.
+  if (abortCause === "cost_cap" || (abortCause === "stalled" && failureCause !== "provider")) {
+    failureCause = abortCause;
+  }
   if (abortCause === "user_abort") failureCause = "user_abort";
   if (abortCause === "process") failureCause = "process";
   const exitCode = abortCause ? 1 : (code ?? 1);
