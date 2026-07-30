@@ -425,6 +425,7 @@ ctrl+alt+j / ctrl+alt+k   move the agent selector under the editor (next/previou
 /maestro config project   interactive settings editor (repo scope)
 /maestro config show      print the resolved defaults + user + project configuration
 /maestro costs            attempts, total/average billed cost, models, providers, per-task spend
+/maestro config budget <usd>  raise or inspect the run budget (counts lifetime spend, sunk included)
 /maestro insights         compare model/tier approvals, cost, failures, and review rejection
 /maestro reconcile        report board/artifact provenance inconsistencies
 /maestro timeline [id]    show bounded chronological evidence without waking a model

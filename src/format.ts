@@ -274,12 +274,7 @@ export function formatBoardProgress(tasks: Task[]): string {
   return `${approved}/${active}${cancelledPart}`;
 }
 
-/**
- * Spend that still counts against the run budget. Cancelled tasks (including
- * superseded predecessors) are sunk cost: counting them permanently starved
- * their own replacement tasks, so a board that escalated near budget could
- * never dispatch the recovery work it was told to create.
- */
+/** Spend on tasks that are still active; the remainder is sunk in cancelled work. */
 export function activeRunCost(tasks: Task[]): number {
   return boardUsage(tasks.filter((task) => task.status !== "cancelled")).cost;
 }
@@ -287,19 +282,24 @@ export function activeRunCost(tasks: Task[]): number {
 /** USD left before the run budget blocks dispatch, or undefined when the cap is off. */
 export function remainingRunBudget(tasks: Task[], maxRunCost: number): number | undefined {
   if (maxRunCost <= 0) return undefined;
-  return Math.max(0, maxRunCost - activeRunCost(tasks));
+  return Math.max(0, maxRunCost - boardUsage(tasks).cost);
 }
 
+/**
+ * The budget bounds every real dollar this board has ever spent — sunk cost
+ * of cancelled and superseded tasks included. Excluding sunk spend was tried
+ * and is a laundering hole: superseding a task freed its budget, so a
+ * cancel-and-replan loop could spend without bound under a cap that claimed
+ * to bound the run. Recovery from a genuinely exhausted budget is one
+ * deliberate human step, not an accounting exemption.
+ */
 export function runBudgetWarning(tasks: Task[], maxRunCost: number): string | undefined {
   if (maxRunCost <= 0) return undefined;
-  const active = activeRunCost(tasks);
-  if (active <= maxRunCost) return undefined;
-  const sunk = boardUsage(tasks).cost - active;
-  const sunkNote =
-    sunk > 0
-      ? `; a further $${sunk.toFixed(4)} is sunk in cancelled tasks and no longer counts`
-      : "";
-  return `run budget exceeded ($${active.toFixed(4)} of $${maxRunCost} across active tasks${sunkNote})`;
+  const total = boardUsage(tasks).cost;
+  if (total <= maxRunCost) return undefined;
+  const sunk = total - activeRunCost(tasks);
+  const sunkNote = sunk > 0 ? ` · $${sunk.toFixed(4)} of it sunk in cancelled tasks` : "";
+  return `run budget exceeded ($${total.toFixed(4)} of $${maxRunCost} lifetime board spend${sunkNote}); raise it deliberately with /maestro config budget <usd>, or /maestro reset to archive the board`;
 }
 
 export function taskLine(task: Task): string {

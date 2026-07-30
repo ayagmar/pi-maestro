@@ -27,6 +27,9 @@ export function formatDrivePulse(summary: DriveSummary): string {
   if (code === "no_progress") {
     return `${summary.stoppedBecause.message}\n\n${base}`;
   }
+  if (code === "budget_blocked") {
+    return `${base}\n\nThe run budget bounds every dollar this board has spent, sunk cost included, and raising it is a human decision. Ask the user to run /maestro config budget <usd> (or /maestro reset to archive the board), then resume. Do not attempt to change configuration or launder spend by cancelling tasks.`;
+  }
   if (code === "provider_blocked") {
     return `${base}\n\nChoose a recovery: configure another fallback in /maestro config then /maestro resume, or maestro_update the task, or ask the user if the block is a cost/quota decision. Do not blindly retry the same provider.`;
   }

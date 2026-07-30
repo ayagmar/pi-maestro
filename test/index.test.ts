@@ -18,7 +18,7 @@ import {
   saveStoredRecipe,
   updateBoard,
 } from "../src/board.js";
-import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
+import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/config.js";
 import { deliverPendingDecision } from "../src/drive-controller.js";
 import maestro, {
   assertKnownTaskIds,
@@ -4957,6 +4957,40 @@ test("the below-editor agent selector marks a selection the shortcuts can move",
         () => loadBoard(cwd).tasks.every((task) => !task.dispatchClaim),
         "executors did not settle"
       );
+    }
+  );
+});
+
+test("/maestro config budget raises the run budget in one deliberate step", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, maxRunCost: 35 });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const sunkTask = createTask(board, { title: "Sunk", brief: "old", tier: "standard" });
+      sunkTask.attempts.push({
+        ...executorAttempt(),
+        usage: { input: 1, output: 1, cost: 36, turns: 2 },
+      });
+      forceStatus(sunkTask, "cancelled");
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+
+      // Without an amount: report the current budget and spend breakdown.
+      await command.handler("config budget", ctx);
+      assert.match(notices.at(-1) ?? "", /Run budget: \$35/);
+      assert.match(notices.at(-1) ?? "", /\$36\.0000 sunk in cancelled tasks/);
+
+      await command.handler("config budget nonsense", ctx);
+      assert.match(notices.at(-1) ?? "", /Budget must be a number/);
+
+      await command.handler("config budget 120", ctx);
+      assert.match(notices.at(-1) ?? "", /Run budget → \$120/);
+      assert.match(notices.at(-1) ?? "", /\$84\.0000 remaining/);
+      assert.equal(loadConfig(cwd).maxRunCost, 120);
+      // Only maxRunCost changed in the project override file.
+      assert.equal(loadConfig(cwd).autoCommit, false);
     }
   );
 });

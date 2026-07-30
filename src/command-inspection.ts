@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { completionFreshness } from "./artifact-policy.js";
 import {
@@ -8,8 +10,8 @@ import {
   planValidationMessage,
   validatePlan,
 } from "./board.js";
-import { describeConfig, loadConfig } from "./config.js";
-import { formatCostSummary } from "./format.js";
+import { configFile, describeConfig, loadConfig, validateConfig } from "./config.js";
+import { activeRunCost, boardUsage, formatCostSummary } from "./format.js";
 import { notify } from "./handoff.js";
 import { deriveModelInsights, formatModelInsights } from "./insights.js";
 import { assertKnownTaskIds } from "./session-control.js";
@@ -24,12 +26,70 @@ export async function handleConfigCommand(
   rest: string,
   onChanged: () => void
 ): Promise<void> {
+  const [sub, amountRaw] = rest.split(/\s+/).filter(Boolean);
+  if (sub === "budget") {
+    handleBudgetCommand(ctx, amountRaw, onChanged);
+    return;
+  }
   if (ctx.mode !== "tui" || rest === "show") {
     notify(ctx, describeConfig(loadConfig(ctx.cwd)));
     return;
   }
   const scope = rest === "project" ? "project" : "user";
   await showSettings(ctx, scope);
+  onChanged();
+}
+
+/**
+ * The one-step recovery from budget_blocked. The budget counts every dollar
+ * the board has ever spent (sunk cost included), so continuing after an
+ * exhausted budget is a deliberate human raise — this command — rather than
+ * an accounting exemption or a JSON-file scavenger hunt.
+ */
+function handleBudgetCommand(
+  ctx: ExtensionCommandContext,
+  amountRaw: string | undefined,
+  onChanged: () => void
+): void {
+  const config = loadConfig(ctx.cwd);
+  const tasks = loadBoard(ctx.cwd).tasks;
+  const total = boardUsage(tasks).cost;
+  const sunk = total - activeRunCost(tasks);
+  const spendSummary = `board spend $${total.toFixed(4)}${sunk > 0 ? ` ($${sunk.toFixed(4)} sunk in cancelled tasks)` : ""}`;
+  if (amountRaw === undefined) {
+    const current = config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`;
+    notify(
+      ctx,
+      `Run budget: ${current} · ${spendSummary}. Set it with /maestro config budget <usd> (0 disables).`
+    );
+    return;
+  }
+  const amount = Number(amountRaw.replace(/^\$/, ""));
+  if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000) {
+    notify(ctx, "Budget must be a number of USD from 0 to 1000000 (0 disables).", "warning");
+    return;
+  }
+  const file = configFile("project", ctx.cwd);
+  let projectSettings: Record<string, unknown> = {};
+  try {
+    projectSettings = JSON.parse(readFileSync(file, "utf-8")) as Record<string, unknown>;
+  } catch {
+    // Missing or invalid project config starts from an empty override set.
+  }
+  projectSettings.maxRunCost = amount;
+  const error = validateConfig(projectSettings);
+  if (error) {
+    notify(ctx, `Budget not saved: existing project config is invalid (${error}).`, "warning");
+    return;
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(projectSettings, null, 2)}\n`, "utf-8");
+  const remaining =
+    amount === 0 ? "budget disabled" : `$${Math.max(0, amount - total).toFixed(4)} remaining`;
+  notify(
+    ctx,
+    `Run budget → ${amount === 0 ? "off" : `$${amount}`} · ${spendSummary} · ${remaining}. Use /maestro resume or /maestro drive to continue.`
+  );
   onChanged();
 }
 

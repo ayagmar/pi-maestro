@@ -4439,3 +4439,52 @@ test("retryContext fresh keeps clean-context retries and injects the prior repor
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("reviewer prose and verdict lines do not become findings", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-findings-filter-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const notes = [
+      "Static review confirms:",
+      "The cache is keyed correctly.",
+      "Required fixes:",
+      "1. Criterion 3: cache eviction races the reconnect in src/net.ts.",
+      "2. Add a regression test for the eviction race.",
+      "VERDICT: REQUEST_CHANGES",
+    ].join("\n");
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: `VERDICT: REQUEST_CHANGES\n${notes}`,
+        })(options);
+      }
+      return executor({
+        usage: { input: 1, output: 1, cost: 0, turns: 1 },
+        finalReport: "done",
+      })(options);
+    };
+
+    await driveBoard({
+      cwd,
+      config: { ...config, maxAttempts: 1 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    const messages = (persisted?.findings ?? []).map((finding) => finding.message);
+    assert.deepEqual(messages, [
+      "Criterion 3: cache eviction races the reconnect in src/net.ts.",
+      "Add a regression test for the eviction race.",
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

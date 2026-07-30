@@ -805,10 +805,17 @@ export async function reviewTask(options: {
         const notes = verdict.notes || outcome.finalReport;
         transition(fresh, "changes_requested");
         fresh.reviewNotes = notes;
-        const messages = notes
-          .split("\n")
+        // Reviewers are contracted to a numbered findings list, but their
+        // notes also carry preamble ("Static review confirms:"), section
+        // headers, and sometimes the VERDICT line itself. Splitting every
+        // line into a "finding" re-injected that prose into retry prompts as
+        // if it were a defect. When list items exist, they are the findings.
+        const noteLines = notes.split("\n");
+        const listItems = noteLines.filter((line) => /^\s*(?:[-*]|\d+[.)])\s+/.test(line));
+        const messages = (listItems.length > 0 ? listItems : noteLines)
           .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
           .filter(Boolean)
+          .filter((line) => !/^\**\s*verdict\s*:/i.test(line))
           .slice(0, 8);
         fresh.findings ??= [];
         const attemptIndex = attempt?.index ?? fresh.attempts.length;

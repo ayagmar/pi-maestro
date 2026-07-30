@@ -39,7 +39,7 @@ export const MAESTRO_COMMANDS = [
 const NESTED_COMMANDS: Record<string, string[]> = {
   plan: ["export", "import", "diff"],
   recipe: ["list", "inspect", "preview", "save", "run", "remove"],
-  config: ["project", "show"],
+  config: ["project", "show", "budget"],
   doctor: ["cleanup"],
   reset: ["confirm"],
 };

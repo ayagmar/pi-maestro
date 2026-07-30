@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   boardUsage,
+  remainingRunBudget,
   boardUsageSummary,
   describeProgressDelta,
   formatBoardProgress,
@@ -169,24 +170,29 @@ test("formatBoardProgress excludes cancelled tasks from active progress", () => 
   assert.equal(formatBoardProgress(tasks.slice(0, 2)), "2/2");
 });
 
-test("run budget gates only when active board cost exceeds a positive cap", () => {
+test("run budget gates only when lifetime board cost exceeds a positive cap", () => {
   const tasks = [makeTask({ attempts: [makeAttempt(5, 1)] })];
   assert.equal(runBudgetWarning(tasks, 0), undefined);
   assert.equal(runBudgetWarning(tasks, 5), undefined);
-  assert.equal(
-    runBudgetWarning(tasks, 4),
-    "run budget exceeded ($5.0000 of $4 across active tasks)"
+  assert.match(
+    runBudgetWarning(tasks, 4) ?? "",
+    /run budget exceeded \(\$5\.0000 of \$4 lifetime board spend\)/
   );
+  assert.match(runBudgetWarning(tasks, 4) ?? "", /\/maestro config budget <usd>/);
 });
 
-test("run budget excludes sunk cost of cancelled tasks but reports it", () => {
+test("cancelling a task never frees run budget; sunk spend is reported", () => {
   const active = makeTask({ attempts: [makeAttempt(3, 1)] });
   const cancelled = makeTask({ status: "cancelled", attempts: [makeAttempt(36, 2)] });
-  // The cancelled predecessor's spend must not starve its successors.
-  assert.equal(runBudgetWarning([active, cancelled], 4), undefined);
-  const warning = runBudgetWarning([active, cancelled], 2);
-  assert.match(warning ?? "", /run budget exceeded \(\$3\.0000 of \$2 across active tasks/);
-  assert.match(warning ?? "", /\$36\.0000 is sunk in cancelled tasks and no longer counts/);
+  // Excluding sunk cost let a cancel-and-replan loop spend without bound
+  // under a cap that claimed to bound the run.
+  const warning = runBudgetWarning([active, cancelled], 35);
+  assert.match(warning ?? "", /run budget exceeded \(\$39\.0000 of \$35 lifetime board spend/);
+  assert.match(warning ?? "", /\$36\.0000 of it sunk in cancelled tasks/);
+  // Launch caps derive from the same lifetime accounting.
+  assert.equal(remainingRunBudget([active, cancelled], 35), 0);
+  assert.equal(remainingRunBudget([active, cancelled], 50), 11);
+  assert.equal(remainingRunBudget([active, cancelled], 0), undefined);
 });
 
 test("formatUsage renders compact parts", () => {
