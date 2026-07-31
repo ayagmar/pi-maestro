@@ -60,6 +60,8 @@ export interface ReviewConvergence {
   reviewerCount: number;
   summary: string;
   decidedAt: number;
+  /** What settled it, when it was not the reviewers' judgment: pre-review gates (fingerprint, artifact, verification). */
+  cause?: "gate";
 }
 
 export interface Attempt {

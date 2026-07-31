@@ -14,9 +14,13 @@ const canonical = (value: unknown): string => JSON.stringify(value);
 
 function tierIdentity(tier: TierConfig | undefined): object | undefined {
   if (!tier) return undefined;
+  // Fallbacks are dispatch resilience, not work identity: adding a fallback
+  // model changes nothing about what an executor already built or how a
+  // reviewer would judge it. Including them here invalidated every in-flight
+  // candidate the moment an operator added provider redundancy — exactly the
+  // situation where re-executing everything is least affordable.
   return {
     model: tier.model ?? null,
-    fallbacks: tier.fallbacks ?? [],
     thinking: tier.thinking,
     tools: tier.tools ?? null,
   };

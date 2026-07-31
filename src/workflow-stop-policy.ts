@@ -237,6 +237,12 @@ export function providerBlockedTask(task: Task): boolean {
   if (!latest) return false;
   if (task.status === "failed") return !consumesMaxAttempt(latest);
   if (task.status !== "ready_for_review") return false;
+  // A pre-review gate settlement (stale execution fingerprint, artifact or
+  // verification failure) is the current truth about this attempt. Matching
+  // on an older provider-failed launch here misdiagnosed a config-change
+  // gate as "no available provider" and sent a real user hunting for an
+  // auth problem that did not exist.
+  if (latest.reviewConvergence?.cause === "gate") return false;
   return latest.reviewLaunches?.at(-1)?.failureReason?.kind === "provider_failure";
 }
 

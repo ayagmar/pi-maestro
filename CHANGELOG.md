@@ -30,6 +30,8 @@
 
 ### Fixed
 
+- A stale provider-failed review launch no longer masks a fresh pre-review gate settlement: after a config change staled an executed candidate, the drive reported "provider_blocked — configure a fallback" off the old launch record while the real cause was the fingerprint gate. Gate settlements now carry a structured cause and take precedence in diagnosis.
+- Tier `fallbacks` are no longer part of the task fingerprint: a fallback list is dispatch resilience, not work identity, and including it invalidated every in-flight candidate the moment an operator added provider redundancy — exactly when re-executing everything is least affordable. Model, thinking, and tools changes still invalidate as before.
 - A watchdog kill caused by complete provider silence (not one event, not one turn after steering) is classified as a provider failure instead of a stall, so an OpenAI outage no longer consumes one of the task's real attempts — the launch falls back or retries without burning the cap. The post-steer grace period also anchors to the last event instead of the steer time, so a model that is still streaming reasoning is never killed mid-thought. Turn-producing no-progress stalls still consume attempts.
 - Reviewer notes are distilled into findings from their numbered list items only; preamble lines ("Static review confirms:"), section headers, and the VERDICT line itself no longer become findings that get re-injected into retry prompts as if they were defects.
 - Decision evidence injected into the owner conversation is character-bounded. The old bound counted lines, which a single enormous line (or a multi-task escalation with executor-report tails) never hit.

@@ -16,7 +16,11 @@ import {
 } from "../src/board.js";
 import { loadConfig, saveConfig } from "../src/config.js";
 import { selfReportedBlocker } from "../src/workflow-review-policy.js";
-import { escalatedTask, omnibusRejection } from "../src/workflow-stop-policy.js";
+import {
+  escalatedTask,
+  omnibusRejection,
+  providerBlockedTask,
+} from "../src/workflow-stop-policy.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import {
   type Attempt,
@@ -4484,6 +4488,72 @@ test("reviewer prose and verdict lines do not become findings", async () => {
       "Criterion 3: cache eviction races the reconnect in src/net.ts.",
       "Add a regression test for the eviction race.",
     ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a gate settlement is not misdiagnosed as a provider block", () => {
+  const { task } = boardWithTask("ready_for_review");
+  const stale = attempt();
+  stale.index = 2;
+  stale.reviewLaunches = [
+    {
+      startedAt: 1,
+      endedAt: 2,
+      usage: { input: 1, output: 1, cost: 0.1, turns: 1 },
+      failureReason: {
+        kind: "provider_failure",
+        message: "Codex error: Our servers are currently overloaded.",
+        retryable: true,
+      },
+    },
+  ];
+  task.attempts.push(stale);
+  // Yesterday's provider-failed launch alone: a genuine provider block.
+  assert.equal(providerBlockedTask(task), true);
+  // A later pre-review gate settlement (stale execution fingerprint after a
+  // config change) is the current truth; advising "configure a provider"
+  // for it sent a real user hunting for an auth problem that did not exist.
+  stale.reviewConvergence = {
+    policy: "single",
+    status: "operational_failure",
+    requiredApprovals: 1,
+    actualApprovals: 0,
+    reviewerCount: 0,
+    summary: "Execution configuration (tier/review policy) changed since this attempt executed.",
+    decidedAt: 3,
+    cause: "gate",
+  };
+  assert.equal(providerBlockedTask(task), false);
+});
+
+test("adding a tier fallback does not invalidate an executed candidate", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-fingerprint-fallbacks-"));
+  try {
+    const { board, task } = boardWithTask();
+    const before = taskFingerprint(board, task, config);
+    const withFallbacks: MaestroConfig = {
+      ...config,
+      tiers: {
+        ...config.tiers,
+        standard: { ...tier, fallbacks: ["anthropic/claude-sonnet-5"] },
+        review: { ...tier },
+      },
+    };
+    const after = taskFingerprint(board, task, withFallbacks);
+    assert.ok(before && after);
+    assert.equal(
+      before.fingerprint,
+      after.fingerprint,
+      "fallbacks are dispatch resilience, not work identity"
+    );
+    // Changing the model or thinking still invalidates, as it must.
+    const changedModel: MaestroConfig = {
+      ...config,
+      tiers: { ...config.tiers, standard: { thinking: "high" } },
+    };
+    assert.notEqual(taskFingerprint(board, task, changedModel)?.fingerprint, before.fingerprint);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

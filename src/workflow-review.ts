@@ -301,7 +301,8 @@ export async function reviewTask(options: {
             effectiveRequiredApprovals(fresh, reviewPolicy, reviewRequiredApprovals),
             0,
             0,
-            notes
+            notes,
+            "gate"
           );
           attempt.failureReason = {
             kind: "reviewer_failure",

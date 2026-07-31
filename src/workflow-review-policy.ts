@@ -130,7 +130,8 @@ export function convergenceRecord(
   requiredApprovals: number,
   actualApprovals: number,
   reviewerCount: number,
-  summary: string
+  summary: string,
+  cause?: "gate"
 ): NonNullable<Attempt["reviewConvergence"]> {
   return {
     policy,
@@ -140,6 +141,7 @@ export function convergenceRecord(
     reviewerCount,
     summary: redactFailureMessage(summary).slice(0, 2_000),
     decidedAt: Date.now(),
+    ...(cause ? { cause } : {}),
   };
 }
 
