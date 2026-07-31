@@ -156,6 +156,19 @@ export function formatCostSummary(tasks: Task[]): string {
   const parts = [
     `run: ${usage.totalAttempts} attempt${usage.totalAttempts === 1 ? "" : "s"} · $${usage.totalCost.toFixed(4)} total · $${usage.averageMeaningfulCost.toFixed(4)} avg (billed)`,
   ];
+  // The question every expensive run eventually asks is "what did the money
+  // buy?". Landed = spend on tasks that reached approval (their rejected
+  // attempts included: that was the cost of landing them). In flight = spend
+  // on tasks still being worked. Sunk = spend on cancelled work.
+  if (usage.totalCost > 0) {
+    const landedTasks = tasks.filter((task) => task.status === "approved");
+    const landed = boardUsage(landedTasks).cost;
+    const sunk = boardUsage(tasks.filter((task) => task.status === "cancelled")).cost;
+    const inFlight = Math.max(0, usage.totalCost - landed - sunk);
+    parts.push(
+      `value: $${landed.toFixed(4)} landed across ${landedTasks.length} approved task${landedTasks.length === 1 ? "" : "s"} · $${inFlight.toFixed(4)} in flight · $${sunk.toFixed(4)} sunk in cancelled work`
+    );
+  }
   if (usage.models.length > 0) parts.push(`models: ${usage.models.join(", ")}`);
   if (usage.providers.length > 0) parts.push(`providers: ${usage.providers.join(", ")}`);
   const promptAccounting = tasks.reduce(

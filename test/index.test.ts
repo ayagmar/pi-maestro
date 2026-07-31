@@ -867,7 +867,7 @@ test("/maestro costs summarizes attempts, cost, and identities", async () => {
       await command.handler("costs", ctx);
       assert.equal(
         notices[0],
-        "run: 1 attempt · $0.0200 total · $0.0200 avg (billed)\nmodels: openai/gpt-5-mini\nproviders: openai\nspend: other $0.0200 · reconciled $0.0200"
+        "run: 1 attempt · $0.0200 total · $0.0200 avg (billed)\nvalue: $0.0000 landed across 0 approved tasks · $0.0200 in flight · $0.0000 sunk in cancelled work\nmodels: openai/gpt-5-mini\nproviders: openai\nspend: other $0.0200 · reconciled $0.0200"
       );
     }
   );

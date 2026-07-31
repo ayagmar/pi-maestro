@@ -78,6 +78,7 @@
 
 ### Observability
 
+- Cost reporting answers "what did the money buy?" directly: `/maestro costs` splits spend into landed (tasks that reached approval, their rejected attempts included), in flight, and sunk in cancelled work, and drive summaries state cost per approved task — or "no approvals yet" when the spend is all churn.
 - Resumed rejection retries are marked on the attempt and `/maestro insights` compares retry economics per model/tier: average executor cost of retries that resumed the rejected session versus retries that started fresh, so the `retryContext` saving is measured instead of assumed.
 
 - `/maestro insights` now renders a bounded, model-free aggregation over current and archived boards with per-model/tier attempts, first-review approval, approved-task cost, failure kinds, and reviewer rejection rates.

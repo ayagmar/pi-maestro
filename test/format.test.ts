@@ -117,7 +117,7 @@ test("formatCostSummary stays compact and omits unavailable identities", () => {
   attempt.model = "openai/gpt-5-mini";
   assert.equal(
     formatCostSummary([makeTask({ attempts: [attempt] })]),
-    "run: 1 attempt · $0.0200 total · $0.0200 avg (billed)\nmodels: openai/gpt-5-mini\nproviders: openai\nspend: other $0.0200 · reconciled $0.0200"
+    "run: 1 attempt · $0.0200 total · $0.0200 avg (billed)\nvalue: $0.0000 landed across 0 approved tasks · $0.0200 in flight · $0.0000 sunk in cancelled work\nmodels: openai/gpt-5-mini\nproviders: openai\nspend: other $0.0200 · reconciled $0.0200"
   );
   assert.equal(formatCostSummary([]), "run: 0 attempts · $0.0000 total · $0.0000 avg (billed)");
 });
@@ -215,4 +215,15 @@ test("truncateText keeps short text and truncates long text", () => {
   assert.equal(truncateText("a\nb", 5), "a\nb");
   const truncated = truncateText("1\n2\n3\n4\n5", 2);
   assert.match(truncated, /^1\n2\n… \(3 more lines\)$/);
+});
+
+test("cost summary separates landed value from in-flight and sunk spend", () => {
+  const landed = makeTask({ status: "approved", attempts: [makeAttempt(2, 1)] });
+  const churning = makeTask({ status: "changes_requested", attempts: [makeAttempt(30, 2)] });
+  const sunk = makeTask({ status: "cancelled", attempts: [makeAttempt(36, 2)] });
+  const summary = formatCostSummary([landed, churning, sunk]);
+  assert.match(
+    summary,
+    /value: \$2\.0000 landed across 1 approved task · \$30\.0000 in flight · \$36\.0000 sunk in cancelled work/
+  );
 });

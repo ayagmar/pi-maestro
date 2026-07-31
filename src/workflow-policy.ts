@@ -133,9 +133,16 @@ export function formatDriveSummary(summary: DriveSummary): string {
   // resume re-printed the whole board's historical spend as if it just happened.
   const driveCost =
     summary.driveCost === undefined ? "" : ` · $${summary.driveCost.toFixed(4)} this drive`;
+  // Spend without approvals is churn; make the ratio impossible to miss.
+  const perApproved =
+    totalCost > 0
+      ? approved > 0
+        ? ` · $${(totalCost / approved).toFixed(4)} per approved task`
+        : " · no approvals yet"
+      : "";
   return [
     `Drive ${summary.stoppedBecause.code} after ${summary.rounds} round(s): ${approved} approved · ${failed} failed · ${cancelled} cancelled · ${blocked} blocked`,
-    `${attempts} consuming attempt${attempts === 1 ? "" : "s"} · ${launches} launch${launches === 1 ? "" : "es"} · $${totalCost.toFixed(4)} total (executor $${executorCost.toFixed(4)} · review $${reviewCost.toFixed(4)})${driveCost} · $${averageCost.toFixed(4)} avg billed launch`,
+    `${attempts} consuming attempt${attempts === 1 ? "" : "s"} · ${launches} launch${launches === 1 ? "" : "es"} · $${totalCost.toFixed(4)} total (executor $${executorCost.toFixed(4)} · review $${reviewCost.toFixed(4)})${driveCost} · $${averageCost.toFixed(4)} avg billed launch${perApproved}`,
     ...identity,
     summary.stoppedBecause.message,
   ].join("\n");
