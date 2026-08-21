@@ -1,7 +1,5 @@
-export const EXTENSION_NAME = "pi-maestro";
 export const COMMAND = "maestro";
 export const MESSAGE_TYPE = "maestro";
-export const STATE_ENTRY_TYPE = "maestro:event";
 
 /** All maestro state lives under this directory, relative to the project cwd. */
 export const STATE_DIR = ".pi/maestro";
@@ -17,5 +15,4 @@ export const KILL_GRACE_MS = 5000;
 export const MAX_PERSISTED_REPORT_CHARS = 16_000;
 /** Discovery JSON is validated in bytes and must remain intact up to this contract limit. */
 export const MAX_DISCOVERY_REPORT_BYTES = 64_000;
-export const REPORT_PREVIEW_LINES = 40;
 export const CONTEXT_NUDGE_PERCENT = 65;

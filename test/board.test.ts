@@ -439,6 +439,41 @@ test("changing the brief or tier resets the reviewer rejection counter", () => {
   assert.equal(task.reviewRejections, undefined);
 });
 
+test("editing the brief or success criteria clears stale findings and stagnation counters", () => {
+  const task = createTask(emptyBoard(), { title: "Task", brief: "brief", tier: "standard" });
+  const staleFindings = () => [
+    {
+      fingerprint: "criterion-1",
+      message: "Criterion 1: unmet under the old contract",
+      status: "open" as const,
+      firstAttempt: 1,
+      lastAttempt: 1,
+    },
+  ];
+
+  task.findings = staleFindings();
+  task.reviewRejections = 1;
+  task.reviewStagnantRejections = 1;
+  applyPlanTaskEdits(task, { brief: "reworked brief" }, ["standard"]);
+  assert.equal(task.findings, undefined);
+  assert.equal(task.reviewRejections, undefined);
+  assert.equal(task.reviewStagnantRejections, undefined);
+
+  task.findings = staleFindings();
+  task.reviewRejections = 1;
+  task.reviewStagnantRejections = 1;
+  applyPlanTaskEdits(task, { successCriteria: ["renumbered criterion"] }, ["standard"]);
+  assert.deepEqual(task.successCriteria, ["renumbered criterion"]);
+  assert.equal(task.findings, undefined);
+  assert.equal(task.reviewRejections, undefined);
+  assert.equal(task.reviewStagnantRejections, undefined);
+
+  // A tier edit keeps findings: the contract they describe is unchanged.
+  task.findings = staleFindings();
+  applyPlanTaskEdits(task, { tier: "complex" }, ["standard", "complex"]);
+  assert.deepEqual(task.findings, staleFindings());
+});
+
 test("plan edits reject empty fields and unknown tiers without changing them", () => {
   const task = createTask(emptyBoard(), { title: "Title", brief: "brief", tier: "standard" });
 

@@ -2077,6 +2077,7 @@ test("an invalidated in-flight task is reset to todo instead of staying reviewab
       task.status = "ready_for_review";
       task.reviewNotes = "reviewer rejected the old contract";
       task.reviewRejections = 1;
+      task.reviewStagnantRejections = 1;
       const attempt = executorAttempt();
       attempt.usage.cost = 1.5;
       attempt.failureReason = {
@@ -2107,6 +2108,7 @@ test("an invalidated in-flight task is reset to todo instead of staying reviewab
       assert.equal(task?.status, "todo");
       assert.equal(task?.reviewNotes, undefined);
       assert.equal(task?.reviewRejections, undefined);
+      assert.equal(task?.reviewStagnantRejections, undefined);
       assert.equal(task?.attempts.at(-1)?.failureReason, undefined);
       assert.match(result?.content[0]?.text ?? "", /reset to todo/);
     }

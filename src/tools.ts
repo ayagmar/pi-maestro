@@ -758,6 +758,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           forceStatus(fresh, "todo");
           delete fresh.reviewNotes;
           delete fresh.reviewRejections;
+          delete fresh.reviewStagnantRejections;
           const invalidated = fresh.attempts.at(-1);
           if (invalidated) {
             delete invalidated.reviewConvergence;

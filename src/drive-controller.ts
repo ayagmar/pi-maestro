@@ -729,7 +729,7 @@ export function armDeliveredDecisionNudge(
     return;
   }
   const decision = board.activeDecision;
-  if (!decision || !decision.deliveredAt || decision.resolution) return;
+  if (!decision?.deliveredAt || decision.resolution) return;
   if (decision.ownerSession && decision.ownerSession !== currentSession) return;
   armDecisionNudge(cwd, decision.id, send, options, 1, board.revision ?? 0);
 }

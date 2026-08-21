@@ -1,7 +1,7 @@
-import { findTask, loadBoard } from "./board.js";
-import { boardUsage, describeProgressDelta, truncateText } from "./format.js";
-import { type Board, type MaestroConfig, type TaskStatus } from "./types.js";
-import { type DriveSummary, formatDriveSummary, lastReport, snapshot } from "./workflow.js";
+import { loadBoard } from "./board.js";
+import { boardUsage, describeProgressDelta } from "./format.js";
+import { type MaestroConfig, type TaskStatus } from "./types.js";
+import { type DriveSummary, formatDriveSummary, snapshot } from "./workflow.js";
 
 export function unexpectedDriveSummary(
   cwd: string,
@@ -52,13 +52,6 @@ export function formatDrivePulse(summary: DriveSummary): string {
     return `${base}\n\nChoose one: maestro_update the brief/tier, maestro_plan to split, cancel the task, or ask the user. Do not raise the project maxAttempts to force another retry.`;
   }
   return base;
-}
-
-export function reportPreview(board: Board, taskId: string, maxLines: number): string {
-  const task = findTask(board, taskId);
-  const report = task ? lastReport(task) : undefined;
-  if (!report) return "";
-  return `\nReport:\n${truncateText(report, maxLines)}`;
 }
 
 /**

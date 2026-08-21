@@ -147,17 +147,6 @@ function assertRecipeName(name: string): void {
   }
 }
 
-export function inspectBoardStorage(cwd: string): { boardBytes: number; archiveCount: number } {
-  const file = boardFile(cwd);
-  const archiveDirectory = join(stateDir(cwd), "archive");
-  return {
-    boardBytes: existsSync(file) ? statSync(file).size : 0,
-    archiveCount: existsSync(archiveDirectory)
-      ? readdirSync(archiveDirectory).filter((name) => name.endsWith("-board.json")).length
-      : 0,
-  };
-}
-
 interface BoardCacheEntry {
   identity: string;
   board: Board;
@@ -1306,27 +1295,6 @@ export function renewTaskDispatch(
   return renewed;
 }
 
-export function reserveClaimedAttempt(
-  cwd: string,
-  taskId: string,
-  claimId: string
-): number | undefined {
-  let index: number | undefined;
-  updateTask(cwd, taskId, (task) => {
-    if (task.dispatchClaim?.id !== claimId) return;
-    index = Math.max(0, ...task.attempts.map((attempt) => attempt.index)) + 1;
-    task.attempts.push({
-      index,
-      logFile: "pending",
-      thinking: "pending",
-      startedAt: Date.now(),
-      usage: { input: 0, output: 0, cost: 0, turns: 0 },
-      touchedFiles: [],
-    });
-  });
-  return index;
-}
-
 function recoverExpiredClaim(task: Task): void {
   const claim = task.dispatchClaim;
   if (!claim) return;
@@ -2067,6 +2035,10 @@ export function applyPlanTaskEdits(
     delete task.reviewNotes;
     delete task.reviewRejections;
     delete task.reviewStagnantRejections;
+    // Recorded findings describe the old contract. Keeping them open would
+    // re-inject stale feedback into retry and review prompts and could
+    // falsely trip omnibus escalation under the new brief.
+    delete task.findings;
     if (task.status === "changes_requested" || task.status === "failed") {
       forceStatus(task, "todo");
     }
@@ -2094,6 +2066,11 @@ export function applyPlanTaskEdits(
   }
   if (edits.successCriteria !== undefined) {
     task.successCriteria = normalizeSuccessCriteria(edits.successCriteria);
+    // Criterion-numbered findings and the rejection counters reference the
+    // old criteria list; under the new one they are stale evidence.
+    delete task.findings;
+    delete task.reviewRejections;
+    delete task.reviewStagnantRejections;
   }
   if (edits.verificationProfile !== undefined) {
     const profile = edits.verificationProfile.trim();

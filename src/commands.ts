@@ -44,9 +44,6 @@ const NESTED_COMMANDS: Record<string, string[]> = {
   reset: ["confirm"],
 };
 
-/** Aliases that keep working but do not compete for space in the menu. */
-export const MAESTRO_COMMAND_ALIASES = ["dash", "dashboard"] as const;
-
 function completionsFor(prefix: string): AutocompleteItem[] {
   const lower = prefix.toLowerCase();
   const [parent, ...typed] = lower.split(/\s+/);

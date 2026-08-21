@@ -95,7 +95,6 @@ function gitOutput(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: GIT_TIMEOUT_MS,
-    ...(env ? { env } : {}),
     env: {
       ...(env ?? process.env),
       GIT_TERMINAL_PROMPT: "0",

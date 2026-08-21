@@ -288,7 +288,11 @@ export function simulatePlan(board: Board, config: MaestroConfig, taskIds?: stri
       break;
     }
     const ids = [...wave.runnableIds, ...wave.reviewableIds];
-    waves.push(`wave ${index}: ${ids.slice(0, config.maxParallel).join(", ")}`);
+    const shown = ids.slice(0, config.maxParallel);
+    const overflow = ids.length - shown.length;
+    waves.push(
+      `wave ${index}: ${shown.join(", ")}${overflow > 0 ? ` (+${overflow} more, throttled by maxParallel)` : ""}`
+    );
     for (const id of wave.runnableIds) {
       const task = findTask(simulated, id);
       if (task) forceStatus(task, "ready_for_review");
