@@ -98,7 +98,6 @@ let lastEventAt = Date.now();
 let progressTurns = 0;
 let watchdogSteeredAt;
 let watchdogSteeredTime;
-let _lastActivity = "starting…";
 let sessionFile;
 let model;
 let errorMessage;
@@ -191,7 +190,6 @@ const processEvent = (event) => {
     setTimeout(() => killChild("SIGTERM"), config.killGraceMs).unref();
   }
   if (event.type === "tool_execution_start" && event.toolName) {
-    _lastActivity = event.toolName;
     const signature = `${event.toolName.toLowerCase()}:${JSON.stringify(event.args ?? null)}`;
     const repeated = actionSignatures.includes(signature);
     actionSignatures.push(signature);

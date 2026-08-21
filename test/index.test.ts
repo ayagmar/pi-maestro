@@ -3496,26 +3496,6 @@ test("drive results render the completed summary even with task details present"
   );
 });
 
-function _approvingReviewer(): RunOutcome {
-  return {
-    exitCode: 0,
-    usage: { input: 1, output: 1, cost: 0, turns: 1 },
-    finalReport: "Verified.\nVERDICT: APPROVE",
-    touchedFiles: [],
-    aborted: false,
-  };
-}
-
-function _altSession(ctx: CommandCtx, sessionFile: string): CommandCtx {
-  return {
-    ...ctx,
-    sessionManager: {
-      getSessionFile: () => sessionFile,
-      getSessionName: () => undefined,
-    },
-  };
-}
-
 function setupResetBoard(cwd: string): string {
   const board: Board = { version: 1, nextTaskNumber: 1, goal: "keep this goal", tasks: [] };
   const task = createTask(board, { title: "Reset me", brief: "work", tier: "standard" });
