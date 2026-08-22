@@ -410,7 +410,10 @@ function loadMaestro(
     sendMessage: (message: unknown, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
       messages.push({ message, ...(options ? { options } : {}) });
     },
-    sendUserMessage: (message: string, options?: { deliverAs?: string }) => {
+    sendUserMessage: (
+      message: string,
+      options?: { deliverAs?: string; expandPromptTemplates?: boolean }
+    ) => {
       userMessages.push({ message, ...(options ? { options } : {}) });
     },
   };
@@ -2852,7 +2855,12 @@ test("maestro_drive handoff routes through the human command", async () => {
         ctx
       );
       assert.deepEqual(userMessages, [
-        { message: "/maestro handoff", options: { deliverAs: "followUp" } },
+        {
+          message: "/maestro handoff",
+          // expandPromptTemplates is what makes pi dispatch the command instead
+          // of delivering it as literal conversation text.
+          options: { deliverAs: "followUp", expandPromptTemplates: true },
+        },
       ]);
       assert.match(result?.content[0]?.text ?? "", /handoff queued/);
     }
@@ -4085,6 +4093,14 @@ test("settled decisions are owner-scoped, inspectable, and resolve exactly once"
       );
       assert.equal(loadBoard(cwd).activeDecision?.resolution?.intervention, "handoff");
       assert.equal(userMessages.length, 1);
+      // Without expandPromptTemplates pi delivers "/maestro handoff" as literal
+      // conversation text and never dispatches the command: no handoff happens.
+      assert.equal(userMessages[0]?.message, "/maestro handoff");
+      assert.equal(
+        (userMessages[0]?.options as { expandPromptTemplates?: boolean } | undefined)
+          ?.expandPromptTemplates,
+        true
+      );
       await assert.rejects(
         drive.execute(
           "stale",

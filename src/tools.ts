@@ -30,6 +30,7 @@ import {
   resolveDriveDecision,
 } from "./drive-controller.js";
 import { formatDrivePulse, startDriveHeartbeat } from "./drive-summary.js";
+import { requestHandoffCommand } from "./handoff.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
 import { assertPlanTaskLimit, preflightWorkflow, taskShapeWarnings } from "./preflight.js";
 import { canonicalTaskIds } from "./session-control.js";
@@ -499,7 +500,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             };
           }
           if (input.intervention === "handoff") {
-            pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
+            requestHandoffCommand(pi);
           }
           return {
             content: [{ type: "text", text: `Decision ${resolved.id} resolved.` }],
@@ -507,7 +508,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           };
         }
         if (input.intervention === "handoff") {
-          pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
+          requestHandoffCommand(pi);
         } else {
           const selectedRuns = [...driveController.liveRunValues()].filter(
             (run) => !taskIds || taskIds.includes(run.taskId)

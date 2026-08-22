@@ -1,8 +1,28 @@
 import {
+  type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { MESSAGE_TYPE } from "./constants.js";
+import { COMMAND, MESSAGE_TYPE } from "./constants.js";
+
+/**
+ * Dispatch `/maestro handoff` programmatically through the queued-message API.
+ *
+ * Pi executes extension commands from sendUserMessage only when
+ * `expandPromptTemplates` is true (its default is false). Without it the
+ * literal text "/maestro handoff" landed in the conversation as a user
+ * message, the model replied conversationally, and no handoff ever happened —
+ * which silently broke both maestro_drive intervene handoff and the automatic
+ * context-pressure handoff. The pinned 0.82 extension types predate the
+ * option (that runtime ignores it), hence the widened options type.
+ */
+export function requestHandoffCommand(pi: Pick<ExtensionAPI, "sendUserMessage">): void {
+  const options: { deliverAs: "followUp"; expandPromptTemplates?: boolean } = {
+    deliverAs: "followUp",
+    expandPromptTemplates: true,
+  };
+  pi.sendUserMessage(`/${COMMAND} handoff`, options);
+}
 
 export function notify(
   ctx: ExtensionContext,

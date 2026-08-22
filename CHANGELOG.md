@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- Programmatic handoff actually hands off now. `maestro_drive` intervene=handoff and the automatic context-pressure handoff both queued `/maestro handoff` through `sendUserMessage`, which dispatches extension commands only when `expandPromptTemplates` is true (its default is false) — so the literal text landed in the conversation, the model replied conversationally, and no session replacement ever happened. Both paths now request command dispatch explicitly.
 - Novel tool activity now counts as watchdog progress for every run kind, not just investigations and reviews. The mutation-only progress rule killed five real doc/planning implementers at exactly warning+termination turns (~$37) while they read the input documents their briefs required; doom loops still stall because repeated actions and silence still leave the watchdog armed.
 - A cost-cap failure now names the bound that actually cut the attempt off. When the run budget's remainder (not maxCostPerTask) was the binding launch cap, the failure blamed maxCostPerTask and told the operator to raise the wrong knob — a real board burned two more attempts against a $1.09 budget remainder labeled as the per-task cap.
 - A drive no longer dispatches launches whose cost cap would be a near-exhausted run budget's dregs (below 25% of the per-attempt cap, or $0.50 when that cap is off); it stops with budget_blocked before spending, matching the exceeded-budget behavior.

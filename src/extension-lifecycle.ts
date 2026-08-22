@@ -10,7 +10,7 @@ import {
   persistDriveDecision,
 } from "./drive-controller.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
-import { notify } from "./handoff.js";
+import { notify, requestHandoffCommand } from "./handoff.js";
 import { reattachDetachedExecutor } from "./runner.js";
 import {
   maestroBoardCwd,
@@ -102,7 +102,7 @@ export function registerMaestroLifecycle(
       }
 
       state.markContextNudgeShown();
-      pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp" });
+      requestHandoffCommand(pi);
     } catch {
       // The turn may belong to a context invalidated by a session switch.
     }
