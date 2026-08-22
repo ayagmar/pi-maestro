@@ -510,8 +510,12 @@ export class DriveRuntimeController {
           const task = findTask(board, id);
           return task ? `${id} ${task.title.slice(0, 60)}` : id;
         });
+        // Lead with where the whole board stands so each round answers
+        // "how far along am I" without a separate status check.
+        const approved = board.tasks.filter((task) => task.status === "approved").length;
+        const active = board.tasks.filter((task) => task.status !== "cancelled").length;
         reportProgress(
-          `Round ${round} · ${phase === "review" ? "reviewing" : "executing"} ${ids.length} task(s): ${titles.join(" · ")}`
+          `${approved}/${active} approved · Round ${round} · ${phase === "review" ? "reviewing" : "executing"} ${ids.length} task(s): ${titles.join(" · ")}`
         );
       },
       trackRun: (run) => this.trackRun(ctx, run, services),

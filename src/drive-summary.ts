@@ -1,5 +1,5 @@
-import { loadBoard } from "./board.js";
-import { boardUsage, describeProgressDelta } from "./format.js";
+import { isTaskSettled, loadBoard } from "./board.js";
+import { boardUsage, describeProgressDelta, formatElapsed, progressBar } from "./format.js";
 import { type MaestroConfig, type TaskStatus } from "./types.js";
 import { type DriveSummary, formatDriveSummary, snapshot } from "./workflow.js";
 
@@ -81,6 +81,8 @@ export function startDriveHeartbeat(
   const seconds = config.statusWaitSeconds;
   if (!seconds || seconds <= 0) return () => {};
   let previous: Map<string, TaskStatus> | undefined;
+  const startedAt = Date.now();
+  const boardCostAtStart = boardUsage(loadBoard(cwd).tasks).cost;
   const timer = schedule(() => {
     const tasks = loadBoard(cwd).tasks;
     const delta = describeProgressDelta(previous, tasks);
@@ -92,7 +94,22 @@ export function startDriveHeartbeat(
       )
       .join("\n");
     const usage = boardUsage(tasks);
-    const header = `Drive running · ${live ? `${runs.liveRunCount()} live agent(s)` : "no live agent"} · $${usage.cost.toFixed(4)} so far`;
+    // "Where am I": approved over still-landable work, elapsed wall clock,
+    // and this drive's own spend beside the board-lifetime figure.
+    const cancelled = tasks.filter((task) => task.status === "cancelled").length;
+    const approved = tasks.filter((task) => task.status === "approved").length;
+    const remaining = tasks.filter((task) => !isTaskSettled(task)).length;
+    const bar = progressBar(approved, tasks.length - cancelled);
+    const driveCost = Math.max(0, usage.cost - boardCostAtStart);
+    const header = [
+      `Drive running · ${formatElapsed(startedAt)}`,
+      bar || undefined,
+      `${remaining} task(s) left`,
+      live ? `${runs.liveRunCount()} live agent(s)` : "no live agent",
+      `$${driveCost.toFixed(4)} this drive · $${usage.cost.toFixed(4)} board`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     emit([header, live, delta].filter(Boolean).join("\n"));
   }, seconds * 1000);
   return () => timer.stop();

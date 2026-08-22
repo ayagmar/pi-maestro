@@ -166,6 +166,18 @@ export function limitsSummary(config: MaestroConfig): string {
   return `$${config.maxCostPerTask}/attempt · ${config.maxAttempts} tries · ${config.maxTotalLaunchesPerRun} launches`;
 }
 
+export function watchdogSummary(config: MaestroConfig): string {
+  const idle = config.watchdogIdleSeconds ?? 120;
+  const warn = config.watchdogWarningTurns ?? 12;
+  const handoff = config.handoffContextRatio ?? 0.68;
+  const parts = [
+    idle === 0 ? "idle watch off" : `${idle}s idle→steer`,
+    warn === 0 ? "turn watch off" : `${warn} turns→steer`,
+    handoff === 0 ? "auto-handoff off" : `handoff at ${Math.round(handoff * 100)}%`,
+  ];
+  return parts.join(" · ");
+}
+
 export function applySettingsChange(
   currentConfig: MaestroConfig,
   id: string,
@@ -213,6 +225,19 @@ export function applySettingsChange(
     config.statusWaitSeconds = Number(value);
   } else if (id === "decisionNudgeMinutes") {
     config.decisionNudgeMinutes = value === "off" ? 0 : Number(value);
+  } else if (id === "watchdogIdleSeconds") {
+    config.watchdogIdleSeconds = value === "off" ? 0 : Number(value);
+  } else if (id === "watchdogWarningTurns") {
+    config.watchdogWarningTurns = value === "off" ? 0 : Number(value);
+  } else if (id === "watchdogTerminationTurns") {
+    config.watchdogTerminationTurns = Number(value);
+  } else if (id === "handoffContextRatio") {
+    config.handoffContextRatio = value === "off" ? 0 : Number(value.replace("%", "")) / 100;
+  } else if (id === "logEvents") {
+    config.logEvents = value === "full" ? "full" : "compact";
+  } else if (id === "maxLogBytesPerRun") {
+    config.maxLogBytesPerRun =
+      value === "unlimited" ? 0 : Number(value.replace("MB", "")) * 1_000_000;
   } else {
     const [kind, tierName] = id.split(":");
     const tier = tierName ? config.tiers[tierName] : undefined;
@@ -421,8 +446,9 @@ export async function showSettings(
             id: "maxRunCost",
             label: "Run cost cap (USD)",
             currentValue: config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`,
-            values: ["off", "$5", "$10", "$25", "$50"],
-            description: "Stop starting new executors after the board exceeds this cost.",
+            values: ["off", "$5", "$10", "$25", "$50", "$100", "$200", "$300"],
+            description:
+              "Stop starting new executors after lifetime board spend exceeds this. Large multi-task boards with confirm reviews routinely need $100+.",
           },
           {
             id: "planGate",
@@ -548,8 +574,71 @@ export async function showSettings(
             id: "maxCostPerTask",
             label: "Cost cap per attempt (USD)",
             currentValue: config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`,
-            values: ["off", "$1", "$2", "$5", "$10"],
+            values: ["off", "$1", "$2", "$5", "$10", "$20"],
             description: "Abort one executor attempt after it exceeds this cost.",
+          },
+        ];
+      }
+      if (section === "watchdog") {
+        return [
+          {
+            id: "watchdogIdleSeconds",
+            label: "Idle seconds before steering",
+            currentValue:
+              (config.watchdogIdleSeconds ?? 120) === 0
+                ? "off"
+                : String(config.watchdogIdleSeconds ?? 120),
+            values: ["off", "60", "120", "300", "600"],
+            description:
+              "Steer an executor after this many seconds with no provider events. Provider silence past termination×idle is retried as a provider failure, not billed as a stall.",
+          },
+          {
+            id: "watchdogWarningTurns",
+            label: "No-progress turns before steering",
+            currentValue:
+              (config.watchdogWarningTurns ?? 12) === 0
+                ? "off"
+                : String(config.watchdogWarningTurns ?? 12),
+            values: ["off", "8", "12", "24", "48"],
+            description:
+              "Steer after this many turns without novel tool activity. Novel reads count as progress; only repeated actions and silence accumulate.",
+          },
+          {
+            id: "watchdogTerminationTurns",
+            label: "Post-steer turns before termination",
+            currentValue: String(config.watchdogTerminationTurns ?? 4),
+            values: ["2", "4", "8", "16"],
+            description:
+              "Kill an executor this many no-progress turns after steering. The stall consumes one attempt.",
+          },
+          {
+            id: "handoffContextRatio",
+            label: "Auto-handoff context threshold",
+            currentValue:
+              (config.handoffContextRatio ?? 0.68) === 0
+                ? "off"
+                : `${Math.round((config.handoffContextRatio ?? 0.68) * 100)}%`,
+            values: ["off", "50%", "68%", "80%", "90%"],
+            description:
+              "Hand the orchestrator conversation to a fresh supervisor session once its context passes this share of the window.",
+          },
+          {
+            id: "logEvents",
+            label: "Run event log detail",
+            currentValue: config.logEvents ?? "compact",
+            values: ["compact", "full"],
+            description:
+              "compact keeps lifecycle, tool, and final events; full mirrors every executor event to the run log.",
+          },
+          {
+            id: "maxLogBytesPerRun",
+            label: "Run log size cap",
+            currentValue:
+              (config.maxLogBytesPerRun ?? 1_000_000) === 0
+                ? "unlimited"
+                : `${Math.round((config.maxLogBytesPerRun ?? 1_000_000) / 1_000_000)}MB`,
+            values: ["1MB", "10MB", "100MB", "unlimited"],
+            description: "Stop appending to one run's event log after this many bytes.",
           },
         ];
       }
@@ -620,6 +709,8 @@ export async function showSettings(
         "execution",
         config.useWorktrees ? "isolated checkouts" : "shared checkout"
       );
+      navigation.updateValue("limits", limitsSummary(config));
+      navigation.updateValue("watchdog", watchdogSummary(config));
       navigation.updateValue(
         "tiers",
         `${Object.keys(config.tiers).filter((name) => name !== "review").length} tiers`
@@ -678,6 +769,13 @@ export async function showSettings(
         currentValue: limitsSummary(config),
         description: "Runaway guards. Leave these alone until a real run trips one.",
         submenu: (_current, close) => createSection("limits", close),
+      },
+      {
+        id: "watchdog",
+        label: "Watchdog & logging",
+        currentValue: watchdogSummary(config),
+        description: "Stall detection, automatic context handoff, and run-log detail.",
+        submenu: (_current, close) => createSection("watchdog", close),
       },
       {
         id: "tiers",

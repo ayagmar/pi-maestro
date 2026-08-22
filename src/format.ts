@@ -279,6 +279,17 @@ export function describeProgressDelta(
     : "No status change since last pulse.";
 }
 
+/**
+ * Compact visual progress: `▰▰▰▱▱▱▱▱▱▱ 5/16 (31%)`. Cancelled tasks are
+ * excluded by callers so the bar reflects work that can still land.
+ */
+export function progressBar(completed: number, total: number, width = 10): string {
+  if (total <= 0) return "";
+  const ratio = Math.max(0, Math.min(1, completed / total));
+  const filled = Math.round(ratio * width);
+  return `${"▰".repeat(filled)}${"▱".repeat(width - filled)} ${completed}/${total} (${Math.round(ratio * 100)}%)`;
+}
+
 export function formatBoardProgress(tasks: Task[]): string {
   const approved = tasks.filter((task) => task.status === "approved").length;
   const cancelled = tasks.filter((task) => task.status === "cancelled").length;

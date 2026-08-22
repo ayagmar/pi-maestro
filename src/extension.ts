@@ -22,7 +22,7 @@ import { COMMAND, MESSAGE_TYPE } from "./constants.js";
 import { showDashboard as showDashboardOverlay } from "./dashboard-controller.js";
 import { type BackgroundDrive, DriveRuntimeController } from "./drive-controller.js";
 import { ExtensionLifecycleState, registerMaestroLifecycle } from "./extension-lifecycle.js";
-import { boardUsage, formatBoardProgress, formatElapsed } from "./format.js";
+import { boardUsage, formatBoardProgress, formatElapsed, progressBar } from "./format.js";
 import { notify } from "./handoff.js";
 import { LivePaneController } from "./live-pane-controller.js";
 import { manuallyApproveTask } from "./manual-approval.js";
@@ -166,7 +166,6 @@ export default function maestro(
       return;
     }
 
-    const progress = formatBoardProgress(board.tasks);
     const status = projectStatus(
       board,
       driveController.liveTaskIds(),
@@ -175,6 +174,12 @@ export default function maestro(
     );
     const running = status.running;
     const usage = boardUsage(board.tasks);
+    // Where am I: visual bar over the work that can still land, plus the
+    // current phase, so one glance answers progress and location.
+    const active = status.total - status.cancelled;
+    const bar = progressBar(status.approved, active);
+    const progress = bar || formatBoardProgress(board.tasks);
+    const phasePart = status.phase !== status.code ? ` · ${status.phase}` : "";
     const runningPart = running > 0 ? ` · ${running} running` : "";
     const reviewPart = status.reviewable > 0 ? ` · ${status.reviewable} review` : "";
     const blockedPart = status.blocked > 0 ? ` · ${status.blocked} blocked` : "";
@@ -184,7 +189,7 @@ export default function maestro(
       COMMAND,
       ctx.ui.theme.fg(
         running > 0 || board.pausedDrive ? "warning" : "muted",
-        `⚡ maestro ${status.code} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart}${planPart} · $${usage.cost.toFixed(4)}`
+        `⚡ maestro ${status.code}${phasePart} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart}${planPart} · $${usage.cost.toFixed(4)}`
       )
     );
 
@@ -193,7 +198,9 @@ export default function maestro(
       ctx.ui.setWorkingMessage();
       return;
     }
-    ctx.ui.setWorkingMessage(`maestro · ${running} executor(s) · $${usage.cost.toFixed(2)}`);
+    ctx.ui.setWorkingMessage(
+      `maestro ${status.approved}/${active} · ${running} executor(s) · $${usage.cost.toFixed(2)}`
+    );
     // Claude-style agent selector under the editor: one row per launch, a
     // movable selection marker, and the stats right-aligned. ctrl+alt+j/k
     // moves the selection; ctrl+alt+w opens the viewer on it.

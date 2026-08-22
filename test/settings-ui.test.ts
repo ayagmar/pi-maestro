@@ -9,13 +9,14 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER } from "@earendil-works/pi-tui";
-import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
+import { DEFAULT_CONFIG, saveConfig, validateEffectiveConfig } from "../src/config.js";
 import {
   applySettingsChange,
   buildModelChoices,
   buildModelPickerChoices,
   filterModelChoices,
   showSettings,
+  watchdogSummary,
 } from "../src/settings-ui.js";
 
 initTheme();
@@ -192,6 +193,48 @@ test("model picker changes preserve qualified values, sentinels, and fallback ch
   config = applySettingsChange(config, "fallback:standard", "(none)");
   assert.equal(config.tiers.standard?.model, undefined);
   assert.deepEqual(config.tiers.standard?.fallbacks, ["provider-c/last-resort"]);
+});
+
+test("watchdog and logging settings round-trip through applySettingsChange", () => {
+  let config = structuredClone(DEFAULT_CONFIG);
+  config = applySettingsChange(config, "watchdogIdleSeconds", "300");
+  assert.equal(config.watchdogIdleSeconds, 300);
+  config = applySettingsChange(config, "watchdogIdleSeconds", "off");
+  assert.equal(config.watchdogIdleSeconds, 0);
+  config = applySettingsChange(config, "watchdogWarningTurns", "24");
+  assert.equal(config.watchdogWarningTurns, 24);
+  config = applySettingsChange(config, "watchdogWarningTurns", "off");
+  assert.equal(config.watchdogWarningTurns, 0);
+  config = applySettingsChange(config, "watchdogTerminationTurns", "8");
+  assert.equal(config.watchdogTerminationTurns, 8);
+  config = applySettingsChange(config, "handoffContextRatio", "80%");
+  assert.equal(config.handoffContextRatio, 0.8);
+  config = applySettingsChange(config, "handoffContextRatio", "off");
+  assert.equal(config.handoffContextRatio, 0);
+  config = applySettingsChange(config, "logEvents", "full");
+  assert.equal(config.logEvents, "full");
+  config = applySettingsChange(config, "maxLogBytesPerRun", "10MB");
+  assert.equal(config.maxLogBytesPerRun, 10_000_000);
+  config = applySettingsChange(config, "maxLogBytesPerRun", "unlimited");
+  assert.equal(config.maxLogBytesPerRun, 0);
+  // Every value produced above passes effective-config validation.
+  assert.equal(validateEffectiveConfig(config), undefined);
+});
+
+test("watchdog summary names disabled guards instead of hiding them", () => {
+  assert.equal(
+    watchdogSummary(structuredClone(DEFAULT_CONFIG)),
+    "120s idle→steer · 12 turns→steer · handoff at 68%"
+  );
+  assert.equal(
+    watchdogSummary({
+      ...structuredClone(DEFAULT_CONFIG),
+      watchdogIdleSeconds: 0,
+      watchdogWarningTurns: 0,
+      handoffContextRatio: 0,
+    }),
+    "idle watch off · turn watch off · auto-handoff off"
+  );
 });
 
 test("settings cannot persist an impossible effective review configuration", () => {

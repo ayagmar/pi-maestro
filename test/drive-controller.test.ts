@@ -390,7 +390,13 @@ test("drive heartbeat pulses live agents, spend, and status deltas without wakin
 
     assert.ok(tick, "a positive statusWaitSeconds must schedule a pulse");
     tick();
-    assert.match(pulses[0] ?? "", /Drive running · 1 live agent\(s\)/);
+    // The header answers "where am I": elapsed, progress bar over landable
+    // work, remaining count, live agents, and this drive's own spend.
+    assert.match(pulses[0] ?? "", /Drive running · \d+s · /);
+    assert.match(pulses[0] ?? "", /▱ 0\/1 \(0%\)/);
+    assert.match(pulses[0] ?? "", /1 task\(s\) left/);
+    assert.match(pulses[0] ?? "", /1 live agent\(s\)/);
+    assert.match(pulses[0] ?? "", /\$\d+\.\d{4} this drive · \$\d+\.\d{4} board/);
     assert.match(pulses[0] ?? "", /T1 running · 7 turns · \$1\.2500 · bash/);
 
     // The second pulse reports what actually advanced since the first.

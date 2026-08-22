@@ -11,6 +11,7 @@ import {
   formatUsage,
   launchBudgetShortfall,
   padText,
+  progressBar,
   runBudgetWarning,
   taskLine,
   taskUsage,
@@ -180,6 +181,15 @@ test("run budget gates only when lifetime board cost exceeds a positive cap", ()
     /run budget exceeded \(\$5\.0000 of \$4 lifetime board spend\)/
   );
   assert.match(runBudgetWarning(tasks, 4) ?? "", /\/maestro config budget <usd>/);
+});
+
+test("progress bar shows filled ratio, counts, and percent", () => {
+  assert.equal(progressBar(0, 0), "");
+  assert.equal(progressBar(0, 16), "▱▱▱▱▱▱▱▱▱▱ 0/16 (0%)");
+  assert.equal(progressBar(5, 16), "▰▰▰▱▱▱▱▱▱▱ 5/16 (31%)");
+  assert.equal(progressBar(16, 16), "▰▰▰▰▰▰▰▰▰▰ 16/16 (100%)");
+  // Overshoot clamps instead of overflowing the bar.
+  assert.equal(progressBar(20, 16), "▰▰▰▰▰▰▰▰▰▰ 20/16 (100%)");
 });
 
 test("a near-exhausted run budget blocks launches before dispatch", () => {
