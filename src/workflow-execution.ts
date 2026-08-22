@@ -257,10 +257,22 @@ export async function executeTask(options: {
     // The per-attempt cap and the remaining run budget both bound this launch;
     // without the run-budget bound, a launch dispatched just under the run cap
     // could overshoot it by a full attempt before the next between-round check.
-    const launchCostCaps = [config.maxCostPerTask, remainingRunBudget].filter(
-      (cap): cap is number => cap !== undefined && cap > 0
-    );
-    if (launchCostCaps.length > 0) runOptions.maxCost = Math.min(...launchCostCaps);
+    // Name whichever bound is binding: a budget-capped failure blamed on
+    // maxCostPerTask sends the operator to the wrong knob.
+    const perTaskCap = config.maxCostPerTask > 0 ? config.maxCostPerTask : undefined;
+    const budgetCap =
+      remainingRunBudget !== undefined && remainingRunBudget > 0 ? remainingRunBudget : undefined;
+    const launchCap =
+      perTaskCap !== undefined && budgetCap !== undefined
+        ? Math.min(perTaskCap, budgetCap)
+        : (perTaskCap ?? budgetCap);
+    if (launchCap !== undefined) {
+      runOptions.maxCost = launchCap;
+      runOptions.maxCostSource =
+        budgetCap !== undefined && (perTaskCap === undefined || budgetCap < perTaskCap)
+          ? "remaining run budget (maxRunCost)"
+          : "maxCostPerTask";
+    }
 
     let run: ExecutorHandle;
     try {

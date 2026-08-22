@@ -11,7 +11,12 @@ import {
   validatePlan,
 } from "./board.js";
 import { loadConfig, resolveTierModels } from "./config.js";
-import { boardUsage, remainingRunBudget, runBudgetWarning } from "./format.js";
+import {
+  boardUsage,
+  launchBudgetShortfall,
+  remainingRunBudget,
+  runBudgetWarning,
+} from "./format.js";
 import { mapWithConcurrencyLimit } from "./runner.js";
 import { type MaestroConfig, type Task, type TierConfig } from "./types.js";
 import {
@@ -285,7 +290,10 @@ export async function driveBoard(options: {
           (task.id.toUpperCase() === humanRetryId && retryEligibility?.kind === "execute")
       );
       const budgetWarning =
-        runnable.length > 0 ? runBudgetWarning(board.tasks, config.maxRunCost) : undefined;
+        runnable.length > 0
+          ? (runBudgetWarning(board.tasks, config.maxRunCost) ??
+            launchBudgetShortfall(board.tasks, config))
+          : undefined;
 
       if (runnable.length > 0 && !budgetWarning) {
         const dispatchable = runnable.slice(
@@ -472,7 +480,9 @@ export async function driveBoard(options: {
         }
         return finish(providerBlockedReason(blockedAfterRuns, transientProviderRetries));
       }
-      const currentBudgetWarning = runBudgetWarning(afterRuns.tasks, config.maxRunCost);
+      const currentBudgetWarning =
+        runBudgetWarning(afterRuns.tasks, config.maxRunCost) ??
+        launchBudgetShortfall(afterRuns.tasks, config);
       if (currentBudgetWarning) {
         const reviewable = afterRuns.tasks.filter(
           (task) =>
@@ -513,10 +523,20 @@ export async function driveBoard(options: {
           config.maxCostPerReview && config.maxCostPerReview > 0
             ? config.maxCostPerReview
             : config.maxCostPerTask;
+        const reviewCapSource =
+          config.maxCostPerReview && config.maxCostPerReview > 0
+            ? "maxCostPerReview"
+            : "maxCostPerTask";
         const reviewBudget = remainingRunBudget(afterRuns.tasks, config.maxRunCost);
         const reviewLaunchCaps = [reviewCostCap, reviewBudget].filter(
           (cap): cap is number => cap !== undefined && cap > 0
         );
+        const reviewLaunchCapSource =
+          reviewBudget !== undefined &&
+          reviewBudget > 0 &&
+          (reviewCostCap <= 0 || reviewBudget < reviewCostCap)
+            ? "remaining run budget (maxRunCost)"
+            : reviewCapSource;
         const reviewResults = await mapWithConcurrencyLimit(
           reviewDispatchable,
           config.maxParallel,
@@ -531,6 +551,7 @@ export async function driveBoard(options: {
               reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
               maxReviewerLaunches: config.maxReviewerLaunches ?? 4,
               maxCostPerLaunch: reviewLaunchCaps.length > 0 ? Math.min(...reviewLaunchCaps) : 0,
+              maxCostPerLaunchSource: reviewLaunchCapSource,
               availableTiers: Object.keys(config.tiers),
               onUpdate,
               trackRun,

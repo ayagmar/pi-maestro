@@ -194,7 +194,9 @@ const processEvent = (event) => {
     const repeated = actionSignatures.includes(signature);
     actionSignatures.push(signature);
     if (actionSignatures.length > 8) actionSignatures.shift();
-    if (/^(edit|write)$/.test(event.toolName) || (readOnlyProgress && !repeated)) resetWatchdog();
+    // Novel tool activity is progress for every run kind; see the attached
+    // transport for the evidence. Repeats and silence still stall.
+    if (/^(edit|write)$/.test(event.toolName) || !repeated) resetWatchdog();
   }
   if (event.type === "message_end" && event.message?.role === "assistant") {
     state.usage.turns += 1;
@@ -217,7 +219,7 @@ const processEvent = (event) => {
       if (readOnlyProgress && rawReportLength >= priorLength + 80) resetWatchdog();
     }
     if (config.maxCost > 0 && state.usage.cost > config.maxCost) {
-      errorMessage = `cost cap exceeded: $${state.usage.cost.toFixed(4)} > $${config.maxCost} (maxCostPerTask)`;
+      errorMessage = `cost cap exceeded: $${state.usage.cost.toFixed(4)} > $${config.maxCost} (${config.maxCostSource ?? "maxCostPerTask"})`;
       failureCause = "cost_cap";
       abortWithCause("cost_cap");
     }

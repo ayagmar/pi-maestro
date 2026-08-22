@@ -9,6 +9,7 @@ import {
   formatCostSummary,
   formatTokens,
   formatUsage,
+  launchBudgetShortfall,
   padText,
   runBudgetWarning,
   taskLine,
@@ -179,6 +180,35 @@ test("run budget gates only when lifetime board cost exceeds a positive cap", ()
     /run budget exceeded \(\$5\.0000 of \$4 lifetime board spend\)/
   );
   assert.match(runBudgetWarning(tasks, 4) ?? "", /\/maestro config budget <usd>/);
+});
+
+test("a near-exhausted run budget blocks launches before dispatch", () => {
+  const tasks = [makeTask({ attempts: [makeAttempt(149, 1)] })];
+  // $1 left of $150 with a $10 per-attempt cap: below the 25% floor.
+  const shortfall = launchBudgetShortfall(tasks, { maxRunCost: 150, maxCostPerTask: 10 });
+  assert.match(shortfall ?? "", /remaining run budget \(\$1\.0000 of \$150\)/);
+  assert.match(shortfall ?? "", /below \$2\.50/);
+  assert.match(shortfall ?? "", /\/maestro config budget <usd>/);
+  // Enough remaining budget: no shortfall.
+  assert.equal(launchBudgetShortfall(tasks, { maxRunCost: 160, maxCostPerTask: 10 }), undefined);
+  // Budget already exceeded: runBudgetWarning owns that case.
+  assert.equal(
+    launchBudgetShortfall([makeTask({ attempts: [makeAttempt(151, 1)] })], {
+      maxRunCost: 150,
+      maxCostPerTask: 10,
+    }),
+    undefined
+  );
+  // Cap disabled entirely: no gate.
+  assert.equal(launchBudgetShortfall(tasks, { maxRunCost: 0, maxCostPerTask: 10 }), undefined);
+  // Per-attempt cap off: absolute $0.50 floor applies.
+  assert.match(
+    launchBudgetShortfall([makeTask({ attempts: [makeAttempt(149.8, 1)] })], {
+      maxRunCost: 150,
+      maxCostPerTask: 0,
+    }) ?? "",
+    /below \$0\.50/
+  );
 });
 
 test("cancelling a task never frees run budget; sunk spend is reported", () => {

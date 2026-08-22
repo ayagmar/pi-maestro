@@ -261,10 +261,16 @@ export function classifyFailure(
     // Retrying the same task under the same cap reproduces the same wall and
     // bills for it again. A real board did this twice, spending $10.46 across
     // two doomed attempts. Recovery needs a bigger cap or a smaller task, both
-    // of which are human decisions.
+    // of which are human decisions. When the binding cap was the run budget's
+    // remainder rather than maxCostPerTask, the remedy is the budget: a real
+    // board was told to raise maxCostPerTask while $1.09 of run budget was the
+    // actual wall, and burned two more attempts against it.
+    const budgetBound = message.includes("remaining run budget");
     return {
       kind: "cost_cap",
-      message: `${message}. Raise maxCostPerTask or split the task into smaller ones; retrying unchanged will stop at the same point.`,
+      message: budgetBound
+        ? `${message}. The remaining run budget, not maxCostPerTask, cut this attempt off; raise it with /maestro config budget <usd> before retrying.`
+        : `${message}. Raise maxCostPerTask or split the task into smaller ones; retrying unchanged will stop at the same point.`,
       retryable: false,
     };
   }
@@ -406,7 +412,8 @@ export function applyAssistantMessage(
   result: RunOutcome,
   attempt: Attempt,
   message: NonNullable<JsonEvent["message"]>,
-  maxCost?: number
+  maxCost?: number,
+  maxCostSource = "maxCostPerTask"
 ): boolean {
   const usage = message.usage;
   attempt.usage.turns += 1;
@@ -425,7 +432,7 @@ export function applyAssistantMessage(
 
   const exceededCostCap = Boolean(maxCost && attempt.usage.cost > maxCost);
   if (exceededCostCap) {
-    result.errorMessage = `cost cap exceeded: $${attempt.usage.cost.toFixed(4)} > $${maxCost} (maxCostPerTask)`;
+    result.errorMessage = `cost cap exceeded: $${attempt.usage.cost.toFixed(4)} > $${maxCost} (${maxCostSource})`;
     result.failureCause = "cost_cap";
   }
 
@@ -469,6 +476,8 @@ export interface StartExecutorOptions {
   resumeSessionFile?: string;
   /** Abort the run when attempt cost exceeds this (USD). 0 disables the cap. */
   maxCost?: number;
+  /** Which bound produced maxCost (e.g. "maxCostPerTask", "remaining run budget (maxRunCost)"); named in the cost-cap failure. */
+  maxCostSource?: string;
   /** Event detail mirrored to the run log. Compact keeps lifecycle, tool, and final events. */
   logEvents?: "compact" | "full";
   /** Stop appending to this run's event log after this many bytes. */
@@ -743,10 +752,13 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
         actionSignatures.push(signature);
         if (actionSignatures.length > 8) actionSignatures.shift();
         const mutation = /^(edit|write)$/.test(event.toolName);
-        // Implementation runs progress by mutating files. Read-only runs
-        // (investigation, review) progress through novel tool activity;
-        // exact repeats of a recent action do not reset the watchdog.
-        if (mutation || (readOnlyProgress && !repeated)) {
+        // Novel tool activity is progress for every run kind; only exact
+        // repeats of a recent action leave the watchdog armed. Counting only
+        // mutations killed real doc/planning implementers at exactly
+        // warning+termination turns while they read the inputs their briefs
+        // required (five ThesisHelm attempts, ~$37). Doom loops repeat their
+        // actions and still stall; pure silence still stalls.
+        if (mutation || !repeated) {
           lastProgressAt = Date.now();
           progressTurns = attempt.usage.turns;
           watchdogSteeredAt = undefined;
@@ -762,7 +774,8 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
           result,
           attempt,
           event.message,
-          options.maxCost
+          options.maxCost,
+          options.maxCostSource
         );
         if (exceededCostCap && !abortCause) abortWithCause("cost_cap");
         // Read-only runs can legitimately spend consecutive turns writing a
@@ -951,6 +964,7 @@ function startDetachedExecutor(
       maxLogBytes: options.maxLogBytes ?? 0,
       maxStderrBytes: 16_000,
       maxCost: options.maxCost ?? 0,
+      maxCostSource: options.maxCostSource ?? "maxCostPerTask",
       watchdogIdleMs: Math.max(0, (options.watchdogIdleSeconds ?? 120) * 1000),
       watchdogWarningTurns: options.watchdogWarningTurns ?? 0,
       watchdogTerminationTurns: options.watchdogTerminationTurns ?? 4,
@@ -1050,6 +1064,7 @@ function monitorDetachedExecutor(
   cwd: string,
   options: {
     maxCost?: number | undefined;
+    maxCostSource?: string | undefined;
     maxReportChars?: number | undefined;
     maxReportBytes?: number | undefined;
     signal?: AbortSignal | undefined;
@@ -1165,7 +1180,15 @@ function monitorDetachedExecutor(
     if (event.type === "message_end" && event.message?.role === "assistant") {
       // The supervisor enforces the cap for current transports; keeping the
       // monitor-side check covers legacy detached attempts without one.
-      if (applyAssistantMessage(result, attempt, event.message, options.maxCost)) {
+      if (
+        applyAssistantMessage(
+          result,
+          attempt,
+          event.message,
+          options.maxCost,
+          options.maxCostSource
+        )
+      ) {
         abortWithCause("cost_cap");
       }
     }

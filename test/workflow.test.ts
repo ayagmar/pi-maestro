@@ -1314,6 +1314,39 @@ test("driveBoard gives plan gates precedence and rechecks cost caps after pause"
   }
 });
 
+test("driveBoard blocks dispatch when the remaining budget cannot fund a meaningful launch", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-budget-floor-test-"));
+  try {
+    const { board, task } = boardWithTask();
+    const costly = attempt();
+    costly.usage.cost = 149; // $1 left of $150 with a $10 per-attempt cap
+    task.attempts.push(costly);
+    saveBoard(cwd, board);
+
+    let launched = 0;
+    const summary = await driveBoard({
+      cwd,
+      config: { ...config, maxRunCost: 150, maxCostPerTask: 10 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: () => {
+        launched += 1;
+        throw new Error("must not launch under a crippled budget cap");
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(summary.stoppedBecause.code, "budget_blocked");
+    assert.match(summary.stoppedBecause.message, /cannot fund a meaningful launch/);
+    assert.equal(launched, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("driveBoard blocks invalid plans before dispatch and leaves the board unchanged", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-invalid-plan-test-"));
   try {

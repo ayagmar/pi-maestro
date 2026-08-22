@@ -1796,6 +1796,115 @@ test("successful assistant event crossing the cost cap retains a cost-cap failur
   assert.equal(outcome.usage.cost, 0.12);
 });
 
+test("a budget-bound cost cap names the run budget and steers recovery to it", () => {
+  const attempt: Attempt = {
+    index: 1,
+    logFile: "log",
+    thinking: "low",
+    startedAt: 0,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+  };
+  const outcome: RunOutcome = {
+    exitCode: 0,
+    usage: attempt.usage,
+    finalReport: "",
+    touchedFiles: [],
+    aborted: false,
+  };
+  const exceeded = applyAssistantMessage(
+    outcome,
+    attempt,
+    {
+      role: "assistant",
+      usage: { input: 10, output: 5, cost: { total: 1.19 } },
+      content: [{ type: "text", text: "partial work" }],
+    },
+    1.09,
+    "remaining run budget (maxRunCost)"
+  );
+  assert.equal(exceeded, true);
+  assert.equal(
+    outcome.errorMessage,
+    "cost cap exceeded: $1.1900 > $1.09 (remaining run budget (maxRunCost))"
+  );
+  const reason = classifyFailure(outcome);
+  assert.equal(reason?.kind, "cost_cap");
+  // A budget-bound cap must not tell the operator to raise maxCostPerTask —
+  // a real board burned two more attempts against the wrong knob.
+  assert.match(reason?.message ?? "", /\/maestro config budget <usd>/);
+  assert.doesNotMatch(reason?.message ?? "", /Raise maxCostPerTask/);
+});
+
+test("novel tool activity after steering is progress, not a stall", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-watchdog-novel-reads-"));
+  const fakePi = join(root, "reading-pi.mjs");
+  // After the steer, keep making *novel* read-tool calls (a doc-writing task
+  // collecting its required inputs), then settle cleanly. Before the fix this
+  // was killed as a stall at exactly warning+termination turns.
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+let reads = 0;
+const emitTurn = () => console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "reading inputs" }] } }));
+const emitRead = () => {
+  reads += 1;
+  console.log(JSON.stringify({ type: "tool_execution_start", toolName: "read", args: { path: "docs/file-" + reads + ".md" } }));
+};
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "prompt") {
+      // Turns with no tool activity: arm the warning.
+      emitTurn(); emitTurn(); emitTurn();
+    }
+    if (command.type === "steer") {
+      let step = 0;
+      const interval = setInterval(() => {
+        step += 1;
+        emitRead();
+        emitTurn();
+        if (step >= 6) {
+          clearInterval(interval);
+          console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "## Report\\ndone" }] } }));
+          console.log(JSON.stringify({ type: "agent_settled" }));
+        }
+      }, 5);
+    }
+    if (command.type === "abort") process.exit(1);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const run = startExecutor({
+      stateDir: root,
+      runId: "novel-reads",
+      cwd: root,
+      prompt: "write the tracker",
+      tier: { thinking: "low" },
+      // Silence path effectively disabled; only the turn policy is under test.
+      watchdogIdleSeconds: 30,
+      watchdogWarningTurns: 2,
+      watchdogTerminationTurns: 2,
+    });
+    const outcome = await run.outcome;
+    assert.notEqual(outcome.failureCause, "stalled");
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.aborted, false);
+  } finally {
+    process.argv[1] = originalScript;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("failure messages redact common credentials", () => {
   assert.equal(
     redactFailureMessage("token=top-secret Bearer abc.def sk-abcdefgh12345678"),

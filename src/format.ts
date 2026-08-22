@@ -299,6 +299,27 @@ export function remainingRunBudget(tasks: Task[], maxRunCost: number): number | 
 }
 
 /**
+ * Remaining run budget too small to fund a meaningful launch. Dispatching
+ * with the budget's last dregs as the cost cap is a doomed launch: a real
+ * board spent $4.73 across attempts capped at $1.09 that could only die at
+ * cost_cap, and the failure blamed maxCostPerTask. Stopping before dispatch
+ * turns that waste into the same one deliberate budget decision the exceeded
+ * case already requires.
+ */
+export function launchBudgetShortfall(
+  tasks: Task[],
+  config: { maxRunCost: number; maxCostPerTask: number }
+): string | undefined {
+  if (config.maxRunCost <= 0) return undefined;
+  const total = boardUsage(tasks).cost;
+  if (total > config.maxRunCost) return undefined; // runBudgetWarning owns the exceeded case
+  const remaining = config.maxRunCost - total;
+  const floor = config.maxCostPerTask > 0 ? config.maxCostPerTask * 0.25 : 0.5;
+  if (remaining >= floor) return undefined;
+  return `remaining run budget ($${remaining.toFixed(4)} of $${config.maxRunCost}) cannot fund a meaningful launch (below $${floor.toFixed(2)}, 25% of the per-attempt cap); raise it deliberately with /maestro config budget <usd>, or /maestro reset to archive the board`;
+}
+
+/**
  * The budget bounds every real dollar this board has ever spent — sunk cost
  * of cancelled and superseded tasks included. Excluding sunk spend was tried
  * and is a laundering hole: superseding a task freed its budget, so a
