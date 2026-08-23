@@ -33,6 +33,7 @@
 
 ### Fixed
 
+- Zero-turn process failures (spawn ENOENT, immediate crash before any model turn) no longer consume maxAttempts. A transient PATH blip burned all four of a real task's attempts on "spawn pi ENOENT" at $0 each and forced a supersession to recover; environment failures now retry without touching the cap, still bounded by drive rounds and the launch limit.
 - Programmatic handoff actually hands off now. `maestro_drive` intervene=handoff and the automatic context-pressure handoff both queued `/maestro handoff` through `sendUserMessage`, which dispatches extension commands only when `expandPromptTemplates` is true (its default is false) — so the literal text landed in the conversation, the model replied conversationally, and no session replacement ever happened. Both paths now request command dispatch explicitly.
 - Novel tool activity now counts as watchdog progress for every run kind, not just investigations and reviews. The mutation-only progress rule killed five real doc/planning implementers at exactly warning+termination turns (~$37) while they read the input documents their briefs required; doom loops still stall because repeated actions and silence still leave the watchdog armed.
 - A cost-cap failure now names the bound that actually cut the attempt off. When the run budget's remainder (not maxCostPerTask) was the binding launch cap, the failure blamed maxCostPerTask and told the operator to raise the wrong knob — a real board burned two more attempts against a $1.09 budget remainder labeled as the per-task cap.

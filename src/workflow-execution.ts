@@ -285,7 +285,10 @@ export async function executeTask(options: {
           attempt.endedAt = Date.now();
           attempt.exitCode = 1;
           attempt.errorMessage = message;
-          attempt.consumesAttempt = true;
+          // A launch that never spawned says nothing about the task. A real
+          // board burned all four of a task's attempts on "spawn pi ENOENT"
+          // at $0 each and had to be superseded to recover from a PATH blip.
+          attempt.consumesAttempt = false;
           attempt.failureReason = { kind: "executor_failure", message, retryable: true };
         }
         forceStatus(fresh, "failed");
@@ -374,7 +377,17 @@ export async function executeTask(options: {
       !outcome.aborted &&
       (classifiedFailure?.kind === "provider_failure" || inferredProviderFailure);
     const canFallback = providerFailure && modelIndex < models.length - 1;
-    run.attempt.consumesAttempt = !providerFailure;
+    // A zero-turn process failure (spawn ENOENT, immediate crash before any
+    // model turn) is an environment problem, not evidence about the task;
+    // consuming maxAttempts for it forced a supersession to recover from a
+    // transient PATH blip. Rounds and the launch cap still bound retries.
+    const environmentFailure =
+      status === "failed" &&
+      !outcome.aborted &&
+      outcome.usage.turns === 0 &&
+      outcome.failureCause === "process" &&
+      run.attempt.touchedFiles.length === 0;
+    run.attempt.consumesAttempt = !providerFailure && !environmentFailure;
     if (providerFailure) run.attempt.providerFailure = true;
     const failureReason = inferredProviderFailure
       ? classifyFailure({ ...outcome, failureCause: "provider" })

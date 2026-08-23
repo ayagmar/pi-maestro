@@ -2273,6 +2273,8 @@ test("synchronous executor spawn failure finalizes its reserved attempt and rele
     assert.equal(persisted?.attempts.length, 1);
     assert.equal(persisted?.attempts[0]?.failureReason?.kind, "executor_failure");
     assert.equal(persisted?.attempts[0]?.errorMessage, "spawn failed");
+    // Never spawned → no evidence about the task → must not consume the cap.
+    assert.equal(persisted?.attempts[0]?.consumesAttempt, false);
     assert.equal(persisted?.dispatchClaim, undefined);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -2480,7 +2482,7 @@ test("zero-turn provider failure is persisted and retries on fallback without co
   }
 });
 
-test("zero-turn process failure consumes an attempt and does not use provider fallbacks", async () => {
+test("zero-turn process failure keeps the attempt cap and does not use provider fallbacks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-process-fallback-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -2515,11 +2517,14 @@ test("zero-turn process failure consumes an attempt and does not use provider fa
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(calls, 1, "process failures must not trigger provider fallbacks");
     assert.equal(result.status, "failed");
-    assert.equal(persisted?.attempts[0]?.consumesAttempt, true);
+    // A launch that produced zero turns is an environment problem (a real
+    // board burned four attempts on "spawn pi ENOENT" at $0 each); it must
+    // not consume maxAttempts. Rounds and the launch cap still bound retries.
+    assert.equal(persisted?.attempts[0]?.consumesAttempt, false);
     assert.equal(persisted?.attempts[0]?.providerFailure, undefined);
     assert.equal(persisted?.attempts[0]?.failureReason?.kind, "executor_failure");
     assert.equal(persisted?.attempts[0]?.failureReason?.message, "spawn pi ENOENT");
-    assert.equal(persisted?.attempts.filter((item) => item.consumesAttempt).length, 1);
+    assert.equal(persisted?.attempts.filter((item) => item.consumesAttempt).length, 0);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
