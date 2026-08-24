@@ -1,5 +1,11 @@
 import { isTaskSettled, loadBoard } from "./board.js";
-import { boardUsage, describeProgressDelta, formatElapsed, progressBar } from "./format.js";
+import {
+  boardCostSplit,
+  boardUsage,
+  describeProgressDelta,
+  formatElapsed,
+  progressBar,
+} from "./format.js";
 import { type MaestroConfig, type TaskStatus } from "./types.js";
 import { type DriveSummary, formatDriveSummary, snapshot } from "./workflow.js";
 
@@ -101,12 +107,21 @@ export function startDriveHeartbeat(
     const remaining = tasks.filter((task) => !isTaskSettled(task)).length;
     const bar = progressBar(approved, tasks.length - cancelled);
     const driveCost = Math.max(0, usage.cost - boardCostAtStart);
+    const split = boardCostSplit(tasks);
+    // Forward projection from landed cost, so "how much more?" has an answer
+    // before the budget wall does.
+    const landedAverage = approved > 0 ? usage.cost / Math.max(1, approved) : 0;
+    const estimate =
+      approved >= 2 && remaining > 0 && landedAverage > 0
+        ? `est. ~$${(remaining * landedAverage).toFixed(0)} to finish at current avg`
+        : undefined;
     const header = [
       `Drive running · ${formatElapsed(startedAt)}`,
       bar || undefined,
       `${remaining} task(s) left`,
       live ? `${runs.liveRunCount()} live agent(s)` : "no live agent",
-      `$${driveCost.toFixed(4)} this drive · $${usage.cost.toFixed(4)} board`,
+      `$${driveCost.toFixed(4)} this drive · $${usage.cost.toFixed(4)} board (exec $${split.executor.toFixed(2)} · review $${split.review.toFixed(2)})`,
+      estimate,
     ]
       .filter(Boolean)
       .join(" · ");

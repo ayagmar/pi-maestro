@@ -17,6 +17,7 @@ interface ExportedPlanTask {
   verificationProfile?: string;
   reviewPolicy?: "single" | "confirm" | "find-and-refute";
   commitMessage?: string;
+  reviewGuidance?: string;
   cancelled?: boolean;
   discovery?: { allowedWritePaths: string[] };
 }
@@ -58,6 +59,7 @@ export function exportPlan(board: Board): string {
       ...(task.verificationProfile ? { verificationProfile: task.verificationProfile } : {}),
       ...(task.reviewPolicy ? { reviewPolicy: task.reviewPolicy } : {}),
       ...(task.commitMessage ? { commitMessage: task.commitMessage } : {}),
+      ...(task.reviewGuidance ? { reviewGuidance: task.reviewGuidance } : {}),
       ...(task.status === "cancelled" ? { cancelled: true } : {}),
       ...(task.discovery
         ? { discovery: { allowedWritePaths: [...task.discovery.allowedWritePaths] } }
@@ -109,6 +111,7 @@ export function importPlan(
       ...(raw.verificationProfile ? { verificationProfile: raw.verificationProfile } : {}),
       ...(raw.reviewPolicy ? { reviewPolicy: raw.reviewPolicy } : {}),
       ...(raw.commitMessage ? { commitMessage: raw.commitMessage } : {}),
+      ...(raw.reviewGuidance ? { reviewGuidance: raw.reviewGuidance } : {}),
       ...(raw.discovery
         ? { discovery: { allowedWritePaths: raw.discovery.allowedWritePaths } }
         : {}),
@@ -234,6 +237,7 @@ function changedFields(before: Task, after: Task): string[] {
     ["review policy", before.reviewPolicy ?? "single", after.reviewPolicy ?? "single"],
     ["discovery", before.discovery ?? null, after.discovery ?? null],
     ["commit message", before.commitMessage ?? null, after.commitMessage ?? null],
+    ["review guidance", before.reviewGuidance ?? null, after.reviewGuidance ?? null],
     ["cancelled", before.status === "cancelled", after.status === "cancelled"],
   ];
   return fields
@@ -318,6 +322,7 @@ function isExportedTask(value: unknown): value is ExportedPlanTask {
       value.reviewPolicy === "confirm" ||
       value.reviewPolicy === "find-and-refute") &&
     (value.commitMessage === undefined || typeof value.commitMessage === "string") &&
+    (value.reviewGuidance === undefined || typeof value.reviewGuidance === "string") &&
     (value.cancelled === undefined || typeof value.cancelled === "boolean") &&
     (value.discovery === undefined ||
       (isRecord(value.discovery) &&

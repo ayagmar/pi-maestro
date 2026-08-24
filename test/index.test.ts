@@ -4992,3 +4992,45 @@ test("/maestro config budget raises the run budget in one deliberate step", asyn
     }
   );
 });
+
+test("/maestro config budget resolves a pending budget_blocked decision in the same step", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, maxRunCost: 10 });
+      const board: Board = {
+        version: 1,
+        nextTaskNumber: 1,
+        tasks: [],
+        activeDecision: {
+          id: "budget-decision",
+          ownerSession: "/tmp/dead-session.jsonl",
+          kind: "budget_blocked",
+          taskIds: [],
+          evidence: "run budget exceeded",
+          allowedInterventions: ["handoff", "abort"],
+          createdAt: Date.now(),
+          deliveredAt: Date.now(),
+        },
+      };
+      const spent = createTask(board, { title: "Spent", brief: "work", tier: "standard" });
+      spent.attempts.push({
+        ...executorAttempt(),
+        usage: { input: 1, output: 1, cost: 11, turns: 2 },
+      });
+      forceStatus(spent, "cancelled");
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+
+      // A raise below current spend must not resolve the decision: the wall
+      // would come straight back on resume.
+      await command.handler("config budget 5", ctx);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+
+      await command.handler("config budget 200", ctx);
+      assert.match(notices.at(-1) ?? "", /Pending budget_blocked decision resolved/);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution?.intervention, "resume");
+    }
+  );
+});

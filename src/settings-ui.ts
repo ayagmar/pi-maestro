@@ -196,6 +196,7 @@ export function applySettingsChange(
   else if (id === "detachedExecutors") config.detachedExecutors = value === "on";
   else if (id === "retryContext") config.retryContext = value === "fresh" ? "fresh" : "resume";
   else if (id === "autoCommit") config.autoCommit = value === "on";
+  else if (id === "pushOnIntegration") config.pushOnIntegration = value === "on";
   else if (id === "cleanupCompletedTasks") config.cleanupCompletedTasks = value === "on";
   else if (id === "maxAttempts") config.maxAttempts = Number(value);
   else if (id === "maxPlanTasks") config.maxPlanTasks = Number(value);
@@ -433,7 +434,7 @@ export async function showSettings(
             label: "Preset",
             currentValue: matchingPreset(config),
             values: PRESETS.map((preset) => preset.name),
-            description: presetDescription(matchingPreset(config)),
+            description: presetDescription(matchingPreset(config), config),
           },
           {
             id: "maxParallel",
@@ -446,9 +447,23 @@ export async function showSettings(
             id: "maxRunCost",
             label: "Run cost cap (USD)",
             currentValue: config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`,
-            values: ["off", "$5", "$10", "$25", "$50", "$100", "$200", "$300"],
+            values: [
+              ...new Set([
+                "off",
+                ...(config.maxRunCost > 0 ? [`$${config.maxRunCost}`] : []),
+                "$5",
+                "$10",
+                "$25",
+                "$50",
+                "$100",
+                "$200",
+                "$300",
+                "$500",
+                "$1000",
+              ]),
+            ],
             description:
-              "Stop starting new executors after lifetime board spend exceeds this. Large multi-task boards with confirm reviews routinely need $100+.",
+              "Stop starting new executors after lifetime board spend exceeds this. Large multi-task boards with confirm reviews routinely need $100+. Any value: /maestro config budget <usd>.",
           },
           {
             id: "planGate",
@@ -463,6 +478,14 @@ export async function showSettings(
             currentValue: config.autoCommit ? "on" : "off",
             values: ["on", "off"],
             description: "Commit each approved task with one conventional commit.",
+          },
+          {
+            id: "pushOnIntegration",
+            label: "Push after each integration",
+            currentValue: (config.pushOnIntegration ?? false) ? "on" : "off",
+            values: ["off", "on"],
+            description:
+              "Best-effort push of the main branch after every approved integration, so landed work is backed up off-machine as it lands.",
           },
           {
             id: "maxAttempts",
@@ -842,7 +865,43 @@ export async function showSettings(
   });
 }
 
-function presetDescription(name: string): string {
-  if (name === "custom") return "Hand-tuned values. Pick a preset to reset all tiers at once.";
+function presetDescription(name: string, config?: MaestroConfig): string {
+  if (name === "custom") {
+    const drift = config ? presetDrift(config) : undefined;
+    return drift
+      ? `Hand-tuned values · ${drift}. Pick a preset to reset all tiers at once.`
+      : "Hand-tuned values. Pick a preset to reset all tiers at once.";
+  }
   return findPreset(name)?.description ?? "";
+}
+
+/** Which fields separate a custom config from its nearest preset. */
+export function presetDrift(config: MaestroConfig): string | undefined {
+  let best: { name: string; fields: string[] } | undefined;
+  for (const preset of PRESETS) {
+    const fields: string[] = [];
+    const reference = preset.config as unknown as Record<string, unknown>;
+    const candidate = config as unknown as Record<string, unknown>;
+    for (const key of new Set([...Object.keys(reference), ...Object.keys(candidate)])) {
+      if (key === "tiers") {
+        const referenceTiers = preset.config.tiers;
+        const candidateTiers = config.tiers;
+        for (const tier of new Set([
+          ...Object.keys(referenceTiers),
+          ...Object.keys(candidateTiers),
+        ])) {
+          if (JSON.stringify(referenceTiers[tier]) !== JSON.stringify(candidateTiers[tier])) {
+            fields.push(`tiers.${tier}`);
+          }
+        }
+        continue;
+      }
+      if (JSON.stringify(reference[key]) !== JSON.stringify(candidate[key])) fields.push(key);
+    }
+    if (!best || fields.length < best.fields.length) best = { name: preset.name, fields };
+  }
+  if (!best || best.fields.length === 0) return undefined;
+  const shown = best.fields.slice(0, 4);
+  const more = best.fields.length - shown.length;
+  return `closest ${best.name}, differs in ${shown.join(", ")}${more > 0 ? ` +${more} more` : ""}`;
 }

@@ -132,6 +132,13 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
                 "Conventional commit message (e.g. 'fix: handle empty board') used when this task's approved work is committed. Defaults to 'feat: <title>'.",
             })
           ),
+          reviewGuidance: Type.Optional(
+            Type.String({
+              maxLength: 2000,
+              description:
+                "Optional reviewer focus hint injected into review prompts: which slices, files, or properties to verify on a large artifact. Not a substitute for success criteria.",
+            })
+          ),
           supersedesTaskId: Type.Optional(
             Type.String({
               description:
@@ -171,6 +178,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           kind?: "implementation" | "investigation";
           tier: string;
           commitMessage?: string;
+          reviewGuidance?: string;
           supersedesTaskId?: string;
           dependsOn?: string[];
           writePaths?: string[];
@@ -212,6 +220,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           };
           if (contract.kind) taskInput.kind = contract.kind;
           if (input.commitMessage) taskInput.commitMessage = input.commitMessage;
+          if (input.reviewGuidance) taskInput.reviewGuidance = input.reviewGuidance;
           if (input.dependsOn) taskInput.dependsOn = input.dependsOn;
           taskInput.writePaths = contract.writePaths;
           if (contract.successCriteria) taskInput.successCriteria = contract.successCriteria;
@@ -633,6 +642,12 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       commitMessage: Type.Optional(
         Type.String({ description: "Replacement conventional commit message; empty clears it" })
       ),
+      reviewGuidance: Type.Optional(
+        Type.String({
+          maxLength: 2000,
+          description: "Replacement reviewer focus hint; empty clears it",
+        })
+      ),
       reviewPolicy: Type.Optional(
         StringEnum(["single", "confirm", "find-and-refute"] as const, {
           description: "Replacement review convergence policy",
@@ -666,6 +681,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         successCriteria,
         verificationProfile,
         commitMessage,
+        reviewGuidance,
         reviewPolicy,
         supersedesTaskId,
         invalidateInFlight,
@@ -681,6 +697,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         successCriteria?: string[];
         verificationProfile?: string;
         commitMessage?: string;
+        reviewGuidance?: string;
         reviewPolicy?: "single" | "confirm" | "find-and-refute";
         supersedesTaskId?: string;
         invalidateInFlight?: boolean;
@@ -709,7 +726,8 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         verificationProfile !== undefined ||
         reviewPolicy !== undefined ||
         dependsOn !== undefined ||
-        commitMessage !== undefined;
+        commitMessage !== undefined ||
+        reviewGuidance !== undefined;
       const editsTaskContract =
         brief !== undefined ||
         kind !== undefined ||
@@ -736,6 +754,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
             ...(successCriteria !== undefined ? { successCriteria } : {}),
             ...(verificationProfile !== undefined ? { verificationProfile } : {}),
             ...(commitMessage !== undefined ? { commitMessage } : {}),
+            ...(reviewGuidance !== undefined ? { reviewGuidance } : {}),
             ...(reviewPolicy !== undefined ? { reviewPolicy } : {}),
             ...(cancel !== undefined ? { cancelled: cancel } : {}),
           },

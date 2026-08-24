@@ -85,6 +85,12 @@ export interface LivePaneLaunch {
   cost: number;
   lastActivity: string;
   live?: boolean;
+  /** Executor lifecycle phase from the latest run update (live rows only). */
+  phase?: string;
+  /** The watchdog steered this run and it has not progressed since. */
+  steered?: boolean;
+  /** Settled reviewer verdict, shown instead of a generic "settled". */
+  verdict?: "approve" | "request_changes";
   startedAt?: number;
   endedAt?: number;
 }

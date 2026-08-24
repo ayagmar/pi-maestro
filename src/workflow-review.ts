@@ -42,7 +42,13 @@ import {
   staleExecutionInputsMessage,
 } from "./workflow-review-policy.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
-import { parkWorktree, restoreWorktree, snapshotArtifact, type WorktreeRef } from "./worktree.js";
+import {
+  parkWorktree,
+  pushCurrentBranch,
+  restoreWorktree,
+  snapshotArtifact,
+  type WorktreeRef,
+} from "./worktree.js";
 
 export async function reviewTask(options: {
   cwd: string;
@@ -51,6 +57,8 @@ export async function reviewTask(options: {
   startExecutor: StartExecutor;
   canStartExecutor?: () => boolean;
   autoCommit?: boolean;
+  /** Push the main branch after a successful integration (best-effort backup). */
+  pushOnIntegration?: boolean;
   logEvents?: "compact" | "full" | undefined;
   maxLogBytes?: number | undefined;
   watchdogIdleSeconds?: number | undefined;
@@ -79,6 +87,7 @@ export async function reviewTask(options: {
     startExecutor,
     canStartExecutor = () => true,
     autoCommit,
+    pushOnIntegration = false,
     logEvents,
     maxLogBytes,
     watchdogIdleSeconds,
@@ -200,6 +209,7 @@ export async function reviewTask(options: {
       verificationProfile: task.verificationProfile,
       reviewPolicy,
       commitMessage: task.commitMessage,
+      reviewGuidance: task.reviewGuidance,
     });
     const reviewIdentityMatches = (fresh: Task): boolean =>
       fresh.status === "ready_for_review" &&
@@ -216,6 +226,7 @@ export async function reviewTask(options: {
         verificationProfile: fresh.verificationProfile,
         reviewPolicy: fresh.reviewPolicy ?? "single",
         commitMessage: fresh.commitMessage,
+        reviewGuidance: fresh.reviewGuidance,
       }) === claimedTaskContract;
     // Legacy/injected workflow harnesses may not provide a Git integration surface.
     // File-backed auto-commit or worktree reviews require full provenance;
@@ -881,6 +892,15 @@ export async function reviewTask(options: {
     if (result.status === "approved") {
       if (worktree) {
         await removeIntegratedWorktree(cwd, worktree);
+      }
+      // Off-machine backup of landed work. Best-effort by design: a real
+      // program accumulated $150 of approved work on one disk before its
+      // first push, and durability should not depend on remembering to.
+      if (pushOnIntegration && (integratedCommit ?? result.integratedCommit)) {
+        const pushed = pushCurrentBranch(cwd);
+        if (!pushed.ok) {
+          onRetentionWarning?.(`Post-integration push skipped: ${pushed.detail}`);
+        }
       }
     }
     if (outcome.aborted) {

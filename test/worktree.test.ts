@@ -26,9 +26,9 @@ import {
   captureChangeBaseline,
   captureDiff,
   changedPaths,
-  commitAll,
   changedPathsSinceBaseline,
   cleanupManagedWorktrees,
+  commitAll,
   createWorktree,
   inspectManagedWorktrees,
   mergeWorktree,
@@ -36,6 +36,7 @@ import {
   parkWorktree,
   prepareMainTreeIntegration,
   promotePreparedMainTreeIntegration,
+  pushCurrentBranch,
   removePreparedIntegration,
   restoreWorktree,
   snapshotArtifact,
@@ -1030,5 +1031,32 @@ test("parking preserves a checkout whose work cannot be checkpointed", () => {
     assert.match(readFileSync(join(ref.worktreePath, "shared.txt"), "utf-8"), /irreplaceable/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("pushCurrentBranch backs up the current branch and never throws", () => {
+  const cwd = repository();
+  const remote = mkdtempSync(join(tmpdir(), "maestro-push-remote-"));
+  try {
+    // No origin yet: report, do not throw.
+    const noRemote = pushCurrentBranch(cwd);
+    assert.equal(noRemote.ok, false);
+    assert.match(noRemote.detail, /no origin remote/);
+
+    git(remote, "init", "-q", "--bare");
+    git(cwd, "remote", "add", "origin", remote);
+    const branch = git(cwd, "branch", "--show-current");
+    const pushed = pushCurrentBranch(cwd);
+    assert.equal(pushed.ok, true, pushed.detail);
+    assert.equal(git(remote, "rev-parse", branch), git(cwd, "rev-parse", "HEAD"));
+
+    // Unreachable remote: report, do not throw, approval flow unaffected.
+    git(cwd, "remote", "set-url", "origin", join(remote, "missing-repo"));
+    const failed = pushCurrentBranch(cwd);
+    assert.equal(failed.ok, false);
+    assert.ok(failed.detail.length > 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(remote, { recursive: true, force: true });
   }
 });

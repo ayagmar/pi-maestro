@@ -189,6 +189,8 @@ export interface Task {
   kind?: "investigation";
   /** Conventional commit message used when auto-committing this task's approved work. */
   commitMessage?: string;
+  /** Orchestrator hint injected into review prompts: what to verify and where to focus. */
+  reviewGuidance?: string;
   /** Successor task that replaced this task. */
   supersededBy?: string;
   /** Predecessor task that this task replaced. */
@@ -279,6 +281,7 @@ export interface PlanTaskEdits {
   dependsOn?: string[];
   writePaths?: string[];
   commitMessage?: string;
+  reviewGuidance?: string;
   successCriteria?: string[];
   verificationProfile?: string;
   reviewPolicy?: ReviewPolicy;
@@ -471,6 +474,8 @@ export interface MaestroConfig {
   cleanupCompletedTasks?: boolean;
   /** Commit each task's work on approval (one conventional commit per task). */
   autoCommit: boolean;
+  /** Push the main branch after each approved integration (remote backup of landed work). */
+  pushOnIntegration?: boolean;
   /** Trusted user/project commands; model task text is never executed. */
   verificationProfiles?: Record<string, VerificationProfile>;
   defaultVerificationProfile?: string;

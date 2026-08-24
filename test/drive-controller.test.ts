@@ -460,6 +460,33 @@ test("a foreign completed decision cannot deadlock a new drive reservation", () 
   });
 });
 
+test("foreign mechanical decisions (budget, abort, limits) are resumable by any session", () => {
+  withBoard((cwd) => {
+    // Three real recoveries required hand-editing persisted state because a
+    // dead session owned a budget_blocked decision. Mechanical stops carry
+    // self-contained evidence; any session may resume once the cause is fixed.
+    for (const kind of ["budget_blocked", "aborted", "launch_limit", "provider_blocked"]) {
+      saveBoard(cwd, {
+        version: 1,
+        nextTaskNumber: 1,
+        activeDecision: decision({
+          kind,
+          ownerSession: "/tmp/dead-session.jsonl",
+          deliveredAt: Date.now(),
+        }),
+        tasks: [],
+      });
+      const reserved = persistActiveDrive(cwd, {
+        id: `drive-${kind}`,
+        ownerSession: owner,
+        startedAt: Date.now(),
+      });
+      assert.equal(reserved.ok, true, `${kind} must be resumable by a foreign session`);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution?.intervention, "resume");
+    }
+  });
+});
+
 test("a foreign actionable decision refuses reservation and names the blocker", () => {
   withBoard((cwd) => {
     saveBoard(cwd, {

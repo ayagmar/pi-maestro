@@ -66,6 +66,16 @@ function reviewCost(attempt: Task["attempts"][number]): number {
   return attempt.reviewUsage?.cost ?? 0;
 }
 
+/** Board-lifetime spend split into executor and reviewer shares. */
+export function boardCostSplit(tasks: Task[]): { executor: number; review: number } {
+  let review = 0;
+  for (const task of tasks) {
+    for (const attempt of task.attempts) review += reviewCost(attempt);
+  }
+  const total = boardUsage(tasks).cost;
+  return { executor: Math.max(0, total - review), review };
+}
+
 export function boardUsage(tasks: Task[]): Usage {
   const total: Usage = { input: 0, output: 0, cost: 0, turns: 0 };
   for (const task of tasks) {
@@ -218,6 +228,14 @@ export function formatCostSummary(tasks: Task[]): string {
   const reconciledCost = [...categorized.values()].reduce((sum, cost) => sum + cost, 0);
   if (usage.totalAttempts > 0) spend.push(`reconciled $${reconciledCost.toFixed(4)}`);
   if (spend.length > 0) parts.push(`spend: ${spend.join(" · ")}`);
+  // Reviews quietly overtaking executors is the board's most expensive silent
+  // drift; a real run reached $211 review vs $188 executor before anyone saw it.
+  const split = boardCostSplit(tasks);
+  if (split.review > 5 && split.review >= split.executor) {
+    parts.push(
+      `⚠ review spend ($${split.review.toFixed(4)}) meets or exceeds executor spend ($${split.executor.toFixed(4)}) — consider reviewPolicy "single" for mechanical tasks or a cheaper review-tier model`
+    );
+  }
 
   // Where the money actually went. A board can look cheap per attempt while a
   // few tasks quietly consume most of the run through repeated review panels.

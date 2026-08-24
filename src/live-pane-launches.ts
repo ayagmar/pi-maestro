@@ -56,6 +56,9 @@ export function collectLivePaneLaunches(
         cost: live?.cost ?? review?.usage.cost ?? launch.attempt.usage.cost,
         lastActivity: live?.lastActivity ?? "settled",
         live: live !== undefined,
+        ...(live?.phase ? { phase: live.phase } : {}),
+        ...(live?.steered ? { steered: true } : {}),
+        ...(review?.verdict ? { verdict: review.verdict } : {}),
         startedAt: review?.startedAt ?? launch.attempt.startedAt,
         ...((review?.endedAt ?? launch.attempt.endedAt)
           ? { endedAt: review?.endedAt ?? launch.attempt.endedAt }
@@ -82,6 +85,8 @@ export function collectLivePaneLaunches(
       cost: run.cost,
       lastActivity: run.lastActivity,
       live: true,
+      ...(run.phase ? { phase: run.phase } : {}),
+      ...(run.steered ? { steered: true } : {}),
       startedAt: attempt.startedAt,
     });
   }

@@ -26,6 +26,7 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   useWorktrees: false,
   detachedExecutors: false,
   autoCommit: true,
+  pushOnIntegration: false,
   maxAttempts: 3,
   maxPlanTasks: 64,
   maxDiscoveryGeneratedTasks: 32,
@@ -209,6 +210,7 @@ export function mergeConfig(
     useWorktrees: override.useWorktrees ?? base.useWorktrees,
     detachedExecutors: override.detachedExecutors ?? base.detachedExecutors ?? false,
     autoCommit: override.autoCommit ?? base.autoCommit,
+    pushOnIntegration: override.pushOnIntegration ?? base.pushOnIntegration ?? false,
     maxAttempts: override.maxAttempts ?? base.maxAttempts,
     maxPlanTasks: override.maxPlanTasks ?? base.maxPlanTasks,
     maxDiscoveryGeneratedTasks:
@@ -263,6 +265,7 @@ const CONFIG_KEYS = new Set([
   "useWorktrees",
   "detachedExecutors",
   "autoCommit",
+  "pushOnIntegration",
   "maxAttempts",
   "maxPlanTasks",
   "maxDiscoveryGeneratedTasks",
@@ -302,6 +305,7 @@ export function validateConfig(value: unknown): string | undefined {
     "useWorktrees",
     "detachedExecutors",
     "autoCommit",
+    "pushOnIntegration",
     "cleanupCompletedTasks",
   ];
   for (const key of booleanKeys) {
@@ -629,6 +633,7 @@ export function describeConfig(config: MaestroConfig): string {
     `livePanes: ${config.livePanes}`,
     `useWorktrees: ${config.useWorktrees}`,
     `detachedExecutors: ${config.detachedExecutors ?? false}`,
+    `pushOnIntegration: ${config.pushOnIntegration ?? false}`,
     `maxAttempts: ${config.maxAttempts}`,
     `maxPlanTasks: ${config.maxPlanTasks}`,
     `maxDiscoveryGeneratedTasks: ${config.maxDiscoveryGeneratedTasks}`,

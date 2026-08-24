@@ -5,8 +5,9 @@ import {
   blockedReason,
   findTask,
   groupTasks,
-  type HumanRetryEligibility,
+  supersessionChain,
   taskGroup,
+  type HumanRetryEligibility,
 } from "./board.js";
 import {
   DEFAULT_DASHBOARD_BODY_HEIGHT,
@@ -989,17 +990,46 @@ export class Dashboard {
     const breadcrumb = launch
       ? `Run › ${phase} › ${task.id} › ${launch.label}`
       : `Run › ${phase} › ${task.id}`;
+    // Exec/review split: a board can look cheap per attempt while reviews
+    // quietly dominate its spend.
+    const reviewSpend = task.attempts.reduce(
+      (sum, attempt) =>
+        sum +
+        ((attempt.reviewLaunches?.length ?? 0) > 0
+          ? (attempt.reviewLaunches ?? []).reduce((s, launch) => s + launch.usage.cost, 0)
+          : (attempt.reviewUsage?.cost ?? 0)),
+      0
+    );
+    const totalSpend = taskUsage(task).cost;
+    const costDetail =
+      reviewSpend > 0
+        ? `$${totalSpend.toFixed(4)} (exec $${Math.max(0, totalSpend - reviewSpend).toFixed(2)} · review $${reviewSpend.toFixed(2)})`
+        : `$${usage.cost.toFixed(4)}`;
     const lines = [
       this.theme.fg("dim", truncateToWidth(breadcrumb, width)),
       this.theme.bold(truncateToWidth(heading, width)),
       this.theme.fg(
         "dim",
         truncateToWidth(
-          `Group: ${group} · Dependencies: ${dependencies} · ${attempts} · $${usage.cost.toFixed(4)}${liveDetail}`,
+          `Group: ${group} · Dependencies: ${dependencies} · ${attempts} · ${costDetail}${liveDetail}`,
           width
         )
       ),
     ];
+    // Supersession lineage answers "why are there 60 tasks" in one line:
+    // every cancelled predecessor is evidence, not extra work.
+    const chain = supersessionChain(board, task);
+    if (chain.length > 1) {
+      lines.push(
+        this.theme.fg(
+          "dim",
+          truncateToWidth(
+            `Lineage: ${chain.map((id) => (id === task.id ? `[${id}]` : id)).join(" → ")}`,
+            width
+          )
+        )
+      );
+    }
 
     const blockers = task.dependsOn.flatMap((dependencyId) => {
       const dependency = findTask(board, dependencyId);

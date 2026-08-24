@@ -198,6 +198,11 @@ export function buildReviewPrompt(task: Task, report: string): string {
       `## Previous review findings\nExplicitly verify every prior finding:\n${truncateInjectedContext(reviewFeedback)}`
     );
   }
+  if (task.reviewGuidance) {
+    sections.push(
+      `## Review guidance from the orchestrator\n${truncateContext(task.reviewGuidance, 2_000)}`
+    );
+  }
   sections.push(`## Executor report\n${truncateContext(report, 4_000)}`);
   if (task.provenance?.candidateTree) {
     sections.push(

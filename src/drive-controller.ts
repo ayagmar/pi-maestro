@@ -43,6 +43,10 @@ export interface LiveRun {
   turns: number;
   cost: number;
   lastActivity: string;
+  /** Executor lifecycle phase from the latest run update. */
+  phase?: string;
+  /** The watchdog steered this run and it has not progressed since. */
+  steered?: boolean;
   handle: ExecutorHandle;
 }
 
@@ -76,6 +80,19 @@ export interface DriveRuntimeServices {
 }
 
 const DELIVERY_CLAIM_STALE_MS = 30_000;
+
+/**
+ * Decision kinds whose evidence requires the owning conversation's judgment.
+ * Everything else is a mechanical stop that any session may resume once the
+ * underlying cause (budget, config, provider, plan) has been addressed.
+ */
+export const JUDGMENT_DECISION_KINDS: ReadonlySet<string> = new Set([
+  "escalation_required",
+  "review_disagreement",
+  "stale_completion",
+  "reviewer_failure",
+  "attempt_cap",
+]);
 
 export class DriveRuntimeController {
   private active: ActiveDriveControl | undefined;
@@ -214,8 +231,43 @@ export class DriveRuntimeController {
     }
 
     this.setBackground(operation);
+    // Outcome toasts: between heartbeat pulses the only sign of a settled
+    // task was the drive summary at the very end. Surface approvals and
+    // rejections the moment they land on the board.
+    let toastStatuses = new Map(
+      loadBoard(ctx.cwd).tasks.map((task) => [task.id, task.status] as const)
+    );
     const statusRefresh = setInterval(() => {
-      if (services.isRuntimeActive()) services.refreshUI(ctx);
+      if (!services.isRuntimeActive()) return;
+      try {
+        const tasks = loadBoard(ctx.cwd).tasks;
+        for (const task of tasks) {
+          const before = toastStatuses.get(task.id);
+          if (before === task.status) continue;
+          const cost = task.attempts.reduce((sum, attempt) => sum + attempt.usage.cost, 0);
+          if (task.status === "approved") {
+            services.notify(ctx, `✓ ${task.id} approved · $${cost.toFixed(2)}`);
+          } else if (task.status === "changes_requested") {
+            const finding = (task.reviewNotes ?? "").split("\n").find(Boolean) ?? "";
+            services.notify(
+              ctx,
+              `↻ ${task.id} changes requested${finding ? `: ${finding.slice(0, 90)}` : ""}`,
+              "warning"
+            );
+          } else if (task.status === "failed") {
+            const reason = task.attempts.at(-1)?.failureReason?.message ?? "";
+            services.notify(
+              ctx,
+              `✗ ${task.id} failed${reason ? `: ${reason.slice(0, 90)}` : ""}`,
+              "warning"
+            );
+          }
+        }
+        toastStatuses = new Map(tasks.map((task) => [task.id, task.status] as const));
+        services.refreshUI(ctx);
+      } catch {
+        // A transient board read failure must not kill the refresh loop.
+      }
     }, 1_000);
     statusRefresh.unref();
     operation.promise = this.runControlledDrive(
@@ -523,6 +575,14 @@ export class DriveRuntimeController {
       onRetentionWarning: (warning) =>
         services.notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
       onNotice: (message) => services.notify(ctx, message, "warning"),
+      // Budget raises take effect at the next boundary of a running drive.
+      liveMaxRunCost: () => {
+        try {
+          return loadConfig(ctx.cwd).maxRunCost;
+        } catch {
+          return config.maxRunCost;
+        }
+      },
     };
     if (taskIds) driveOptions.taskIds = taskIds;
     if (signal) driveOptions.signal = signal;
@@ -547,6 +607,8 @@ export class DriveRuntimeController {
       live.turns = update.turns;
       live.cost = update.cost;
       live.lastActivity = update.lastActivity;
+      if (update.phase !== undefined) live.phase = update.phase;
+      live.steered = update.steered === true;
     }
     if (services.isRuntimeActive()) {
       (services.refreshUIOnEvent ?? services.refreshUI)(ctx);
@@ -831,13 +893,14 @@ export function persistActiveDrive(cwd: string, activeDrive: ActiveDriveState): 
     }
     if (board.activeDecision && !board.activeDecision.resolution) {
       const foreignDecision = board.activeDecision.ownerSession !== activeDrive.ownerSession;
-      // A "completed" decision is a terminal notification, not a pending
-      // judgment. Requiring its (possibly long-dead) owner session to
-      // acknowledge it before anyone else may drive deadlocked the board
-      // behind a message nobody can read anymore. Actionable decisions keep
-      // their ownership guard so a foreign session cannot steal a pending
-      // escalation.
-      if (foreignDecision && board.activeDecision.kind !== "completed") {
+      // Only judgment decisions keep their ownership guard: their evidence
+      // needs the owning conversation's context, and a foreign session must
+      // not steal a pending escalation. Mechanical stops (budget, abort,
+      // launch/round limits, provider outages) carry self-contained evidence
+      // and their fix is a board/config change any session can make — three
+      // real recoveries required hand-editing persisted state because a dead
+      // session owned a budget_blocked decision.
+      if (foreignDecision && JUDGMENT_DECISION_KINDS.has(board.activeDecision.kind)) {
         result = {
           ok: false,
           reason: `an unresolved ${board.activeDecision.kind} decision is owned by ${describeOwnerSession(board.activeDecision.ownerSession)}; act on it from that session, or /maestro reset to archive the board`,

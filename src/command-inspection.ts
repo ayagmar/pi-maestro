@@ -8,6 +8,7 @@ import {
   loadArchivedBoard,
   loadBoard,
   planValidationMessage,
+  updateBoard,
   validatePlan,
 } from "./board.js";
 import { configFile, describeConfig, loadConfig, validateConfig } from "./config.js";
@@ -84,11 +85,24 @@ function handleBudgetCommand(
   }
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `${JSON.stringify(projectSettings, null, 2)}\n`, "utf-8");
+  // The raise is the fix for a pending budget stop: resolve it in the same
+  // step so recovery is one command instead of config-edit + decision surgery.
+  let resolvedDecision = false;
+  if (amount === 0 || amount > total) {
+    updateBoard(ctx.cwd, (board) => {
+      const decision = board.activeDecision;
+      if (!decision || decision.resolution || decision.kind !== "budget_blocked") return false;
+      decision.resolution = { intervention: "resume", resolvedAt: Date.now() };
+      delete decision.deliveryClaim;
+      resolvedDecision = true;
+      return true;
+    });
+  }
   const remaining =
     amount === 0 ? "budget disabled" : `$${Math.max(0, amount - total).toFixed(4)} remaining`;
   notify(
     ctx,
-    `Run budget → ${amount === 0 ? "off" : `$${amount}`} · ${spendSummary} · ${remaining}. Use /maestro resume or /maestro drive to continue.`
+    `Run budget → ${amount === 0 ? "off" : `$${amount}`} · ${spendSummary} · ${remaining}.${resolvedDecision ? " Pending budget_blocked decision resolved." : ""} Use /maestro resume or /maestro drive to continue.`
   );
   onChanged();
 }

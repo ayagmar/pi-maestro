@@ -47,6 +47,7 @@ import {
   taskGroup,
   transition,
   updateBoard,
+  supersessionChain,
   updateBoardAsync,
   updateTask,
   updateTaskAsync,
@@ -472,6 +473,34 @@ test("editing the brief or success criteria clears stale findings and stagnation
   task.findings = staleFindings();
   applyPlanTaskEdits(task, { tier: "complex" }, ["standard", "complex"]);
   assert.deepEqual(task.findings, staleFindings());
+});
+
+test("review guidance round-trips through edits and bounds its length", () => {
+  const task = createTask(emptyBoard(), { title: "Task", brief: "brief", tier: "standard" });
+  applyPlanTaskEdits(task, { reviewGuidance: " verify slices A and B " }, ["standard"]);
+  assert.equal(task.reviewGuidance, "verify slices A and B");
+  applyPlanTaskEdits(task, { reviewGuidance: "" }, ["standard"]);
+  assert.equal(task.reviewGuidance, undefined);
+  assert.throws(
+    () => applyPlanTaskEdits(task, { reviewGuidance: "x".repeat(2001) }, ["standard"]),
+    /1-2000 characters/
+  );
+});
+
+test("supersession chain walks predecessors and successors without cycling", () => {
+  const board = emptyBoard();
+  const first = createTask(board, { title: "A", brief: "a", tier: "standard" });
+  const second = createTask(board, { title: "B", brief: "b", tier: "standard" });
+  const third = createTask(board, { title: "C", brief: "c", tier: "standard" });
+  first.supersededBy = second.id;
+  second.supersedes = first.id;
+  second.supersededBy = third.id;
+  third.supersedes = second.id;
+  assert.deepEqual(supersessionChain(board, second), ["T1", "T2", "T3"]);
+  assert.deepEqual(supersessionChain(board, first), ["T1", "T2", "T3"]);
+  // A corrupt cycle terminates instead of hanging.
+  first.supersedes = third.id;
+  assert.deepEqual(supersessionChain(board, first), ["T2", "T3", "T1"]);
 });
 
 test("plan edits reject empty fields and unknown tiers without changing them", () => {

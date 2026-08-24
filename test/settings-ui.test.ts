@@ -15,6 +15,7 @@ import {
   buildModelChoices,
   buildModelPickerChoices,
   filterModelChoices,
+  presetDrift,
   showSettings,
   watchdogSummary,
 } from "../src/settings-ui.js";
@@ -219,6 +220,19 @@ test("watchdog and logging settings round-trip through applySettingsChange", () 
   assert.equal(config.maxLogBytesPerRun, 0);
   // Every value produced above passes effective-config validation.
   assert.equal(validateEffectiveConfig(config), undefined);
+});
+
+test("pushOnIntegration toggles through settings and preset drift names the changed fields", () => {
+  let config = structuredClone(DEFAULT_CONFIG);
+  assert.equal(presetDrift(config), undefined); // exact preset match
+  config = applySettingsChange(config, "pushOnIntegration", "on");
+  assert.equal(config.pushOnIntegration, true);
+  config = applySettingsChange(config, "maxRunCost", "$300");
+  const drift = presetDrift(config);
+  assert.ok(drift, "a hand-tuned config must name its drift");
+  assert.match(drift ?? "", /closest inherit/);
+  assert.match(drift ?? "", /pushOnIntegration/);
+  assert.match(drift ?? "", /maxRunCost/);
 });
 
 test("watchdog summary names disabled guards instead of hiding them", () => {

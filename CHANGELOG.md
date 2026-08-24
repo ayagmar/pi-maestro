@@ -20,6 +20,17 @@
 
 ### Added
 
+- Cross-session recovery for mechanical stops: budget_blocked, aborted, launch/round limits, provider blocks, and internal errors can now be resumed by any session once the cause is addressed — only judgment decisions (escalation, review disagreement, stale completion, reviewer failure, attempt cap) keep their owner-session guard. Three real recoveries previously required hand-editing persisted board state.
+- `/maestro config budget <usd>` now resolves a pending budget_blocked decision in the same step when the new budget clears current spend, and a running drive re-reads the budget at every boundary so mid-drive raises take effect without a restart. A one-time notice fires at 80% budget consumption so the wall is never a surprise.
+- Outcome toasts: `✓ T18 approved · $19.01`, `↻ T17 changes requested: …`, and `✗ failed` notifications the moment a task settles, instead of silence until the drive summary.
+- The agent selector shows each live run's lifecycle phase and a red `⚠` steered marker when the watchdog has warned it; settled reviewer rows show their verdict (`✓ approved` / `↻ changes requested`) instead of a generic "settled".
+- The drive heartbeat adds the executor/review spend split and a forward cost estimate (`est. ~$45 to finish at current avg`); `/maestro costs` warns when review spend meets or exceeds executor spend.
+- The dashboard task view shows the executor/review cost split and the full supersession lineage (`T12 → T14 → [T21]`), so a recovery-heavy board explains itself.
+- `pushOnIntegration` setting: best-effort push of the main branch after every approved integration, backing landed work up off-machine as it lands. A push failure never blocks or reverts an approval.
+- Per-task `reviewGuidance` on maestro_plan/maestro_update: an orchestrator hint injected into review prompts (which slices or properties to verify on a large artifact) — the alternative to hand-building validation-task pipelines around one oversized review. Included in the review identity contract and plan export/import.
+- Zero-turn environment failures back off briefly (2s) before retrying so a transient PATH blip cannot burn drive rounds in seconds.
+- Settings: the run-cost picker includes the current value plus $500/$1000 rungs and points at `/maestro config budget` for arbitrary amounts, and a custom config names its nearest preset and the exact fields that differ.
+
 - Progress is visible at a glance everywhere a run is watched. The status bar shows a live progress bar over still-landable work with the current phase (`⚡ maestro running · execution · ▰▰▰▱▱▱▱▱▱▱ 5/16 (31%) · 2 running · $84.21`), the drive heartbeat pulse leads with elapsed time, the same bar, tasks left, and this drive's own spend beside the board total, round updates open with `5/16 approved`, and the working message carries the fraction.
 - A "Watchdog & logging" settings section exposes the previously config-file-only knobs: idle seconds before steering, no-progress turns before steering, post-steer termination turns, the automatic-handoff context threshold, run event log detail, and the run log size cap. The run cost cap choices now extend to $300 and per-attempt to $20, matching what real multi-task boards need.
 

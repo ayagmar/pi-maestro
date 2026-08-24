@@ -122,6 +122,17 @@ test("explicit success criteria appear once in executor and reviewer prompts", (
   }
 });
 
+test("review guidance is injected into the review prompt and only there", () => {
+  const task = makeTask({
+    reviewGuidance: "Verify the S001-S014 trace wiring against docs/security.md sections only.",
+  });
+  const review = buildReviewPrompt(task, "Done.");
+  assert.match(review, /## Review guidance from the orchestrator/);
+  assert.match(review, /S001-S014 trace wiring/);
+  // Guidance steers reviewers; executors must not see it as an instruction.
+  assert.doesNotMatch(buildExecutorPrompt(task, []), /Review guidance from the orchestrator/);
+});
+
 test("executor prompt contains task, success criteria, stop rule, and report contract", () => {
   const prompt = buildExecutorPrompt(makeTask(), []);
   assert.match(prompt, /## Task T1: Add health endpoint/);

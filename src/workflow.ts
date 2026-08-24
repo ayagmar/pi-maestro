@@ -126,6 +126,8 @@ export async function driveBoard(options: {
   onRetentionWarning?: (warning: string) => void;
   /** Operational notices (isolation escalation, serialization) surfaced to the user. */
   onNotice?: (message: string) => void;
+  /** Live run-budget source so mid-drive raises apply at the next boundary. Defaults to the captured config. */
+  liveMaxRunCost?: () => number;
   humanRetryTaskId?: string;
   humanRetryExpectedRiskToken?: string;
   humanRetryOwnerSession?: string;
@@ -158,6 +160,12 @@ export async function driveBoard(options: {
   let warnedInvisiblePaths = false;
   const transientProviderRetries = new Set<string>();
   const currentFingerprintConfig = (): MaestroConfig => loadConfig(cwd);
+  // The run budget is re-read every time it is consulted, so raising it with
+  // /maestro config budget while a drive is running takes effect at the next
+  // boundary instead of silently waiting for a restart. Injected by the
+  // extension runtime; library and test callers keep the captured config.
+  const liveMaxRunCost = options.liveMaxRunCost ?? ((): number => config.maxRunCost);
+  let budgetNearlyConsumedWarned = false;
   const humanRetryId = humanRetryTaskId?.trim().toUpperCase();
   const boundedStartExecutor: StartExecutor = (startOptions) => {
     if (rawLaunches >= config.maxTotalLaunchesPerRun) {
@@ -289,11 +297,25 @@ export async function driveBoard(options: {
           wave.runnableIds.includes(task.id) ||
           (task.id.toUpperCase() === humanRetryId && retryEligibility?.kind === "execute")
       );
+      const roundMaxRunCost = liveMaxRunCost();
       const budgetWarning =
         runnable.length > 0
-          ? (runBudgetWarning(board.tasks, config.maxRunCost) ??
-            launchBudgetShortfall(board.tasks, config))
+          ? (runBudgetWarning(board.tasks, roundMaxRunCost) ??
+            launchBudgetShortfall(board.tasks, {
+              maxRunCost: roundMaxRunCost,
+              maxCostPerTask: config.maxCostPerTask,
+            }))
           : undefined;
+      // One advance warning before the wall: the budget stop is never a surprise.
+      if (!budgetNearlyConsumedWarned && roundMaxRunCost > 0) {
+        const spent = boardUsage(board.tasks).cost;
+        if (spent >= roundMaxRunCost * 0.8 && spent <= roundMaxRunCost) {
+          budgetNearlyConsumedWarned = true;
+          options.onNotice?.(
+            `Run budget ${Math.round((spent / roundMaxRunCost) * 100)}% consumed ($${spent.toFixed(2)} of $${roundMaxRunCost}); the drive stops at the cap. Raise it early with /maestro config budget <usd> to avoid the wall.`
+          );
+        }
+      }
 
       if (runnable.length > 0 && !budgetWarning) {
         const dispatchable = runnable.slice(
@@ -384,7 +406,7 @@ export async function driveBoard(options: {
         // A launch that starts with less run budget than its per-attempt cap
         // must stop at the budget, not sail past it: the run cap is otherwise
         // only enforced between rounds, after the money is spent.
-        const executeBudget = remainingRunBudget(loadBoard(cwd).tasks, config.maxRunCost);
+        const executeBudget = remainingRunBudget(loadBoard(cwd).tasks, liveMaxRunCost());
         const executeResults = await mapWithConcurrencyLimit(
           dispatchable,
           config.maxParallel,
@@ -480,9 +502,13 @@ export async function driveBoard(options: {
         }
         return finish(providerBlockedReason(blockedAfterRuns, transientProviderRetries));
       }
+      const reviewMaxRunCost = liveMaxRunCost();
       const currentBudgetWarning =
-        runBudgetWarning(afterRuns.tasks, config.maxRunCost) ??
-        launchBudgetShortfall(afterRuns.tasks, config);
+        runBudgetWarning(afterRuns.tasks, reviewMaxRunCost) ??
+        launchBudgetShortfall(afterRuns.tasks, {
+          maxRunCost: reviewMaxRunCost,
+          maxCostPerTask: config.maxCostPerTask,
+        });
       if (currentBudgetWarning) {
         const reviewable = afterRuns.tasks.filter(
           (task) =>
@@ -527,7 +553,7 @@ export async function driveBoard(options: {
           config.maxCostPerReview && config.maxCostPerReview > 0
             ? "maxCostPerReview"
             : "maxCostPerTask";
-        const reviewBudget = remainingRunBudget(afterRuns.tasks, config.maxRunCost);
+        const reviewBudget = remainingRunBudget(afterRuns.tasks, reviewMaxRunCost);
         const reviewLaunchCaps = [reviewCostCap, reviewBudget].filter(
           (cap): cap is number => cap !== undefined && cap > 0
         );
@@ -561,6 +587,7 @@ export async function driveBoard(options: {
             if (task.id.toUpperCase() === humanRetryId && humanRetryOwnerSession) {
               reviewOptions.humanRetryOwnerSession = humanRetryOwnerSession;
             }
+            if (config.pushOnIntegration) reviewOptions.pushOnIntegration = true;
             if (config.verificationProfiles)
               reviewOptions.verificationProfiles = config.verificationProfiles;
             if (config.logEvents !== undefined) reviewOptions.logEvents = config.logEvents;

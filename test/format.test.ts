@@ -11,6 +11,7 @@ import {
   formatUsage,
   launchBudgetShortfall,
   padText,
+  boardCostSplit,
   progressBar,
   runBudgetWarning,
   taskLine,
@@ -181,6 +182,28 @@ test("run budget gates only when lifetime board cost exceeds a positive cap", ()
     /run budget exceeded \(\$5\.0000 of \$4 lifetime board spend\)/
   );
   assert.match(runBudgetWarning(tasks, 4) ?? "", /\/maestro config budget <usd>/);
+});
+
+test("cost summary warns when review spend meets or exceeds executor spend", () => {
+  const attempt = makeAttempt(4, 1);
+  attempt.usage.cost = 10;
+  attempt.reviewLaunches = [
+    {
+      startedAt: 1,
+      usage: { input: 1, output: 1, cost: 6, turns: 2 },
+    },
+  ];
+  const task = makeTask({ attempts: [attempt] });
+  const summary = formatCostSummary([task]);
+  assert.match(summary, /review spend \(\$6\.0000\) meets or exceeds executor spend \(\$4\.0000\)/);
+  assert.match(summary, /reviewPolicy "single"/);
+  assert.deepEqual(boardCostSplit([task]), { executor: 4, review: 6 });
+
+  // Cheap boards stay quiet: the advisory needs real money at stake.
+  const cheap = makeAttempt(1, 1);
+  cheap.usage.cost = 1;
+  cheap.reviewLaunches = [{ startedAt: 1, usage: { input: 1, output: 1, cost: 2, turns: 1 } }];
+  assert.doesNotMatch(formatCostSummary([makeTask({ attempts: [cheap] })]), /review spend/);
 });
 
 test("progress bar shows filled ratio, counts, and percent", () => {

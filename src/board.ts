@@ -772,6 +772,7 @@ function isTask(value: unknown): value is Task {
     isNumber(value.createdAt) &&
     isNumber(value.updatedAt) &&
     (value.commitMessage === undefined || typeof value.commitMessage === "string") &&
+    (value.reviewGuidance === undefined || typeof value.reviewGuidance === "string") &&
     (value.supersededBy === undefined || typeof value.supersededBy === "string") &&
     (value.supersedes === undefined || typeof value.supersedes === "string") &&
     (value.reviewNotes === undefined || typeof value.reviewNotes === "string") &&
@@ -1104,6 +1105,7 @@ export function createTask(
     kind?: "investigation";
     tier: string;
     commitMessage?: string;
+    reviewGuidance?: string;
     dependsOn?: string[];
     writePaths?: string[];
     successCriteria?: string[];
@@ -1125,6 +1127,7 @@ export function createTask(
   };
   if (input.kind === "investigation") task.kind = "investigation";
   if (input.commitMessage) task.commitMessage = input.commitMessage;
+  if (input.reviewGuidance) task.reviewGuidance = normalizeReviewGuidance(input.reviewGuidance);
   if (input.writePaths) task.writePaths = normalizeWritePaths(input.writePaths);
   if (input.successCriteria) task.successCriteria = normalizeSuccessCriteria(input.successCriteria);
   if (input.verificationProfile) task.verificationProfile = input.verificationProfile;
@@ -1369,6 +1372,32 @@ export function sweepDispatchState(cwd: string): string[] {
     });
   }
   return notes;
+}
+
+/**
+ * Full supersession lineage through a task, oldest first: T12 → T14 → T21.
+ * Cycles (corrupt boards) terminate at the first repeated id.
+ */
+export function supersessionChain(board: Board, task: Task): string[] {
+  const chain: string[] = [task.id];
+  const seen = new Set([task.id.toUpperCase()]);
+  let current: Task | undefined = task;
+  while (current?.supersedes) {
+    const predecessor = findTask(board, current.supersedes);
+    if (!predecessor || seen.has(predecessor.id.toUpperCase())) break;
+    seen.add(predecessor.id.toUpperCase());
+    chain.unshift(predecessor.id);
+    current = predecessor;
+  }
+  current = task;
+  while (current?.supersededBy) {
+    const successor = findTask(board, current.supersededBy);
+    if (!successor || seen.has(successor.id.toUpperCase())) break;
+    seen.add(successor.id.toUpperCase());
+    chain.push(successor.id);
+    current = successor;
+  }
+  return chain;
 }
 
 export function findTask(board: Board, id: string): Task | undefined {
@@ -1917,6 +1946,14 @@ export function planValidationMessage(validation: PlanValidation): string | unde
   return `Invalid plan:\n- ${problems.join("\n- ")}`;
 }
 
+export function normalizeReviewGuidance(value: string): string {
+  const guidance = value.trim();
+  if (!guidance || guidance.length > 2_000) {
+    throw new Error("reviewGuidance must contain 1-2000 characters.");
+  }
+  return guidance;
+}
+
 export function normalizeSuccessCriteria(criteria: string[]): string[] {
   if (criteria.length < 1 || criteria.length > 12) {
     throw new Error("successCriteria must contain 1-12 items.");
@@ -2063,6 +2100,11 @@ export function applyPlanTaskEdits(
     const commitMessage = edits.commitMessage.trim();
     if (commitMessage) task.commitMessage = commitMessage;
     else delete task.commitMessage;
+  }
+  if (edits.reviewGuidance !== undefined) {
+    const reviewGuidance = edits.reviewGuidance.trim();
+    if (reviewGuidance) task.reviewGuidance = normalizeReviewGuidance(reviewGuidance);
+    else delete task.reviewGuidance;
   }
   if (edits.successCriteria !== undefined) {
     task.successCriteria = normalizeSuccessCriteria(edits.successCriteria);

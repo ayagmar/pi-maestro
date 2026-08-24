@@ -618,6 +618,26 @@ export function removePreparedIntegration(mainCwd: string, prepared: PreparedInt
   removeWorktree(mainCwd, prepared.tempRef);
 }
 
+/**
+ * Best-effort push of the current branch after an approved integration, so
+ * landed work is durably backed up off-machine. Never throws: a push failure
+ * must not undo or block an approval that already settled.
+ */
+export function pushCurrentBranch(cwd: string): { ok: boolean; detail: string } {
+  try {
+    const branch = git(cwd, ["branch", "--show-current"]);
+    if (!branch) return { ok: false, detail: "detached HEAD; nothing pushed" };
+    const remotes = git(cwd, ["remote"]);
+    if (!remotes.split("\n").includes("origin")) {
+      return { ok: false, detail: "no origin remote configured" };
+    }
+    git(cwd, ["push", "origin", branch]);
+    return { ok: true, detail: `pushed ${branch} to origin` };
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /** Merge in the main tree. A failed merge is aborted and recovery state is retained. */
 export function mergeWorktree(mainCwd: string, ref: WorktreeRef, message?: string): MergeResult {
   try {

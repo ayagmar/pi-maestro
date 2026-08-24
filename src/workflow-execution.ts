@@ -68,6 +68,8 @@ export async function executeTask(options: {
   humanRetry?: boolean;
   humanRetryExpectedRiskToken?: string;
   humanRetryOwnerSession?: string;
+  /** Pause after a zero-turn environment failure so a PATH blip cannot burn rounds in seconds. */
+  environmentFailureBackoffMs?: number;
   signal?: AbortSignal;
   onUpdate: WorkflowUpdate;
   trackRun: TrackRun;
@@ -85,6 +87,7 @@ export async function executeTask(options: {
     humanRetry = false,
     humanRetryExpectedRiskToken,
     humanRetryOwnerSession,
+    environmentFailureBackoffMs = 2_000,
     signal,
     onUpdate,
     trackRun,
@@ -388,6 +391,9 @@ export async function executeTask(options: {
       outcome.failureCause === "process" &&
       run.attempt.touchedFiles.length === 0;
     run.attempt.consumesAttempt = !providerFailure && !environmentFailure;
+    if (environmentFailure && environmentFailureBackoffMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, environmentFailureBackoffMs));
+    }
     if (providerFailure) run.attempt.providerFailure = true;
     const failureReason = inferredProviderFailure
       ? classifyFailure({ ...outcome, failureCause: "provider" })

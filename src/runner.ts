@@ -302,6 +302,8 @@ export interface RunUpdate {
   phase?: "starting" | "exploring" | "editing" | "verifying" | "reporting";
   changedFileCount?: number;
   turnsWithoutProgress?: number;
+  /** The watchdog steered this run and it has not shown progress since. */
+  steered?: boolean;
   /** Persisted as soon as RPC get_state returns so interrupted runs remain navigable. */
   sessionFile?: string;
 }
@@ -828,6 +830,7 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
         phase,
         changedFileCount: attempt.touchedFiles.length,
         turnsWithoutProgress,
+        steered: watchdogSteeredAt !== undefined,
       });
     };
 

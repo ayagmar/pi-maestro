@@ -212,10 +212,24 @@ export default function maestro(
         const lines = rows.map((launch) => {
           const selected = launch.key === selectedKey;
           const marker = selected ? theme.fg("accent", "❯ ") : "  ";
-          const glyph = launch.live ? theme.fg("warning", "◐ ") : theme.fg("success", "○ ");
+          // A steered run is one the watchdog already warned; that is the
+          // moment to look at it, not when it dies.
+          const glyph = launch.steered
+            ? theme.fg("error", "⚠ ")
+            : launch.live
+              ? theme.fg("warning", "◐ ")
+              : theme.fg("success", "○ ");
           const id = theme.fg(selected ? "accent" : "muted", `${launch.taskId} `);
           const kind = launch.kind === "review" ? "review" : "execute";
-          const activity = launch.live ? launch.lastActivity : "settled";
+          const activity = launch.live
+            ? [launch.phase, launch.steered ? "steered" : undefined, launch.lastActivity]
+                .filter(Boolean)
+                .join(" · ")
+            : launch.verdict === "approve"
+              ? "✓ approved"
+              : launch.verdict === "request_changes"
+                ? "↻ changes requested"
+                : "settled";
           const stats = theme.fg(
             "dim",
             [
