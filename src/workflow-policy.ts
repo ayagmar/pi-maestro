@@ -161,9 +161,33 @@ export const TIER_LADDER = ["trivial", "standard", "complex"] as const;
  * classifier marks these `retryable: false`; scheduling another identical
  * attempt only bills for the same wall a second time.
  */
-export function endedUnretryably(task: Task): boolean {
+export function endedUnretryably(
+  task: Task,
+  config?: Pick<MaestroConfig, "maxCostPerTask">
+): boolean {
   if (task.status !== "failed") return false;
-  return task.attempts.at(-1)?.failureReason?.retryable === false;
+  const last = task.attempts.at(-1);
+  if (last?.failureReason?.retryable !== false) return false;
+  if (last.failureReason.kind === "cost_cap" && config && costCapLifted(last, config)) return false;
+  return true;
+}
+
+/**
+ * Whether an attempt cut off by the per-attempt cost cap can now continue.
+ *
+ * The cap is the only "unretryable" failure whose remedy is a configuration
+ * number, and the cut-off attempt's edits are checkpointed on its branch. Once
+ * the operator raises (or removes) the cap above what that attempt spent, the
+ * right move is to resume the same session in the same checkout — not to
+ * hand-write a successor task that restates the brief and loses the
+ * predecessor's dependencies, which is what a real board was pushed into.
+ */
+export function costCapLifted(
+  attempt: Pick<Attempt, "usage">,
+  config: Pick<MaestroConfig, "maxCostPerTask">
+): boolean {
+  if (config.maxCostPerTask === 0) return true;
+  return config.maxCostPerTask > attempt.usage.cost;
 }
 
 export function consumesMaxAttempt(attempt: Attempt): boolean {
@@ -254,7 +278,7 @@ export function calculateSchedulingWave(
   const capped = tasks.filter(
     (task) =>
       (task.attempts.filter(consumesMaxAttempt).length >= config.maxAttempts ||
-        endedUnretryably(task)) &&
+        endedUnretryably(task, config)) &&
       task.status !== "approved"
   );
   const runnable = tasks.filter(

@@ -331,7 +331,10 @@ trusted user/default value:
   `/maestro config` changes it.
 - `maxCostPerTask` — abort a launch when it exceeds this USD cost (default $5; 0 disables the cap).
   Applies to executor attempts and to each reviewer launch, so a runaway reviewer cannot outspend
-  the executor it is checking. Safety net against a stuck launch burning tokens unattended.
+  the executor it is checking. Safety net against a stuck launch burning tokens unattended. A
+  capped attempt is not a failed one: its edits are checkpointed on the task branch, and once the
+  cap is raised above what it spent (or set to 0) driving the task again resumes that attempt in
+  the same checkout and session. Driving under the unchanged cap is refused without billing.
 - `statusWaitSeconds` — heartbeat interval for an awaited drive (default 60, maximum 240; 0
   disables it). Each pulse reports live agents, spend so far, and which tasks advanced since the
   previous pulse. Pulses are live tool updates: they keep a long round visibly alive without

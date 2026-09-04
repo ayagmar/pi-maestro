@@ -24,6 +24,7 @@ import {
   detachedAttemptIsLive,
   mapWithConcurrencyLimit,
   projectSessionDir,
+  qualifiedModel,
   type RunOutcome,
   reattachDetachedExecutor,
   redactFailureMessage,
@@ -86,10 +87,35 @@ test("capped run logs stop at the byte limit without stopping outcome tracking",
     content: [{ type: "text", text: "completed after log cap" }],
   });
 
-  assert.equal(Buffer.concat(chunks).length, 12);
-  assert.equal(Buffer.concat(chunks).toString(), "1234567\nabcd");
+  // Whole lines only: the first fits, the second would breach the cap and is
+  // replaced by exactly one marker, and nothing else is written afterwards.
+  const written = Buffer.concat(chunks).toString().split("\n").filter(Boolean);
+  assert.equal(written[0], "1234567");
+  assert.deepEqual(JSON.parse(written[1] ?? "{}"), {
+    type: "maestro_log_capped",
+    maxBytes: 12,
+    writtenBytes: 8,
+  });
+  assert.equal(written.length, 2);
   assert.equal(outcome.finalReport, "completed after log cap");
   assert.equal(outcome.usage.turns, 1);
+});
+
+test("qualifiedModel keeps the configured provider/model form for the reported bare id", () => {
+  assert.equal(
+    qualifiedModel("gpt-5.6-sol", "openai-codex/gpt-5.6-sol"),
+    "openai-codex/gpt-5.6-sol"
+  );
+  // A different bare id (provider-side substitution) inherits the configured provider.
+  assert.equal(
+    qualifiedModel("gpt-5.6-mini", "openai-codex/gpt-5.6-sol"),
+    "openai-codex/gpt-5.6-mini"
+  );
+  // Already-qualified reports and unconfigured tiers pass through.
+  assert.equal(qualifiedModel("anthropic/claude", "openai-codex/gpt-5.6-sol"), "anthropic/claude");
+  assert.equal(qualifiedModel("gpt-5.6-sol", undefined), "gpt-5.6-sol");
+  assert.equal(qualifiedModel("gpt-5.6-sol", "gpt-5.6-sol"), "gpt-5.6-sol");
+  assert.equal(qualifiedModel(undefined, "openai-codex/gpt-5.6-sol"), "openai-codex/gpt-5.6-sol");
 });
 
 test("a zero log cap leaves logging unlimited", () => {
@@ -142,7 +168,11 @@ process.stdin.on("end", () => process.exit(0));
     });
     const outcome = await run.outcome;
 
-    assert.equal(readFileSync(run.attempt.logFile).byteLength, 64);
+    // The first event (~220 bytes) already exceeds a 64-byte cap, so the log
+    // holds exactly one whole marker line and no partial JSON.
+    const logLines = readFileSync(run.attempt.logFile, "utf-8").split("\n").filter(Boolean);
+    assert.equal(logLines.length, 1);
+    assert.equal(JSON.parse(logLines[0] ?? "{}").type, "maestro_log_capped");
     assert.equal(outcome.finalReport, "finished after cap");
     assert.deepEqual(outcome.touchedFiles, ["after-cap.ts"]);
     assert.deepEqual(outcome.usage, { input: 7, output: 3, cost: 0.25, turns: 1 });

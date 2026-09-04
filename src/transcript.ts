@@ -1,7 +1,8 @@
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 
 export interface TranscriptItem {
-  kind: "text" | "tool" | "tool_error" | "status";
+  /** `notice` is an out-of-band Maestro message (e.g. the log cap); it never means the run ended. */
+  kind: "text" | "tool" | "tool_error" | "status" | "notice";
   text: string;
 }
 
@@ -26,6 +27,7 @@ export function toolPreview(
 
 interface LogEvent {
   type: string;
+  maxBytes?: number;
   toolName?: string;
   args?: Record<string, unknown> | null;
   isError?: boolean;
@@ -62,6 +64,16 @@ export function parseLogLine(line: string): TranscriptItem[] {
   }
   if (event.type === "agent_end") {
     return [{ kind: "status", text: "— agent finished —" }];
+  }
+  if (event.type === "maestro_log_capped") {
+    const megabytes =
+      typeof event.maxBytes === "number" ? `${(event.maxBytes / 1_000_000).toFixed(1)} MB` : "its";
+    return [
+      {
+        kind: "notice",
+        text: `⚠ event log reached its ${megabytes} cap (maxLogBytesPerRun); the run continues but no further events are shown here. Open the session for the full transcript.`,
+      },
+    ];
   }
   return [];
 }

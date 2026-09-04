@@ -75,6 +75,26 @@ export function findingFingerprint(message: string): string {
   return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }
 
+/**
+ * One criterion line in a reviewer report, in any of the shapes reviewers
+ * actually write: the requested `CRITERION 1: PASS — evidence`, a Markdown
+ * heading `### Criterion 1 — title: **PASS**` with the evidence on the lines
+ * below, or a bold list item. Leading Markdown, emphasis, and separators are
+ * ignored; the verdict token must be upper-case so prose such as "tests pass"
+ * inside a title is never mistaken for it.
+ */
+const CRITERION_LINE = /^[\s#>*\-+|]*(?:\*\*|__|`)*\s*criterion\s+(\d+)\b(?:\*\*|__|`)*\s*(.*)$/i;
+const VERDICT_TOKEN = /(?:\*\*|__|`)*\b(PASS|FAIL)(?:ED)?\b(?:\*\*|__|`)*/;
+const SEPARATOR = /^[\s:—–\-|]+/;
+const MARKDOWN_HEADING = /^\s*#/;
+
+function stripSeparators(text: string): string {
+  return text
+    .replace(SEPARATOR, "")
+    .replace(/[\s:—–\-|]+$/, "")
+    .trim();
+}
+
 export function reviewEvidence(
   report: string,
   criteriaCount: number
@@ -85,19 +105,73 @@ export function reviewEvidence(
   // list, where `every` is vacuously true and would read a rejection as an
   // inconsistency.
   if (criteriaCount <= 0) return undefined;
-  const matches = [...report.matchAll(/^CRITERION\s+(\d+):\s*(PASS|FAIL)\s*(?:—|-)\s*(.+)$/gim)];
-  if (matches.length !== criteriaCount) return undefined;
-  const evidence = matches.map((match) => ({
-    criterion: Number(match[1]),
-    passed: match[2]?.toUpperCase() === "PASS",
-    evidence: redactFailureMessage(match[3] ?? "").slice(0, 500),
-  }));
-  const numbers = new Set(evidence.map((entry) => entry.criterion));
-  if (numbers.size !== criteriaCount) return undefined;
-  if (evidence.some((entry) => entry.criterion < 1 || entry.criterion > criteriaCount)) {
-    return undefined;
+  const lines = report.split(/\r?\n/);
+  // The last statement about a criterion wins: a closing summary that restates
+  // the per-criterion findings is corroboration, not a duplicate to reject.
+  const byCriterion = new Map<number, { passed: boolean; evidence: string }>();
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const header = line.match(CRITERION_LINE);
+    if (!header) continue;
+    const criterion = Number(header[1]);
+    const remainder = header[2] ?? "";
+    const verdict = remainder.match(VERDICT_TOKEN);
+    if (!verdict || verdict.index === undefined) continue;
+    const passed = verdict[1] === "PASS";
+    const title = stripSeparators(remainder.slice(0, verdict.index));
+    let evidence = stripSeparators(remainder.slice(verdict.index + verdict[0].length));
+    if (!evidence) {
+      // Heading style: the evidence is the block that follows, up to the next
+      // heading, criterion line, or blank line.
+      const block: string[] = [];
+      for (let next = index + 1; next < lines.length; next += 1) {
+        const candidate = lines[next] ?? "";
+        if (!candidate.trim()) {
+          if (block.length > 0) break;
+          continue;
+        }
+        if (MARKDOWN_HEADING.test(candidate) || CRITERION_LINE.test(candidate)) break;
+        if (/^\s*VERDICT:/i.test(candidate)) break;
+        block.push(candidate.replace(/^[\s>*\-+|]+/, "").trim());
+      }
+      evidence = block.join(" ").trim();
+    }
+    if (!evidence) evidence = title;
+    if (!evidence) continue;
+    byCriterion.set(criterion, {
+      passed,
+      evidence: redactFailureMessage(evidence.replace(/[*_`]+/g, "")).slice(0, 500),
+    });
   }
-  return evidence.sort((left, right) => left.criterion - right.criterion);
+  if (byCriterion.size !== criteriaCount) return undefined;
+  for (let criterion = 1; criterion <= criteriaCount; criterion += 1) {
+    if (!byCriterion.has(criterion)) return undefined;
+  }
+  return [...byCriterion.entries()]
+    .map(([criterion, entry]) => ({ criterion, ...entry }))
+    .sort((left, right) => left.criterion - right.criterion);
+}
+
+/**
+ * Why a verdict cannot be trusted against its own criterion lines, or
+ * undefined when they agree.
+ *
+ * Only one direction is a contradiction: approving while a criterion is
+ * marked FAIL. Requesting changes with every criterion PASS is a legitimate
+ * rejection on grounds outside the enumerated criteria (a scope violation, a
+ * defect the criteria did not anticipate). Treating that as malformed evidence
+ * failed two `confirm` reviewers who had each found a real build-time
+ * misconfiguration, billed both, and pushed the operator into downgrading the
+ * policy to `single` to get any verdict at all.
+ */
+export function verdictEvidenceConflict(
+  approved: boolean,
+  evidence: CriterionEvidence
+): string | undefined {
+  if (!approved) return undefined;
+  const failed = evidence.filter((entry) => !entry.passed).map((entry) => entry.criterion);
+  if (failed.length === 0) return undefined;
+  return `reviewer approved while marking criterion ${failed.join(", ")} FAIL`;
 }
 
 export function policyReviewPrompt(
@@ -121,7 +195,7 @@ export function policyReviewPrompt(
   // With no stated criteria there is nothing to enumerate; asking for the
   // lines anyway invites invented criteria that no parser can corroborate.
   if (!criteria) return `${base}\n\n${roleText}`;
-  return `${base}\n\n${roleText}\nReport every criterion exactly once using these lines:\n${criteria}\nThe VERDICT must agree with the criterion lines.`;
+  return `${base}\n\n${roleText}\nReport every criterion exactly once using these lines, each on its own line:\n${criteria}\nAPPROVE only when every criterion is PASS. REQUEST_CHANGES is required when any criterion is FAIL, and is also allowed when all criteria pass but you found a blocking defect outside them; list that defect after the verdict.`;
 }
 
 export function convergenceRecord(

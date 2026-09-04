@@ -29,6 +29,7 @@ import {
   changedPathsSinceBaseline,
   cleanupManagedWorktrees,
   commitAll,
+  committedPathsSinceFork,
   createWorktree,
   inspectManagedWorktrees,
   mergeWorktree,
@@ -42,6 +43,8 @@ import {
   snapshotArtifact,
   sweepWorktrees,
   uncommittedPathsInvisibleToWorktrees,
+  worktreeChangedPaths,
+  worktreeForkPoint,
   worktreeRecoveryExists,
   worktreeRef,
 } from "../src/worktree.js";
@@ -310,6 +313,50 @@ test("trusted verifier mutation invalidates the candidate before review", async 
     assert.match(result.note ?? "", /changed during trusted verification/);
     assert.equal(existsSync(ref.worktreePath), false);
     assert.notEqual(git(cwd, "branch", "--list", ref.branch), "");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executor commits inside an isolated checkout are attributed, snapshotted, and diffed", () => {
+  const cwd = repository();
+  try {
+    const ref = createWorktree(cwd, "T2", 1);
+    // The executor commits its own work (a CI bootstrap that must run remotely
+    // before verification) and deletes a file in the same commit, leaving the
+    // checkout Git-clean.
+    writeFileSync(join(ref.worktreePath, "ci.yml"), "jobs: {}\n");
+    rmSync(join(ref.worktreePath, "unstaged.txt"));
+    git(ref.worktreePath, "add", "-A");
+    git(ref.worktreePath, "commit", "-qm", "ci: bootstrap");
+    // Main moves on independently; the fork point must stay the original base.
+    writeFileSync(join(cwd, "shared.txt"), "main moved\n");
+    git(cwd, "commit", "-qam", "main advances");
+    writeFileSync(join(ref.worktreePath, "staged.txt"), "uncommitted\n");
+
+    assert.deepEqual(changedPaths(ref.worktreePath), ["staged.txt"]);
+    assert.deepEqual(committedPathsSinceFork(ref.worktreePath, cwd), ["ci.yml", "unstaged.txt"]);
+    assert.deepEqual(worktreeChangedPaths(ref.worktreePath, cwd), [
+      "ci.yml",
+      "staged.txt",
+      "unstaged.txt",
+    ]);
+
+    // A committed deletion is neither on disk nor in HEAD; the snapshot must
+    // still resolve instead of aborting on an unmatched pathspec.
+    const committedOnly = snapshotArtifact(ref.worktreePath, ["ci.yml", "unstaged.txt"]);
+    assert.equal(committedOnly, git(ref.worktreePath, "rev-parse", "HEAD^{tree}"));
+    const withDirty = snapshotArtifact(ref.worktreePath, ["ci.yml", "unstaged.txt", "staged.txt"]);
+    assert.ok(withDirty);
+    assert.notEqual(withDirty, committedOnly);
+
+    const fork = worktreeForkPoint(ref.worktreePath, cwd);
+    assert.equal(fork, git(cwd, "rev-parse", "HEAD~1"));
+    const diff = captureDiff(ref.worktreePath, undefined, fork);
+    assert.match(diff, /ci\.yml/);
+    assert.match(diff, /staged\.txt/);
+    assert.doesNotMatch(diff, /main moved/);
+    assert.doesNotMatch(captureDiff(ref.worktreePath), /ci\.yml/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

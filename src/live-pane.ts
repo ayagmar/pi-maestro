@@ -61,6 +61,12 @@ export function styledTranscriptLines(
       lines.push(theme.fg("dim", truncateToWidth(item.text, safeWidth)));
       continue;
     }
+    if (item.kind === "notice") {
+      for (const line of wrapText(item.text, safeWidth)) {
+        lines.push(theme.fg("warning", line));
+      }
+      continue;
+    }
     for (const raw of item.text.split("\n")) {
       for (const line of wrapText(raw, safeWidth)) {
         lines.push(theme.fg("toolOutput", line));
@@ -77,6 +83,8 @@ export interface LivePaneLaunch {
   taskId: string;
   title: string;
   kind: "execute" | "review";
+  /** Attempt this launch belongs to; shown in the strip so retries of one task are distinguishable. */
+  attemptIndex?: number;
   logFile: string;
   sessionFile?: string;
   model?: string;
@@ -177,6 +185,26 @@ const LIVE_PANE_STATUS: Record<
   tool: { glyph: "◑", color: "accent" },
   done: { glyph: "✓", color: "success" },
 };
+
+/**
+ * Strip entry for one launch: task, kind, attempt number, and how it ended.
+ * Three retries of one task used to read as three identical "T14 run" tabs,
+ * with no way to tell the live one from the two the reviewer had already
+ * rejected.
+ */
+export function launchStripLabel(launch: LivePaneLaunch): string {
+  const kind = launch.kind === "execute" ? "run" : "review";
+  const attempt = launch.attemptIndex !== undefined ? ` #${launch.attemptIndex}` : "";
+  const state =
+    launch.live !== false
+      ? " ●"
+      : launch.verdict === "approve"
+        ? " ✓"
+        : launch.verdict === "request_changes"
+          ? " ✗"
+          : "";
+  return `${launch.taskId} ${kind}${attempt}${state}`;
+}
 
 /** Bounded Pi-style browser for live and recorded executor/reviewer sessions. */
 export class LivePaneComponent {
@@ -769,7 +797,9 @@ export class LivePaneComponent {
 
   private launchStatus(launch: LivePaneLaunch, items: readonly TranscriptItem[]): LivePaneStatus {
     if (launch.live === false) return "done";
-    const latest = items.at(-1);
+    // A capped log stops producing items while the run goes on; judge the
+    // status from the last real event, not the cap notice.
+    const latest = [...items].reverse().find((item) => item.kind !== "notice");
     if (!latest) return "thinking";
     if (latest.kind === "status") return "done";
     if (latest.kind === "tool" || latest.kind === "tool_error") return "tool";
@@ -781,7 +811,7 @@ export class LivePaneComponent {
       0,
       launches.findIndex((launch) => launch.key === this.selectedKey)
     );
-    const capacity = Math.max(1, Math.floor(width / 18));
+    const capacity = Math.max(1, Math.floor(width / 22));
     const start = Math.min(
       Math.max(0, selectedIndex - Math.floor(capacity / 2)),
       Math.max(0, launches.length - capacity)
@@ -789,7 +819,7 @@ export class LivePaneComponent {
     const visible = launches.slice(start, start + capacity).map((launch) => {
       const selected = launch.key === this.selectedKey;
       const marker = selected ? "▶" : "·";
-      const label = `${marker} ${launch.taskId} ${launch.kind === "execute" ? "run" : "review"}`;
+      const label = `${marker} ${launchStripLabel(launch)}`;
       return selected ? this.theme.fg("accent", label) : this.theme.fg("dim", label);
     });
     const earlier = start > 0 ? `←${start} ` : "";

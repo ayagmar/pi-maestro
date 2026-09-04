@@ -262,6 +262,62 @@ export function changedPaths(cwd: string): string[] {
   return changedPathsFromPorcelain(output);
 }
 
+/**
+ * The commit an isolated task checkout forked from: the main checkout's HEAD
+ * at `worktree add`, or a later merge-base when the executor merged main.
+ * Undefined when the two histories are unrelated or Git cannot answer.
+ */
+export function worktreeForkPoint(worktreePath: string, mainCwd: string): string | undefined {
+  try {
+    return git(worktreePath, ["merge-base", "HEAD", headCommit(mainCwd)]) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Paths the executor committed on its task branch since it forked from the main checkout. */
+export function committedPathsSinceFork(worktreePath: string, mainCwd: string): string[] {
+  const fork = worktreeForkPoint(worktreePath, mainCwd);
+  if (!fork) return [];
+  try {
+    const output = gitOutput(worktreePath, [
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "-z",
+      fork,
+      "HEAD",
+    ]);
+    return [
+      ...new Set(
+        output
+          .split("\0")
+          .filter(Boolean)
+          .map((path) => path.replaceAll("\\", "/"))
+      ),
+    ].sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every change an executor made in its isolated checkout: dirty files plus
+ * commits it created itself.
+ *
+ * `git status` alone attributed nothing to a task whose brief legitimately
+ * required committing and pushing (a CI bootstrap that had to run on the
+ * remote before it could be verified). The clean worktree read as "expected
+ * file work produced no attributable Git changes", the artifact gate failed
+ * twice, and the operator had to demote the task to a read-only investigation
+ * to get its already-landed work approved.
+ */
+export function worktreeChangedPaths(worktreePath: string, mainCwd: string): string[] {
+  return [
+    ...new Set([...changedPaths(worktreePath), ...committedPathsSinceFork(worktreePath, mainCwd)]),
+  ].sort();
+}
+
 export interface ChangeBaseline {
   /** Immutable tree of HEAD plus every path dirty when the baseline was captured. */
   tree: string;
@@ -378,12 +434,36 @@ export function mainTreeIdentityMatches(cwd: string, expected: MainTreeIdentity)
 export function snapshotArtifact(cwd: string, paths: string[]): string | undefined {
   if (paths.length === 0) return undefined;
 
+  // A path the executor deleted and already committed is neither on disk nor
+  // in HEAD, and `git add -A -- <path>` aborts on a pathspec that matches
+  // nothing. Only paths Git can still resolve are staged; work that is fully
+  // committed is already the HEAD tree.
+  let addable: string[];
+  try {
+    const tracked = new Set(
+      gitOutput(cwd, ["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", ...paths])
+        .split("\0")
+        .filter(Boolean)
+        .map((path) => path.replaceAll("\\", "/"))
+    );
+    addable = paths.filter((path) => tracked.has(path) || existsSync(join(cwd, path)));
+  } catch {
+    return undefined;
+  }
+  if (addable.length === 0) {
+    try {
+      return commitTree(cwd, "HEAD");
+    } catch {
+      return undefined;
+    }
+  }
+
   const directory = mkdtempSync(join(tmpdir(), "maestro-index-"));
   const indexFile = join(directory, "index");
   const env = { ...process.env, GIT_INDEX_FILE: indexFile };
   try {
     git(cwd, ["read-tree", "HEAD"], env);
-    git(cwd, ["add", "-A", "--", ...paths], env);
+    git(cwd, ["add", "-A", "--", ...addable], env);
     return git(cwd, ["write-tree"], env);
   } catch {
     return undefined;
@@ -411,15 +491,19 @@ export function artifactMatchesCommit(
   }
 }
 
-/** Capture a bounded diff. An empty paths list deliberately captures nothing. */
-export function captureDiff(cwd: string, paths?: string[]): string {
+/**
+ * Capture a bounded diff. An empty paths list deliberately captures nothing.
+ * `since` widens a whole-checkout diff to start at that commit, so commits the
+ * executor made itself appear alongside its uncommitted edits.
+ */
+export function captureDiff(cwd: string, paths?: string[], since?: string): string {
   if (paths?.length === 0) return "";
 
   const diff = paths
     ? [git(cwd, ["diff", "--", ...paths]), git(cwd, ["diff", "--cached", "--", ...paths])]
         .filter(Boolean)
         .join("\n")
-    : git(cwd, ["diff", "HEAD"]);
+    : git(cwd, ["diff", since ?? "HEAD"]);
   return diff.slice(0, MAX_INJECTED_CONTEXT_LENGTH);
 }
 

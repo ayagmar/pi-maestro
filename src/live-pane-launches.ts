@@ -34,6 +34,7 @@ export function collectLivePaneLaunches(
         taskId: task.id,
         title: `${task.title} · ${launch.label}${archived ? " · archived" : ""}`,
         kind: launch.kind,
+        attemptIndex: launch.attempt.index,
         logFile,
         ...(live?.handle.attempt.sessionFile || review?.sessionFile || launch.attempt.sessionFile
           ? {
@@ -77,6 +78,7 @@ export function collectLivePaneLaunches(
       taskId: run.taskId,
       title: task?.title ?? run.taskId,
       kind: run.kind,
+      attemptIndex: attempt.index,
       logFile: attempt.logFile,
       ...(attempt.sessionFile ? { sessionFile: attempt.sessionFile } : {}),
       ...(attempt.model ? { model: attempt.model } : {}),

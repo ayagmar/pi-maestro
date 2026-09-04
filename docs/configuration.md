@@ -17,6 +17,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `useWorktrees` | false | Isolate task checkouts |
 | `detachedExecutors` | false | Unix-only detached executor transport; Git tasks auto-isolate |
 | `autoCommit` | true | Commit only attributed task paths |
+| `pushOnIntegration` | false | Best-effort `git push origin <branch>` after each approved integration. Never blocks or reverts an approval; a rejected push (for example a ruleset that requires pull requests on the default branch) is reported as a warning, so keep this off when the default branch is protected or when approved work is not yet authorized for publication. |
 | `maxAttempts` | 3 | 1–100 consumed attempts |
 | `maxPlanTasks` | 64 | 1–512 tasks at plan mutation boundaries |
 | `maxDiscoveryGeneratedTasks` | 32 | 1–128 and no greater than `maxPlanTasks` |
@@ -26,7 +27,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `reviewPolicy` | `single` | `single`, `confirm`, or `find-and-refute`; inherited by new tasks that do not state one |
 | `reviewRequiredApprovals` | 2 | Integer 2–8; cannot exceed `maxReviewerLaunches` |
 | `maxReviewerLaunches` | 4 | Integer 1–16; includes provider fallback launches |
-| `maxCostPerTask` | 5 | USD per executor attempt; 0 disables |
+| `maxCostPerTask` | 5 | USD per executor attempt; 0 disables. A capped attempt keeps its edits and resumes when the cap is raised above what it spent |
 | `maxCostPerReview` | 0 | USD per reviewer launch; 0 inherits `maxCostPerTask` |
 | `maxRunCost` | 25 | USD across the board's lifetime spend, sunk cost of cancelled and superseded tasks included; 0 disables. Excluding sunk spend would let a cancel-and-replan loop spend without bound. Each launch is additionally capped at the remaining run budget, and `/maestro config budget <usd>` raises the cap deliberately when a board needs more. |
 | `reviewRejectionLimit` | 2 | Integer 1–10; consecutive genuine reviewer rejections before a task escalates instead of retrying. One rejection spanning 4+ distinct criteria escalates immediately as an omnibus-task signal. |
@@ -34,7 +35,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `statusWaitSeconds` | 60 | 0–240; awaited-drive heartbeat interval, 0 disables pulsing |
 | `decisionNudgeMinutes` | 5 | 0–240; minutes a delivered decision may sit unresolved with no board activity before the owner session is re-nudged (up to 3 reminders). A provider failure can kill the turn a decision triggered; without the nudge the board sits blocked while the orchestrator looks idle. 0 disables. |
 | `logEvents` | `compact` | `compact` or `full` |
-| `maxLogBytesPerRun` | 1000000 | 0 means unlimited |
+| `maxLogBytesPerRun` | 1000000 | Per-launch event log cap; 0 means unlimited. Whole lines only: when the cap is hit one `maestro_log_capped` marker is written and the live pane shows a notice. Raise it for verbose builds (Maven, Gradle) if you want the pane to follow the whole run. |
 | `watchdogIdleSeconds` | 120 | 0–86400 |
 | `watchdogWarningTurns` | 12 | 0–10000 |
 | `watchdogTerminationTurns` | 4 | 0–10000 |

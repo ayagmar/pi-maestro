@@ -64,9 +64,22 @@ const touchedFile = (event) => {
 
 let eventBytes = fileSize(config.eventFile);
 let stderrBytes = fileSize(config.stderrFile);
+let eventLogCapped = false;
+// Whole lines only, plus one marker when the cap is reached: a silently frozen
+// log is indistinguishable from a hung run to anyone tailing it.
 const appendBoundedLine = (line) => {
+  if (eventLogCapped) return;
   const entry = Buffer.from(`${line}\n`);
-  if (config.maxLogBytes > 0 && eventBytes + entry.length > config.maxLogBytes) return;
+  if (config.maxLogBytes > 0 && eventBytes + entry.length > config.maxLogBytes) {
+    eventLogCapped = true;
+    appendPrivate(
+      config.eventFile,
+      Buffer.from(
+        `${JSON.stringify({ type: "maestro_log_capped", maxBytes: config.maxLogBytes, writtenBytes: eventBytes })}\n`
+      )
+    );
+    return;
+  }
   appendPrivate(config.eventFile, entry);
   eventBytes += entry.length;
 };

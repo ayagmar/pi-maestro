@@ -19,11 +19,17 @@ import {
 import { loadConfig } from "./config.js";
 import { MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import { DISCOVERY_TOOLS, discoveryInstructions } from "./discovery.js";
-import { accountPromptContext, buildExecutorPrompt, buildRetryFollowUpPrompt } from "./prompts.js";
+import {
+  accountPromptContext,
+  buildCostCapResumePrompt,
+  buildExecutorPrompt,
+  buildRetryFollowUpPrompt,
+} from "./prompts.js";
 import {
   classifyFailure,
   type ExecutorHandle,
   providerFromModel,
+  qualifiedModel,
   type RunOutcome,
   redactFailureMessage,
 } from "./runner.js";
@@ -38,6 +44,7 @@ import {
 import { claimDispatchLifecycle } from "./workflow-dispatch.js";
 import {
   consumesMaxAttempt,
+  costCapLifted,
   endedUnretryably,
   lastReport,
   snapshot,
@@ -48,10 +55,11 @@ import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workfl
 import {
   captureChangeBaseline,
   captureDiff,
-  changedPaths,
   changedPathsSinceBaseline,
   type WorktreeRef,
+  worktreeChangedPaths,
   worktreeExists,
+  worktreeForkPoint,
 } from "./worktree.js";
 
 export async function executeTask(options: {
@@ -99,19 +107,25 @@ export async function executeTask(options: {
 
   // A cost cap is not a defect in the work: the attempt was cut off mid-flight
   // with its edits intact. Sending the user to write a successor brief hides
-  // that the fix is usually one number.
-  const terminal = endedUnretryably(task) ? task.attempts.at(-1)?.failureReason : undefined;
+  // that the fix is usually one number — and once that number is raised, the
+  // continuation below resumes the checkpointed attempt instead of restarting.
+  const terminal = endedUnretryably(task, config) ? task.attempts.at(-1)?.failureReason : undefined;
   if (terminal?.kind === "cost_cap") {
     const updated = updateTask(cwd, task.id, (fresh) => {
       forceStatus(fresh, "failed");
     });
     const spent = task.attempts.at(-1)?.usage.cost ?? 0;
-    const guidance = `stopped by the per-attempt cost cap at $${spent.toFixed(2)} (maxCostPerTask $${config.maxCostPerTask}); its edits are kept. Raise maxCostPerTask for a task this size, or split it into smaller tasks. Retrying unchanged stops at the same point.`;
+    const guidance = `stopped by the per-attempt cost cap at $${spent.toFixed(2)} (maxCostPerTask $${config.maxCostPerTask}); its edits are checkpointed on ${task.attempts.at(-1)?.branch ?? "its task branch"}. Raise maxCostPerTask above $${spent.toFixed(2)} (or set it to 0) and drive the task again: the same attempt resumes in the same checkout and session. Retrying unchanged stops at the same point.`;
     const result = snapshot(updated ?? task, guidance);
     delete result.retryAction;
     result.note = guidance;
     return result;
   }
+  const previousAttempt = task.attempts.at(-1);
+  const continuesCostCappedAttempt =
+    task.status === "failed" &&
+    previousAttempt?.failureReason?.kind === "cost_cap" &&
+    costCapLifted(previousAttempt, config);
 
   const consumedAttempts = task.attempts.filter(consumesMaxAttempt).length;
   if (consumedAttempts >= config.maxAttempts) {
@@ -200,19 +214,20 @@ export async function executeTask(options: {
     // start fresh — a resumed launch that hits a provider failure therefore
     // falls back to a clean launch instead of a half-poisoned transcript — and
     // human retries keep their deliberately isolated rerun semantics.
-    const previousAttempt = task.attempts.at(-1);
     const resumeSessionFile =
       config.retryContext !== "fresh" &&
       modelIndex === 0 &&
       !humanRetry &&
       !task.discovery &&
-      task.status === "changes_requested" &&
+      (task.status === "changes_requested" || continuesCostCappedAttempt) &&
       previousAttempt?.sessionFile !== undefined &&
       existsSync(previousAttempt.sessionFile)
         ? previousAttempt.sessionFile
         : undefined;
     const basePrompt = resumeSessionFile
-      ? buildRetryFollowUpPrompt(task)
+      ? continuesCostCappedAttempt
+        ? buildCostCapResumePrompt(task, previousAttempt?.usage.cost ?? 0)
+        : buildRetryFollowUpPrompt(task)
       : buildExecutorPrompt(task, dependencyReports);
     const prompt = task.discovery
       ? `${basePrompt}\n\n${discoveryInstructions(task.discovery.allowedWritePaths)}`
@@ -344,7 +359,8 @@ export async function executeTask(options: {
       untrack();
     }
     if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
-    if (outcome.model !== undefined) run.attempt.model = outcome.model;
+    const settledModel = qualifiedModel(outcome.model, run.attempt.model ?? model);
+    if (settledModel !== undefined) run.attempt.model = settledModel;
     const provider = providerFromModel(run.attempt.model);
     if (provider !== undefined) run.attempt.provider = provider;
     if (outcome.errorMessage) run.attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
@@ -359,7 +375,12 @@ export async function executeTask(options: {
       : undefined;
     run.attempt.touchedFiles =
       worktree && worktreeExists(worktree)
-        ? [...new Set([...priorWorktreeFiles, ...changedPaths(worktree.worktreePath)])].sort()
+        ? [
+            ...new Set([
+              ...priorWorktreeFiles,
+              ...worktreeChangedPaths(worktree.worktreePath, cwd),
+            ]),
+          ].sort()
         : [...new Set([...outcome.touchedFiles, ...(baselineChanges ?? [])])].sort();
 
     const status: TaskStatus = outcome.aborted
@@ -403,7 +424,8 @@ export async function executeTask(options: {
     if (status === "ready_for_review") {
       try {
         const paths = worktree ? undefined : run.attempt.touchedFiles;
-        const diff = captureDiff(worktree?.worktreePath ?? cwd, paths);
+        const since = worktree ? worktreeForkPoint(worktree.worktreePath, cwd) : undefined;
+        const diff = captureDiff(worktree?.worktreePath ?? cwd, paths, since);
         if (diff) run.attempt.diff = diff;
       } catch {
         // Diff context is best-effort and must never change the executor outcome.
@@ -435,7 +457,10 @@ export function settleReattachedDetachedAttempt(
   attempt.finalReport = outcome.finalReport;
   attempt.exitCode = outcome.exitCode;
   attempt.endedAt ??= Date.now();
-  if (outcome.model) attempt.model = outcome.model;
+  const settledModel = qualifiedModel(outcome.model, attempt.model);
+  if (settledModel !== undefined) attempt.model = settledModel;
+  const provider = providerFromModel(attempt.model);
+  if (provider !== undefined) attempt.provider = provider;
   if (outcome.errorMessage) attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
   const failureReason = classifyFailure(outcome);
   if (failureReason) attempt.failureReason = failureReason;
@@ -446,7 +471,7 @@ export function settleReattachedDetachedAttempt(
       branch: attempt.branch ?? "",
     })
   ) {
-    attempt.touchedFiles = changedPaths(attempt.worktreePath);
+    attempt.touchedFiles = worktreeChangedPaths(attempt.worktreePath, cwd);
   } else {
     attempt.touchedFiles = [...outcome.touchedFiles];
   }
@@ -459,7 +484,8 @@ export function settleReattachedDetachedAttempt(
     try {
       const diff = captureDiff(
         attempt.worktreePath ?? cwd,
-        attempt.worktreePath ? undefined : attempt.touchedFiles
+        attempt.worktreePath ? undefined : attempt.touchedFiles,
+        attempt.worktreePath ? worktreeForkPoint(attempt.worktreePath, cwd) : undefined
       );
       if (diff) attempt.diff = diff;
     } catch {

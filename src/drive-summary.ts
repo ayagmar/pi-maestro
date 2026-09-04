@@ -46,6 +46,9 @@ export function formatDrivePulse(summary: DriveSummary): string {
     return `${base}\n\nResolve the disagreement deliberately: use maestro_update to change the task reviewPolicy, or split/cancel the task after inspecting both retained reviewer reports. Then start maestro_drive for the corrected scope.`;
   }
   if (code === "reviewer_failure") {
+    if (summary.stoppedBecause.message.startsWith("artifact gate failed")) {
+      return `${base}\n\nNo reviewer ran: Maestro's pre-review artifact gate rejected the attempt for the reason above. Fix that cause, then start maestro_drive for the task. "No attributable Git changes" means the executor's checkout showed no work — check whether the brief's edits landed somewhere else or the task should be a read-only investigation; "inputs changed" means the contract or configuration was edited mid-flight and the task simply needs to run again under the current one. Do not change the review policy or read reviewer evidence: there is none.`;
+    }
     return `${base}\n\nUse maestro_drive inspect for the reviewer verdict, convergence, and failure evidence, correct the operational cause, then start maestro_drive for the affected task. Never open a raw session or log file to investigate: those transcripts are megabytes of replayed tool output, and reading one into this conversation destroys the context and prompt cache. Operational failures do not count as reviewer rejection or disagreement.`;
   }
   if (code === "attempt_cap") {

@@ -238,6 +238,30 @@ export function providerFromModel(model?: string): string | undefined {
   return model.split("/", 1)[0];
 }
 
+/**
+ * The model identity to record for a launch, given what the child reported and
+ * what the tier configured.
+ *
+ * Pi reports the bare model id (`gpt-5.6-sol`) while tiers are configured as
+ * `provider/model`. Recording whichever arrived last left the same task showing
+ * `[openai-codex/gpt-5.6-sol]` while its attempt was live and `[gpt-5.6-sol]`
+ * once it settled, and made per-model insight rows split in two. The configured
+ * form wins when it names the reported model; an unexpected bare id inherits
+ * the configured provider so it stays comparable.
+ */
+export function qualifiedModel(
+  reported: string | undefined,
+  configured: string | undefined
+): string | undefined {
+  if (!reported) return configured;
+  if (reported.includes("/") || !configured) return reported;
+  const provider = providerFromModel(configured);
+  if (!provider) return reported;
+  return configured.slice(provider.length + 1) === reported
+    ? configured
+    : `${provider}/${reported}`;
+}
+
 export function redactFailureMessage(message: string): string {
   return message
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
@@ -270,7 +294,7 @@ export function classifyFailure(
       kind: "cost_cap",
       message: budgetBound
         ? `${message}. The remaining run budget, not maxCostPerTask, cut this attempt off; raise it with /maestro config budget <usd> before retrying.`
-        : `${message}. Raise maxCostPerTask or split the task into smaller ones; retrying unchanged will stop at the same point.`,
+        : `${message}. Raise maxCostPerTask or split the task into smaller ones; retrying unchanged will stop at the same point. With a raised cap, driving the task again resumes this attempt's checkpointed edits and session instead of starting over.`,
       retryable: false,
     };
   }
@@ -308,21 +332,38 @@ export interface RunUpdate {
   sessionFile?: string;
 }
 
+/** Event type of the single marker line written when a run log reaches its byte cap. */
+export const LOG_CAPPED_EVENT = "maestro_log_capped";
+
+export function logCappedMarker(maxBytes: number, writtenBytes: number): string {
+  return JSON.stringify({ type: LOG_CAPPED_EVENT, maxBytes, writtenBytes });
+}
+
+/**
+ * Bounded JSONL writer. Lines are kept whole: a cap that sliced the last line
+ * mid-JSON left an unparseable tail, and every later line vanished silently, so
+ * a live pane tailing the log simply froze while the run went on for another
+ * half hour. The cap now drops whole lines and leaves exactly one marker event
+ * so tails can say why the transcript stopped.
+ */
 export function cappedLogWriter(
   output: Pick<Writable, "write">,
   maxBytes?: number
 ): (line: string) => void {
   let writtenBytes = 0;
+  let capped = false;
 
   return (line: string) => {
+    if (capped) return;
     const entry = Buffer.from(`${line}\n`);
     const unlimited = maxBytes === undefined || maxBytes === 0;
-    const remainingBytes = unlimited ? entry.length : maxBytes - writtenBytes;
-    if (remainingBytes <= 0) return;
-
-    const bytes = entry.subarray(0, remainingBytes);
-    output.write(bytes);
-    writtenBytes += bytes.length;
+    if (unlimited || writtenBytes + entry.length <= maxBytes) {
+      output.write(entry);
+      writtenBytes += entry.length;
+      return;
+    }
+    capped = true;
+    output.write(Buffer.from(`${logCappedMarker(maxBytes, writtenBytes)}\n`));
   };
 }
 

@@ -142,7 +142,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           supersedesTaskId: Type.Optional(
             Type.String({
               description:
-                "Failed, cancelled, or changes-requested predecessor this task replaces. Maestro atomically cancels it and rewires all downstream dependencies to this new task.",
+                "Failed, cancelled, or changes-requested predecessor this task replaces. Maestro atomically cancels it, rewires all downstream dependencies to this new task, and adds the predecessor's own dependsOn to this task so it keeps the predecessor's place in the graph.",
             })
           ),
           dependsOn: Type.Optional(
@@ -286,7 +286,9 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       const replacement = supersessions.length
         ? `\nSuperseded atomically: ${supersessions
             .map(({ predecessorId, successorId }) => `${predecessorId} → ${successorId}`)
-            .join(", ")}. Downstream dependencies were rewired.`
+            .join(
+              ", "
+            )}. Downstream dependencies were rewired and the predecessor's prerequisites were inherited.`
         : "";
       const legacyKindNotice = result.legacyInvestigationTaskIds.length
         ? `\nDeprecated: ${result.legacyInvestigationTaskIds.join(", ")} rel${result.legacyInvestigationTaskIds.length === 1 ? "ies" : "y"} on investigation-phrased brief text to justify writePaths: []. Set kind: "investigation" explicitly; brief-phrasing detection will be removed.`
@@ -656,7 +658,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       supersedesTaskId: Type.Optional(
         Type.String({
           description:
-            "Stopped predecessor this existing task replaces. Atomically cancel it and rewire all downstream dependencies to taskId.",
+            "Stopped predecessor this existing task replaces. Atomically cancel it, rewire all downstream dependencies to taskId, and inherit the predecessor's dependsOn.",
         })
       ),
       invalidateInFlight: Type.Optional(
@@ -872,6 +874,16 @@ function applyTaskSupersession(
 
   predecessor.supersededBy = successor.id;
   successor.supersedes = predecessor.id;
+  // A successor replaces the predecessor's place in the graph, so it inherits
+  // the prerequisites the predecessor waited on. Without this, a handoff task
+  // written as `dependsOn: []` (the natural shape for "finish T3") silently
+  // became runnable before the work T3 itself had to wait for.
+  const inherited = predecessor.dependsOn.filter(
+    (dependencyId) =>
+      dependencyId.toUpperCase() !== predecessor.id.toUpperCase() &&
+      dependencyId.toUpperCase() !== successor.id.toUpperCase()
+  );
+  successor.dependsOn = [...new Set([...successor.dependsOn, ...inherited])];
   forceStatus(predecessor, "cancelled");
   for (const dependent of board.tasks) {
     if (dependent === successor) continue;
