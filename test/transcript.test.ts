@@ -36,6 +36,12 @@ test("parseLogLine maps events to transcript items", () => {
     ),
     [{ kind: "text", text: "Done." }]
   );
+  const capped = parseLogLine(
+    JSON.stringify({ type: "maestro_log_capped", maxBytes: 1_000_000, writtenBytes: 999_950 })
+  );
+  assert.equal(capped[0]?.kind, "notice");
+  assert.match(capped[0]?.text ?? "", /1\.0 MB cap/);
+  assert.match(capped[0]?.text ?? "", /run continues/);
   assert.deepEqual(parseLogLine(JSON.stringify({ type: "agent_end" })), [
     { kind: "status", text: "— agent finished —" },
   ]);

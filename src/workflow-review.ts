@@ -16,6 +16,7 @@ import {
   classifyFailure,
   type ExecutorHandle,
   providerFromModel,
+  qualifiedModel,
   type RunOutcome,
   redactFailureMessage,
   runVerification,
@@ -40,6 +41,7 @@ import {
   selfReportedBlocker,
   sessionLabel,
   staleExecutionInputsMessage,
+  verdictEvidenceConflict,
 } from "./workflow-review-policy.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
 import {
@@ -488,7 +490,7 @@ export async function reviewTask(options: {
           usage: { ...outcome.usage },
           exitCode: outcome.exitCode,
         };
-        const reviewModel = outcome.model ?? run.attempt.model;
+        const reviewModel = qualifiedModel(outcome.model, run.attempt.model ?? model);
         if (reviewModel !== undefined) {
           launch.model = reviewModel;
           const provider = providerFromModel(reviewModel);
@@ -510,8 +512,13 @@ export async function reviewTask(options: {
         // and demanding evidence there rejected every verdict as malformed.
         if (parsed && reviewPolicy !== "single" && criteriaCount > 0) {
           const evidence = reviewEvidence(outcome.finalReport, criteriaCount);
-          if (!evidence || parsed.approved !== evidence.every((entry) => entry.passed)) {
-            launch.errorMessage = "reviewer returned malformed or inconsistent criterion evidence";
+          const conflict = evidence
+            ? verdictEvidenceConflict(parsed.approved, evidence)
+            : undefined;
+          if (!evidence) {
+            launch.errorMessage = `reviewer returned malformed criterion evidence: expected one line per criterion (1-${criteriaCount}) each stating PASS or FAIL`;
+          } else if (conflict) {
+            launch.errorMessage = `reviewer returned inconsistent criterion evidence: ${conflict}`;
           } else {
             launch.criterionEvidence = evidence;
             launch.verdict = parsed.approved ? "approve" : "request_changes";

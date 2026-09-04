@@ -71,6 +71,7 @@ export {
   LivePaneComponent,
   type LivePaneLaunch,
   type LivePaneOptions,
+  launchStripLabel,
   styledTranscriptLines,
 } from "./live-pane.js";
 

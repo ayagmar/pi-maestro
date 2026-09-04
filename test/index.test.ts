@@ -2362,10 +2362,18 @@ test("maestro_plan atomically supersedes a stopped task and rewires its dependen
   await withBoard(
     (cwd) => {
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const prerequisite = createTask(board, {
+        title: "Prerequisite",
+        brief: "must land first",
+        tier: "standard",
+        writePaths: ["src/base.ts"],
+        successCriteria: ["base works"],
+      });
       const predecessor = createTask(board, {
         title: "Original",
         brief: "change shared file",
         tier: "standard",
+        dependsOn: [prerequisite.id],
         writePaths: ["src/shared.ts"],
         successCriteria: ["original works"],
       });
@@ -2393,7 +2401,7 @@ test("maestro_plan atomically supersedes a stopped task and rewires its dependen
               title: "Replacement",
               brief: "replace the rejected implementation",
               tier: "standard",
-              supersedesTaskId: "T1",
+              supersedesTaskId: "T2",
               writePaths: ["src/shared.ts"],
               successCriteria: ["replacement works"],
             },
@@ -2404,16 +2412,18 @@ test("maestro_plan atomically supersedes a stopped task and rewires its dependen
         ctx
       );
 
-      assert.match(result?.content[0]?.text ?? "", /Superseded atomically: T1 → T3/);
+      assert.match(result?.content[0]?.text ?? "", /Superseded atomically: T2 → T4/);
       const board = loadBoard(cwd);
-      assert.equal(findTask(board, "T1")?.status, "cancelled");
-      assert.equal(findTask(board, "T1")?.supersededBy, "T3");
-      assert.deepEqual(findTask(board, "T2")?.dependsOn, ["T3"]);
-      assert.equal(findTask(board, "T3")?.status, "todo");
-      assert.equal(findTask(board, "T3")?.supersedes, "T1");
+      assert.equal(findTask(board, "T2")?.status, "cancelled");
+      assert.equal(findTask(board, "T2")?.supersededBy, "T4");
+      assert.deepEqual(findTask(board, "T3")?.dependsOn, ["T4"]);
+      assert.equal(findTask(board, "T4")?.status, "todo");
+      assert.equal(findTask(board, "T4")?.supersedes, "T2");
+      // The successor takes the predecessor's place in the graph, prerequisites included.
+      assert.deepEqual(findTask(board, "T4")?.dependsOn, ["T1"]);
       assert.deepEqual(
         board.pausedDrive?.taskIds,
-        ["T3"],
+        ["T4"],
         "the paused drive scope must follow the successor"
       );
     }

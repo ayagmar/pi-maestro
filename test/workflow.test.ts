@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -15,12 +15,7 @@ import {
   updateTask,
 } from "../src/board.js";
 import { loadConfig, saveConfig } from "../src/config.js";
-import { selfReportedBlocker } from "../src/workflow-review-policy.js";
-import {
-  escalatedTask,
-  omnibusRejection,
-  providerBlockedTask,
-} from "../src/workflow-stop-policy.js";
+import { formatDrivePulse } from "../src/drive-summary.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import {
   type Attempt,
@@ -41,6 +36,16 @@ import {
   snapshot,
   taskCommitMessage,
 } from "../src/workflow.js";
+import {
+  reviewEvidence,
+  selfReportedBlocker,
+  verdictEvidenceConflict,
+} from "../src/workflow-review-policy.js";
+import {
+  escalatedTask,
+  omnibusRejection,
+  providerBlockedTask,
+} from "../src/workflow-stop-policy.js";
 import { createWorktree } from "../src/worktree.js";
 
 const tier = { thinking: "low" };
@@ -519,6 +524,131 @@ test("find-and-refute converges for both agreeing verdict pairs", async () => {
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
+  }
+});
+
+test("criterion evidence parses the requested lines, Markdown headings, bold list items, and restated summaries", () => {
+  const requested = reviewEvidence(
+    "CRITERION 1: PASS — pom pins Quarkus 3.33.3.1\nCRITERION 2: FAIL — Java 21 was not rejected\nVERDICT: REQUEST_CHANGES",
+    2
+  );
+  assert.deepEqual(requested, [
+    { criterion: 1, passed: true, evidence: "pom pins Quarkus 3.33.3.1" },
+    { criterion: 2, passed: false, evidence: "Java 21 was not rejected" },
+  ]);
+
+  const headings = reviewEvidence(
+    [
+      "## Review of T1",
+      "### Criterion 1 — Canonical Java 25 `./mvnw -B verify` exits 0: **PASS**",
+      "- `target/surefire-reports` shows 2/2 tests",
+      "- SBOM present at `target/bom.json`",
+      "",
+      "### Criterion 2 — Running under Java 21 fails at Enforcer: **FAIL**",
+      "No negative proof was recorded; the executor only asserted it.",
+      "",
+      "VERDICT: REQUEST_CHANGES",
+      "Criterion 2: run the Java 21 probe and capture the Enforcer failure",
+    ].join("\n"),
+    2
+  );
+  assert.deepEqual(headings, [
+    {
+      criterion: 1,
+      passed: true,
+      evidence: "target/surefire-reports shows 2/2 tests SBOM present at target/bom.json",
+    },
+    {
+      criterion: 2,
+      passed: false,
+      evidence: "No negative proof was recorded; the executor only asserted it.",
+    },
+  ]);
+
+  const bold = reviewEvidence(
+    "- **Criterion 1:** PASS — tests pass and the gate is enforced\n- **Criterion 2**: `FAIL` – coverage threshold is skipped\n\nSummary\nCriterion 1: PASS — restated\nVERDICT: REQUEST_CHANGES",
+    2
+  );
+  assert.deepEqual(
+    bold?.map((entry) => [entry.criterion, entry.passed]),
+    [
+      [1, true],
+      [2, false],
+    ]
+  );
+  // The closing restatement is the final word for criterion 1.
+  assert.equal(bold?.[0]?.evidence, "restated");
+
+  // Lower-case prose never counts as a verdict token; a missing criterion is malformed.
+  assert.equal(reviewEvidence("Criterion 1 — tests pass\nVERDICT: APPROVE", 1), undefined);
+  assert.equal(reviewEvidence("CRITERION 1: PASS — ok\nVERDICT: APPROVE", 2), undefined);
+  assert.equal(reviewEvidence("CRITERION 3: PASS — out of range\nVERDICT: APPROVE", 1), undefined);
+});
+
+test("a rejection with every criterion passing is a genuine verdict, approving over a FAIL is not", async () => {
+  assert.equal(
+    verdictEvidenceConflict(false, [{ criterion: 1, passed: true, evidence: "ok" }]),
+    undefined
+  );
+  assert.equal(
+    verdictEvidenceConflict(true, [{ criterion: 1, passed: false, evidence: "gap" }]),
+    "reviewer approved while marking criterion 1 FAIL"
+  );
+
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-confirm-outside-criteria-"));
+  try {
+    const task = reviewPolicyTask(cwd, "confirm");
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      reviewRequiredApprovals: 2,
+      startExecutor: queuedReviewerReports([
+        {
+          finalReport:
+            "CRITERION 1: PASS — the observable result exists\nVERDICT: REQUEST_CHANGES\nBuild-time toggle misused as a runtime switch in application.properties",
+        },
+      ]),
+      onUpdate,
+      trackRun,
+    });
+
+    const reviewed = findTask(loadBoard(cwd), task.id);
+    assert.equal(reviewed?.status, "changes_requested");
+    assert.equal(reviewed?.reviewRejections, 1);
+    const launch = reviewed?.attempts.at(-1)?.reviewLaunches?.at(-1);
+    assert.equal(launch?.verdict, "request_changes");
+    assert.equal(launch?.errorMessage, undefined);
+    assert.deepEqual(launch?.criterionEvidence, [
+      { criterion: 1, passed: true, evidence: "the observable result exists" },
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+
+  const approvedOverFail = mkdtempSync(join(tmpdir(), "maestro-confirm-conflict-"));
+  try {
+    const task = reviewPolicyTask(approvedOverFail, "confirm");
+    await reviewTask({
+      cwd: approvedOverFail,
+      task,
+      tier,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 1,
+      startExecutor: queuedReviewerReports([
+        { finalReport: "CRITERION 1: FAIL — result missing\nVERDICT: APPROVE" },
+      ]),
+      onUpdate,
+      trackRun,
+    });
+    const reviewed = findTask(loadBoard(approvedOverFail), task.id)?.attempts.at(-1);
+    assert.equal(reviewed?.reviewConvergence?.status, "operational_failure");
+    assert.match(
+      reviewed?.reviewLaunches?.at(-1)?.errorMessage ?? "",
+      /approved while marking criterion 1 FAIL/
+    );
+  } finally {
+    rmSync(approvedOverFail, { recursive: true, force: true });
   }
 });
 
@@ -1009,6 +1139,49 @@ test("drive stops when a review dispatch declines without making progress", asyn
       formatDriveSummary(result),
       /T1 \(ready_for_review\): no executor report to review/
     );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("driveBoard names the artifact gate, not the reviewer, when no reviewer ever ran", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-drive-gate-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    createTask(board, {
+      title: "File task",
+      brief: "Edit a file",
+      tier: "standard",
+      writePaths: ["src/**"],
+    });
+    saveBoard(cwd, board);
+    let reviewerStarts = 0;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) reviewerStarts += 1;
+      return executor({ finalReport: "Work completed", touchedFiles: [] })(options);
+    };
+
+    const result = await driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(reviewerStarts, 0);
+    assert.equal(result.stoppedBecause.code, "reviewer_failure");
+    assert.match(
+      result.stoppedBecause.message,
+      /^artifact gate failed before any reviewer ran — T1: Expected file work produced no attributable Git changes\./
+    );
+    const pulse = formatDrivePulse(result);
+    assert.match(pulse, /No reviewer ran/);
+    assert.doesNotMatch(pulse, /inspect the retained launch evidence/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -2244,6 +2417,58 @@ test("worktree execution records metadata and starts the executor in that checko
     assert.deepEqual(seenCwds, [worktree.worktreePath]);
     assert.equal(recorded?.worktreePath, worktree.worktreePath);
     assert.equal(recorded?.branch, worktree.branch);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("worktree execution attributes commits the executor made itself and reaches review", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-workflow-test-"));
+  const git = (dir: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd: dir, encoding: "utf-8" }).trim();
+  try {
+    git(cwd, "init", "-q");
+    git(cwd, "config", "user.email", "test@local");
+    git(cwd, "config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git(cwd, "add", "-A");
+    git(cwd, "commit", "-qm", "chore: base");
+    const { board, task } = boardWithTask();
+    task.writePaths = [".github/**"];
+    saveBoard(cwd, board);
+    const worktree = createWorktree(cwd, task.id, 1);
+    // A brief that must push CI before it can observe checks leaves the
+    // checkout Git-clean: the executor committed everything it produced.
+    const startExecutor: StartExecutor = (options) => {
+      mkdirSync(join(options.cwd, ".github"), { recursive: true });
+      writeFileSync(join(options.cwd, ".github", "ci.yml"), "jobs: {}\n");
+      git(options.cwd, "add", "-A");
+      git(options.cwd, "commit", "-qm", "ci: bootstrap");
+      return executor({ finalReport: "CI bootstrap pushed and green" })(options);
+    };
+
+    const result = await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      worktree,
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    const recorded = findTask(loadBoard(cwd), task.id);
+    assert.equal(result.status, "ready_for_review");
+    assert.deepEqual(recorded?.attempts.at(-1)?.touchedFiles, [".github/ci.yml"]);
+    assert.match(recorded?.attempts.at(-1)?.diff ?? "", /ci\.yml/);
+    assert.deepEqual(
+      (artifactFindings(recorded as Task, recorded?.attempts.at(-1) as Attempt) ?? []).map(
+        (finding) => finding.fingerprint
+      ),
+      []
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -4418,6 +4643,122 @@ test("a rejection retry resumes the prior attempt's session with a findings-only
       /## Task T1/,
       "a resumed retry must not re-send the brief the session already contains"
     );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a raised cost cap resumes the capped attempt in its own checkout and session", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-costcap-resume-"));
+  const git = (dir: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd: dir, encoding: "utf-8" }).trim();
+  try {
+    git(cwd, "init", "-q");
+    git(cwd, "config", "user.email", "test@local");
+    git(cwd, "config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git(cwd, "add", "-A");
+    git(cwd, "commit", "-qm", "chore: base");
+    const { board, task } = boardWithTask();
+    task.writePaths = ["work.txt"];
+    saveBoard(cwd, board);
+    const priorSessionFile = join(cwd, "attempt-1.jsonl");
+    writeFileSync(priorSessionFile, "{}\n");
+
+    const launches: Array<{ cwd: string; prompt: string; resumeSessionFile?: string }> = [];
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: "Looks correct.\nVERDICT: APPROVE",
+        })(options);
+      }
+      const entry: { cwd: string; prompt: string; resumeSessionFile?: string } = {
+        cwd: options.cwd,
+        prompt: options.prompt,
+      };
+      if (options.resumeSessionFile !== undefined)
+        entry.resumeSessionFile = options.resumeSessionFile;
+      launches.push(entry);
+      if (launches.length === 1) {
+        // Half the work lands, then the cap cuts the attempt off.
+        writeFileSync(join(options.cwd, "work.txt"), "half\n");
+        const handle = executor({
+          exitCode: 1,
+          errorMessage: "cost cap exceeded: $1.2000 > $1 (maxCostPerTask)",
+          failureCause: "cost_cap",
+          usage: { input: 10, output: 5, cost: 1.2, turns: 3 },
+        })(options);
+        handle.attempt.sessionFile = priorSessionFile;
+        return handle;
+      }
+      // The continuation must see its own earlier edit.
+      assert.equal(readFileSync(join(options.cwd, "work.txt"), "utf-8"), "half\n");
+      writeFileSync(join(options.cwd, "work.txt"), "half\nrest\n");
+      const handle = executor({
+        usage: { input: 1, output: 1, cost: 0.2, turns: 1 },
+        finalReport: "## Report\ndone",
+      })(options);
+      handle.attempt.sessionFile = priorSessionFile;
+      return handle;
+    };
+    const tiers = new Map([
+      ["standard", tier],
+      ["review", tier],
+    ]);
+    const cappedConfig = { ...config, maxAttempts: 3, maxCostPerTask: 1, useWorktrees: true };
+
+    const capped = await driveBoard({
+      cwd,
+      config: cappedConfig,
+      resolvedTiers: tiers,
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(capped.stoppedBecause.code, "no_progress");
+    assert.match(capped.stoppedBecause.message, /cost cap exceeded/);
+    assert.equal(launches.length, 1);
+    const cappedTask = findTask(loadBoard(cwd), task.id);
+    assert.equal(cappedTask?.status, "failed");
+    const branch = cappedTask?.attempts[0]?.branch;
+    assert.ok(branch);
+    // The cut-off edit survives as a checkpoint on the attempt branch.
+    assert.equal(git(cwd, "show", `${branch}:work.txt`), "half");
+
+    // Same cap again: still capped, no launch is billed.
+    const unchanged = await driveBoard({
+      cwd,
+      config: cappedConfig,
+      resolvedTiers: tiers,
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(unchanged.stoppedBecause.code, "no_progress");
+    assert.equal(launches.length, 1);
+
+    // Raised cap: the same attempt continues where it stopped.
+    const resumed = await driveBoard({
+      cwd,
+      config: { ...cappedConfig, maxCostPerTask: 5 },
+      resolvedTiers: tiers,
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(resumed.stoppedBecause.code, "completed");
+    assert.equal(launches.length, 2);
+    assert.ok(cappedTask?.attempts[0]?.worktreePath);
+    assert.equal(launches[1]?.cwd, cappedTask?.attempts[0]?.worktreePath);
+    assert.equal(launches[1]?.resumeSessionFile, priorSessionFile);
+    assert.match(launches[1]?.prompt ?? "", /stopped by the per-attempt cost cap after \$1\.20/);
+    assert.doesNotMatch(launches[1]?.prompt ?? "", /A reviewer rejected/);
+    const done = findTask(loadBoard(cwd), task.id);
+    assert.equal(done?.status, "approved");
+    assert.equal(done?.attempts.length, 2);
+    assert.equal(done?.attempts[1]?.resumed, true);
+    assert.equal(readFileSync(join(cwd, "work.txt"), "utf-8"), "half\nrest\n");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

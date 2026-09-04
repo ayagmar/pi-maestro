@@ -14,6 +14,7 @@ import {
   DEFAULT_DASHBOARD_BODY_HEIGHT,
   LivePaneComponent,
   type LivePaneLaunch,
+  launchStripLabel,
   projectEvidenceSections,
   taskLaunches,
   wrapText,
@@ -2524,4 +2525,35 @@ test("dashboard hides unavailable actions and ignores their keys while live", ()
   } finally {
     dashboard.dispose();
   }
+});
+
+test("agent strip labels distinguish attempts and how each launch ended", () => {
+  const base: LivePaneLaunch = {
+    key: "k",
+    taskId: "T14",
+    title: "Finish identity",
+    kind: "execute",
+    logFile: "/tmp/none.jsonl",
+    turns: 0,
+    cost: 0,
+    lastActivity: "working",
+  };
+  assert.equal(launchStripLabel({ ...base, attemptIndex: 3, live: true }), "T14 run #3 ●");
+  assert.equal(launchStripLabel({ ...base, attemptIndex: 2, live: false }), "T14 run #2");
+  assert.equal(
+    launchStripLabel({
+      ...base,
+      kind: "review",
+      attemptIndex: 2,
+      live: false,
+      verdict: "request_changes",
+    }),
+    "T14 review #2 ✗"
+  );
+  assert.equal(
+    launchStripLabel({ ...base, kind: "review", attemptIndex: 1, live: false, verdict: "approve" }),
+    "T14 review #1 ✓"
+  );
+  // Legacy launches without an attempt index still render.
+  assert.equal(launchStripLabel({ ...base, live: false }), "T14 run");
 });

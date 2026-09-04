@@ -369,9 +369,15 @@ export async function driveBoard(options: {
         try {
           for (const task of dispatchable) {
             const previous = task.attempts.at(-1);
+            // Rejected work and a cost-capped attempt both continue in their
+            // own checkout: the edits are there, and a fresh checkout from HEAD
+            // would silently discard them.
+            const continues =
+              task.status === "changes_requested" ||
+              (task.status === "failed" && previous?.failureReason?.kind === "cost_cap");
             const retained =
               task.id.toUpperCase() !== humanRetryId &&
-              task.status === "changes_requested" &&
+              continues &&
               previous?.worktreePath &&
               previous.branch
                 ? { worktreePath: previous.worktreePath, branch: previous.branch }
@@ -655,9 +661,23 @@ export async function driveBoard(options: {
         (task) => terminalReviewConvergence(task) === "operational_failure"
       );
       if (reviewerFailures.length > 0) {
+        // A pre-review artifact gate (nothing attributable, contract changed
+        // mid-flight, trusted verification failed) is not a reviewer problem.
+        // Reporting it as "review operation failed" sent an operator hunting
+        // through reviewer evidence that did not exist and then rewriting the
+        // review policy, when the cause was printed in the gate notes.
+        const gateNotes = reviewerFailures.flatMap((task) => {
+          const convergence = task.attempts.at(-1)?.reviewConvergence;
+          return convergence?.cause === "gate"
+            ? [`${task.id}: ${convergence.summary.split("\n")[0]?.slice(0, 300) ?? ""}`]
+            : [];
+        });
         return finish({
           code: "reviewer_failure",
-          message: `review operation failed for ${reviewerFailures.map((task) => task.id).join(", ")}; inspect the retained launch evidence before resuming`,
+          message:
+            gateNotes.length === reviewerFailures.length
+              ? `artifact gate failed before any reviewer ran — ${gateNotes.join("; ")}`
+              : `review operation failed for ${reviewerFailures.map((task) => task.id).join(", ")}; inspect the retained launch evidence before resuming`,
           taskIds: reviewerFailures.map((task) => task.id),
         });
       }
