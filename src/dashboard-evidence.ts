@@ -1,6 +1,7 @@
 import { executorUsage, formatPromptSections, singleLine } from "./dashboard-format.js";
 import { type DashboardLaunch } from "./dashboard-launches.js";
-import { type Board, type Task } from "./types.js";
+import { formatClock, formatRelative } from "./status.js";
+import { type Board, type DriveWait, type Task } from "./types.js";
 
 export interface EvidenceSection {
   title: string;
@@ -11,6 +12,7 @@ export interface EvidenceExtras {
   phaseLabel: string;
   lastActivity?: string;
   pausedDrive?: Board["pausedDrive"];
+  waiting?: DriveWait;
   decision?: Board["activeDecision"];
 }
 
@@ -81,6 +83,11 @@ export function projectEvidenceSections(
   if (extras.pausedDrive) {
     execution.push(
       `Paused drive: owner ${extras.pausedDrive.ownerSession ?? "unknown"} · scope ${extras.pausedDrive.taskIds?.join(", ") ?? "all"}`
+    );
+  }
+  if (extras.waiting?.taskIds.includes(task.id)) {
+    execution.push(
+      `Drive waiting: ${extras.waiting.reason} · resumes ${formatClock(extras.waiting.until)} (${formatRelative(extras.waiting.until)})`
     );
   }
   if (extras.decision?.taskIds.includes(task.id)) {

@@ -6,6 +6,7 @@ import {
   formatElapsed,
   progressBar,
 } from "./format.js";
+import { formatClock, formatRelative } from "./status.js";
 import { type MaestroConfig, type TaskStatus } from "./types.js";
 import { type DriveSummary, formatDriveSummary, snapshot } from "./workflow.js";
 
@@ -118,8 +119,15 @@ export function startDriveHeartbeat(
       approved >= 2 && remaining > 0 && landedAverage > 0
         ? `est. ~$${(remaining * landedAverage).toFixed(0)} to finish at current avg`
         : undefined;
+    const wait = loadBoard(cwd).activeDrive?.waiting;
+    const waiting =
+      wait && wait.until > Date.now()
+        ? `⏳ ${wait.reason} · resumes ${formatClock(wait.until)} (${formatRelative(wait.until)}) · deferred: ${wait.taskIds.join(", ")}`
+        : undefined;
     const header = [
-      `Drive running · ${formatElapsed(startedAt)}`,
+      waiting
+        ? `Drive waiting · ${formatElapsed(startedAt)}`
+        : `Drive running · ${formatElapsed(startedAt)}`,
       bar || undefined,
       `${remaining} task(s) left`,
       live ? `${runs.liveRunCount()} live agent(s)` : "no live agent",
@@ -128,7 +136,7 @@ export function startDriveHeartbeat(
     ]
       .filter(Boolean)
       .join(" · ");
-    emit([header, live, delta].filter(Boolean).join("\n"));
+    emit([header, waiting, live, delta].filter(Boolean).join("\n"));
   }, seconds * 1000);
   return () => timer.stop();
 }

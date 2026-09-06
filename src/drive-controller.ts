@@ -29,6 +29,7 @@ import {
   type ActiveDriveState,
   type Board,
   type DriveDecision,
+  type DriveWait,
   type PausedDriveState,
   type Task,
   type TaskStatus,
@@ -580,6 +581,10 @@ export class DriveRuntimeController {
       onRetentionWarning: (warning) =>
         services.notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
       onNotice: (message) => services.notify(ctx, message, "warning"),
+      onWait: (wait) => {
+        setActiveDriveWait(ctx.cwd, this.active?.id, wait);
+        services.refreshUI(ctx);
+      },
       ...(services.retryDelayScale === undefined
         ? {}
         : { retryDelayScale: services.retryDelayScale }),
@@ -930,6 +935,22 @@ export function persistActiveDrive(cwd: string, activeDrive: ActiveDriveState): 
     return true;
   });
   return result;
+}
+
+/** Record (or clear) the deliberate sleep of the current drive so projections can show it. */
+export function setActiveDriveWait(
+  cwd: string,
+  driveId: string | undefined,
+  wait: DriveWait | undefined
+): void {
+  if (!driveId) return;
+  updateBoard(cwd, (board) => {
+    if (board.activeDrive?.id !== driveId) return false;
+    if (wait) board.activeDrive.waiting = wait;
+    else if (board.activeDrive.waiting) delete board.activeDrive.waiting;
+    else return false;
+    return true;
+  });
 }
 
 export function clearActiveDrive(cwd: string, driveId: string): boolean {

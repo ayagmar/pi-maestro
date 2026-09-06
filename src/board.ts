@@ -705,7 +705,20 @@ function isActiveDrive(value: unknown): boolean {
       (Array.isArray(value.taskIds) &&
         value.taskIds.length <= 64 &&
         value.taskIds.every((id) => typeof id === "string"))) &&
-    isNumber(value.startedAt)
+    isNumber(value.startedAt) &&
+    (value.waiting === undefined || isDriveWait(value.waiting))
+  );
+}
+
+function isDriveWait(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    isNumber(value.until) &&
+    typeof value.reason === "string" &&
+    value.reason.length <= 400 &&
+    Array.isArray(value.taskIds) &&
+    value.taskIds.length <= 64 &&
+    value.taskIds.every((id) => typeof id === "string")
   );
 }
 

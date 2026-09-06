@@ -3,6 +3,7 @@ import test from "node:test";
 import { createTask } from "../src/board.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import {
+  formatRelative,
   formatStatusProjection,
   projectRunPhases,
   projectStatus,
@@ -22,6 +23,46 @@ test("status projection uses one deterministic phase and accounting model", () =
   const complete = projectStatus(board);
   assert.equal(complete.code, "complete");
   assert.match(formatStatusProjection(complete), /complete · 1 approved · 0 cancelled/);
+});
+
+test("a drive sleeping for provider quota reads as waiting, not blocked", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const task = createTask(board, { title: "Work", brief: "Do work", tier: "standard" });
+  task.status = "failed";
+  task.attempts.push({
+    index: 1,
+    logFile: "T1-attempt-1.jsonl",
+    thinking: "medium",
+    startedAt: 1,
+    endedAt: 2,
+    usage: { input: 1, output: 0, cost: 0.06, turns: 2 },
+    touchedFiles: [],
+    providerFailure: true,
+    failureReason: {
+      kind: "provider_failure",
+      message: "Codex error: The usage limit has been reached",
+      retryable: true,
+    },
+  });
+  const until = Date.now() + 2 * 3_600_000;
+  board.activeDrive = {
+    id: "drive-1",
+    startedAt: 1,
+    waiting: { until, reason: "openai-codex 5h window exhausted", taskIds: ["T1"] },
+  };
+
+  const status = projectStatus(board, undefined, DEFAULT_CONFIG);
+  assert.equal(status.code, "waiting");
+  assert.match(status.phase, /^waiting · resumes \d{2}:\d{2}$/);
+  assert.deepEqual(status.waiting, { until, reason: "openai-codex 5h window exhausted" });
+  assert.match(formatStatusProjection(status), /^waiting · waiting · resumes/);
+
+  // An elapsed wait no longer masks the real state.
+  board.activeDrive.waiting = { until: Date.now() - 1, reason: "elapsed", taskIds: ["T1"] };
+  assert.notEqual(projectStatus(board, undefined, DEFAULT_CONFIG).code, "waiting");
+  assert.equal(formatRelative(until, until - 119 * 60_000), "in 1h 59m");
+  assert.equal(formatRelative(until, until - 25 * 60_000), "in 25m");
+  assert.equal(formatRelative(until, until), "now");
 });
 
 test("stale approved work is blocked instead of reported complete", () => {
