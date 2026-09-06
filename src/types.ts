@@ -478,9 +478,12 @@ export interface MaestroConfig {
   /** Maximum bytes mirrored per run. 0 disables the limit. */
   maxLogBytesPerRun?: number;
   /**
-   * Minutes a drive keeps waiting for a provider whose quota or usage window
-   * is exhausted before it stops with `provider_blocked`. Probes back off
-   * (2, 4, 8, then 15 minutes). 0 stops at the first quota failure.
+   * Minutes a drive may wait for a provider whose quota or usage window is
+   * exhausted before it stops with `provider_blocked`. Providers that publish
+   * a reset clock (Codex) are waited for exactly; others are probed with
+   * 2/4/8/15-minute backoff. 0 stops at the first quota failure. The default
+   * covers a full 5-hour subscription window; a weekly limit stops the drive
+   * with its reset time.
    */
   providerQuotaWaitMinutes?: number;
   /** Seconds without any executor event before watchdog steering. */
