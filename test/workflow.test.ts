@@ -1080,6 +1080,7 @@ test("drive completes an all-cancelled selection without launching work", async 
     saveBoard(cwd, board);
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1114,6 +1115,7 @@ test("drive stops when a review dispatch declines without making progress", asyn
     let launches = 0;
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1162,6 +1164,7 @@ test("driveBoard names the artifact gate, not the reviewer, when no reviewer eve
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1211,6 +1214,7 @@ test("driveBoard approves dependent tasks across multiple rounds", async () => {
       })(options);
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1254,6 +1258,7 @@ test("driveBoard summary reports only the selected task scope", async () => {
     saveBoard(cwd, board);
 
     const summary = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1300,6 +1305,7 @@ test("driveBoard normalizes scoped task ids and still dispatches them", async ()
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1352,6 +1358,7 @@ test("driveBoard pauses after active executors finish and resumes from fresh boa
     };
 
     const pausedRun = driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1380,6 +1387,7 @@ test("driveBoard pauses after active executors finish and resumes from fresh boa
     assert.equal(findTask(loadBoard(cwd), task.id)?.status, "ready_for_review");
 
     const resumed = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1425,6 +1433,7 @@ test("driveBoard aborts active executors through the existing AbortSignal", asyn
     };
 
     const running = driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1457,6 +1466,7 @@ test("driveBoard gives plan gates precedence and rechecks cost caps after pause"
     task.attempts.push(costly);
     saveBoard(cwd, board);
     const options = {
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxRunCost: 1 },
       resolvedTiers: new Map([
@@ -1498,6 +1508,7 @@ test("driveBoard blocks dispatch when the remaining budget cannot fund a meaning
 
     let launched = 0;
     const summary = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxRunCost: 150, maxCostPerTask: 10 },
       resolvedTiers: new Map([
@@ -1536,6 +1547,7 @@ test("driveBoard blocks invalid plans before dispatch and leaves the board uncha
     let dispatches = 0;
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([["standard", tier]]),
@@ -1572,6 +1584,7 @@ test("rejected executor outcomes persist a redacted failure and return a retryab
     saveBoard(cwd, board);
     let tracked = 0;
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 1 },
       resolvedTiers: new Map([
@@ -1629,6 +1642,7 @@ test("driveBoard stops repeated executor failures at the attempt cap", async () 
     saveBoard(cwd, board);
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 2 },
       resolvedTiers: new Map([
@@ -1663,6 +1677,7 @@ test("driveBoard enforces the combined raw launch limit before review dispatch",
     let launches = 0;
     const limitedConfig = { ...config, maxTotalLaunchesPerRun: 1 };
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: limitedConfig,
       resolvedTiers: new Map([
@@ -1694,6 +1709,7 @@ test("a synchronous spawn failure consumes one raw launch slot", async () => {
     saveBoard(cwd, board);
     let launches = 0;
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxTotalLaunchesPerRun: 1 },
       resolvedTiers: new Map([
@@ -1722,6 +1738,7 @@ test("raw launch cap blocks an executor fallback before reserving another attemp
     saveBoard(cwd, board);
     let launches = 0;
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxTotalLaunchesPerRun: 1 },
       resolvedTiers: new Map<string, TierConfig>([
@@ -1764,6 +1781,7 @@ test("raw launch cap blocks a reviewer fallback before persisting its placeholde
     saveBoard(cwd, board);
     let launches = 0;
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxTotalLaunchesPerRun: 1 },
       resolvedTiers: new Map<string, TierConfig>([
@@ -1822,6 +1840,7 @@ test("a deleted recovery checkout fails only its own task, not the whole drive",
 
     const notices: string[] = [];
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, useWorktrees: true },
       resolvedTiers: new Map([
@@ -1862,6 +1881,7 @@ test("launch-bounded worktree dispatch creates no checkout for undispatched task
     saveBoard(cwd, board);
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: {
         ...config,
@@ -1912,6 +1932,7 @@ test("human execution retry is isolated from a dirty main tree when worktrees ar
     });
     let executorCwd = "";
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, useWorktrees: false },
       resolvedTiers: new Map([
@@ -1986,6 +2007,7 @@ test("declined human retry claim removes its fresh clean unreferenced worktree",
     execFileSync("chmod", ["+x", hook]);
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, useWorktrees: false },
       resolvedTiers: new Map([
@@ -2051,6 +2073,7 @@ test("human reviewer retry remains on the same attempt even at the execution cap
     saveBoard(cwd, board);
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 1 },
       resolvedTiers: new Map([
@@ -2272,6 +2295,7 @@ test("parallel non-worktree batches auto-isolate in per-task worktrees with a no
     const executorCwds: string[] = [];
     const notices: string[] = [];
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, useWorktrees: false, maxParallel: 2, autoCommit: false },
       resolvedTiers: new Map([
@@ -3410,6 +3434,7 @@ test("drive retries one transient provider failure and completes without interve
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3432,7 +3457,7 @@ test("drive retries one transient provider failure and completes without interve
   }
 });
 
-test("drive stops after one transient provider retry also fails", async () => {
+test("drive stops after two transient provider retries also fail", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-transient-failed-"));
   try {
     const { board, task } = boardWithTask();
@@ -3440,6 +3465,7 @@ test("drive stops after one transient provider retry also fails", async () => {
     let calls = 0;
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3461,10 +3487,10 @@ test("drive stops after one transient provider retry also fails", async () => {
     });
 
     assert.equal(result.stoppedBecause.code, "provider_blocked");
-    assert.equal(calls, 2);
-    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.length, 2);
+    assert.equal(calls, 3);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.length, 3);
     assert.match(result.stoppedBecause.message, /transient/i);
-    assert.match(result.stoppedBecause.message, /retried once/i);
+    assert.match(result.stoppedBecause.message, /retried 2× and failed again/i);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -3478,6 +3504,7 @@ test("drive stops immediately for a persistent provider authentication failure",
     let calls = 0;
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3501,13 +3528,13 @@ test("drive stops immediately for a persistent provider authentication failure",
     assert.equal(result.stoppedBecause.code, "provider_blocked");
     assert.equal(calls, 1);
     assert.match(result.stoppedBecause.message, /persistent/i);
-    assert.doesNotMatch(result.stoppedBecause.message, /retried once/i);
+    assert.doesNotMatch(result.stoppedBecause.message, /retried/i);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test("persistent quota failures stop drive without consuming maxAttempts or hot-looping", async () => {
+test("quota failures stop the drive at once when quota waiting is disabled, without consuming maxAttempts", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-blocked-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -3537,8 +3564,9 @@ test("persistent quota failures stop drive without consuming maxAttempts or hot-
       })(options);
     };
     const options = {
+      retryDelayScale: 0,
       cwd,
-      config: { ...config, maxAttempts: 1 },
+      config: { ...config, maxAttempts: 1, providerQuotaWaitMinutes: 0 },
       resolvedTiers: new Map<string, TierConfig>([
         ["standard", { thinking: "low", model: "provider-a/model-a" }],
         ["review", tier],
@@ -3554,6 +3582,7 @@ test("persistent quota failures stop drive without consuming maxAttempts or hot-
     assert.equal(blocked.stoppedBecause.code, "provider_blocked");
     assert.equal(blocked.rounds, 1);
     assert.equal(calls, 1, "the same provider must not be retried autonomously");
+    assert.match(blocked.stoppedBecause.message, /\[quota; quota waiting is disabled/);
     assert.equal(blocked.tasks[0]?.attempts, 0);
     assert.equal(blocked.tasks[0]?.launches, 1);
     assert.match(blocked.stoppedBecause.message, /provider-a\/model-a \(provider-a\)/);
@@ -3568,6 +3597,194 @@ test("persistent quota failures stop drive without consuming maxAttempts or hot-
     // Raw launches now count reviewer processes too: one failed executor
     // launch, one successful executor launch, one reviewer launch.
     assert.equal(resumed.tasks[0]?.launches, 3);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an exhausted usage window is probed with backoff until the provider returns", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-quota-wait-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let executions = 0;
+    const notices: string[] = [];
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({ finalReport: "Verified.\nVERDICT: APPROVE" })(options);
+      }
+      executions += 1;
+      if (executions <= 2) {
+        return executor({
+          exitCode: 1,
+          usage: { input: 5801, output: 38, cost: 0.06, turns: 2 },
+          errorMessage: "Codex error: The usage limit has been reached",
+          failureCause: "provider",
+          model: "openai-codex/model",
+        })(options);
+      }
+      return executor({
+        usage: { input: 1, output: 1, cost: 0.5, turns: 3 },
+        finalReport: "## Report\nimplemented once the window reset",
+        model: "openai-codex/model",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      cwd,
+      config,
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", { thinking: "low", model: "openai-codex/model" }],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+      onNotice: (message) => notices.push(message),
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.equal(executions, 3);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "approved");
+    assert.equal(persisted?.attempts.length, 3);
+    // Quota probes never consume the attempt budget.
+    assert.equal(
+      persisted?.attempts.filter((attempt) => attempt.consumesAttempt !== false).length,
+      1
+    );
+    assert.match(
+      notices[0] ?? "",
+      /quota exhausted; probing again in 2 min \(58 min of quota wait left\)/
+    );
+    assert.match(notices[1] ?? "", /probing again in 4 min \(54 min of quota wait left\)/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("quota probing stops once providerQuotaWaitMinutes is spent and reports the wait", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-quota-exhausted-"));
+  try {
+    const { board } = boardWithTask();
+    saveBoard(cwd, board);
+    let executions = 0;
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      cwd,
+      config: { ...config, providerQuotaWaitMinutes: 5 },
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", { thinking: "low", model: "openai-codex/model" }],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        executions += 1;
+        return executor({
+          exitCode: 1,
+          usage: { input: 1, output: 0, cost: 0.01, turns: 1 },
+          errorMessage: "Codex error: The usage limit has been reached",
+          failureCause: "provider",
+          model: "openai-codex/model",
+        })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    // 2 min probe fits the 5 min budget; the following 4 min probe does not.
+    assert.equal(result.stoppedBecause.code, "provider_blocked");
+    assert.equal(executions, 2);
+    assert.match(result.stoppedBecause.message, /\[quota; waited 2 min of the 5 min quota wait\]/);
+    assert.match(result.stoppedBecause.message, /resume from any session/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a WebSocket drop mid-attempt resumes the same session and checkout instead of restarting", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-interrupt-resume-"));
+  const git = (dir: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd: dir, encoding: "utf-8" }).trim();
+  try {
+    git(cwd, "init", "-q");
+    git(cwd, "config", "user.email", "test@local");
+    git(cwd, "config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git(cwd, "add", "-A");
+    git(cwd, "commit", "-qm", "chore: base");
+    const { board, task } = boardWithTask();
+    task.writePaths = ["work.txt"];
+    saveBoard(cwd, board);
+    const priorSessionFile = join(cwd, "attempt-1.jsonl");
+    writeFileSync(priorSessionFile, "{}\n");
+
+    const launches: Array<{ cwd: string; prompt: string; resumeSessionFile?: string }> = [];
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: "Looks correct.\nVERDICT: APPROVE",
+        })(options);
+      }
+      const entry: { cwd: string; prompt: string; resumeSessionFile?: string } = {
+        cwd: options.cwd,
+        prompt: options.prompt,
+      };
+      if (options.resumeSessionFile !== undefined)
+        entry.resumeSessionFile = options.resumeSessionFile;
+      launches.push(entry);
+      if (launches.length === 1) {
+        // Real work lands, then the provider drops the connection.
+        writeFileSync(join(options.cwd, "work.txt"), "half\n");
+        const handle = executor({
+          exitCode: 1,
+          errorMessage: "WebSocket error",
+          failureCause: "provider",
+          usage: { input: 10, output: 5, cost: 4.7, turns: 9 },
+          touchedFiles: ["work.txt"],
+        })(options);
+        handle.attempt.sessionFile = priorSessionFile;
+        return handle;
+      }
+      // The continuation sees its own earlier edit.
+      assert.equal(readFileSync(join(options.cwd, "work.txt"), "utf-8"), "half\n");
+      writeFileSync(join(options.cwd, "work.txt"), "half\nrest\n");
+      const handle = executor({
+        usage: { input: 1, output: 1, cost: 0.2, turns: 1 },
+        finalReport: "## Report\ndone",
+      })(options);
+      handle.attempt.sessionFile = priorSessionFile;
+      return handle;
+    };
+
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      cwd,
+      config: { ...config, useWorktrees: true },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.equal(launches.length, 2);
+    assert.equal(launches[0]?.resumeSessionFile, undefined);
+    assert.equal(launches[1]?.resumeSessionFile, priorSessionFile);
+    assert.equal(launches[1]?.cwd, launches[0]?.cwd, "the continuation reuses the checkout");
+    assert.match(
+      launches[1]?.prompt ?? "",
+      /interrupted by the model provider \(WebSocket error\)/
+    );
+    assert.match(launches[1]?.prompt ?? "", /check its effect before repeating it/);
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(persisted?.status, "approved");
+    assert.equal(persisted?.attempts[0]?.consumesAttempt, false);
+    assert.equal(persisted?.attempts[1]?.resumed, true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -3616,6 +3833,7 @@ test("provider blocking waits for active peer executors and starts no review bat
     };
 
     const driving = driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxParallel: 2 },
       resolvedTiers: new Map([
@@ -3646,7 +3864,7 @@ test("provider blocking waits for active peer executors and starts no review bat
   }
 });
 
-test("transient fallback exhaustion auto-retries once and preserves every launch", async () => {
+test("transient fallback exhaustion auto-retries twice and preserves every launch", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-fallback-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -3657,13 +3875,14 @@ test("transient fallback exhaustion auto-retries once and preserves every launch
       return executor({
         exitCode: 1,
         usage: { input: 10, output: 2, cost: 0.01, turns: 2 },
-        errorMessage: "rate limit reached",
+        errorMessage: "HTTP 503 service unavailable",
         failureCause: "provider",
         model: options.tier.model ?? "unknown/model",
       })(options);
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3687,21 +3906,23 @@ test("transient fallback exhaustion auto-retries once and preserves every launch
       "provider-b/model-b",
       "provider-a/model-a",
       "provider-b/model-b",
+      "provider-a/model-a",
+      "provider-b/model-b",
     ]);
     assert.equal(result.stoppedBecause.code, "provider_blocked");
     assert.equal(result.tasks[0]?.attempts, 0);
-    assert.equal(result.tasks[0]?.launches, 4);
+    assert.equal(result.tasks[0]?.launches, 6);
     const persisted = findTask(loadBoard(cwd), task.id);
-    assert.equal(persisted?.attempts.length, 4);
+    assert.equal(persisted?.attempts.length, 6);
     assert.ok(persisted?.attempts.every((item) => item.consumesAttempt === false));
     assert.match(result.stoppedBecause.message, /provider-b\/model-b \(provider-b\)/);
-    assert.match(result.stoppedBecause.message, /retried once/i);
+    assert.match(result.stoppedBecause.message, /retried 2×/i);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test("reviewer provider failures use fallbacks and auto-retry once before blocking", async () => {
+test("reviewer provider failures use fallbacks and auto-retry twice before blocking", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-provider-test-"));
   try {
     const { board, task } = boardWithTask();
@@ -3726,12 +3947,13 @@ test("reviewer provider failures use fallbacks and auto-retry once before blocki
       return executor({
         exitCode: 1,
         usage: { input: 2, output: 1, cost: 0, turns: 1 },
-        errorMessage: "HTTP 429 too many requests",
+        errorMessage: "HTTP 502 bad gateway",
         failureCause: "provider",
         model: options.tier.model ?? "unknown/model",
       })(options);
     };
     const options = {
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3757,14 +3979,16 @@ test("reviewer provider failures use fallbacks and auto-retry once before blocki
       "review-b/model",
       "review-a/model",
       "review-b/model",
+      "review-a/model",
+      "review-b/model",
     ]);
-    assert.match(blocked.stoppedBecause.message, /retried once/i);
+    assert.match(blocked.stoppedBecause.message, /retried 2×/i);
     const persisted = findTask(loadBoard(cwd), task.id);
     assert.equal(persisted?.status, "ready_for_review");
-    assert.equal(persisted?.attempts[0]?.reviewLaunches?.length, 4);
+    assert.equal(persisted?.attempts[0]?.reviewLaunches?.length, 6);
     assert.equal(
       new Set(persisted?.attempts[0]?.reviewLaunches?.map((launch) => launch.id)).size,
-      4
+      6
     );
     assert.ok(
       persisted?.attempts[0]?.reviewLaunches?.every(
@@ -3775,7 +3999,7 @@ test("reviewer provider failures use fallbacks and auto-retry once before blocki
     reviewBlocked = false;
     const resumed = await driveBoard(options);
     assert.equal(resumed.stoppedBecause.code, "completed");
-    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts[0]?.reviewLaunches?.length, 5);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts[0]?.reviewLaunches?.length, 7);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -3940,6 +4164,7 @@ test("drive bookkeeping stays fingerprint-fresh across reject with notes, retry,
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -3994,6 +4219,7 @@ test("markdown-formatted criterion findings are recognized across attempts", asy
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 5 },
       resolvedTiers: new Map([
@@ -4045,6 +4271,7 @@ test("second consecutive reviewer rejection escalates instead of re-dispatching"
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: ladderConfig,
       resolvedTiers: new Map([
@@ -4105,6 +4332,7 @@ test("rejections that raise only new findings keep converging instead of escalat
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 5 },
       resolvedTiers: new Map([
@@ -4204,6 +4432,7 @@ test("escalation clears and the drive continues after the counter is reset", asy
     task.tier = "complex";
     saveBoard(cwd, board);
     const options = {
+      retryDelayScale: 0,
       cwd,
       config: { ...config, tiers: { standard: tier, complex: tier } },
       resolvedTiers: new Map([
@@ -4257,6 +4486,7 @@ test("a drive blocked by a cancelled dependency names the blocker and the remedy
   saveBoard(cwd, board);
 
   const result = await driveBoard({
+    retryDelayScale: 0,
     cwd,
     config: { ...config },
     resolvedTiers: new Map([
@@ -4308,6 +4538,7 @@ test("a task stopped by the cost cap is not launched again", async () => {
   saveBoard(cwd, board);
 
   const result = await driveBoard({
+    retryDelayScale: 0,
     cwd,
     // Two attempts remain under maxAttempts, so only the terminal failure
     // can stop another launch.
@@ -4368,6 +4599,7 @@ test("a reviewer cannot approve work the executor reported as blocked", async ()
     saveBoard(cwd, board);
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 1 },
       resolvedTiers: new Map<string, TierConfig>([
@@ -4460,6 +4692,7 @@ test("a first review failing four criteria stops the drive instead of retrying t
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 5 },
       resolvedTiers: new Map([
@@ -4559,6 +4792,7 @@ test("launch cost caps combine the per-role cap with the remaining run budget", 
     };
 
     await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxCostPerTask: 5, maxCostPerReview: 2.5, maxRunCost: 3 },
       resolvedTiers: new Map([
@@ -4617,6 +4851,7 @@ test("a rejection retry resumes the prior attempt's session with a findings-only
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 3 },
       resolvedTiers: new Map([
@@ -4712,6 +4947,7 @@ test("a raised cost cap resumes the capped attempt in its own checkout and sessi
     const cappedConfig = { ...config, maxAttempts: 3, maxCostPerTask: 1, useWorktrees: true };
 
     const capped = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: cappedConfig,
       resolvedTiers: tiers,
@@ -4731,6 +4967,7 @@ test("a raised cost cap resumes the capped attempt in its own checkout and sessi
 
     // Same cap again: still capped, no launch is billed.
     const unchanged = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: cappedConfig,
       resolvedTiers: tiers,
@@ -4743,6 +4980,7 @@ test("a raised cost cap resumes the capped attempt in its own checkout and sessi
 
     // Raised cap: the same attempt continues where it stopped.
     const resumed = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...cappedConfig, maxCostPerTask: 5 },
       resolvedTiers: tiers,
@@ -4802,6 +5040,7 @@ test("retryContext fresh keeps clean-context retries and injects the prior repor
     };
 
     const result = await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 3, retryContext: "fresh" },
       resolvedTiers: new Map([
@@ -4853,6 +5092,7 @@ test("reviewer prose and verdict lines do not become findings", async () => {
     };
 
     await driveBoard({
+      retryDelayScale: 0,
       cwd,
       config: { ...config, maxAttempts: 1 },
       resolvedTiers: new Map([

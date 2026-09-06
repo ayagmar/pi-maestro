@@ -225,7 +225,11 @@ todo ──run──▶ running ──▶ ready_for_review ──review──▶
   including provider failures and model fallbacks) and **attempts** (launches that consumed the
   `maxAttempts` cap). A provider failure before useful work — an auth/rate-limit/quota error
   before any model turn — is a launch but not an attempt, so it never counts against
-  `maxAttempts`; only launches that produced real work count.
+  `maxAttempts`; only launches that produced real work count. Provider failures are classified:
+  transient drops (`WebSocket error`, connection reset, 5xx) retry twice with a short delay, an
+  exhausted usage window waits with backoff for `providerQuotaWaitMinutes`, and only credential or
+  billing failures stop the drive at once. An attempt the provider cut off after real work resumes
+  its own session and checkout instead of paying to rebuild the context.
 - **`/maestro simulate [taskIds]`**: deterministic, read-only preview of dependency waves, concurrency, caps, and blockers. It assumes every run/review succeeds; it does not predict quality, cost, or spawn children.
 - **`/maestro open T3`**: switches your TUI into that executor's persisted session so you can
   inspect exactly what it did — or continue working in it by hand. `/maestro back` returns to the

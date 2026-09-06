@@ -1,6 +1,6 @@
 import { sep } from "node:path";
 import { findTask } from "./board.js";
-import { type Board } from "./types.js";
+import { type Board, type PausedDriveState } from "./types.js";
 
 export function maestroBoardCwd(cwd: string): string {
   const marker = `${sep}.pi${sep}maestro${sep}worktrees${sep}`;
@@ -13,6 +13,27 @@ export function sessionCanControlDrive(
   currentSession: string | undefined
 ): boolean {
   return ownerSession === undefined || ownerSession === currentSession;
+}
+
+/**
+ * Whether `currentSession` may resume or release a paused drive.
+ *
+ * Only a deliberate `/maestro pause` keeps its owner guard. A drive parked by
+ * a provider outage or a settled escalation is a mechanical stop whose fix
+ * (quota back, config edited) any session can apply — the owning session is
+ * frequently closed by then, and the only escape was `/maestro reset`, which
+ * archives the whole board. Concurrent starts are still serialized by the
+ * atomic active-drive claim, so opening the paused guard cannot race two
+ * drives. Records without a reason predate the field; they are treated as
+ * mechanical because the stuck-behind-a-dead-session case is exactly what
+ * they were found in.
+ */
+export function sessionCanResumePausedDrive(
+  paused: Pick<PausedDriveState, "ownerSession" | "reason">,
+  currentSession: string | undefined
+): boolean {
+  if (paused.reason !== "paused") return true;
+  return sessionCanControlDrive(paused.ownerSession, currentSession);
 }
 
 export function sessionSwitchBlocked(activeDrive: boolean, liveRunCount: number): boolean {

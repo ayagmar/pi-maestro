@@ -685,6 +685,10 @@ function isPausedDrive(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
     (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
+    (value.reason === undefined ||
+      value.reason === "paused" ||
+      value.reason === "provider_blocked" ||
+      value.reason === "escalation_required") &&
     (value.taskIds === undefined ||
       (Array.isArray(value.taskIds) &&
         value.taskIds.length <= 64 &&
@@ -1525,7 +1529,11 @@ export function humanRetryEligibility(
   if (board.activeDrive && board.activeDrive.ownerSession !== options.ownerSession) {
     return refused("foreign_owner", `${task.id} is owned by an active drive from another session.`);
   }
-  if (board.pausedDrive && board.pausedDrive.ownerSession !== options.ownerSession) {
+  if (
+    board.pausedDrive &&
+    board.pausedDrive.ownerSession !== options.ownerSession &&
+    board.pausedDrive.reason === "paused"
+  ) {
     return refused("foreign_owner", `${task.id} is owned by a paused drive from another session.`);
   }
   if (board.planPending) return refused("plan_pending", "Plan approval is pending.");

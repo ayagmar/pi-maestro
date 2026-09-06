@@ -51,6 +51,8 @@ export { scrollableTextOffset } from "./scrollable-viewer.js";
 
 export interface MaestroDependencies {
   startExecutor: typeof defaultStartExecutor;
+  /** Multiplier on provider retry/quota-probe delays; tests pass 0. */
+  retryDelayScale?: number;
 }
 
 export default function maestro(
@@ -270,6 +272,9 @@ export default function maestro(
 
   const driveServices = {
     startExecutor: dependencies.startExecutor,
+    ...(dependencies.retryDelayScale === undefined
+      ? {}
+      : { retryDelayScale: dependencies.retryDelayScale }),
     isRuntimeActive: () => lifecycleState.isActive(),
     adoptBoard,
     refreshUI,

@@ -3,7 +3,36 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { updateBoard } from "./board.js";
 import { COMMAND, MESSAGE_TYPE } from "./constants.js";
+
+/**
+ * Hand parked drive control to the session that takes over the board.
+ *
+ * A handoff that left the paused drive and the open decision owned by the
+ * session being abandoned produced a supervisor that could only be told
+ * "resume it from that session" — the one thing a handoff exists to avoid.
+ * Ownership moves here, deliberately, rather than in board adoption, which
+ * every drive start performs and which must not bypass the pause guard.
+ */
+export function transferParkedDriveControl(cwd: string, newOwnerSession: string): void {
+  updateBoard(cwd, (board) => {
+    let changed = false;
+    if (board.pausedDrive && board.pausedDrive.ownerSession !== newOwnerSession) {
+      board.pausedDrive.ownerSession = newOwnerSession;
+      changed = true;
+    }
+    if (
+      board.activeDecision &&
+      !board.activeDecision.resolution &&
+      board.activeDecision.ownerSession !== newOwnerSession
+    ) {
+      board.activeDecision.ownerSession = newOwnerSession;
+      changed = true;
+    }
+    return changed;
+  });
+}
 
 /**
  * Dispatch `/maestro handoff` programmatically through the queued-message API.
@@ -61,6 +90,8 @@ export async function runHandoff(options: {
       withSession: async (fresh) => {
         try {
           adoptBoard(fresh);
+          const freshSession = fresh.sessionManager.getSessionFile();
+          if (freshSession) transferParkedDriveControl(fresh.cwd, freshSession);
           await fresh.sendMessage(
             { customType: MESSAGE_TYPE, content: briefing, display: true },
             { triggerTurn: true }

@@ -420,7 +420,10 @@ function loadMaestro(
   const unusedExecutor: StartExecutor = () => {
     throw new Error("unexpected executor start");
   };
-  maestro(pi as unknown as ExtensionAPI, { startExecutor: startExecutor ?? unusedExecutor });
+  maestro(pi as unknown as ExtensionAPI, {
+    startExecutor: startExecutor ?? unusedExecutor,
+    retryDelayScale: 0,
+  });
   assert.ok(command, "maestro must register its command");
   return {
     ctx,
@@ -3042,7 +3045,11 @@ test("slash drive can pause live work without aborting it, persist ownership, an
       await waitFor(() => loadBoard(cwd).pausedDrive !== undefined, "drive did not pause");
 
       const pausedBoard = loadBoard(cwd);
-      assert.deepEqual(pausedBoard.pausedDrive, { taskIds: ["T1"], ownerSession: owner });
+      assert.deepEqual(pausedBoard.pausedDrive, {
+        taskIds: ["T1"],
+        ownerSession: owner,
+        reason: "paused",
+      });
       assert.equal(findTask(pausedBoard, "T1")?.status, "ready_for_review");
       assert.equal(abortCalls, 0);
 
@@ -3060,7 +3067,7 @@ test("slash drive can pause live work without aborting it, persist ownership, an
   );
 });
 
-test("provider-blocked slash drive retries transient failures once and persists resumable state", async () => {
+test("provider-blocked slash drive retries transient failures twice and persists resumable state", async () => {
   await withBoard(
     (cwd) => {
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
@@ -3097,7 +3104,7 @@ test("provider-blocked slash drive retries transient failures once and persists 
                   finalReport: "",
                   touchedFiles: [],
                   aborted: false,
-                  errorMessage: "HTTP 429 too many requests",
+                  errorMessage: "connection reset by peer",
                   failureCause: "provider" as const,
                 }
               : {
@@ -3117,8 +3124,9 @@ test("provider-blocked slash drive retries transient failures once and persists 
 
       await command.handler("drive T1", ctx);
       await waitFor(() => loadBoard(cwd).pausedDrive !== undefined, "provider block was not saved");
-      assert.equal(starts, 2, "transient provider failure must be retried exactly once");
+      assert.equal(starts, 3, "transient provider failure must be retried exactly twice");
       assert.equal(findTask(loadBoard(cwd), "T1")?.status, "failed");
+      assert.equal(loadBoard(cwd).pausedDrive?.reason, "provider_blocked");
 
       blocked = false;
       await command.handler("resume", ctx);
@@ -3127,18 +3135,18 @@ test("provider-blocked slash drive retries transient failures once and persists 
         "provider-blocked drive did not resume and clean the completed board"
       );
       assert.equal(loadBoard(cwd).pausedDrive, undefined);
-      assert.equal(starts, 4);
+      assert.equal(starts, 5);
     }
   );
 });
 
-test("paused drive ownership blocks resume and abort from another session", async () => {
+test("a deliberately paused drive blocks resume and abort from another session", async () => {
   await withBoard(
     (cwd) => {
       const board: Board = {
         version: 1,
         nextTaskNumber: 1,
-        pausedDrive: { taskIds: ["T1"], ownerSession: owner },
+        pausedDrive: { taskIds: ["T1"], ownerSession: owner, reason: "paused" },
         tasks: [],
       };
       createTask(board, { title: "Work", brief: "do it", tier: "standard" });
@@ -3153,9 +3161,35 @@ test("paused drive ownership blocks resume and abort from another session", asyn
       assert.deepEqual(loadBoard(cwd).pausedDrive, {
         taskIds: ["T1"],
         ownerSession: owner,
+        reason: "paused",
       });
       assert.match(notices[0] ?? "", /Only the session that paused this drive may resume/);
       assert.match(notices[1] ?? "", /Only the session that paused this drive may abort/);
+    }
+  );
+});
+
+test("a provider-blocked paused drive can be released from another session", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = {
+        version: 1,
+        nextTaskNumber: 1,
+        pausedDrive: { taskIds: ["T1"], ownerSession: owner, reason: "provider_blocked" },
+        tasks: [],
+      };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd, undefined, other);
+
+      // The owning session is gone; quota is back. Nothing about this stop
+      // needs the old conversation, so the new session may release it.
+      await command.handler("abort", ctx);
+
+      assert.equal(loadBoard(cwd).pausedDrive, undefined);
+      assert.match(notices[0] ?? "", /Paused autonomous drive aborted/);
     }
   );
 });
@@ -3210,7 +3244,24 @@ test("slash abort cancels an active drive and its executor", async () => {
 test("handoff replaces the session once and briefs the fresh supervisor context", async () => {
   await withBoard(
     (cwd) => {
-      const board: Board = { version: 1, nextTaskNumber: 1, goal: "Ship reliably", tasks: [] };
+      const board: Board = {
+        version: 1,
+        nextTaskNumber: 1,
+        goal: "Ship reliably",
+        tasks: [],
+        // What a stopped drive leaves behind: the fresh supervisor must be
+        // able to resume it, not be told to go back to this session.
+        pausedDrive: { taskIds: ["T1"], ownerSession: owner, reason: "paused" },
+        activeDecision: {
+          id: "decision-1",
+          ownerSession: owner,
+          kind: "escalation_required",
+          taskIds: ["T1"],
+          evidence: "reviewers rejected twice",
+          allowedInterventions: ["handoff", "abort"],
+          createdAt: 1,
+        },
+      };
       createTask(board, { title: "Work", brief: "do it", tier: "standard" });
       saveBoard(cwd, board);
     },
@@ -3255,7 +3306,10 @@ test("handoff replaces the session once and briefs the fresh supervisor context"
       assert.deepEqual(sent[0]?.options, { triggerTurn: true });
       assert.match(JSON.stringify(sent[0]?.message), /Ship reliably/);
       assert.deepEqual(sessionNames, ["supervisor: Ship reliably"]);
-      assert.ok(loadBoard(cwd).ownerSessions?.includes("/sessions/fresh.jsonl"));
+      const after = loadBoard(cwd);
+      assert.ok(after.ownerSessions?.includes("/sessions/fresh.jsonl"));
+      assert.equal(after.pausedDrive?.ownerSession, "/sessions/fresh.jsonl");
+      assert.equal(after.activeDecision?.ownerSession, "/sessions/fresh.jsonl");
     }
   );
 });

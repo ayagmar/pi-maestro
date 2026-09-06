@@ -190,6 +190,30 @@ export function costCapLifted(
   return config.maxCostPerTask > attempt.usage.cost;
 }
 
+/**
+ * An attempt that was cut off from outside — by the per-attempt cost cap or
+ * by the provider dropping the connection or its quota — keeps its checkout:
+ * the edits are there and a fresh checkout from HEAD would discard them.
+ */
+export function continuesInterruptedAttempt(attempt: Attempt | undefined): boolean {
+  const kind = attempt?.failureReason?.kind;
+  return kind === "cost_cap" || kind === "provider_failure";
+}
+
+/**
+ * Whether a provider-interrupted attempt has a conversation worth resuming.
+ * Two turns that ended in "usage limit reached" carry nothing; an attempt
+ * that already read the tree and edited files carries most of its cost —
+ * two such attempts on one real task threw away $8.64 of context before a
+ * third started from scratch.
+ */
+export function resumesInterruptedSession(
+  attempt: Pick<Attempt, "failureReason" | "sessionFile" | "touchedFiles" | "usage"> | undefined
+): boolean {
+  if (attempt?.failureReason?.kind !== "provider_failure" || !attempt.sessionFile) return false;
+  return attempt.touchedFiles.length > 0 || attempt.usage.turns > 2;
+}
+
 export function consumesMaxAttempt(attempt: Attempt): boolean {
   return attempt.consumesAttempt ?? !attempt.providerFailure;
 }

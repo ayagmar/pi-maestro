@@ -22,6 +22,7 @@ import { DISCOVERY_TOOLS, discoveryInstructions } from "./discovery.js";
 import {
   accountPromptContext,
   buildCostCapResumePrompt,
+  buildProviderInterruptionResumePrompt,
   buildExecutorPrompt,
   buildRetryFollowUpPrompt,
 } from "./prompts.js";
@@ -45,6 +46,7 @@ import { claimDispatchLifecycle } from "./workflow-dispatch.js";
 import {
   consumesMaxAttempt,
   costCapLifted,
+  resumesInterruptedSession,
   endedUnretryably,
   lastReport,
   snapshot,
@@ -126,6 +128,8 @@ export async function executeTask(options: {
     task.status === "failed" &&
     previousAttempt?.failureReason?.kind === "cost_cap" &&
     costCapLifted(previousAttempt, config);
+  const continuesInterruptedSession =
+    task.status === "failed" && resumesInterruptedSession(previousAttempt);
 
   const consumedAttempts = task.attempts.filter(consumesMaxAttempt).length;
   if (consumedAttempts >= config.maxAttempts) {
@@ -219,7 +223,9 @@ export async function executeTask(options: {
       modelIndex === 0 &&
       !humanRetry &&
       !task.discovery &&
-      (task.status === "changes_requested" || continuesCostCappedAttempt) &&
+      (task.status === "changes_requested" ||
+        continuesCostCappedAttempt ||
+        continuesInterruptedSession) &&
       previousAttempt?.sessionFile !== undefined &&
       existsSync(previousAttempt.sessionFile)
         ? previousAttempt.sessionFile
@@ -227,7 +233,12 @@ export async function executeTask(options: {
     const basePrompt = resumeSessionFile
       ? continuesCostCappedAttempt
         ? buildCostCapResumePrompt(task, previousAttempt?.usage.cost ?? 0)
-        : buildRetryFollowUpPrompt(task)
+        : continuesInterruptedSession
+          ? buildProviderInterruptionResumePrompt(
+              task,
+              previousAttempt?.failureReason?.message ?? "provider failure"
+            )
+          : buildRetryFollowUpPrompt(task)
       : buildExecutorPrompt(task, dependencyReports);
     const prompt = task.discovery
       ? `${basePrompt}\n\n${discoveryInstructions(task.discovery.allowedWritePaths)}`
