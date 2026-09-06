@@ -46,6 +46,7 @@ export {
   type ProviderFailureClass,
 } from "./workflow-stop-policy.js";
 
+import { createQuotaStatusResolver, type QuotaStatusResolver } from "./provider-quota.js";
 import { executeTask } from "./workflow-execution.js";
 import { reviewTask } from "./workflow-review.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
@@ -131,6 +132,8 @@ export async function driveBoard(options: {
   onNotice?: (message: string) => void;
   /** Multiplier on provider retry/quota-probe delays; tests pass 0. Defaults to 1. */
   retryDelayScale?: number;
+  /** Provider usage-window lookup; defaults to the Codex usage endpoint. */
+  quotaStatus?: QuotaStatusResolver;
   /** Live run-budget source so mid-drive raises apply at the next boundary. Defaults to the captured config. */
   liveMaxRunCost?: () => number;
   humanRetryTaskId?: string;
@@ -164,7 +167,8 @@ export async function driveBoard(options: {
   let humanExecuteDispatched = false;
   let warnedInvisiblePaths = false;
   const providerRetries = newProviderRetryState();
-  const quotaWaitMinutes = config.providerQuotaWaitMinutes ?? 60;
+  const quotaWaitMinutes = config.providerQuotaWaitMinutes ?? 360;
+  const quotaStatus = options.quotaStatus ?? createQuotaStatusResolver();
   /**
    * Provider-failed tasks either get another automatic launch after a delay
    * (transient hiccup, exhausted quota window) or stop the drive. The wait is
@@ -172,7 +176,7 @@ export async function driveBoard(options: {
    * behind a sleeping drive.
    */
   const retryProviderFailures = async (tasks: Task[]): Promise<DriveStopReason | undefined> => {
-    const plan = planProviderRetry(tasks, providerRetries, quotaWaitMinutes);
+    const plan = await planProviderRetry(tasks, providerRetries, quotaWaitMinutes, quotaStatus);
     if (plan.kind === "stop") {
       return providerBlockedReason(tasks, providerRetries, quotaWaitMinutes);
     }

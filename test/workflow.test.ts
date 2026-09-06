@@ -1081,6 +1081,7 @@ test("drive completes an all-cancelled selection without launching work", async 
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1116,6 +1117,7 @@ test("drive stops when a review dispatch declines without making progress", asyn
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1165,6 +1167,7 @@ test("driveBoard names the artifact gate, not the reviewer, when no reviewer eve
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1215,6 +1218,7 @@ test("driveBoard approves dependent tasks across multiple rounds", async () => {
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1259,6 +1263,7 @@ test("driveBoard summary reports only the selected task scope", async () => {
 
     const summary = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1306,6 +1311,7 @@ test("driveBoard normalizes scoped task ids and still dispatches them", async ()
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1359,6 +1365,7 @@ test("driveBoard pauses after active executors finish and resumes from fresh boa
 
     const pausedRun = driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1388,6 +1395,7 @@ test("driveBoard pauses after active executors finish and resumes from fresh boa
 
     const resumed = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1434,6 +1442,7 @@ test("driveBoard aborts active executors through the existing AbortSignal", asyn
 
     const running = driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -1467,6 +1476,7 @@ test("driveBoard gives plan gates precedence and rechecks cost caps after pause"
     saveBoard(cwd, board);
     const options = {
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxRunCost: 1 },
       resolvedTiers: new Map([
@@ -1509,6 +1519,7 @@ test("driveBoard blocks dispatch when the remaining budget cannot fund a meaning
     let launched = 0;
     const summary = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxRunCost: 150, maxCostPerTask: 10 },
       resolvedTiers: new Map([
@@ -1548,6 +1559,7 @@ test("driveBoard blocks invalid plans before dispatch and leaves the board uncha
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([["standard", tier]]),
@@ -1585,6 +1597,7 @@ test("rejected executor outcomes persist a redacted failure and return a retryab
     let tracked = 0;
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 1 },
       resolvedTiers: new Map([
@@ -1643,6 +1656,7 @@ test("driveBoard stops repeated executor failures at the attempt cap", async () 
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 2 },
       resolvedTiers: new Map([
@@ -1678,6 +1692,7 @@ test("driveBoard enforces the combined raw launch limit before review dispatch",
     const limitedConfig = { ...config, maxTotalLaunchesPerRun: 1 };
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: limitedConfig,
       resolvedTiers: new Map([
@@ -1710,6 +1725,7 @@ test("a synchronous spawn failure consumes one raw launch slot", async () => {
     let launches = 0;
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxTotalLaunchesPerRun: 1 },
       resolvedTiers: new Map([
@@ -1739,6 +1755,7 @@ test("raw launch cap blocks an executor fallback before reserving another attemp
     let launches = 0;
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxTotalLaunchesPerRun: 1 },
       resolvedTiers: new Map<string, TierConfig>([
@@ -1782,6 +1799,7 @@ test("raw launch cap blocks a reviewer fallback before persisting its placeholde
     let launches = 0;
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxTotalLaunchesPerRun: 1 },
       resolvedTiers: new Map<string, TierConfig>([
@@ -1841,6 +1859,7 @@ test("a deleted recovery checkout fails only its own task, not the whole drive",
     const notices: string[] = [];
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, useWorktrees: true },
       resolvedTiers: new Map([
@@ -1882,6 +1901,7 @@ test("launch-bounded worktree dispatch creates no checkout for undispatched task
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: {
         ...config,
@@ -1933,6 +1953,7 @@ test("human execution retry is isolated from a dirty main tree when worktrees ar
     let executorCwd = "";
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, useWorktrees: false },
       resolvedTiers: new Map([
@@ -2008,6 +2029,7 @@ test("declined human retry claim removes its fresh clean unreferenced worktree",
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, useWorktrees: false },
       resolvedTiers: new Map([
@@ -2074,6 +2096,7 @@ test("human reviewer retry remains on the same attempt even at the execution cap
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 1 },
       resolvedTiers: new Map([
@@ -2296,6 +2319,7 @@ test("parallel non-worktree batches auto-isolate in per-task worktrees with a no
     const notices: string[] = [];
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, useWorktrees: false, maxParallel: 2, autoCommit: false },
       resolvedTiers: new Map([
@@ -3435,6 +3459,7 @@ test("drive retries one transient provider failure and completes without interve
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3466,6 +3491,7 @@ test("drive stops after two transient provider retries also fail", async () => {
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3505,6 +3531,7 @@ test("drive stops immediately for a persistent provider authentication failure",
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3565,6 +3592,7 @@ test("quota failures stop the drive at once when quota waiting is disabled, with
     };
     const options = {
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 1, providerQuotaWaitMinutes: 0 },
       resolvedTiers: new Map<string, TierConfig>([
@@ -3632,6 +3660,7 @@ test("an exhausted usage window is probed with backoff until the provider return
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3656,9 +3685,123 @@ test("an exhausted usage window is probed with backoff until the provider return
     );
     assert.match(
       notices[0] ?? "",
-      /quota exhausted; probing again in 2 min \(58 min of quota wait left\)/
+      /no reset clock is published; probing again in 2 min \(358 min of quota wait left\)/
     );
-    assert.match(notices[1] ?? "", /probing again in 4 min \(54 min of quota wait left\)/);
+    assert.match(notices[1] ?? "", /probing again in 4 min \(354 min of quota wait left\)/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a provider that publishes its reset clock is waited for exactly instead of probed", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-quota-clock-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let executions = 0;
+    const notices: string[] = [];
+    const resetAt = Date.now() + 3 * 3_600_000 + 10 * 60_000;
+    const lookups: string[] = [];
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({ finalReport: "Verified.\nVERDICT: APPROVE" })(options);
+      }
+      executions += 1;
+      if (executions === 1) {
+        return executor({
+          exitCode: 1,
+          usage: { input: 5801, output: 38, cost: 0.06, turns: 2 },
+          errorMessage: "Codex error: The usage limit has been reached",
+          failureCause: "provider",
+          model: "openai-codex/model",
+        })(options);
+      }
+      return executor({
+        usage: { input: 1, output: 1, cost: 0.5, turns: 3 },
+        finalReport: "## Report\nimplemented once the window reset",
+        model: "openai-codex/model",
+      })(options);
+    };
+
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async (provider) => {
+        lookups.push(provider);
+        return {
+          provider,
+          windows: [
+            { label: "5h", usedPercent: 100, resetAt },
+            { label: "Week", usedPercent: 54, resetAt: Date.now() + 4 * 86_400_000 },
+          ],
+        };
+      },
+      cwd,
+      config,
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", { thinking: "low", model: "openai-codex/model" }],
+        ["review", tier],
+      ]),
+      startExecutor,
+      onUpdate,
+      trackRun,
+      onNotice: (message) => notices.push(message),
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    assert.deepEqual(lookups, ["openai-codex"]);
+    assert.equal(executions, 2, "one wait for the published reset, no probes");
+    assert.equal(notices.length, 1);
+    assert.match(
+      notices[0] ?? "",
+      /openai-codex 5h window exhausted; waiting until it resets at \d{2}:\d{2} \(in 3h 1[01]m\)/
+    );
+    assert.equal(findTask(loadBoard(cwd), task.id)?.status, "approved");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an exhausted weekly window beyond the wait budget stops the drive with its reset time", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-quota-week-"));
+  try {
+    const { board } = boardWithTask();
+    saveBoard(cwd, board);
+    let executions = 0;
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async (provider) => ({
+        provider,
+        windows: [
+          { label: "5h", usedPercent: 100, resetAt: Date.now() + 3_600_000 },
+          { label: "Week", usedPercent: 100, resetAt: Date.now() + 2 * 86_400_000 },
+        ],
+      }),
+      cwd,
+      config,
+      resolvedTiers: new Map<string, TierConfig>([
+        ["standard", { thinking: "low", model: "openai-codex/model" }],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        executions += 1;
+        return executor({
+          exitCode: 1,
+          usage: { input: 1, output: 0, cost: 0.01, turns: 1 },
+          errorMessage: "Codex error: The usage limit has been reached",
+          failureCause: "provider",
+          model: "openai-codex/model",
+        })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "provider_blocked");
+    assert.equal(executions, 1, "a reset days away is not worth a single probe");
+    assert.match(
+      result.stoppedBecause.message,
+      /\[quota; openai-codex Week window resets at \d{2}:\d{2} \(in 48h 00m\), beyond the 360 min providerQuotaWaitMinutes budget\]/
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -3672,6 +3815,7 @@ test("quota probing stops once providerQuotaWaitMinutes is spent and reports the
     let executions = 0;
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, providerQuotaWaitMinutes: 5 },
       resolvedTiers: new Map<string, TierConfig>([
@@ -3760,6 +3904,7 @@ test("a WebSocket drop mid-attempt resumes the same session and checkout instead
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, useWorktrees: true },
       resolvedTiers: new Map([
@@ -3820,7 +3965,7 @@ test("provider blocking waits for active peer executors and starts no review bat
               finalReport: "",
               touchedFiles: [],
               aborted: false,
-              errorMessage: "HTTP 429",
+              errorMessage: "authentication failed: invalid API key",
               failureCause: "provider",
             })
           : peerOutcome,
@@ -3834,6 +3979,7 @@ test("provider blocking waits for active peer executors and starts no review bat
 
     const driving = driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxParallel: 2 },
       resolvedTiers: new Map([
@@ -3883,6 +4029,7 @@ test("transient fallback exhaustion auto-retries twice and preserves every launc
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -3954,6 +4101,7 @@ test("reviewer provider failures use fallbacks and auto-retry twice before block
     };
     const options = {
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map<string, TierConfig>([
@@ -4165,6 +4313,7 @@ test("drive bookkeeping stays fingerprint-fresh across reject with notes, retry,
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config,
       resolvedTiers: new Map([
@@ -4220,6 +4369,7 @@ test("markdown-formatted criterion findings are recognized across attempts", asy
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 5 },
       resolvedTiers: new Map([
@@ -4272,6 +4422,7 @@ test("second consecutive reviewer rejection escalates instead of re-dispatching"
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: ladderConfig,
       resolvedTiers: new Map([
@@ -4333,6 +4484,7 @@ test("rejections that raise only new findings keep converging instead of escalat
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 5 },
       resolvedTiers: new Map([
@@ -4433,6 +4585,7 @@ test("escalation clears and the drive continues after the counter is reset", asy
     saveBoard(cwd, board);
     const options = {
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, tiers: { standard: tier, complex: tier } },
       resolvedTiers: new Map([
@@ -4600,6 +4753,7 @@ test("a reviewer cannot approve work the executor reported as blocked", async ()
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 1 },
       resolvedTiers: new Map<string, TierConfig>([
@@ -4693,6 +4847,7 @@ test("a first review failing four criteria stops the drive instead of retrying t
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 5 },
       resolvedTiers: new Map([
@@ -4793,6 +4948,7 @@ test("launch cost caps combine the per-role cap with the remaining run budget", 
 
     await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxCostPerTask: 5, maxCostPerReview: 2.5, maxRunCost: 3 },
       resolvedTiers: new Map([
@@ -4852,6 +5008,7 @@ test("a rejection retry resumes the prior attempt's session with a findings-only
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 3 },
       resolvedTiers: new Map([
@@ -4948,6 +5105,7 @@ test("a raised cost cap resumes the capped attempt in its own checkout and sessi
 
     const capped = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: cappedConfig,
       resolvedTiers: tiers,
@@ -4968,6 +5126,7 @@ test("a raised cost cap resumes the capped attempt in its own checkout and sessi
     // Same cap again: still capped, no launch is billed.
     const unchanged = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: cappedConfig,
       resolvedTiers: tiers,
@@ -4981,6 +5140,7 @@ test("a raised cost cap resumes the capped attempt in its own checkout and sessi
     // Raised cap: the same attempt continues where it stopped.
     const resumed = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...cappedConfig, maxCostPerTask: 5 },
       resolvedTiers: tiers,
@@ -5041,6 +5201,7 @@ test("retryContext fresh keeps clean-context retries and injects the prior repor
 
     const result = await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 3, retryContext: "fresh" },
       resolvedTiers: new Map([
@@ -5093,6 +5254,7 @@ test("reviewer prose and verdict lines do not become findings", async () => {
 
     await driveBoard({
       retryDelayScale: 0,
+      quotaStatus: async () => undefined,
       cwd,
       config: { ...config, maxAttempts: 1 },
       resolvedTiers: new Map([

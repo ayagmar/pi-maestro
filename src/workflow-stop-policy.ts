@@ -1,5 +1,6 @@
 import { updateTask } from "./board.js";
 import { taskUsage, truncateText } from "./format.js";
+import { formatResetClock, quotaReopensAt, type QuotaStatusResolver } from "./provider-quota.js";
 import { redactFailureMessage } from "./runner.js";
 import { type MaestroConfig, type Task } from "./types.js";
 import {
@@ -233,8 +234,12 @@ export interface ProviderRetryState {
   transientRetries: Map<string, number>;
   /** Milliseconds this drive has already spent waiting for quota. */
   quotaWaitedMs: number;
-  /** Number of quota probes already made in this drive. */
+  /** Number of blind quota probes already made in this drive. */
   quotaProbes: number;
+  /** Provider reset clock the drive last waited for, for the stop message. */
+  quotaResetAt?: number;
+  /** Why a known reset could not be waited for, for the stop message. */
+  quotaStopNote?: string;
 }
 
 export function newProviderRetryState(): ProviderRetryState {
@@ -245,6 +250,14 @@ export type ProviderRetryPlan =
   | { kind: "retry"; delayMs: number; classes: ProviderFailureClass[]; note: string }
   | { kind: "stop" };
 
+/** Slack after a published reset so the first request lands inside the new window. */
+export const QUOTA_RESET_GRACE_MS = 45_000;
+
+function failedProvider(task: Task): string | undefined {
+  const attempt = task.attempts.at(-1);
+  return attempt?.reviewLaunches?.at(-1)?.provider ?? attempt?.provider;
+}
+
 /**
  * Decide whether provider-failed tasks get another automatic launch, and
  * after what delay. Any persistent failure stops the drive: waiting cannot
@@ -252,29 +265,60 @@ export type ProviderRetryPlan =
  * times per task; quota failures wait with backoff until
  * `providerQuotaWaitMinutes` is spent.
  */
-export function planProviderRetry(
+export async function planProviderRetry(
   tasks: Task[],
   state: ProviderRetryState,
-  quotaWaitMinutes: number
-): ProviderRetryPlan {
+  quotaWaitMinutes: number,
+  quotaStatus: QuotaStatusResolver,
+  now: () => number = Date.now
+): Promise<ProviderRetryPlan> {
   const classes = tasks.map((task) => classifyProviderFailure(providerFailureMessage(task)));
   if (classes.includes("persistent")) return { kind: "stop" };
 
   let delayMs = 0;
   const notes: string[] = [];
   if (classes.includes("quota")) {
-    const probe =
-      QUOTA_PROBE_DELAYS_MS[Math.min(state.quotaProbes, QUOTA_PROBE_DELAYS_MS.length - 1)];
-    if (probe === undefined) return { kind: "stop" };
     const budgetMs = quotaWaitMinutes * 60_000;
-    if (state.quotaWaitedMs + probe > budgetMs) return { kind: "stop" };
-    state.quotaProbes += 1;
-    state.quotaWaitedMs += probe;
-    delayMs = Math.max(delayMs, probe);
-    const remaining = Math.max(0, Math.round((budgetMs - state.quotaWaitedMs) / 60_000));
-    notes.push(
-      `provider quota exhausted; probing again in ${Math.round(probe / 60_000)} min (${remaining} min of quota wait left)`
+    const quotaTasks = tasks.filter((_task, index) => classes[index] === "quota");
+    const providers = [...new Set(quotaTasks.map(failedProvider))].filter(
+      (provider): provider is string => provider !== undefined
     );
+    // Ask each blocked provider for its own reset clock first. A provider that
+    // publishes one is waited for exactly; the drive falls back to blind
+    // probing only when nothing is known.
+    let reopensAt: { provider: string; label: string; resetAt: number } | undefined;
+    for (const provider of providers) {
+      const status = await quotaStatus(provider);
+      const window = status ? quotaReopensAt(status, now()) : undefined;
+      if (window && (!reopensAt || window.resetAt > reopensAt.resetAt)) {
+        reopensAt = { provider, label: window.label, resetAt: window.resetAt };
+      }
+    }
+    if (reopensAt) {
+      const wait = reopensAt.resetAt + QUOTA_RESET_GRACE_MS - now();
+      state.quotaResetAt = reopensAt.resetAt;
+      if (state.quotaWaitedMs + wait > budgetMs) {
+        state.quotaStopNote = `${reopensAt.provider} ${reopensAt.label} window resets at ${formatResetClock(reopensAt.resetAt, now())}, beyond the ${quotaWaitMinutes} min providerQuotaWaitMinutes budget`;
+        return { kind: "stop" };
+      }
+      state.quotaWaitedMs += wait;
+      delayMs = Math.max(delayMs, wait);
+      notes.push(
+        `${reopensAt.provider} ${reopensAt.label} window exhausted; waiting until it resets at ${formatResetClock(reopensAt.resetAt, now())}`
+      );
+    } else {
+      const probe =
+        QUOTA_PROBE_DELAYS_MS[Math.min(state.quotaProbes, QUOTA_PROBE_DELAYS_MS.length - 1)];
+      if (probe === undefined) return { kind: "stop" };
+      if (state.quotaWaitedMs + probe > budgetMs) return { kind: "stop" };
+      state.quotaProbes += 1;
+      state.quotaWaitedMs += probe;
+      delayMs = Math.max(delayMs, probe);
+      const remaining = Math.max(0, Math.round((budgetMs - state.quotaWaitedMs) / 60_000));
+      notes.push(
+        `provider quota exhausted and no reset clock is published; probing again in ${Math.round(probe / 60_000)} min (${remaining} min of quota wait left)`
+      );
+    }
   }
   const transientTasks = tasks.filter((_task, index) => classes[index] === "transient");
   if (transientTasks.length > 0) {
@@ -332,7 +376,7 @@ export function providerBlockedTask(task: Task): boolean {
 
 export function providerBlockedReason(
   tasks: Task[],
-  state: Pick<ProviderRetryState, "transientRetries" | "quotaWaitedMs">,
+  state: Pick<ProviderRetryState, "transientRetries" | "quotaWaitedMs" | "quotaStopNote">,
   quotaWaitMinutes: number
 ): DriveStopReason {
   const details = tasks.map((task) => {
@@ -347,11 +391,13 @@ export function providerBlockedReason(
     const retry =
       failureClass === "transient" && retries > 0
         ? `; auto-retried ${retries}× and failed again`
-        : failureClass === "quota" && state.quotaWaitedMs > 0
-          ? `; waited ${Math.round(state.quotaWaitedMs / 60_000)} min of the ${quotaWaitMinutes} min quota wait`
-          : failureClass === "quota"
-            ? "; quota waiting is disabled (providerQuotaWaitMinutes 0)"
-            : "";
+        : failureClass === "quota" && state.quotaStopNote
+          ? `; ${state.quotaStopNote}`
+          : failureClass === "quota" && state.quotaWaitedMs > 0
+            ? `; waited ${Math.round(state.quotaWaitedMs / 60_000)} min of the ${quotaWaitMinutes} min quota wait`
+            : failureClass === "quota"
+              ? "; quota waiting is disabled (providerQuotaWaitMinutes 0)"
+              : "";
     return `${task.id} [${failureClass}${retry}]: ${identity}${message ? ` — ${redactFailureMessage(message)}` : ""}`;
   });
   return {

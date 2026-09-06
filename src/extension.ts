@@ -28,6 +28,7 @@ import { LivePaneController } from "./live-pane-controller.js";
 import { manuallyApproveTask } from "./manual-approval.js";
 import { showPlanReview } from "./plan-review-controller.js";
 import { createRenderThrottle } from "./render-scheduler.js";
+import { type QuotaStatusResolver } from "./provider-quota.js";
 import { startExecutor as defaultStartExecutor } from "./runner.js";
 import { SessionNavigator } from "./session-navigator.js";
 import { projectStatus } from "./status.js";
@@ -53,6 +54,8 @@ export interface MaestroDependencies {
   startExecutor: typeof defaultStartExecutor;
   /** Multiplier on provider retry/quota-probe delays; tests pass 0. */
   retryDelayScale?: number;
+  /** Provider usage-window lookup; tests inject a fake. */
+  quotaStatus?: QuotaStatusResolver;
 }
 
 export default function maestro(
@@ -275,6 +278,7 @@ export default function maestro(
     ...(dependencies.retryDelayScale === undefined
       ? {}
       : { retryDelayScale: dependencies.retryDelayScale }),
+    ...(dependencies.quotaStatus === undefined ? {} : { quotaStatus: dependencies.quotaStatus }),
     isRuntimeActive: () => lifecycleState.isActive(),
     adoptBoard,
     refreshUI,

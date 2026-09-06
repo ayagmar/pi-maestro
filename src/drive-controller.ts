@@ -18,6 +18,7 @@ import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { truncateCharacters, truncateText } from "./format.js";
 import { preflightWorkflow } from "./preflight.js";
+import { type QuotaStatusResolver } from "./provider-quota.js";
 import {
   type startExecutor as defaultStartExecutor,
   type ExecutorHandle,
@@ -71,6 +72,8 @@ export interface DriveRuntimeServices {
   startExecutor: typeof defaultStartExecutor;
   /** Multiplier on provider retry/quota-probe delays; tests pass 0. */
   retryDelayScale?: number;
+  /** Provider usage-window lookup; tests inject a fake. */
+  quotaStatus?: QuotaStatusResolver;
   isRuntimeActive(): boolean;
   adoptBoard(ctx: ExtensionContext): void;
   refreshUI(ctx: ExtensionContext): void;
@@ -580,6 +583,7 @@ export class DriveRuntimeController {
       ...(services.retryDelayScale === undefined
         ? {}
         : { retryDelayScale: services.retryDelayScale }),
+      ...(services.quotaStatus === undefined ? {} : { quotaStatus: services.quotaStatus }),
       // Budget raises take effect at the next boundary of a running drive.
       liveMaxRunCost: () => {
         try {

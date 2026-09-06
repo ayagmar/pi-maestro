@@ -45,7 +45,7 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   decisionNudgeMinutes: 5,
   logEvents: "compact",
   maxLogBytesPerRun: 1_000_000,
-  providerQuotaWaitMinutes: 60,
+  providerQuotaWaitMinutes: 360,
   watchdogIdleSeconds: 120,
   watchdogWarningTurns: 12,
   watchdogTerminationTurns: 4,
@@ -232,7 +232,7 @@ export function mergeConfig(
     logEvents: override.logEvents ?? base.logEvents ?? "compact",
     maxLogBytesPerRun: override.maxLogBytesPerRun ?? base.maxLogBytesPerRun ?? 1_000_000,
     providerQuotaWaitMinutes:
-      override.providerQuotaWaitMinutes ?? base.providerQuotaWaitMinutes ?? 60,
+      override.providerQuotaWaitMinutes ?? base.providerQuotaWaitMinutes ?? 360,
     watchdogIdleSeconds: override.watchdogIdleSeconds ?? base.watchdogIdleSeconds ?? 120,
     watchdogWarningTurns: override.watchdogWarningTurns ?? base.watchdogWarningTurns ?? 12,
     watchdogTerminationTurns:
@@ -656,7 +656,7 @@ export function describeConfig(config: MaestroConfig): string {
     `decisionNudgeMinutes: ${config.decisionNudgeMinutes ?? 5}`,
     `logEvents: ${config.logEvents ?? "compact"}`,
     `maxLogBytesPerRun: ${config.maxLogBytesPerRun === 0 ? "unlimited" : (config.maxLogBytesPerRun ?? 1_000_000)}`,
-    `providerQuotaWaitMinutes: ${config.providerQuotaWaitMinutes ?? 60}`,
+    `providerQuotaWaitMinutes: ${config.providerQuotaWaitMinutes ?? 360}`,
     `watchdogIdleSeconds: ${config.watchdogIdleSeconds ?? 120}`,
     `watchdogWarningTurns: ${config.watchdogWarningTurns ?? 12}`,
     `watchdogTerminationTurns: ${config.watchdogTerminationTurns ?? 4}`,

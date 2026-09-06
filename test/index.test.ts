@@ -423,6 +423,7 @@ function loadMaestro(
   maestro(pi as unknown as ExtensionAPI, {
     startExecutor: startExecutor ?? unusedExecutor,
     retryDelayScale: 0,
+    quotaStatus: async () => undefined,
   });
   assert.ok(command, "maestro must register its command");
   return {
