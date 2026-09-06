@@ -2145,6 +2145,8 @@ test("review refuses execution inputs changed in config after dispatch", async (
     const { board, task } = boardWithTask();
     task.brief = "Read-only investigation with no-file changes";
     task.writePaths = [];
+    // The confirm count is part of the execution contract the attempt ran under.
+    task.reviewPolicy = "confirm";
     saveBoard(cwd, board);
     await executeTask({
       cwd,
@@ -2158,7 +2160,8 @@ test("review refuses execution inputs changed in config after dispatch", async (
     });
 
     const changedConfig = structuredClone(config);
-    changedConfig.tiers.standard = { thinking: "high" };
+    changedConfig.reviewRequiredApprovals = 3;
+    changedConfig.maxReviewerLaunches = 6;
     saveConfig("project", cwd, changedConfig);
     const ready = findTask(loadBoard(cwd), task.id);
     assert.ok(ready);
@@ -4927,12 +4930,23 @@ test("adding a tier fallback does not invalidate an executed candidate", () => {
       after.fingerprint,
       "fallbacks are dispatch resilience, not work identity"
     );
-    // Changing the model or thinking still invalidates, as it must.
+    // Changing the model or thinking is provenance too: the artifact the
+    // executor built and the reviewer judged is unchanged by it.
     const changedModel: MaestroConfig = {
       ...config,
-      tiers: { ...config.tiers, standard: { thinking: "high" } },
+      tiers: { ...config.tiers, standard: { thinking: "high", model: "other/model" } },
     };
-    assert.notEqual(taskFingerprint(board, task, changedModel)?.fingerprint, before.fingerprint);
+    assert.equal(taskFingerprint(board, task, changedModel)?.fingerprint, before.fingerprint);
+    // The task's tier *name* and review policy remain execution inputs.
+    const changedTier = { ...task, tier: "trivial" };
+    const tieredConfig: MaestroConfig = {
+      ...config,
+      tiers: { ...config.tiers, trivial: { thinking: "low" } },
+    };
+    assert.notEqual(
+      taskFingerprint(board, changedTier, tieredConfig)?.fingerprint,
+      before.fingerprint
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

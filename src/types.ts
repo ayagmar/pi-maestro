@@ -162,7 +162,12 @@ export interface ArtifactProvenance {
 }
 
 export interface ApprovedProvenance {
-  version: 1;
+  /**
+   * 1: the execution component hashed the tier's model/thinking/tools.
+   * 2: execution covers only the tier name, review policy, and confirm count;
+   *    which model produced or reviewed the artifact is provenance, not identity.
+   */
+  version: 1 | 2;
   fingerprint: string;
   componentHashes: {
     contract: string;

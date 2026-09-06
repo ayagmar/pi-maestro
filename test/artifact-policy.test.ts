@@ -52,6 +52,49 @@ test("task fingerprints are deterministic, normalized, and exclude runtime contr
   assert.match(first.fingerprint, /^[a-f0-9]{64}$/);
 });
 
+test("switching tier models, thinking, or reviewer tools never changes a fingerprint", () => {
+  const { board, task, config } = fixture();
+  const before = taskFingerprint(board, task, config);
+  assert.ok(before);
+  config.tiers.standard = { thinking: "high", model: "other-provider/other-model" };
+  config.tiers.review = { thinking: "low", model: "another/reviewer", tools: "read" };
+  const after = taskFingerprint(board, task, config);
+  assert.equal(after?.fingerprint, before.fingerprint);
+  assert.equal(after?.componentHashes.execution, before.componentHashes.execution);
+
+  // The review policy and confirm count do remain execution inputs.
+  task.reviewPolicy = "confirm";
+  const confirm = taskFingerprint(board, task, config);
+  assert.notEqual(confirm?.componentHashes.execution, before.componentHashes.execution);
+  config.reviewRequiredApprovals = 3;
+  assert.notEqual(
+    taskFingerprint(board, task, config)?.componentHashes.execution,
+    confirm?.componentHashes.execution
+  );
+});
+
+test("version-1 proofs stay fresh across a model switch and go stale on a contract change", () => {
+  const { board, task, config } = fixture();
+  forceStatus(task, "approved");
+  const proof = captureApprovedProvenance(board, task, config);
+  assert.ok(proof);
+  assert.equal(proof.version, 2);
+  // Simulate a proof captured by the previous shape: a different execution
+  // digest and total fingerprint, but the same contract/verification/
+  // dependency/artifact identities.
+  task.approvedProvenance = {
+    ...proof,
+    version: 1,
+    fingerprint: "f".repeat(64),
+    componentHashes: { ...proof.componentHashes, execution: "e".repeat(64) },
+  };
+  assert.equal(completionFreshness(board, task, config).state, "fresh");
+  config.tiers.standard = { thinking: "low", model: "cheaper/model" };
+  assert.equal(completionFreshness(board, task, config).state, "fresh");
+  task.brief = "changed contract";
+  assert.match(completionFreshness(board, task, config).reason, /contract/);
+});
+
 test("freshness detects legacy, component, artifact, and transitive dependency staleness", () => {
   const { board, task, config } = fixture();
   forceStatus(task, "approved");

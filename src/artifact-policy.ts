@@ -6,25 +6,13 @@ import {
   type Board,
   type MaestroConfig,
   type Task,
-  type TierConfig,
 } from "./types.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const canonical = (value: unknown): string => JSON.stringify(value);
 
-function tierIdentity(tier: TierConfig | undefined): object | undefined {
-  if (!tier) return undefined;
-  // Fallbacks are dispatch resilience, not work identity: adding a fallback
-  // model changes nothing about what an executor already built or how a
-  // reviewer would judge it. Including them here invalidated every in-flight
-  // candidate the moment an operator added provider redundancy — exactly the
-  // situation where re-executing everything is least affordable.
-  return {
-    model: tier.model ?? null,
-    thinking: tier.thinking,
-    tools: tier.tools ?? null,
-  };
-}
+/** Fingerprint shape of proofs captured by this version of Maestro. */
+export const PROVENANCE_VERSION = 2;
 
 function authoritativeArtifact(task: Task): ApprovedProvenance["artifact"] | undefined {
   const latestAttempt = task.attempts.at(-1);
@@ -64,9 +52,7 @@ function fingerprintTask(
 ): TaskFingerprint | undefined {
   if (visited.has(task.id)) return undefined;
   const nextVisited = new Set(visited).add(task.id);
-  const taskTier = config.tiers[task.tier];
-  const reviewTier = config.tiers.review;
-  if (!taskTier || !reviewTier) return undefined;
+  if (!config.tiers[task.tier] || !config.tiers.review) return undefined;
   const profileName = task.verificationProfile ?? config.defaultVerificationProfile;
   const profile = profileName ? config.verificationProfiles?.[profileName] : undefined;
   if (profileName && !profile) return undefined;
@@ -102,10 +88,15 @@ function fingerprintTask(
       : null,
     dependsOn: dependencyIds,
   };
+  // Which model, thinking level, or tool set produced or judged the artifact
+  // is provenance, not identity: the reviewed Git tree is the same tree
+  // afterwards. Hashing tier identity here meant that switching models to
+  // dodge a quota wall marked every approved task on a real board stale and
+  // offered re-executing $90 of integrated, reviewed work as the only remedy.
+  // Fallbacks were excluded for the same reason earlier; the primary model is
+  // no different once the work exists.
   const execution = {
     tier: task.tier,
-    taskTier: tierIdentity(taskTier),
-    reviewTier: tierIdentity(reviewTier),
     reviewPolicy: task.reviewPolicy ?? "single",
     confirmApprovals: task.reviewPolicy === "confirm" ? config.reviewRequiredApprovals : null,
   };
@@ -121,7 +112,7 @@ function fingerprintTask(
     dependencies: digest(canonical(dependencyIdentities)),
   };
   return {
-    fingerprint: digest(canonical({ version: 1, ...components })),
+    fingerprint: digest(canonical({ version: PROVENANCE_VERSION, ...components })),
     componentHashes: components,
     dependencyIdentities,
   };
@@ -175,12 +166,15 @@ function freshness(
   if (!current)
     return { state: "unavailable", reason: "effective execution inputs are unavailable" };
   const approved = task.approvedProvenance;
-  const priorities: Array<keyof ApprovedProvenance["componentHashes"]> = [
-    "contract",
-    "execution",
-    "verification",
-    "dependencies",
-  ];
+  // A version-1 proof hashed the tier's model/thinking/tools into `execution`,
+  // so its execution digest and total fingerprint can never equal a v2
+  // computation. Its contract, verification, dependency, and artifact
+  // identities are still exact; judge it by those and let the next approval
+  // capture a v2 proof.
+  const legacyExecutionShape = approved.version === 1;
+  const priorities: Array<keyof ApprovedProvenance["componentHashes"]> = legacyExecutionShape
+    ? ["contract", "verification", "dependencies"]
+    : ["contract", "execution", "verification", "dependencies"];
   for (const component of priorities) {
     if (current.componentHashes[component] !== approved.componentHashes[component]) {
       const result: CompletionFreshness = {
@@ -200,7 +194,7 @@ function freshness(
   ) {
     return { state: "stale", reason: "approved artifact identity changed" };
   }
-  if (current.fingerprint !== approved.fingerprint) {
+  if (!legacyExecutionShape && current.fingerprint !== approved.fingerprint) {
     return { state: "stale", reason: "fingerprint changed after approval" };
   }
   const result: CompletionFreshness = {
@@ -220,7 +214,7 @@ export function captureApprovedProvenance(
   const fingerprint = taskFingerprint(board, task, config);
   const artifact = authoritativeArtifact(task);
   if (!fingerprint || !artifact) return undefined;
-  return { version: 1, ...fingerprint, artifact, approvedAt };
+  return { version: PROVENANCE_VERSION, ...fingerprint, artifact, approvedAt };
 }
 
 function pathInWriteScope(path: string, writePaths: string[]): boolean {
