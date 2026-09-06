@@ -201,6 +201,27 @@ export function buildCostCapResumePrompt(task: Task, spent: number): string {
   ]);
 }
 
+/**
+ * Continuation after the provider cut an attempt off (dropped connection,
+ * exhausted usage window). Nothing was wrong with the work; the session and
+ * checkout are the same, so the executor continues instead of re-reading.
+ */
+export function buildProviderInterruptionResumePrompt(task: Task, failure: string): string {
+  const criteria = task.successCriteria?.length
+    ? `\n\n## Success criteria (unchanged)\n${task.successCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n")}`
+    : "";
+  return joinBudgetedSections([
+    `Your previous turn on Task ${task.id} (${task.title}) was interrupted by the model provider (${truncateContext(failure, 200)}), not because anything was wrong with your work. Provider access is back and this is a continuation of the same attempt: every edit you made is still in the working tree on this branch. Continue from where you stopped rather than starting over or re-reading what you already know. If your last tool call may not have completed, check its effect before repeating it.${criteria}`,
+    [
+      "## Stop rule",
+      "Finish the remaining work, run the most relevant verification, and check every acceptance criterion.",
+      "",
+      "## Report",
+      "End your final message with a `## Report` section covering the whole task: what was done across the attempt, files changed, how it was verified, open questions or risks.",
+    ].join("\n"),
+  ]);
+}
+
 /** Prompt for an adversarial reviewer with read-only tools and a fresh context. */
 export function buildReviewPrompt(task: Task, report: string): string {
   const sections = [

@@ -35,6 +35,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `statusWaitSeconds` | 60 | 0–240; awaited-drive heartbeat interval, 0 disables pulsing |
 | `decisionNudgeMinutes` | 5 | 0–240; minutes a delivered decision may sit unresolved with no board activity before the owner session is re-nudged (up to 3 reminders). A provider failure can kill the turn a decision triggered; without the nudge the board sits blocked while the orchestrator looks idle. 0 disables. |
 | `logEvents` | `compact` | `compact` or `full` |
+| `providerQuotaWaitMinutes` | 60 | 0–1440 | How long a drive keeps waiting for a provider whose quota or usage window is exhausted (`usage limit`, `429`, `rate limit`) before stopping with `provider_blocked`. Probes back off 2, 4, 8, then 15 minutes and are cheap (each is a failed launch that never consumed an attempt). 0 stops at the first quota failure. Credential, billing, and unknown-model failures never wait. |
 | `maxLogBytesPerRun` | 1000000 | Per-launch event log cap; 0 means unlimited. Whole lines only: when the cap is hit one `maestro_log_capped` marker is written and the live pane shows a notice. Raise it for verbose builds (Maven, Gradle) if you want the pane to follow the whole run. |
 | `watchdogIdleSeconds` | 120 | 0–86400 |
 | `watchdogWarningTurns` | 12 | 0–10000 |

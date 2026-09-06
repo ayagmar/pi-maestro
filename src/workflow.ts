@@ -25,6 +25,7 @@ import {
   DRIVE_ROUND_LIMIT,
   type DriveStopReason,
   type DriveSummary,
+  continuesInterruptedAttempt,
   snapshot,
   type TaskSnapshot,
 } from "./workflow-policy.js";
@@ -32,9 +33,11 @@ import {
   escalatedTask,
   escalationReason,
   noProgressReason,
+  newProviderRetryState,
+  planProviderRetry,
   providerBlockedReason,
   providerBlockedTask,
-  scheduleTransientProviderRetry,
+  resetOperationalReviewFailures,
   terminalReviewConvergence,
 } from "./workflow-stop-policy.js";
 
@@ -126,6 +129,8 @@ export async function driveBoard(options: {
   onRetentionWarning?: (warning: string) => void;
   /** Operational notices (isolation escalation, serialization) surfaced to the user. */
   onNotice?: (message: string) => void;
+  /** Multiplier on provider retry/quota-probe delays; tests pass 0. Defaults to 1. */
+  retryDelayScale?: number;
   /** Live run-budget source so mid-drive raises apply at the next boundary. Defaults to the captured config. */
   liveMaxRunCost?: () => number;
   humanRetryTaskId?: string;
@@ -158,7 +163,32 @@ export async function driveBoard(options: {
   let rawLaunches = 0;
   let humanExecuteDispatched = false;
   let warnedInvisiblePaths = false;
-  const transientProviderRetries = new Set<string>();
+  const providerRetries = newProviderRetryState();
+  const quotaWaitMinutes = config.providerQuotaWaitMinutes ?? 60;
+  /**
+   * Provider-failed tasks either get another automatic launch after a delay
+   * (transient hiccup, exhausted quota window) or stop the drive. The wait is
+   * abortable and honours a pause request so an operator is never stuck
+   * behind a sleeping drive.
+   */
+  const retryProviderFailures = async (tasks: Task[]): Promise<DriveStopReason | undefined> => {
+    const plan = planProviderRetry(tasks, providerRetries, quotaWaitMinutes);
+    if (plan.kind === "stop") {
+      return providerBlockedReason(tasks, providerRetries, quotaWaitMinutes);
+    }
+    resetOperationalReviewFailures(cwd, tasks);
+    options.onNotice?.(`${tasks.map((task) => task.id).join(", ")}: ${plan.note}`);
+    const interrupted = await waitUnlessStopped(
+      plan.delayMs * (options.retryDelayScale ?? 1),
+      signal,
+      shouldPause
+    );
+    if (interrupted === "aborted") return { code: "aborted", message: "drive aborted by user" };
+    if (interrupted === "paused") {
+      return { code: "paused", message: "drive paused while waiting for provider capacity" };
+    }
+    return undefined;
+  };
   const currentFingerprintConfig = (): MaestroConfig => loadConfig(cwd);
   // The run budget is re-read every time it is consulted, so raising it with
   // /maestro config budget while a drive is running takes effect at the next
@@ -369,12 +399,12 @@ export async function driveBoard(options: {
         try {
           for (const task of dispatchable) {
             const previous = task.attempts.at(-1);
-            // Rejected work and a cost-capped attempt both continue in their
-            // own checkout: the edits are there, and a fresh checkout from HEAD
-            // would silently discard them.
+            // Rejected work, a cost-capped attempt, and an attempt the provider
+            // cut off all continue in their own checkout: the edits are there,
+            // and a fresh checkout from HEAD would silently discard them.
             const continues =
               task.status === "changes_requested" ||
-              (task.status === "failed" && previous?.failureReason?.kind === "cost_cap");
+              (task.status === "failed" && continuesInterruptedAttempt(previous));
             const retained =
               task.id.toUpperCase() !== humanRetryId &&
               continues &&
@@ -503,10 +533,9 @@ export async function driveBoard(options: {
         (task) => isSelected(task) && task.status === "failed" && providerBlockedTask(task)
       );
       if (blockedAfterRuns.length > 0) {
-        if (scheduleTransientProviderRetry(cwd, blockedAfterRuns, transientProviderRetries)) {
-          continue;
-        }
-        return finish(providerBlockedReason(blockedAfterRuns, transientProviderRetries));
+        const stop = await retryProviderFailures(blockedAfterRuns);
+        if (stop) return finish(stop);
+        continue;
       }
       const reviewMaxRunCost = liveMaxRunCost();
       const currentBudgetWarning =
@@ -642,10 +671,9 @@ export async function driveBoard(options: {
       }
       const providerBlocked = freshTasks.filter(providerBlockedTask);
       if (providerBlocked.length > 0) {
-        if (scheduleTransientProviderRetry(cwd, providerBlocked, transientProviderRetries)) {
-          continue;
-        }
-        return finish(providerBlockedReason(providerBlocked, transientProviderRetries));
+        const stop = await retryProviderFailures(providerBlocked);
+        if (stop) return finish(stop);
+        continue;
       }
       const disagreements = freshTasks.filter(
         (task) => terminalReviewConvergence(task) === "disagreement"
@@ -755,3 +783,36 @@ export async function driveBoard(options: {
 
 export { artifactFindings } from "./artifact-policy.js";
 export { sessionLabel, taskCommitMessage } from "./workflow-review-policy.js";
+
+/**
+ * Sleep that ends early on abort or a pause request (polled every second, the
+ * granularity at which operators expect a pause to take effect).
+ */
+export async function waitUnlessStopped(
+  delayMs: number,
+  signal: AbortSignal | undefined,
+  shouldPause: (() => boolean) | undefined
+): Promise<"elapsed" | "aborted" | "paused"> {
+  const deadline = Date.now() + delayMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) return "aborted";
+    if (shouldPause?.()) return "paused";
+    await new Promise<void>((resolve) => {
+      const remaining = Math.min(1_000, deadline - Date.now());
+      const timer = setTimeout(
+        () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        },
+        Math.max(0, remaining)
+      );
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+  if (signal?.aborted) return "aborted";
+  return shouldPause?.() ? "paused" : "elapsed";
+}

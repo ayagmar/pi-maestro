@@ -10,7 +10,11 @@ import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { notify, runHandoff } from "./handoff.js";
 import { buildOrchestratorBriefing, buildSupervisorBriefing } from "./prompts.js";
 import { captureBoardLogs, pruneStaleLogs } from "./retention.js";
-import { canonicalTaskIds, sessionCanControlDrive } from "./session-control.js";
+import {
+  canonicalTaskIds,
+  sessionCanControlDrive,
+  sessionCanResumePausedDrive,
+} from "./session-control.js";
 import { type PausedDriveState } from "./types.js";
 import { inspectGit } from "./worktree.js";
 
@@ -198,7 +202,7 @@ export async function handleResumeCommand(
     notify(ctx, "Executors are already running.", "warning");
     return;
   }
-  if (!sessionCanControlDrive(paused.ownerSession, ctx.sessionManager.getSessionFile())) {
+  if (!sessionCanResumePausedDrive(paused, ctx.sessionManager.getSessionFile())) {
     notify(ctx, "Only the session that paused this drive may resume it.", "warning");
     return;
   }
@@ -239,7 +243,7 @@ export function handleAbortCommand(ctx: ExtensionCommandContext, runtime: RunCom
     notify(ctx, "No active or paused autonomous drive to abort.", "warning");
     return;
   }
-  if (!sessionCanControlDrive(paused.ownerSession, currentSession)) {
+  if (!sessionCanResumePausedDrive(paused, currentSession)) {
     notify(ctx, "Only the session that paused this drive may abort it.", "warning");
     return;
   }

@@ -196,19 +196,41 @@ test("active drive reservation cannot replace a foreign active or paused owner",
     saveBoard(cwd, {
       version: 1,
       nextTaskNumber: 1,
-      pausedDrive: { ownerSession: owner, taskIds: ["T1"] },
+      pausedDrive: { ownerSession: owner, taskIds: ["T1"], reason: "paused" },
       tasks: [],
     });
-    assert.equal(
-      persistActiveDrive(cwd, {
-        id: "drive-foreign",
-        ownerSession: "/tmp/foreign.jsonl",
-        startedAt: 2,
-      }).ok,
-      false
-    );
+    const refused = persistActiveDrive(cwd, {
+      id: "drive-foreign",
+      ownerSession: "/tmp/foreign.jsonl",
+      startedAt: 2,
+    });
+    assert.equal(refused.ok, false);
+    assert.match(refused.ok ? "" : refused.reason, /deliberately paused drive/);
     assert.equal(loadBoard(cwd).pausedDrive?.ownerSession, owner);
     assert.equal(loadBoard(cwd).activeDrive, undefined);
+  });
+});
+
+test("a mechanically parked drive can be resumed by another session", () => {
+  withBoard((cwd) => {
+    // A provider outage parked this drive under a session that has since
+    // been closed; quota is back. The fix is a resume, not a board reset.
+    for (const reason of ["provider_blocked", "escalation_required", undefined] as const) {
+      saveBoard(cwd, {
+        version: 1,
+        nextTaskNumber: 1,
+        pausedDrive: { ownerSession: owner, taskIds: ["T1"], ...(reason ? { reason } : {}) },
+        tasks: [],
+      });
+      const result = persistActiveDrive(cwd, {
+        id: `drive-foreign-${reason ?? "legacy"}`,
+        ownerSession: "/tmp/foreign.jsonl",
+        startedAt: 2,
+      });
+      assert.equal(result.ok, true, `reason ${reason ?? "legacy"} must not block a foreign resume`);
+      assert.equal(loadBoard(cwd).pausedDrive, undefined);
+      assert.equal(loadBoard(cwd).activeDrive?.ownerSession, "/tmp/foreign.jsonl");
+    }
   });
 });
 

@@ -302,11 +302,21 @@ export interface BoardUsageSummary {
   providers: string[];
 }
 
+export type PausedDriveReason = "paused" | "provider_blocked" | "escalation_required";
+
 export interface PausedDriveState {
   /** Selected task scope. Omitted when the whole board is driven. */
   taskIds?: string[];
-  /** Session that started the drive. Only that session may control or resume it. */
+  /** Session that started the drive. */
   ownerSession?: string;
+  /**
+   * Why the drive stopped. Only a deliberate `paused` keeps the owner-session
+   * guard: the operator who paused decides when to continue. Mechanical stops
+   * (provider outage, escalation already settled) carry self-contained
+   * evidence and any session may resume them — the owning session is often
+   * closed by the time quota returns.
+   */
+  reason?: PausedDriveReason;
 }
 
 export interface DriveDecision {
@@ -467,6 +477,12 @@ export interface MaestroConfig {
   logEvents?: "compact" | "full";
   /** Maximum bytes mirrored per run. 0 disables the limit. */
   maxLogBytesPerRun?: number;
+  /**
+   * Minutes a drive keeps waiting for a provider whose quota or usage window
+   * is exhausted before it stops with `provider_blocked`. Probes back off
+   * (2, 4, 8, then 15 minutes). 0 stops at the first quota failure.
+   */
+  providerQuotaWaitMinutes?: number;
   /** Seconds without any executor event before watchdog steering. */
   watchdogIdleSeconds?: number;
   /** Turns without meaningful progress before one automatic steer. */

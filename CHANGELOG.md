@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Robustness
+
+- Provider failures are classified three ways. Transient drops (`WebSocket error`, connection reset, `socket hang up`, 5xx) retry twice with 15 s and 60 s delays. An exhausted quota or usage window (`usage limit has been reached`, `429`, `rate limit`) is probed with 2/4/8/15-minute backoff for `providerQuotaWaitMinutes` (default 60, 0 disables) before the drive stops. Only credential, billing, and unknown-model failures stop at once. A real drive was stopped three times in one evening by a subscription window and each stop needed a human to type resume.
+- An attempt the provider cut off after real work resumes its own session and checkout with a continuation prompt instead of starting a fresh attempt; the interrupted attempt still never consumes `maxAttempts`. Two interrupted attempts on one task had thrown away $8.64 of context before a third began from scratch.
+- Paused drives record why they stopped. Only a deliberate `/maestro pause` keeps its owner-session guard; `provider_blocked` and settled `escalation_required` stops can be resumed or released (`/maestro abort`) from any session. Previously a dead session's parked drive could only be cleared with `/maestro reset`, which archives the whole board.
+- Handoff transfers the paused drive and the open decision to the fresh supervisor session. Before, the new session was told to "resume it from that session" — the one it had just left.
+
 ### Correctness
 
 - Approval fingerprints no longer include the tier's model, thinking level, or reviewer tool set (proof version 2). Which model produced or judged an artifact is provenance, not identity: the reviewed Git tree is unchanged by a configuration edit. Previously, switching executor models to dodge a provider quota marked every approved task on a real board `stale_completion` and offered re-executing $90 of integrated, reviewed work as the only remedy. Version-1 proofs remain valid as long as their contract, verification, dependency, and artifact identities still match; the next approval of a task captures a v2 proof. The task's tier name, review policy, and confirm count remain execution inputs.

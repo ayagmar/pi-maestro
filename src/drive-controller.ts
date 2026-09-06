@@ -23,7 +23,7 @@ import {
   type ExecutorHandle,
   type RunUpdate,
 } from "./runner.js";
-import { assertKnownTaskIds } from "./session-control.js";
+import { assertKnownTaskIds, sessionCanResumePausedDrive } from "./session-control.js";
 import {
   type ActiveDriveState,
   type Board,
@@ -69,6 +69,8 @@ export interface BackgroundDrive {
 
 export interface DriveRuntimeServices {
   startExecutor: typeof defaultStartExecutor;
+  /** Multiplier on provider retry/quota-probe delays; tests pass 0. */
+  retryDelayScale?: number;
   isRuntimeActive(): boolean;
   adoptBoard(ctx: ExtensionContext): void;
   refreshUI(ctx: ExtensionContext): void;
@@ -488,7 +490,7 @@ export class DriveRuntimeController {
       summary.stoppedBecause.code === "provider_blocked" ||
       summary.stoppedBecause.code === "escalation_required"
     ) {
-      const paused: PausedDriveState = {};
+      const paused: PausedDriveState = { reason: summary.stoppedBecause.code };
       if (taskIds) paused.taskIds = taskIds;
       if (control.ownerSession) paused.ownerSession = control.ownerSession;
       this.savePausedDrive(ctx.cwd, paused);
@@ -575,6 +577,9 @@ export class DriveRuntimeController {
       onRetentionWarning: (warning) =>
         services.notify(ctx, `Log cleanup warning: ${warning}`, "warning"),
       onNotice: (message) => services.notify(ctx, message, "warning"),
+      ...(services.retryDelayScale === undefined
+        ? {}
+        : { retryDelayScale: services.retryDelayScale }),
       // Budget raises take effect at the next boundary of a running drive.
       liveMaxRunCost: () => {
         try {
@@ -884,10 +889,13 @@ export function persistActiveDrive(cwd: string, activeDrive: ActiveDriveState): 
       };
       return false;
     }
-    if (board.pausedDrive && board.pausedDrive.ownerSession !== activeDrive.ownerSession) {
+    if (
+      board.pausedDrive &&
+      !sessionCanResumePausedDrive(board.pausedDrive, activeDrive.ownerSession)
+    ) {
       result = {
         ok: false,
-        reason: `a paused drive is owned by ${describeOwnerSession(board.pausedDrive.ownerSession)}; resume it from that session, or /maestro reset`,
+        reason: `a deliberately paused drive is owned by ${describeOwnerSession(board.pausedDrive.ownerSession)}; resume or abort it from that session`,
       };
       return false;
     }
