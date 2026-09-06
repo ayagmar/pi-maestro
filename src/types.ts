@@ -163,11 +163,20 @@ export interface ArtifactProvenance {
 
 export interface ApprovedProvenance {
   /**
-   * 1: the execution component hashed the tier's model/thinking/tools.
-   * 2: execution covers only the tier name, review policy, and confirm count;
-   *    which model produced or reviewed the artifact is provenance, not identity.
+   * Record format. Kept at 1 on purpose: validators in Maestro builds that
+   * are still running in other pi sessions reject any other value and
+   * quarantine the whole board (a real board was quarantined 34 seconds
+   * after an upgrade this way). Shape changes go in `executionShape`, which
+   * old validators ignore as an unknown key.
    */
-  version: 1 | 2;
+  version: 1;
+  /**
+   * How the `execution` component was hashed. Absent: the tier's
+   * model/thinking/tools were included (legacy). 2: only the tier name,
+   * review policy, and confirm count — which model produced or reviewed the
+   * artifact is provenance, not identity.
+   */
+  executionShape?: 2;
   fingerprint: string;
   componentHashes: {
     contract: string;

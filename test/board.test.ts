@@ -1283,6 +1283,7 @@ test("approved provenance round-trips a SHA-1 Git tree and kind-aware report dep
     const task = createTask(board, { title: "Proof", brief: "proof", tier: "standard" });
     task.approvedProvenance = {
       version: 1,
+      executionShape: 2,
       fingerprint: "a".repeat(64),
       componentHashes: {
         contract: "b".repeat(64),
@@ -1297,6 +1298,10 @@ test("approved provenance round-trips a SHA-1 Git tree and kind-aware report dep
     saveBoard(cwd, board);
 
     assert.deepEqual(loadBoard(cwd).tasks[0]?.approvedProvenance, task.approvedProvenance);
+    // A record version other than 1 is what older validators quarantine on;
+    // this build must never write one and must reject one it reads.
+    const raw = JSON.parse(readFileSync(join(cwd, ".pi", "maestro", "board.json"), "utf-8"));
+    assert.equal(raw.tasks[0].approvedProvenance.version, 1);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
