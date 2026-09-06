@@ -796,13 +796,8 @@ function isTask(value: unknown): value is Task {
 }
 
 function isApprovedProvenance(value: unknown): boolean {
-  if (
-    !isRecord(value) ||
-    (value.version !== 1 && value.version !== 2) ||
-    !isRecord(value.componentHashes)
-  ) {
-    return false;
-  }
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.componentHashes)) return false;
+  if (value.executionShape !== undefined && value.executionShape !== 2) return false;
   const digest = (candidate: unknown) =>
     typeof candidate === "string" && /^[a-f0-9]{64}$/.test(candidate);
   if (

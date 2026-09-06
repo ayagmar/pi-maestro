@@ -11,8 +11,8 @@ import {
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const canonical = (value: unknown): string => JSON.stringify(value);
 
-/** Fingerprint shape of proofs captured by this version of Maestro. */
-export const PROVENANCE_VERSION = 2;
+/** Execution-component shape of proofs captured by this version of Maestro. */
+export const EXECUTION_SHAPE = 2;
 
 function authoritativeArtifact(task: Task): ApprovedProvenance["artifact"] | undefined {
   const latestAttempt = task.attempts.at(-1);
@@ -112,7 +112,7 @@ function fingerprintTask(
     dependencies: digest(canonical(dependencyIdentities)),
   };
   return {
-    fingerprint: digest(canonical({ version: PROVENANCE_VERSION, ...components })),
+    fingerprint: digest(canonical({ version: EXECUTION_SHAPE, ...components })),
     componentHashes: components,
     dependencyIdentities,
   };
@@ -166,12 +166,12 @@ function freshness(
   if (!current)
     return { state: "unavailable", reason: "effective execution inputs are unavailable" };
   const approved = task.approvedProvenance;
-  // A version-1 proof hashed the tier's model/thinking/tools into `execution`,
-  // so its execution digest and total fingerprint can never equal a v2
+  // A legacy proof hashed the tier's model/thinking/tools into `execution`,
+  // so its execution digest and total fingerprint can never equal a current
   // computation. Its contract, verification, dependency, and artifact
   // identities are still exact; judge it by those and let the next approval
-  // capture a v2 proof.
-  const legacyExecutionShape = approved.version === 1;
+  // capture a proof in the current shape.
+  const legacyExecutionShape = approved.executionShape !== EXECUTION_SHAPE;
   const priorities: Array<keyof ApprovedProvenance["componentHashes"]> = legacyExecutionShape
     ? ["contract", "verification", "dependencies"]
     : ["contract", "execution", "verification", "dependencies"];
@@ -214,7 +214,7 @@ export function captureApprovedProvenance(
   const fingerprint = taskFingerprint(board, task, config);
   const artifact = authoritativeArtifact(task);
   if (!fingerprint || !artifact) return undefined;
-  return { version: PROVENANCE_VERSION, ...fingerprint, artifact, approvedAt };
+  return { version: 1, executionShape: EXECUTION_SHAPE, ...fingerprint, artifact, approvedAt };
 }
 
 function pathInWriteScope(path: string, writePaths: string[]): boolean {

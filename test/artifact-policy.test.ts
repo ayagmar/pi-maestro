@@ -73,18 +73,21 @@ test("switching tier models, thinking, or reviewer tools never changes a fingerp
   );
 });
 
-test("version-1 proofs stay fresh across a model switch and go stale on a contract change", () => {
+test("legacy-shape proofs stay fresh across a model switch and go stale on a contract change", () => {
   const { board, task, config } = fixture();
   forceStatus(task, "approved");
   const proof = captureApprovedProvenance(board, task, config);
   assert.ok(proof);
-  assert.equal(proof.version, 2);
-  // Simulate a proof captured by the previous shape: a different execution
-  // digest and total fingerprint, but the same contract/verification/
-  // dependency/artifact identities.
+  // The record version never moves: validators still running in other pi
+  // sessions quarantine a board whose proofs carry any other version.
+  assert.equal(proof.version, 1);
+  assert.equal(proof.executionShape, 2);
+  // Simulate a proof captured by the previous shape: no shape marker, a
+  // different execution digest and total fingerprint, but the same
+  // contract/verification/dependency/artifact identities.
+  const { executionShape: _shape, ...legacy } = proof;
   task.approvedProvenance = {
-    ...proof,
-    version: 1,
+    ...legacy,
     fingerprint: "f".repeat(64),
     componentHashes: { ...proof.componentHashes, execution: "e".repeat(64) },
   };
