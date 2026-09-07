@@ -18,7 +18,7 @@ import {
   runBudgetWarning,
 } from "./format.js";
 import { mapWithConcurrencyLimit } from "./runner.js";
-import { type MaestroConfig, type Task, type TierConfig } from "./types.js";
+import { type DriveWait, type MaestroConfig, type Task, type TierConfig } from "./types.js";
 import {
   calculateSchedulingWave,
   consumesMaxAttempt,
@@ -134,6 +134,8 @@ export async function driveBoard(options: {
   retryDelayScale?: number;
   /** Provider usage-window lookup; defaults to the Codex usage endpoint. */
   quotaStatus?: QuotaStatusResolver;
+  /** Called when the drive starts (wait) and ends (undefined) a deliberate sleep. */
+  onWait?: (wait: DriveWait | undefined) => void;
   /** Live run-budget source so mid-drive raises apply at the next boundary. Defaults to the captured config. */
   liveMaxRunCost?: () => number;
   humanRetryTaskId?: string;
@@ -182,11 +184,18 @@ export async function driveBoard(options: {
     }
     resetOperationalReviewFailures(cwd, tasks);
     options.onNotice?.(`${tasks.map((task) => task.id).join(", ")}: ${plan.note}`);
-    const interrupted = await waitUnlessStopped(
-      plan.delayMs * (options.retryDelayScale ?? 1),
-      signal,
-      shouldPause
-    );
+    const delayMs = plan.delayMs * (options.retryDelayScale ?? 1);
+    options.onWait?.({
+      until: Date.now() + delayMs,
+      reason: plan.note,
+      taskIds: tasks.map((task) => task.id),
+    });
+    let interrupted: Awaited<ReturnType<typeof waitUnlessStopped>>;
+    try {
+      interrupted = await waitUnlessStopped(delayMs, signal, shouldPause);
+    } finally {
+      options.onWait?.(undefined);
+    }
     if (interrupted === "aborted") return { code: "aborted", message: "drive aborted by user" };
     if (interrupted === "paused") {
       return { code: "paused", message: "drive paused while waiting for provider capacity" };

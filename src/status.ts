@@ -189,8 +189,18 @@ export function projectRunPhases(
 }
 
 export interface StatusProjection {
-  code: "empty" | "plan_pending" | "running" | "decision" | "blocked" | "ready" | "complete";
+  code:
+    | "empty"
+    | "plan_pending"
+    | "running"
+    | "waiting"
+    | "decision"
+    | "blocked"
+    | "ready"
+    | "complete";
   phase: string;
+  /** Present while the active drive deliberately sleeps (provider quota, transient retry). */
+  waiting?: { until: number; reason: string };
   ownerSession?: string;
   runnable: number;
   reviewable: number;
@@ -256,6 +266,17 @@ export function projectStatus(
   if (board.tasks.length === 0) return { code: "empty", phase: "empty", ...base };
   if (board.planPending) return { code: "plan_pending", phase: phase ?? "plan approval", ...base };
   if (running > 0) return { code: "running", phase: phase ?? "execution", ...base };
+  // A sleeping drive has no live executor and usually a provider-failed task,
+  // which every rule below reads as "blocked · recovery". It is neither.
+  const wait = board.activeDrive?.waiting;
+  if (wait && wait.until > Date.now()) {
+    return {
+      code: "waiting",
+      phase: `waiting · resumes ${formatClock(wait.until)}`,
+      waiting: { until: wait.until, reason: wait.reason },
+      ...base,
+    };
+  }
   if (board.activeDecision && !board.activeDecision.resolution) {
     return {
       code: "decision",
@@ -279,4 +300,17 @@ export function formatStatusProjection(status: StatusProjection): string {
   const owner = status.ownerSession ? ` · owner ${status.ownerSession}` : "";
   const recovery = status.recovery ? ` · recovery: ${status.recovery}` : "";
   return `${status.code} · ${status.phase} · ${status.approved} approved · ${status.cancelled} cancelled · ${status.running} running · ${status.runnable} runnable · ${status.reviewable} reviewable · ${status.blocked} blocked · $${status.cost.toFixed(4)}${owner}${recovery}`;
+}
+
+export function formatClock(epochMs: number): string {
+  const date = new Date(epochMs);
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+/** "in 1h 59m" / "in 25m" for a future moment; "now" once it has passed. */
+export function formatRelative(epochMs: number, now = Date.now()): string {
+  const minutes = Math.round((epochMs - now) / 60_000);
+  if (minutes <= 0) return "now";
+  if (minutes < 60) return `in ${minutes}m`;
+  return `in ${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }

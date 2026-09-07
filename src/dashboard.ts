@@ -1131,6 +1131,7 @@ export class Dashboard {
       phaseLabel: phase,
       ...(lastActivity ? { lastActivity } : {}),
       ...(board.pausedDrive ? { pausedDrive: board.pausedDrive } : {}),
+      ...(board.activeDrive?.waiting ? { waiting: board.activeDrive.waiting } : {}),
       ...(board.activeDecision ? { decision: board.activeDecision } : {}),
     });
 

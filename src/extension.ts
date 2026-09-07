@@ -31,7 +31,7 @@ import { createRenderThrottle } from "./render-scheduler.js";
 import { type QuotaStatusResolver } from "./provider-quota.js";
 import { startExecutor as defaultStartExecutor } from "./runner.js";
 import { SessionNavigator } from "./session-navigator.js";
-import { projectStatus } from "./status.js";
+import { formatClock, formatRelative, projectStatus } from "./status.js";
 import { showTaskBrowser } from "./task-browser.js";
 
 export {
@@ -190,11 +190,14 @@ export default function maestro(
     const blockedPart = status.blocked > 0 ? ` · ${status.blocked} blocked` : "";
     const pausedPart = board.pausedDrive ? " · paused" : "";
     const planPart = board.planPending ? " · plan awaiting approval" : "";
+    const waitingPart = status.waiting
+      ? ` · ⏳ ${status.waiting.reason.split(";")[0]} · resumes ${formatClock(status.waiting.until)} (${formatRelative(status.waiting.until)})`
+      : "";
     ctx.ui.setStatus(
       COMMAND,
       ctx.ui.theme.fg(
-        running > 0 || board.pausedDrive ? "warning" : "muted",
-        `⚡ maestro ${status.code}${phasePart} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart}${planPart} · $${usage.cost.toFixed(4)}`
+        running > 0 || board.pausedDrive || status.waiting ? "warning" : "muted",
+        `⚡ maestro ${status.code}${status.waiting ? "" : phasePart} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart}${planPart}${waitingPart} · $${usage.cost.toFixed(4)}`
       )
     );
 

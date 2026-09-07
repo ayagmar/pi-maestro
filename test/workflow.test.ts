@@ -3723,8 +3723,10 @@ test("a provider that publishes its reset clock is waited for exactly instead of
       })(options);
     };
 
+    const waits: Array<{ until: number; reason: string; taskIds: string[] } | undefined> = [];
     const result = await driveBoard({
       retryDelayScale: 0,
+      onWait: (wait) => waits.push(wait),
       quotaStatus: async (provider) => {
         lookups.push(provider);
         return {
@@ -3751,6 +3753,12 @@ test("a provider that publishes its reset clock is waited for exactly instead of
     assert.deepEqual(lookups, ["openai-codex"]);
     assert.equal(executions, 2, "one wait for the published reset, no probes");
     assert.equal(notices.length, 1);
+    // The sleep is announced to the runtime (start, then end) so the status
+    // line can show "waiting · resumes HH:MM" instead of "blocked".
+    assert.equal(waits.length, 2);
+    assert.deepEqual(waits[0]?.taskIds, [task.id]);
+    assert.match(waits[0]?.reason ?? "", /5h window exhausted/);
+    assert.equal(waits[1], undefined);
     assert.match(
       notices[0] ?? "",
       /openai-codex 5h window exhausted; waiting until it resets at \d{2}:\d{2} \(in 3h 1[01]m\)/

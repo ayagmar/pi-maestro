@@ -430,6 +430,27 @@ test("drive heartbeat pulses live agents, spend, and status deltas without wakin
     tick();
     assert.match(pulses[1] ?? "", /Advanced since last pulse: T1 todo → ready for review/);
 
+    // While the drive sleeps for provider quota, the pulse says so and names
+    // the resume time instead of implying a stall.
+    updateBoard(cwd, (current) => {
+      current.activeDrive = {
+        id: "drive-heartbeat",
+        startedAt: 1,
+        waiting: {
+          until: Date.now() + 90 * 60_000,
+          reason: "openai-codex 5h window exhausted; waiting until it resets at 01:44",
+          taskIds: ["T1"],
+        },
+      };
+      return true;
+    });
+    tick();
+    assert.match(pulses[2] ?? "", /^Drive waiting · /);
+    assert.match(
+      pulses[2] ?? "",
+      /⏳ openai-codex 5h window exhausted; waiting until it resets at 01:44 · resumes \d{2}:\d{2} \(in 1h 30m\) · deferred: T1/
+    );
+
     stop();
     assert.equal(stopped, true);
   });

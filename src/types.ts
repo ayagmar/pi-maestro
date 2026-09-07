@@ -344,6 +344,15 @@ export interface DriveDecision {
   resolution?: { intervention: "handoff" | "abort" | "steer" | "resume"; resolvedAt: number };
 }
 
+export interface DriveWait {
+  /** Epoch milliseconds when the drive resumes launching. */
+  until: number;
+  /** Why it sleeps, e.g. "openai-codex 5h window exhausted". */
+  reason: string;
+  /** Tasks whose launches are deferred by this wait. */
+  taskIds: string[];
+}
+
 export interface ActiveDriveState {
   id: string;
   /** Session that started the drive. Only that session may receive its terminal notification. */
@@ -351,6 +360,14 @@ export interface ActiveDriveState {
   /** Selected task scope. Omitted when the whole board is driven. */
   taskIds?: string[];
   startedAt: number;
+  /**
+   * Present while the drive deliberately sleeps (provider quota, transient
+   * retry). With no live executor and a failed task on the board, every
+   * projection otherwise reads "blocked · recovery" for hours while the
+   * drive is in fact healthy and merely waiting — an operator watching a
+   * real board could not tell the two apart.
+   */
+  waiting?: DriveWait;
 }
 
 export interface Board {
