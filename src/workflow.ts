@@ -243,7 +243,8 @@ export async function driveBoard(options: {
   }
 
   try {
-    while (rounds < DRIVE_ROUND_LIMIT) {
+    const roundLimit = config.maxRoundsPerRun ?? DRIVE_ROUND_LIMIT;
+    while (rounds < roundLimit) {
       if (signal?.aborted) {
         return finish({ code: "aborted", message: "drive aborted by user" });
       }
@@ -790,7 +791,7 @@ export async function driveBoard(options: {
 
   return finish({
     code: "round_limit",
-    message: `drive stopped after the hard limit of ${DRIVE_ROUND_LIMIT} rounds`,
+    message: `drive stopped after ${config.maxRoundsPerRun ?? DRIVE_ROUND_LIMIT} scheduling rounds (maxRoundsPerRun); work may still be runnable — raise maxRoundsPerRun or start another drive`,
   });
 }
 

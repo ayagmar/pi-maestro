@@ -471,6 +471,14 @@ export interface MaestroConfig {
   maxPlanTasks: number;
   maxDiscoveryGeneratedTasks: number;
   maxTotalLaunchesPerRun: number;
+  /**
+   * Scheduling rounds (loop passes that launched something) one drive may
+   * run before it stops with `round_limit`. A clean sequential task costs one
+   * round; every rejection retry, quota-interrupted launch, or reviewer
+   * re-run costs another, so an unattended overnight drive on a real board
+   * could exhaust the old fixed 20 with work still runnable.
+   */
+  maxRoundsPerRun?: number;
   confirmationPlanTasks: number;
   confirmationTotalLaunches: number;
   /** Review policy new tasks inherit when a plan does not state one. */

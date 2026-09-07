@@ -22,6 +22,7 @@ Project config can tune normal settings and select a user-defined `defaultVerifi
 | `maxPlanTasks` | 64 | 1–512 tasks at plan mutation boundaries |
 | `maxDiscoveryGeneratedTasks` | 32 | 1–128 and no greater than `maxPlanTasks` |
 | `maxTotalLaunchesPerRun` | 128 | 1–4096 raw executor and reviewer launches |
+| `maxRoundsPerRun` | 20 | 1–1000 scheduling rounds per drive (one round is a loop pass that launched something: an execute batch plus its review batch). A clean sequential task costs one round; every rejection retry, quota-interrupted launch, or reviewer re-run costs another. Raise it for long unattended drives; the drive stops with `round_limit` when exhausted, which any session can resume. |
 | `confirmationPlanTasks` | 24 | Explicit confirmation above this task count; no greater than `maxPlanTasks` |
 | `confirmationTotalLaunches` | 64 | Explicit confirmation above this raw-launch upper bound; no greater than `maxTotalLaunchesPerRun` |
 | `reviewPolicy` | `single` | `single`, `confirm`, or `find-and-refute`; inherited by new tasks that do not state one |
