@@ -148,6 +148,7 @@ export function formatDriveSummary(summary: DriveSummary): string {
   ].join("\n");
 }
 
+/** Default for `maxRoundsPerRun`. */
 export const DRIVE_ROUND_LIMIT = 20;
 
 /** Consecutive genuine reviewer rejections before the drive escalates instead of retrying. */

@@ -75,6 +75,10 @@ test("default config has the documented tiers and no model overrides", () => {
   assert.equal(DEFAULT_CONFIG.maxPlanTasks, 64);
   assert.equal(DEFAULT_CONFIG.maxDiscoveryGeneratedTasks, 32);
   assert.equal(DEFAULT_CONFIG.maxTotalLaunchesPerRun, 128);
+  assert.equal(DEFAULT_CONFIG.maxRoundsPerRun, 20);
+  assert.equal(validateConfig({ maxRoundsPerRun: 0 }) !== undefined, true);
+  assert.equal(validateConfig({ maxRoundsPerRun: 1_001 }) !== undefined, true);
+  assert.equal(validateConfig({ maxRoundsPerRun: 60 }), undefined);
   assert.equal(DEFAULT_CONFIG.confirmationPlanTasks, 24);
   assert.equal(DEFAULT_CONFIG.confirmationTotalLaunches, 64);
   assert.equal(DEFAULT_CONFIG.watchdogWarningTurns, 12);

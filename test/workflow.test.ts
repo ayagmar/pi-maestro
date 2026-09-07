@@ -3482,6 +3482,43 @@ test("drive retries one transient provider failure and completes without interve
   }
 });
 
+test("the scheduling round limit follows maxRoundsPerRun and names the fix", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-round-limit-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    const first = createTask(board, { title: "A", brief: "a", tier: "standard" });
+    createTask(board, { title: "B", brief: "b", tier: "standard", dependsOn: [first.id] });
+    saveBoard(cwd, board);
+    // One loop pass (execute batch + review batch) is one round; two chained
+    // tasks need two.
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async () => undefined,
+      cwd,
+      config: { ...config, maxParallel: 1, maxRoundsPerRun: 1 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: (options) =>
+        options.prompt.includes("adversarial code reviewer")
+          ? executor({ finalReport: "Verified.\nVERDICT: APPROVE" })(options)
+          : executor({
+              usage: { input: 1, output: 1, cost: 0, turns: 1 },
+              finalReport: "## Report\ndone",
+            })(options),
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(result.stoppedBecause.code, "round_limit");
+    assert.match(result.stoppedBecause.message, /after 1 scheduling rounds \(maxRoundsPerRun\)/);
+    assert.match(result.stoppedBecause.message, /raise maxRoundsPerRun/);
+    assert.equal(loadBoard(cwd).tasks.filter((task) => task.status === "approved").length, 1);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("drive stops after two transient provider retries also fail", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-transient-failed-"));
   try {
