@@ -739,6 +739,12 @@ function isDriveDecision(value: unknown): boolean {
     value.allowedInterventions.every((item) => interventions.includes(String(item))) &&
     isNumber(value.createdAt) &&
     (value.deliveredAt === undefined || isNumber(value.deliveredAt)) &&
+    (value.awaitingHuman === undefined ||
+      (isRecord(value.awaitingHuman) &&
+        value.awaitingHuman.kind === "scale_confirmation" &&
+        isNumber(value.awaitingHuman.since) &&
+        (value.awaitingHuman.signature === undefined ||
+          typeof value.awaitingHuman.signature === "string"))) &&
     (value.deliveryClaim === undefined ||
       (isRecord(value.deliveryClaim) &&
         typeof value.deliveryClaim.id === "string" &&

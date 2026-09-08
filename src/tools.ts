@@ -29,6 +29,7 @@ import {
   type DriveRuntimeController,
   resolveDriveDecision,
 } from "./drive-controller.js";
+import { markDecisionAwaitingHuman, ScaleConfirmationRequiredError } from "./drive-preflight.js";
 import { formatDrivePulse, startDriveHeartbeat } from "./drive-summary.js";
 import { requestHandoffCommand } from "./handoff.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
@@ -547,18 +548,39 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
         });
       };
       let lastRound = "starting";
-      const operation = startBackgroundDrive(
-        ctx,
-        taskIds,
-        signal,
-        (message) => {
-          lastRound = message;
-          stream(message);
-        },
-        undefined,
-        undefined,
-        true
-      );
+      let operation: ReturnType<typeof startBackgroundDrive>;
+      try {
+        operation = startBackgroundDrive(
+          ctx,
+          taskIds,
+          signal,
+          (message) => {
+            lastRound = message;
+            stream(message);
+          },
+          undefined,
+          undefined,
+          true
+        );
+      } catch (error) {
+        // The orchestrator has done its part; only the human-only preflight
+        // confirmation remains. Say so on the decision so reminders stop and
+        // the status line points the user at /maestro drive.
+        if (error instanceof ScaleConfirmationRequiredError) {
+          markDecisionAwaitingHuman(ctx.cwd, error.signature);
+          refreshUI(ctx);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `${error.message}\nThe board is ready; nothing further is needed from you. Reminders for the open decision are paused until the user confirms.`,
+              },
+            ],
+            details: { action: "drive", tasks: [] },
+          };
+        }
+        throw error;
+      }
       // A single round can run for many minutes. Without a heartbeat the tool
       // call looks hung, which is what drove the sleep+inspect polling in the
       // first place. The pulse is a live tool update, so it never enters the

@@ -190,6 +190,10 @@ export default function maestro(
     const blockedPart = status.blocked > 0 ? ` · ${status.blocked} blocked` : "";
     const pausedPart = board.pausedDrive ? " · paused" : "";
     const planPart = board.planPending ? " · plan awaiting approval" : "";
+    const humanGatePart =
+      board.activeDecision && !board.activeDecision.resolution && board.activeDecision.awaitingHuman
+        ? ` · awaiting your /${COMMAND} drive confirmation`
+        : "";
     const waitingPart = status.waiting
       ? ` · ⏳ ${status.waiting.reason.split(";")[0]} · resumes ${formatClock(status.waiting.until)} (${formatRelative(status.waiting.until)})`
       : "";
@@ -197,7 +201,7 @@ export default function maestro(
       COMMAND,
       ctx.ui.theme.fg(
         running > 0 || board.pausedDrive || status.waiting ? "warning" : "muted",
-        `⚡ maestro ${status.code}${status.waiting ? "" : phasePart} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart}${planPart}${waitingPart} · $${usage.cost.toFixed(4)}`
+        `⚡ maestro ${status.code}${status.waiting ? "" : phasePart} · ${progress}${runningPart}${reviewPart}${blockedPart}${pausedPart}${planPart}${humanGatePart}${waitingPart} · $${usage.cost.toFixed(4)}`
       )
     );
 

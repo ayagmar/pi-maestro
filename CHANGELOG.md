@@ -4,6 +4,8 @@
 
 ### Robustness
 
+- When `maestro_drive start` is refused because the human-only workflow scale confirmation is required, the open decision is marked `awaitingHuman`: reminder nudges stop, the tool tells the orchestrator nothing further is needed, and the status line reads `awaiting your /maestro drive confirmation`. Previously the reminders kept nagging about a step the orchestrator could not take, and a real supervisor "resolved" the decision with a handoff just to silence them. The reminder text now says explicitly that `intervene` is never a silencer.
+
 - `maxRoundsPerRun` (default 20, 1–1000) replaces the fixed 20-round drive limit. One round is a loop pass that launched something; a clean sequential task costs one, every rejection retry, quota-interrupted launch or reviewer re-run costs another, so a long unattended drive could stop with `round_limit` while work was still runnable. The stop message now names the setting.
 
 - A drive that sleeps for provider quota or a transient retry now says so everywhere. The active drive records `waiting {until, reason, taskIds}`; the status line shows `⚡ maestro waiting · ⏳ openai-codex 5h window exhausted · resumes 01:44 (in 1h 59m)`, the heartbeat pulse opens with `Drive waiting`, and the dashboard evidence names the deferred tasks. Previously a sleeping drive had no live executor and one provider-failed task, so every projection read `blocked · recovery` for hours while the drive was healthy — an operator watching a real board could not tell a wait from a stall.

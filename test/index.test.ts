@@ -2434,6 +2434,48 @@ test("maestro_plan atomically supersedes a stopped task and rewires its dependen
   );
 });
 
+test("maestro_drive start refused for scale confirmation parks the open decision on the human", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, {
+        ...DEFAULT_CONFIG,
+        autoCommit: false,
+        confirmationTotalLaunches: 1,
+      });
+      const board: Board = {
+        version: 1,
+        nextTaskNumber: 1,
+        tasks: [],
+        activeDecision: {
+          id: "decision-gate",
+          ownerSession: owner,
+          kind: "reviewer_failure",
+          taskIds: ["T1"],
+          evidence: "artifact gate failed before any reviewer ran",
+          allowedInterventions: ["handoff", "abort"],
+          createdAt: Date.now(),
+          deliveredAt: Date.now(),
+        },
+      };
+      createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const result = await tools
+        .get("maestro_drive")
+        ?.execute("start", { action: "start" }, undefined, undefined, ctx);
+      const text = result?.content[0]?.text ?? "";
+      assert.match(text, /Workflow scale confirmation is required/);
+      assert.match(text, /nothing further is needed from you/);
+      const decision = loadBoard(cwd).activeDecision;
+      assert.equal(decision?.awaitingHuman?.kind, "scale_confirmation");
+      assert.equal(decision?.resolution, undefined, "the decision is parked, not resolved");
+      assert.equal(loadBoard(cwd).activeDrive, undefined);
+    }
+  );
+});
+
 test("mid-run successor plans do not re-enter the plan gate on workflow scale", async () => {
   await withBoard(
     (cwd) => {
