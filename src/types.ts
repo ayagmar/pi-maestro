@@ -335,6 +335,14 @@ export interface DriveDecision {
   taskIds: string[];
   evidence: string;
   allowedInterventions: Array<"handoff" | "abort" | "steer">;
+  /**
+   * The orchestrator has corrected the board and the only remaining step is
+   * a human-only control (workflow scale confirmation via /maestro drive).
+   * While set, reminder nudges stay quiet: nagging the orchestrator about a
+   * step it cannot take made a real supervisor "resolve" the decision with a
+   * handoff just to silence the reminders.
+   */
+  awaitingHuman?: { kind: "scale_confirmation"; since: number; signature?: string };
   createdAt: number;
   deliveredAt?: number;
   deliveryClaim?: {

@@ -13,6 +13,30 @@ import { notify } from "./handoff.js";
 import { formatWorkflowPreflight, preflightWorkflow } from "./preflight.js";
 import { assertKnownTaskIds } from "./session-control.js";
 
+/** Thrown when only the human-only scale confirmation stands between the board and a drive. */
+export class ScaleConfirmationRequiredError extends Error {
+  constructor(readonly signature: string) {
+    super(
+      `Workflow scale confirmation is required (${signature}); use the human /${COMMAND} drive command to inspect and confirm preflight.`
+    );
+    this.name = "ScaleConfirmationRequiredError";
+  }
+}
+
+/**
+ * Record on the open decision that the board is corrected and a human must
+ * now confirm the preflight, so reminders stop and the status line says so.
+ */
+export function markDecisionAwaitingHuman(cwd: string, signature: string): void {
+  updateBoard(cwd, (board) => {
+    const decision = board.activeDecision;
+    if (!decision || decision.resolution) return false;
+    if (decision.awaitingHuman?.signature === signature) return false;
+    decision.awaitingHuman = { kind: "scale_confirmation", since: Date.now(), signature };
+    return true;
+  });
+}
+
 export function validateDriveStart(ctx: ExtensionContext, taskIds: string[] | undefined): void {
   const board = loadBoard(ctx.cwd);
   const config = loadConfig(ctx.cwd);
@@ -22,9 +46,7 @@ export function validateDriveStart(ctx: ExtensionContext, taskIds: string[] | un
   if (board.planPending) throw new Error("Plan approval is pending.");
   const preflight = preflightWorkflow(board, config, taskIds);
   if (preflight.requiresConfirmation && board.scaleApproval?.signature !== preflight.signature) {
-    throw new Error(
-      `Workflow scale confirmation is required (${preflight.signature}); use the human /${COMMAND} drive command to inspect and confirm preflight.`
-    );
+    throw new ScaleConfirmationRequiredError(preflight.signature);
   }
   if (!taskIds) return;
 

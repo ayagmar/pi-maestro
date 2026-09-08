@@ -766,6 +766,9 @@ function armDecisionNudge(
     }
     const decision = board.activeDecision;
     if (!decision || decision.id !== decisionId || decision.resolution) return;
+    // The board is corrected and only a human control remains: nothing the
+    // orchestrator can do, so nothing to remind it of.
+    if (decision.awaitingHuman) return;
     const revision = board.revision ?? 0;
     if (options.isBusy() || revision !== quietRevision) {
       // Something is happening; restart the quiet interval without spending
@@ -775,7 +778,7 @@ function armDecisionNudge(
     }
     try {
       send(
-        `Reminder ${attempt}/${DECISION_NUDGE_LIMIT}: decision ${decision.id} (${decision.kind}) has waited ${options.minutes} minute(s) with no recorded action — the previous turn may have been cut off by a provider failure. Act on it now: maestro_update or maestro_plan (supersedesTaskId) to correct the board, then maestro_drive action=start; or resolve it with maestro_drive action=intervene.\n\n${truncateText(decision.evidence, 20)}`,
+        `Reminder ${attempt}/${DECISION_NUDGE_LIMIT}: decision ${decision.id} (${decision.kind}) has waited ${options.minutes} minute(s) with no recorded action — the previous turn may have been cut off by a provider failure. Act on it now: maestro_update or maestro_plan (supersedesTaskId) to correct the board, then maestro_drive action=start. Use maestro_drive action=intervene only to abort or hand off the work itself — never to silence this reminder. If maestro_drive start answers that human scale confirmation is required, stop: the user must run /maestro drive, and these reminders end on their own.\n\n${truncateText(decision.evidence, 20)}`,
         decisionId
       );
     } catch {
@@ -809,7 +812,7 @@ export function armDeliveredDecisionNudge(
     return;
   }
   const decision = board.activeDecision;
-  if (!decision?.deliveredAt || decision.resolution) return;
+  if (!decision?.deliveredAt || decision.resolution || decision.awaitingHuman) return;
   if (decision.ownerSession && decision.ownerSession !== currentSession) return;
   armDecisionNudge(cwd, decision.id, send, options, 1, board.revision ?? 0);
 }

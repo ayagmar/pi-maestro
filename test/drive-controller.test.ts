@@ -10,13 +10,14 @@ import {
   armDeliveredDecisionNudge,
   cleanupCompletedBoard,
   clearActiveDrive,
-  DriveRuntimeController,
   deliverPendingDecision,
-  type LiveRun,
+  DriveRuntimeController,
   persistActiveDrive,
   persistDriveDecision,
   resolveDriveDecision,
+  type LiveRun,
 } from "../src/drive-controller.js";
+import { markDecisionAwaitingHuman } from "../src/drive-preflight.js";
 import { startDriveHeartbeat } from "../src/drive-summary.js";
 import { type Board, type DriveDecision } from "../src/types.js";
 
@@ -615,6 +616,68 @@ test("a delivered decision that stays untouched re-nudges the owner session", ()
     timers[4 - 1]?.();
     assert.equal(sent.length, 2);
     assert.equal(timers.length, 4, "a resolved decision arms nothing further");
+  });
+});
+
+test("a decision waiting on human scale confirmation is never nudged", () => {
+  withBoard((cwd) => {
+    saveBoard(cwd, {
+      version: 1,
+      nextTaskNumber: 1,
+      activeDecision: decision({ kind: "reviewer_failure", ownerSession: owner }),
+      tasks: [],
+    });
+    const sent: string[] = [];
+    const timers: Array<() => void> = [];
+    deliverPendingDecision(cwd, owner, (evidence) => sent.push(evidence), {
+      minutes: 5,
+      isRuntimeActive: () => true,
+      isBusy: () => false,
+      scheduleTimer: (callback) => {
+        timers.push(callback);
+        return { stop: () => {} };
+      },
+    });
+    assert.equal(sent.length, 1);
+    // The orchestrator corrected the board; maestro_drive start answered that
+    // only the human preflight confirmation remains.
+    markDecisionAwaitingHuman(cwd, "sig-1");
+    assert.equal(loadBoard(cwd).activeDecision?.awaitingHuman?.kind, "scale_confirmation");
+    timers[0]?.();
+    assert.equal(sent.length, 1, "nothing to remind the orchestrator of");
+    assert.equal(timers.length, 1, "no further reminder is armed");
+    // A reload does not resurrect the reminders either.
+    armDeliveredDecisionNudge(cwd, owner, (evidence) => sent.push(evidence), {
+      minutes: 5,
+      isRuntimeActive: () => true,
+      isBusy: () => false,
+      scheduleTimer: (callback) => {
+        timers.push(callback);
+        return { stop: () => {} };
+      },
+    });
+    assert.equal(timers.length, 1);
+    // The reminder text itself no longer offers intervene as a silencer.
+    saveBoard(cwd, {
+      version: 1,
+      nextTaskNumber: 1,
+      activeDecision: decision({ kind: "reviewer_failure", ownerSession: owner }),
+      tasks: [],
+    });
+    const words: string[] = [];
+    const later: Array<() => void> = [];
+    deliverPendingDecision(cwd, owner, (evidence) => words.push(evidence), {
+      minutes: 5,
+      isRuntimeActive: () => true,
+      isBusy: () => false,
+      scheduleTimer: (callback) => {
+        later.push(callback);
+        return { stop: () => {} };
+      },
+    });
+    later[0]?.();
+    assert.match(words[1] ?? "", /never to silence this reminder/);
+    assert.match(words[1] ?? "", /the user must run \/maestro drive/);
   });
 });
 
