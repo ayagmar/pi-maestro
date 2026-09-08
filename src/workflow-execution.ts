@@ -218,11 +218,23 @@ export async function executeTask(options: {
     // start fresh — a resumed launch that hits a provider failure therefore
     // falls back to a clean launch instead of a half-poisoned transcript — and
     // human retries keep their deliberately isolated rerun semantics.
+    // pi refuses to resume a session whose recorded working directory is
+    // gone, so a continuation is only possible in the very checkout the
+    // previous attempt ran in. When that checkout could not be retained (a
+    // clean interrupted worktree was pruned, or its branch is missing) the
+    // attempt starts fresh instead of failing at launch — a real drive lost an
+    // attempt to "Stored session working directory does not exist".
+    const sameCheckout =
+      previousAttempt?.worktreePath === undefined
+        ? worktree === undefined
+        : worktree?.worktreePath === previousAttempt.worktreePath &&
+          existsSync(previousAttempt.worktreePath);
     const resumeSessionFile =
       config.retryContext !== "fresh" &&
       modelIndex === 0 &&
       !humanRetry &&
       !task.discovery &&
+      sameCheckout &&
       (task.status === "changes_requested" ||
         continuesCostCappedAttempt ||
         continuesInterruptedSession) &&
