@@ -3891,6 +3891,106 @@ test("quota probing stops once providerQuotaWaitMinutes is spent and reports the
   }
 });
 
+test("an interrupted attempt whose checkout was pruned starts fresh instead of resuming into a missing directory", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-interrupt-pruned-"));
+  const git = (dir: string, ...args: string[]) =>
+    execFileSync("git", args, { cwd: dir, encoding: "utf-8" }).trim();
+  try {
+    git(cwd, "init", "-q");
+    git(cwd, "config", "user.email", "test@local");
+    git(cwd, "config", "user.name", "Test");
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    git(cwd, "add", "-A");
+    git(cwd, "commit", "-qm", "chore: base");
+    const { board, task } = boardWithTask();
+    task.writePaths = ["work.txt"];
+    saveBoard(cwd, board);
+    const priorSessionFile = join(cwd, "attempt-1.jsonl");
+    writeFileSync(priorSessionFile, "{}\n");
+
+    const launches: Array<{ cwd: string; resumeSessionFile?: string }> = [];
+    let firstCheckout: string | undefined;
+    const startExecutor: StartExecutor = (options) => {
+      if (options.prompt.includes("adversarial code reviewer")) {
+        return executor({
+          usage: { input: 1, output: 1, cost: 0, turns: 1 },
+          finalReport: "Looks correct.\nVERDICT: APPROVE",
+        })(options);
+      }
+      const entry: { cwd: string; resumeSessionFile?: string } = { cwd: options.cwd };
+      if (options.resumeSessionFile !== undefined)
+        entry.resumeSessionFile = options.resumeSessionFile;
+      launches.push(entry);
+      if (launches.length === 1) {
+        // Nineteen turns of reading, no edits, then the quota wall: the clean
+        // checkout is pruned after the attempt, but the session remembers it.
+        firstCheckout = options.cwd;
+        const handle = executor({
+          exitCode: 1,
+          errorMessage: "Codex error: The usage limit has been reached",
+          failureCause: "provider",
+          usage: { input: 10, output: 5, cost: 1.04, turns: 19 },
+        })(options);
+        handle.attempt.sessionFile = priorSessionFile;
+        return handle;
+      }
+      writeFileSync(join(options.cwd, "work.txt"), "done\n");
+      return executor({
+        usage: { input: 1, output: 1, cost: 0.2, turns: 1 },
+        finalReport: "## Report\ndone",
+      })(options);
+    };
+    const tiers = new Map([
+      ["standard", tier],
+      ["review", tier],
+    ]);
+    const runConfig = { ...config, useWorktrees: true };
+
+    const blocked = await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async () => undefined,
+      cwd,
+      config: { ...runConfig, providerQuotaWaitMinutes: 0 },
+      resolvedTiers: tiers,
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(blocked.stoppedBecause.code, "provider_blocked");
+    assert.ok(firstCheckout);
+    // Simulate the cleanup that removed the clean interrupted checkout.
+    if (existsSync(firstCheckout)) {
+      git(cwd, "worktree", "remove", "--force", firstCheckout);
+    }
+    git(cwd, "worktree", "prune");
+    const branch = findTask(loadBoard(cwd), task.id)?.attempts[0]?.branch;
+    if (branch && git(cwd, "branch", "--list", branch)) git(cwd, "branch", "-D", branch);
+    assert.equal(existsSync(firstCheckout), false);
+
+    const resumed = await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async () => undefined,
+      cwd,
+      config: runConfig,
+      resolvedTiers: tiers,
+      startExecutor,
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(resumed.stoppedBecause.code, "completed");
+    assert.equal(launches.length, 2);
+    assert.equal(
+      launches[1]?.resumeSessionFile,
+      undefined,
+      "no session resume without the checkout it recorded"
+    );
+    assert.notEqual(launches[1]?.cwd, firstCheckout);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.status, "approved");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("a WebSocket drop mid-attempt resumes the same session and checkout instead of restarting", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-provider-interrupt-resume-"));
   const git = (dir: string, ...args: string[]) =>
