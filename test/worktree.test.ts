@@ -9,6 +9,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,7 @@ import {
   commitAll,
   committedPathsSinceFork,
   createWorktree,
+  assertWorktreeRegistered,
   inspectManagedWorktrees,
   mergeWorktree,
   parkInactiveWorktrees,
@@ -453,6 +455,67 @@ test("idle worktrees are checkpointed, removed, and restored only when needed", 
     assert.equal(readFileSync(join(ref.worktreePath, "shared.txt"), "utf-8"), "recoverable work\n");
     assert.equal(changedPaths(ref.worktreePath).length, 0);
   } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("isolated checkouts are verified as registered worktrees on the expected branch", () => {
+  const cwd = repository();
+  try {
+    const ref = createWorktree(cwd, "T7", 1);
+    // Creation is not assumed: the path is registered with the expected branch.
+    assert.equal(existsSync(ref.worktreePath), true);
+    const listing = git(cwd, "worktree", "list", "--porcelain");
+    assert.match(listing, new RegExp(`worktree .*${ref.worktreePath.replaceAll("/", "\\/")}`));
+    assert.match(listing, new RegExp(`branch refs/heads/${ref.branch.replaceAll("/", "\\/")}`));
+    assert.doesNotThrow(() => assertWorktreeRegistered(cwd, ref, "T7"));
+
+    // A directory that exists but was never registered is refused instead of
+    // being handed to an executor that would produce nothing attributable.
+    const phantom = worktreeRef(cwd, "T8", 1);
+    mkdirSync(phantom.worktreePath, { recursive: true });
+    writeFileSync(join(phantom.worktreePath, ".keep-placeholder"), "");
+    assert.throws(
+      () => assertWorktreeRegistered(cwd, phantom, "T8"),
+      /Isolated checkout for T8 was not established[\s\S]*not a registered Git worktree[\s\S]*git branch -D maestro\/t8-attempt-1/
+    );
+    assert.throws(
+      () => restoreWorktree(cwd, phantom, "T8"),
+      /Isolated checkout for T8 was not established/
+    );
+
+    // A path registered on a different branch than the attempt recorded is
+    // just as unusable, and says which branch it found.
+    const other = worktreeRef(cwd, "T9", 1);
+    git(cwd, "worktree", "add", "-b", "recovery/t9", other.worktreePath, "HEAD");
+    assert.throws(
+      () => assertWorktreeRegistered(cwd, other, "T9"),
+      /registered on branch "recovery\/t9"/
+    );
+
+    // An absent path is reported as absent, not as a mystery.
+    const absent = worktreeRef(cwd, "T10", 1);
+    assert.throws(
+      () => assertWorktreeRegistered(cwd, absent, "T10"),
+      /the directory does not exist/
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a checkout reached through a symlink still verifies as registered", () => {
+  const cwd = repository();
+  const linked = `${cwd}-link`;
+  try {
+    // `git worktree add` records the resolved path, so resolving only the
+    // caller's string reads a healthy checkout as unregistered.
+    symlinkSync(cwd, linked);
+    const ref = createWorktree(linked, "T11", 1);
+    assert.doesNotThrow(() => assertWorktreeRegistered(linked, ref, "T11"));
+    restoreWorktree(linked, ref, "T11");
+  } finally {
+    rmSync(linked, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
   }
 });

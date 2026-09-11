@@ -431,7 +431,7 @@ export async function driveBoard(options: {
               // not abort the whole drive: only this task loses its retained
               // recovery state, and it starts from a fresh baseline instead.
               try {
-                worktrees.set(task.id, restoreWorktree(cwd, retained));
+                worktrees.set(task.id, restoreWorktree(cwd, retained, task.id));
               } catch (error) {
                 options.onNotice?.(
                   `${task.id}: retained recovery checkout could not be restored (${error instanceof Error ? error.message : String(error)}); starting a fresh attempt from HEAD.`
@@ -447,6 +447,19 @@ export async function driveBoard(options: {
               created.push(ref);
               worktrees.set(task.id, ref);
             }
+          }
+          // Isolation was requested for this batch. A task with no verified
+          // checkout would run in the shared tree, where its edits cannot be
+          // attributed to it — the observed failure mode was a full executor
+          // attempt (plus a review cycle) whose work the artifact gate could
+          // not find. Fail the launch instead of degrading to the shared tree.
+          const unisolated = isolateBatch
+            ? dispatchable.filter((task) => !worktrees.has(task.id)).map((task) => task.id)
+            : [];
+          if (unisolated.length > 0) {
+            throw new Error(
+              `Isolated checkouts could not be established for ${unisolated.join(", ")}; refusing to run them in the shared checkout. Retry the drive, or run /maestro doctor if it recurs.`
+            );
           }
         } catch (error) {
           for (const ref of created) removeWorktree(cwd, ref);

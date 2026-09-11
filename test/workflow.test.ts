@@ -1885,6 +1885,67 @@ test("a deleted recovery checkout fails only its own task, not the whole drive",
   }
 });
 
+test("a retained path that is not a registered worktree restarts fresh instead of running there", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-phantom-recovery-"));
+  try {
+    execFileSync("git", ["init"], { cwd });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd });
+    writeFileSync(join(cwd, "base.txt"), "base\n");
+    execFileSync("git", ["add", "base.txt"], { cwd });
+    execFileSync("git", ["commit", "-m", "base"], { cwd });
+
+    const { board, task } = boardWithTask("changes_requested");
+    const previous = attempt("prior work");
+    // The observed incident: the collision-avoidance suffix picked a directory
+    // that was never a registered Git worktree, so the executor ran with a
+    // phantom checkout and produced nothing the artifact gate could attribute.
+    const phantom = join(cwd, ".pi", "maestro", "worktrees", "t1-attempt-1-2");
+    mkdirSync(phantom, { recursive: true });
+    writeFileSync(join(phantom, ".keep-placeholder"), "");
+    previous.worktreePath = phantom;
+    previous.branch = "maestro/t1-attempt-1-2";
+    task.attempts.push(previous);
+    task.reviewNotes = "1. Fix the thing.";
+    saveBoard(cwd, board);
+
+    const notices: string[] = [];
+    const startedIn: string[] = [];
+    const baseExecutor = executor({ finalReport: "Verified.\nVERDICT: APPROVE" });
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async () => undefined,
+      cwd,
+      config: { ...config, useWorktrees: true },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        startedIn.push(options.cwd);
+        return baseExecutor(options);
+      },
+      onUpdate,
+      trackRun,
+      onNotice: (message) => notices.push(message),
+    });
+
+    assert.notEqual(result.stoppedBecause.code, "error");
+    assert.ok(
+      notices.some((notice) => /retained recovery checkout could not be restored/.test(notice)),
+      `expected a recovery notice, got ${JSON.stringify(notices)}`
+    );
+    // The phantom directory is never used as an executor or reviewer checkout.
+    assert.ok(startedIn.length > 0);
+    assert.ok(
+      startedIn.every((startedCwd) => startedCwd !== phantom),
+      `nothing may run in the unregistered checkout, got ${JSON.stringify(startedIn)}`
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("launch-bounded worktree dispatch creates no checkout for undispatched tasks", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-worktree-launch-limit-"));
   try {

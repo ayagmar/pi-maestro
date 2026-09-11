@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   openSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
 } from "node:fs";
@@ -189,7 +190,54 @@ export function createWorktree(mainCwd: string, taskId: string, attempt: number)
   }
 
   git(mainCwd, ["worktree", "add", "-b", ref.branch, ref.worktreePath, "HEAD"]);
+  assertWorktreeRegistered(mainCwd, ref, taskId);
   return ref;
+}
+
+/**
+ * Paths are compared the way Git records them: `git worktree add` stores the
+ * resolved path, so a checkout reached through a symlink (macOS `/tmp` and
+ * `/var`, a symlinked home, a bind-mounted CI workspace) lists a different
+ * string than the one passed in. Comparing unresolved paths there reports a
+ * healthy worktree as unregistered — the same false negative that lets a task
+ * run in the wrong tree.
+ */
+function pathIdentity(path: string): string {
+  let canonical: string;
+  try {
+    canonical = realpathSync(path);
+  } catch {
+    canonical = resolve(path);
+  }
+  const normalized = canonical.replaceAll("\\", "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Assert that a task checkout really is a registered Git worktree on the
+ * expected branch.
+ *
+ * `git worktree add` exiting 0 was treated as proof the checkout exists, but a
+ * real drive recorded `t1-attempt-1-2` as the attempt's checkout when that
+ * directory was never a registered worktree at all: the executor produced
+ * nothing attributable, the artifact gate rejected the attempt with "Expected
+ * file work produced no attributable Git changes", and a full executor attempt
+ * plus a review cycle were paid for with no candidate to judge.
+ */
+export function assertWorktreeRegistered(mainCwd: string, ref: WorktreeRef, taskId: string): void {
+  const missing = !existsSync(ref.worktreePath);
+  const registered = registeredBranch(mainCwd, ref.worktreePath);
+  if (!missing && registered === ref.branch) return;
+  const observed = missing
+    ? "the directory does not exist"
+    : registered
+      ? `it is registered on branch "${registered}"`
+      : "it is not a registered Git worktree";
+  throw new Error(
+    `Isolated checkout for ${taskId} was not established: ${ref.worktreePath} (expected branch "${ref.branch}") — ${observed}. ` +
+      `Maestro will not run the task in the shared checkout, where its changes are indistinguishable from the user's own work. ` +
+      `Recovery: remove the stale checkout and branch (rm -rf ${ref.worktreePath}; git branch -D ${ref.branch}), then retry the task; run /maestro doctor if it recurs.`
+  );
 }
 
 export function worktreeExists(ref: WorktreeRef): boolean {
@@ -206,11 +254,11 @@ function branchExists(mainCwd: string, branch: string): boolean {
 
 function registeredBranch(mainCwd: string, worktreePath: string): string | undefined {
   try {
-    const target = resolve(worktreePath);
+    const target = pathIdentity(worktreePath);
     let currentPath: string | undefined;
     for (const line of gitOutput(mainCwd, ["worktree", "list", "--porcelain"]).split("\n")) {
       if (line.startsWith("worktree ")) {
-        currentPath = resolve(line.slice("worktree ".length));
+        currentPath = pathIdentity(line.slice("worktree ".length));
       } else if (currentPath === target && line.startsWith("branch refs/heads/")) {
         return line.slice("branch refs/heads/".length);
       }
@@ -222,8 +270,11 @@ function registeredBranch(mainCwd: string, worktreePath: string): string | undef
 }
 
 /** Restore a parked task checkout from its durable Maestro branch. */
-export function restoreWorktree(mainCwd: string, ref: WorktreeRef): WorktreeRef {
-  if (worktreeExists(ref)) return ref;
+export function restoreWorktree(mainCwd: string, ref: WorktreeRef, taskId = "task"): WorktreeRef {
+  if (worktreeExists(ref)) {
+    assertWorktreeRegistered(mainCwd, ref, taskId);
+    return ref;
+  }
   if (!branchExists(mainCwd, ref.branch)) {
     throw new Error(`Recovery branch is missing: ${ref.branch}`);
   }
@@ -231,6 +282,7 @@ export function restoreWorktree(mainCwd: string, ref: WorktreeRef): WorktreeRef 
   git(mainCwd, ["worktree", "prune"]);
   mkdirSync(dirname(ref.worktreePath), { recursive: true });
   git(mainCwd, ["worktree", "add", ref.worktreePath, ref.branch]);
+  assertWorktreeRegistered(mainCwd, ref, taskId);
   return ref;
 }
 

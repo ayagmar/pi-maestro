@@ -194,10 +194,14 @@ export async function reviewTask(options: {
     const candidatePaths = latestAttempt?.touchedFiles ?? [];
     worktree =
       latestAttempt?.worktreePath && latestAttempt.branch
-        ? restoreWorktree(cwd, {
-            worktreePath: latestAttempt.worktreePath,
-            branch: latestAttempt.branch,
-          })
+        ? restoreWorktree(
+            cwd,
+            {
+              worktreePath: latestAttempt.worktreePath,
+              branch: latestAttempt.branch,
+            },
+            task.id
+          )
         : undefined;
     const candidateCwd = worktree?.worktreePath ?? cwd;
     const claimedAttemptIndex = latestAttempt?.index;
