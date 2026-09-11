@@ -47,6 +47,57 @@ function task(id: string, tier: string, status: Task["status"], attempts: Attemp
   };
 }
 
+test("a superseded cheap pre-pass is not reported as a first-review failure", () => {
+  const reviewed: Attempt = {
+    index: 1,
+    logFile: "/tmp/model-a-1.jsonl",
+    model: "model-a",
+    provider: "openai",
+    thinking: "medium",
+    startedAt: 1,
+    usage: { input: 100, output: 20, cost: 0.3, turns: 1 },
+    reviewLaunches: [
+      {
+        id: "T1-review-1-1-1",
+        reviewerIndex: 1,
+        role: "single",
+        costTier: "economy",
+        startedAt: 2,
+        verdict: "request_changes",
+        usage: { input: 10, output: 2, cost: 0.001, turns: 1 },
+      },
+      {
+        id: "T1-review-1-1-2",
+        reviewerIndex: 1,
+        role: "single",
+        costTier: "premium",
+        escalationReason: "cheap first pass was inconclusive: reviewer did not approve",
+        startedAt: 3,
+        verdict: "approve",
+        usage: { input: 10, output: 2, cost: 0.05, turns: 1 },
+      },
+    ],
+    touchedFiles: [],
+  };
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 2,
+    tasks: [task("T1", "standard", "approved", [reviewed])],
+  };
+
+  const insights = deriveModelInsights([board]);
+
+  // One logical reviewer, one settled verdict: the cheap rejection was
+  // superseded, so the attempt's first review is the approval.
+  const group = insights.groups[0];
+  assert.equal(group?.firstReviews, 1);
+  assert.equal(group?.firstReviewApprovals, 1);
+  assert.equal(group?.reviewerVerdicts, 1);
+  assert.equal(group?.reviewerRejections, 0);
+  assert.match(formatModelInsights(insights, 1), /first-review approval 100\.0% \(1\/1\)/);
+  assert.doesNotMatch(formatModelInsights(insights, 1), /reviewer rejection [1-9]/);
+});
+
 test("model insights aggregate attempts, review outcomes, costs, and failures by model and tier", () => {
   const approved = attempt(1, "model-a", 0.3, "approve");
   const rejected = attempt(2, "model-a", 0.2, "request_changes");

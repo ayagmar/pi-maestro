@@ -1,5 +1,5 @@
 import { modelIdentity } from "./cost-forecast-policy.js";
-import { type Board, type FailureKind, type Task } from "./types.js";
+import { type Board, type FailureKind, type ReviewLaunch, type Task } from "./types.js";
 
 const FAILURE_KINDS: FailureKind[] = [
   "provider_failure",
@@ -76,12 +76,22 @@ export function deriveModelInsights(boards: readonly Board[]): ModelInsights {
           const kind = attempt.failureReason.kind;
           group.failures[kind] = (group.failures[kind] ?? 0) + 1;
         }
-        const firstReview = attempt.reviewLaunches?.[0];
+        // One logical reviewer can have several raw launches: a provider
+        // fallback, or the review cost ladder's cheap first pass superseded by
+        // the escalated premium reviewer. Only the launch that settled that
+        // reviewer counts, otherwise a cheap pre-pass rejection is reported as
+        // a first-review failure on an attempt the escalated reviewer approved.
+        const settled = new Map<number, ReviewLaunch>();
+        for (const [index, launch] of (attempt.reviewLaunches ?? []).entries()) {
+          settled.set(launch.reviewerIndex ?? index + 1, launch);
+        }
+        const ordered = [...settled.entries()].sort(([left], [right]) => left - right);
+        const firstReview = ordered[0]?.[1];
         if (firstReview) {
           group.firstReviews += 1;
           if (firstReview.verdict === "approve") group.firstReviewApprovals += 1;
         }
-        for (const launch of attempt.reviewLaunches ?? []) {
+        for (const [, launch] of ordered) {
           if (!launch.verdict) continue;
           group.reviewerVerdicts += 1;
           if (launch.verdict === "request_changes") group.reviewerRejections += 1;
