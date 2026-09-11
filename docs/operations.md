@@ -47,6 +47,27 @@ Maestro preserves board state, attempts, logs, sessions, and checkpoint branches
 - `/maestro plan diff <file> [taskId]` and `/maestro recipe preview <name> [JSON]` are
   validated read-only inspections. Their deterministic references identify bounded omitted detail.
 
+## Review cost
+
+Review, not prompt size, is where an expensive drive's money goes: a measured 6-task drive spent
+$4.1728 of $4.4070 (94.7%) on reviewers while its executors cost $0.2341, and both reviews it paid
+for were rejections. Three controls bound that:
+
+- The review prompt states the attempt's Git-attributed changed paths and per-file line counts, so
+  a reviewer inspects the change instead of rediscovering it with repository-wide searches.
+- Plan approval warns when projected reviewer spend is at least twice the projected executor spend,
+  names the two levers (`reviewPolicy`, review-tier model), and reports the effective per-launch
+  reviewer cap — `maxCostPerReview: 0` inherits `maxCostPerTask`, which is easy to misread as "no
+  cap".
+- `reviewCheapModel` runs the first reviewer of each attempt on a cheap model at `thinking: low`,
+  and `reviewEscalation` (default `risk`) sends it to the review tier when the cheap verdict is
+  doubtful (rejection, no `VERDICT` line, malformed criterion evidence), the change touches a money
+  or migration/schema path, the refuter stage runs, or every reviewer after the first under
+  `always`. The escalated verdict replaces the cheap one for that logical reviewer; `confirm` still
+  needs its required approvals, a find-and-refute disagreement is still reported as a disagreement,
+  and `maxReviewerLaunches` and the per-launch cost caps bound the extra launch. The board records
+  `costTier` and `escalationReason` per launch.
+
 ## Context reuse
 
 A model's context window cannot be persisted across processes with hosted providers, so "saving

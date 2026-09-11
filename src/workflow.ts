@@ -76,7 +76,7 @@ export {
   snapshot,
   type TaskSnapshot,
 } from "./workflow-policy.js";
-export { reviewTask } from "./workflow-review.js";
+export { CHEAP_REVIEW_THINKING, reviewTask } from "./workflow-review.js";
 export type {
   StartExecutor,
   TrackRun,

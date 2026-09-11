@@ -26,6 +26,7 @@ import {
 } from "../src/types.js";
 import {
   artifactFindings,
+  CHEAP_REVIEW_THINKING,
   driveBoard,
   executeTask,
   formatDriveSummary,
@@ -684,14 +685,16 @@ test("the review ladder keeps a clean cheap approval on the cheap model", async 
   try {
     const task = reviewPolicyTask(cwd, "single");
     const launchedModels: string[] = [];
+    const launchedThinking: string[] = [];
     const result = await reviewTask({
       cwd,
       task,
-      tier: { thinking: "low", model: "premium/reviewer" },
+      tier: { thinking: "max", model: "premium/reviewer" },
       maxReviewerLaunches: 4,
       reviewEscalation: { model: "cheap/reviewer", policy: "risk" },
       startExecutor: (options) => {
         launchedModels.push(options.tier.model ?? "(inherited)");
+        launchedThinking.push(options.tier.thinking);
         return queuedReviewerReports([{}])(options);
       },
       onUpdate,
@@ -700,6 +703,9 @@ test("the review ladder keeps a clean cheap approval on the cheap model", async 
 
     // One cheap launch, no premium spend: this is the whole point of the ladder.
     assert.deepEqual(launchedModels, ["cheap/reviewer"]);
+    // The cheap side also drops the review tier's thinking level; max
+    // reasoning tokens on a cheap model are still wasted spend.
+    assert.deepEqual(launchedThinking, [CHEAP_REVIEW_THINKING]);
     assert.equal(result.status, "approved");
     const launches = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewLaunches;
     assert.deepEqual(
@@ -716,6 +722,7 @@ test("a cheap verdict that is not a clean approval escalates to the review tier"
   try {
     const task = reviewPolicyTask(cwd, "single");
     const launchedModels: string[] = [];
+    const launchedThinking: string[] = [];
     // The queue is shared across launches: the cheap pass rejects, the
     // escalated premium reviewer is the deciding one.
     const reports = queuedReviewerReports([
@@ -725,11 +732,12 @@ test("a cheap verdict that is not a clean approval escalates to the review tier"
     const result = await reviewTask({
       cwd,
       task,
-      tier: { thinking: "low", model: "premium/reviewer" },
+      tier: { thinking: "max", model: "premium/reviewer" },
       maxReviewerLaunches: 4,
       reviewEscalation: { model: "cheap/reviewer", policy: "risk" },
       startExecutor: (options) => {
         launchedModels.push(options.tier.model ?? "(inherited)");
+        launchedThinking.push(options.tier.thinking);
         return reports(options);
       },
       onUpdate,
@@ -737,6 +745,8 @@ test("a cheap verdict that is not a clean approval escalates to the review tier"
     });
 
     assert.deepEqual(launchedModels, ["cheap/reviewer", "premium/reviewer"]);
+    // The escalated launch keeps the review tier's configured thinking.
+    assert.deepEqual(launchedThinking, [CHEAP_REVIEW_THINKING, "max"]);
     assert.equal(result.status, "approved");
     const launches = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewLaunches;
     assert.equal(launches?.length, 2);
@@ -780,7 +790,10 @@ test("an unusable cheap verdict escalates instead of failing the review", async 
     assert.deepEqual(launchedModels, ["cheap/reviewer", "premium/reviewer", "cheap/reviewer"]);
     assert.equal(result.status, "approved");
     const launches = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewLaunches;
-    assert.match(launches?.[1]?.escalationReason ?? "", /inconclusive: reviewer gave no VERDICT line/);
+    assert.match(
+      launches?.[1]?.escalationReason ?? "",
+      /inconclusive: reviewer gave no VERDICT line/
+    );
     assert.equal(launches?.[1]?.costTier, "premium");
     // confirm still needs two distinct approvals: #1 escalated, #2 on the cheap pass.
     assert.deepEqual(

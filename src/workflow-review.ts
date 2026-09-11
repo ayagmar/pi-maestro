@@ -405,7 +405,9 @@ export async function reviewTask(options: {
           id: launchId,
           reviewerIndex,
           role,
-          ...(reviewEscalation ? { costTier: plan.cheap ? ("economy" as const) : ("premium" as const) } : {}),
+          ...(reviewEscalation
+            ? { costTier: plan.cheap ? ("economy" as const) : ("premium" as const) }
+            : {}),
           ...(plan.reason ? { escalationReason: plan.reason } : {}),
           startedAt: Date.now(),
           usage: { input: 0, output: 0, cost: 0, turns: 0 },
@@ -580,14 +582,21 @@ export async function reviewTask(options: {
         // reviewer is for: a verdict with nothing usable in it wastes the whole
         // executor attempt, and a rejection decides a re-run.
         if (!parsed) {
-          return { operationalFailure: "reviewer gave no VERDICT line", doubt: "reviewer gave no VERDICT line" };
+          return {
+            operationalFailure: "reviewer gave no VERDICT line",
+            doubt: "reviewer gave no VERDICT line",
+          };
         }
         if (reviewPolicy !== "single" && criteriaCount > 0 && !launch.criterionEvidence) {
           const message = launch.errorMessage ?? "reviewer criterion evidence invalid";
           return { operationalFailure: message, doubt: message };
         }
         if (!parsed.approved) {
-          return { verdict: parsed, report: outcome.finalReport, doubt: "reviewer did not approve" };
+          return {
+            verdict: parsed,
+            report: outcome.finalReport,
+            doubt: "reviewer did not approve",
+          };
         }
         return { verdict: parsed, report: outcome.finalReport };
       }
