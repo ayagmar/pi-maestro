@@ -2,7 +2,13 @@ import { createHash } from "node:crypto";
 import { type taskFingerprint } from "./artifact-policy.js";
 import { buildReviewPrompt } from "./prompts.js";
 import { redactFailureMessage } from "./runner.js";
-import { type Attempt, type ReviewLaunch, type ReviewPolicy, type Task } from "./types.js";
+import {
+  type Attempt,
+  type ReviewEscalationPolicy,
+  type ReviewLaunch,
+  type ReviewPolicy,
+  type Task,
+} from "./types.js";
 
 /** Session picker name: "T3 add replay command · attempt 2" beats "maestro T3-attempt-2". */
 export function sessionLabel(task: Task, kind: "attempt" | "review", index: number): string {
@@ -269,4 +275,77 @@ export function selfReportedBlocker(report: string): string | undefined {
       .map((candidate) => candidate.trim())
       .find((candidate) => candidate.length > 0) ?? "";
   return line.slice(0, 300);
+}
+
+export interface ReviewEscalation {
+  /** Provider-qualified model for the cheap first-pass reviewer. */
+  model: string;
+  policy: ReviewEscalationPolicy;
+}
+
+export interface ReviewerLaunchPlan {
+  /** True when this launch uses the cheap first-pass model. */
+  cheap: boolean;
+  /** Why this launch runs on the premium review tier, when it does. */
+  reason?: string;
+}
+
+/**
+ * Paths where a cheap clean approval is worth the least: money movement and
+ * schema/data migrations fail loudly in production and quietly in review, so
+ * they buy the premium reviewer even when the cheap one is content.
+ */
+const RISK_PATH_PATTERNS: readonly RegExp[] = [
+  /(^|\/)(migrat\w*|alembic|liquibase|flyway)(\/|$)/i,
+  /(^|\/)schemas?(\/|\.|$)/i,
+  /\.(sql|prisma)$/i,
+  /(^|\/)(billing|payments?|invoic\w*|ledger|refunds?|pricing|checkout|subscriptions?)(\/|[-_.])/i,
+  /(^|\/)(finance|financial|money|currency|wallet|stripe)(\/|[-_.])/i,
+];
+
+/** Changed paths that force the premium reviewer, in stable order. */
+export function riskyChangePaths(paths: readonly string[]): string[] {
+  return paths.filter((path) => RISK_PATH_PATTERNS.some((pattern) => pattern.test(path))).sort();
+}
+
+/**
+ * Which side of the review cost ladder a logical reviewer launch runs on.
+ *
+ * The ladder exists because review, not prompt size, is what a real drive
+ * spent its money on: $4.1728 of $4.4070 (94.7%) went to premium reviewers at
+ * thinking max, and both of the two reviews it paid for were rejections on
+ * work a cheaper first pass could have judged first. The premium tier is
+ * therefore reserved for the cases where it changes the outcome — risky
+ * changes, a doubtful cheap verdict, the refuter stage, or an operator who
+ * asks for a paid panel after the cheap gate ("always").
+ */
+export function reviewerLaunchPlan(input: {
+  escalation: ReviewEscalation | undefined;
+  reviewerIndex: number;
+  role: NonNullable<ReviewLaunch["role"]>;
+  riskyPaths: readonly string[];
+  /** Why this logical reviewer is being re-run: its cheap verdict was not usable. */
+  doubt?: string;
+}): ReviewerLaunchPlan {
+  const { escalation, reviewerIndex, role, riskyPaths } = input;
+  if (!escalation || escalation.policy === "off") return { cheap: false };
+  if (input.doubt)
+    return { cheap: false, reason: `cheap first pass was inconclusive: ${input.doubt}` };
+  if (role === "refuter") {
+    return { cheap: false, reason: "refuter stage weighs the finder's verdict" };
+  }
+  if (escalation.policy === "always" && reviewerIndex > 1) {
+    return {
+      cheap: false,
+      reason: "every reviewer after the cheap first pass runs on the review tier",
+    };
+  }
+  if (escalation.policy === "risk" && riskyPaths.length > 0) {
+    const shown = riskyPaths.slice(0, 3).join(", ");
+    return {
+      cheap: false,
+      reason: `change touches risk-sensitive path(s): ${shown}${riskyPaths.length > 3 ? `, +${riskyPaths.length - 3} more` : ""}`,
+    };
+  }
+  return { cheap: true };
 }

@@ -29,7 +29,7 @@ export function manuallyApproveTask(ctx: ExtensionContext, taskId: string): Task
     attempt.worktreePath && attempt.branch
       ? { worktreePath: attempt.worktreePath, branch: attempt.branch }
       : undefined;
-  if (worktree) restoreWorktree(ctx.cwd, worktree);
+  if (worktree) restoreWorktree(ctx.cwd, worktree, taskId);
   const candidateTree =
     (initialTask.writePaths?.length ?? 0) > 0
       ? (() => {

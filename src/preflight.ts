@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { effectiveReviewCostCap } from "./config.js";
 import { type ProjectedCostEstimate, staticProjectedCost } from "./cost-forecast-policy.js";
 import { type Board, type MaestroConfig, type Task } from "./types.js";
 
@@ -25,6 +26,32 @@ export interface WorkflowPreflight {
 export const OMNIBUS_CRITERIA_WARNING = 6;
 /** Write-path count above which a task looks like several tasks in one. */
 export const OMNIBUS_WRITE_PATH_WARNING = 8;
+/** Projected reviewer spend at or above this multiple of executor spend is lopsided. */
+export const REVIEW_SPEND_WARNING_MULTIPLE = 2;
+/** Projected spend below which the review/executor split is not worth a warning. */
+export const REVIEW_SPEND_WARNING_FLOOR_USD = 1;
+
+/**
+ * Warn *before* the money is spent when reviewers project to dominate the plan.
+ *
+ * The board's post-hoc warning fires after the drive has already paid; a real
+ * 6-task drive reached $4.17 review against $0.23 executor (94.7% of $4.4070)
+ * with nothing to show for it. Naming the split at the plan gate is the only
+ * moment the two levers — review policy and review-tier model — are still free
+ * to change.
+ */
+export function reviewSpendWarning(
+  projectedCost: ProjectedCostEstimate,
+  config: MaestroConfig
+): string | undefined {
+  const { reviewer, executor } = projectedCost.byKind;
+  if (reviewer <= 0) return undefined;
+  if (projectedCost.estimatedUsd < REVIEW_SPEND_WARNING_FLOOR_USD) return undefined;
+  if (reviewer < REVIEW_SPEND_WARNING_MULTIPLE * executor) return undefined;
+  const multiple = executor > 0 ? `${(reviewer / executor).toFixed(1)}×` : "∞";
+  const cap = effectiveReviewCostCap(config);
+  return `projected review spend ($${reviewer.toFixed(2)}) is ${multiple} the projected executor spend ($${executor.toFixed(2)}) — reviewers are the dominant cost; consider reviewPolicy "single" for mechanical tasks, a cheaper review-tier model, or a cheap first pass (reviewCheapModel). One reviewer launch may spend up to $${cap.usd.toFixed(2)} before the ${cap.source} cap stops it`;
+}
 
 /**
  * Non-blocking shape warnings for tasks that bundle many independent
@@ -85,6 +112,7 @@ export function preflightWorkflow(
   }
 
   const totalLaunchUpperBound = executorLaunchUpperBound + reviewerLaunchUpperBound;
+  const projectedCostEstimate = projectedCost ?? staticProjectedCost(totalLaunchUpperBound);
   const taskThresholdExceeded = selected.length > config.confirmationPlanTasks;
   const launchThresholdExceeded = totalLaunchUpperBound > config.confirmationTotalLaunches;
   const warnings: string[] = [];
@@ -102,6 +130,8 @@ export function preflightWorkflow(
     warnings.push(`runtime will stop at maxTotalLaunchesPerRun=${config.maxTotalLaunchesPerRun}`);
   }
   warnings.push(...taskShapeWarnings(selected).slice(0, 5));
+  const reviewSpend = reviewSpendWarning(projectedCostEstimate, config);
+  if (reviewSpend) warnings.push(reviewSpend);
   const size = workflowSize(selected.length);
 
   return {
@@ -112,7 +142,7 @@ export function preflightWorkflow(
     executorLaunchUpperBound,
     reviewerLaunchUpperBound,
     totalLaunchUpperBound,
-    projectedCost: projectedCost ?? staticProjectedCost(totalLaunchUpperBound),
+    projectedCost: projectedCostEstimate,
     verificationProfileUsage: verificationUsage(selected, config),
     size,
     guidance:

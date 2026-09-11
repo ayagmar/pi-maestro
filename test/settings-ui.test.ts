@@ -196,6 +196,21 @@ test("model picker changes preserve qualified values, sentinels, and fallback ch
   assert.deepEqual(config.tiers.standard?.fallbacks, ["provider-c/last-resort"]);
 });
 
+test("the review ladder settings round-trip through applySettingsChange", () => {
+  let config = structuredClone(DEFAULT_CONFIG);
+  assert.equal(config.reviewEscalation, "risk");
+  assert.equal(config.reviewCheapModel, undefined);
+
+  config = applySettingsChange(config, "reviewCheapModel", "anthropic/claude-haiku-4-5");
+  config = applySettingsChange(config, "reviewEscalation", "doubt");
+  assert.equal(config.reviewCheapModel, "anthropic/claude-haiku-4-5");
+  assert.equal(config.reviewEscalation, "doubt");
+
+  // "(none)" switches the ladder off rather than naming a model.
+  config = applySettingsChange(config, "reviewCheapModel", "(none)");
+  assert.equal(config.reviewCheapModel, undefined);
+});
+
 test("watchdog and logging settings round-trip through applySettingsChange", () => {
   let config = structuredClone(DEFAULT_CONFIG);
   config = applySettingsChange(config, "watchdogIdleSeconds", "300");

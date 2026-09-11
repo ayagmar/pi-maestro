@@ -3,6 +3,10 @@ import { type Task } from "./types.js";
 
 export const MAX_INJECTED_CONTEXT_LENGTH = 10_000;
 export const MODEL_PROMPT_BUDGET = 40_000;
+/** Bound for the review prompt's changed-file list; it participates in MODEL_PROMPT_BUDGET. */
+export const MAX_CHANGED_FILES_LENGTH = 4_000;
+/** Paths listed at most before the changed-file list discloses the remainder. */
+export const MAX_CHANGED_FILES_LISTED = 40;
 
 const TRUNCATION_MARKER =
   "\n\n[... lower-priority context omitted; use the recorded session/log reference if needed ...]";
@@ -76,6 +80,82 @@ function openFindingsFeedback(task: Task): string | undefined {
     );
   }
   return lines.join("\n");
+}
+
+interface DiffStat {
+  additions: number;
+  deletions: number;
+}
+
+/** Destination path of a `diff --git a/<old> b/<new>` line, or undefined. */
+function diffHeaderPath(line: string): string | undefined {
+  const marker = line.lastIndexOf(" b/");
+  if (!line.startsWith("diff --git ") || marker < 0) return undefined;
+  return line
+    .slice(marker + " b/".length)
+    .replace(/^"|"$/g, "")
+    .replaceAll("\\", "/");
+}
+
+/** Additions and deletions per destination path, read from a unified diff. */
+function diffStatByPath(diff: string): Map<string, DiffStat> {
+  const stats = new Map<string, DiffStat>();
+  let current: string | undefined;
+  for (const line of diff.split("\n")) {
+    const header = diffHeaderPath(line);
+    if (header !== undefined) {
+      current = header;
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      // A deleted file's `+++` target is /dev/null; its hunks still belong to
+      // the path named by the `diff --git` header.
+      if (line.startsWith("+++ /dev/null")) continue;
+      current = line.slice(4).replace(/^"|"$/g, "").replace(/^b\//, "").replaceAll("\\", "/");
+      continue;
+    }
+    if (line.startsWith("--- ") || current === undefined) continue;
+    if (line.startsWith("+")) {
+      const stat = stats.get(current) ?? { additions: 0, deletions: 0 };
+      stat.additions += 1;
+      stats.set(current, stat);
+    } else if (line.startsWith("-")) {
+      const stat = stats.get(current) ?? { additions: 0, deletions: 0 };
+      stat.deletions += 1;
+      stats.set(current, stat);
+    }
+  }
+  return stats;
+}
+
+/**
+ * The attempt's changed paths, plus a diffstat summary where the bounded diff
+ * covers them.
+ *
+ * Reviewers with no scope statement rediscover the change set by hand: a real
+ * review spent 19 `grep` calls and 20 turns before it ever reached the
+ * verification gate, on a change set Git had already computed. Naming the
+ * paths up front makes the same review start from the artifact instead of
+ * from repository-wide search.
+ */
+function changedFilesSection(attempt: Task["attempts"][number] | undefined): string | undefined {
+  const paths = attempt?.touchedFiles ?? [];
+  if (paths.length === 0) return undefined;
+  const stats = diffStatByPath(attempt?.diff ?? "");
+  const shown = paths.slice(0, MAX_CHANGED_FILES_LISTED);
+  const lines = shown.map((path) => {
+    const stat = stats.get(path);
+    return stat
+      ? `- ${path} (+${stat.additions}/-${stat.deletions})`
+      : `- ${path} (no lines in the bounded diff)`;
+  });
+  const omitted = paths.length - shown.length;
+  if (omitted > 0) lines.push(`- (+${omitted} more changed path(s), not listed)`);
+  const header = `${paths.length} Git-attributed path(s) changed by this attempt; line counts cover only the bounded diff below. Review these paths directly instead of rediscovering the change set with repository-wide greps.`;
+  return truncateContext(
+    `## Files changed\n${header}\n${lines.join("\n")}`,
+    MAX_CHANGED_FILES_LENGTH
+  );
 }
 
 /** Prompt for a fresh-context executor. The task brief must be self-contained. */
@@ -258,6 +338,8 @@ export function buildReviewPrompt(task: Task, report: string): string {
       `## Write-scope deviation\nThe executor changed paths not predicted by the plan: ${outsideScope.join(", ")}\nTreat writePaths as planning and scheduling guidance. Decide whether these changes are necessary for the task, and request changes only when the deviation is unsafe, unrelated, or insufficiently justified.`
     );
   }
+  const changedFiles = changedFilesSection(latestAttempt);
+  if (changedFiles) sections.push(changedFiles);
   const diff = latestAttempt?.diff;
   if (diff) sections.push(`## Bounded display diff\n${truncateContext(diff, 8_000)}`);
   sections.push(

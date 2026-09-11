@@ -38,6 +38,9 @@ import {
   findingFingerprint,
   policyReviewPrompt,
   reviewEvidence,
+  type ReviewEscalation,
+  reviewerLaunchPlan,
+  riskyChangePaths,
   selfReportedBlocker,
   sessionLabel,
   staleExecutionInputsMessage,
@@ -51,6 +54,13 @@ import {
   snapshotArtifact,
   type WorktreeRef,
 } from "./worktree.js";
+
+/**
+ * Thinking level for the cheap first pass. The ladder's premise is that most
+ * clean approvals need no deep reasoning; anything doubtful is re-run on the
+ * review tier with its configured thinking instead.
+ */
+export const CHEAP_REVIEW_THINKING = "low";
 
 export async function reviewTask(options: {
   cwd: string;
@@ -72,6 +82,11 @@ export async function reviewTask(options: {
   maxCostPerLaunch?: number;
   /** Which bound produced maxCostPerLaunch; named in the cost-cap failure. */
   maxCostPerLaunchSource?: string;
+  /**
+   * Cheap-first-pass review ladder. Absent keeps every reviewer on the review
+   * tier model, which is the pre-ladder behaviour.
+   */
+  reviewEscalation?: ReviewEscalation;
   availableTiers?: Iterable<string>;
   verificationProfiles?: Record<string, VerificationProfile>;
   signal?: AbortSignal;
@@ -99,6 +114,7 @@ export async function reviewTask(options: {
     maxReviewerLaunches = 4,
     maxCostPerLaunch = 0,
     maxCostPerLaunchSource,
+    reviewEscalation,
     availableTiers,
     verificationProfiles,
     signal,
@@ -194,10 +210,14 @@ export async function reviewTask(options: {
     const candidatePaths = latestAttempt?.touchedFiles ?? [];
     worktree =
       latestAttempt?.worktreePath && latestAttempt.branch
-        ? restoreWorktree(cwd, {
-            worktreePath: latestAttempt.worktreePath,
-            branch: latestAttempt.branch,
-          })
+        ? restoreWorktree(
+            cwd,
+            {
+              worktreePath: latestAttempt.worktreePath,
+              branch: latestAttempt.branch,
+            },
+            task.id
+          )
         : undefined;
     const candidateCwd = worktree?.worktreePath ?? cwd;
     const claimedAttemptIndex = latestAttempt?.index;
@@ -331,6 +351,9 @@ export async function reviewTask(options: {
     }
     const reviewedAttempt = task.attempts.at(-1);
     const models = [tier.model, ...(tier.fallbacks ?? [])];
+    // Money movement and schema/data migrations are where a cheap clean
+    // approval is worth the least, so they buy the premium reviewer outright.
+    const riskyPaths = riskyChangePaths(reviewedAttempt?.touchedFiles ?? []);
     const reviewLaunches: ReviewLaunch[] = [];
     const priorReviewLaunchCount = reviewedAttempt?.reviewLaunches?.length ?? 0;
     let rawLaunchCount = 0;
@@ -346,22 +369,32 @@ export async function reviewTask(options: {
     const launchReviewer = async (
       reviewerIndex: number,
       role: NonNullable<ReviewLaunch["role"]>,
-      finderReport?: string
+      finderReport: string | undefined,
+      plan: { cheap: boolean; reason?: string }
     ): Promise<
-      | { verdict: { approved: boolean; notes: string }; report: string }
-      | { operationalFailure: string }
+      | { verdict: { approved: boolean; notes: string }; report: string; doubt?: string }
+      | { operationalFailure: string; doubt?: string }
       | { launchLimit: true }
     > => {
       if (candidateTree && snapshotArtifact(candidateCwd, candidatePaths) !== candidateTree) {
         return { operationalFailure: "candidate artifact changed between logical reviewers" };
       }
-      for (const [modelIndex, model] of models.entries()) {
+      const launchModels =
+        plan.cheap && reviewEscalation
+          ? [reviewEscalation.model, ...(tier.fallbacks ?? [])]
+          : models;
+      for (const [modelIndex, model] of launchModels.entries()) {
         if (!canStartExecutor()) return { launchLimit: true };
         if (rawLaunchCount >= maxReviewerLaunches) {
           return { operationalFailure: `review launch cap reached (${maxReviewerLaunches})` };
         }
         rawLaunchCount += 1;
+        // The cheap side of the ladder must actually be cheap: a cheap model
+        // at the review tier's thinking level still bills the reasoning tokens
+        // that made the measured reviews cost $1.84 and $2.33. Escalated
+        // launches keep the review tier's configured thinking.
         const launchTier: TierConfig = { ...tier };
+        if (plan.cheap) launchTier.thinking = CHEAP_REVIEW_THINKING;
         delete launchTier.fallbacks;
         if (model === undefined) delete launchTier.model;
         else launchTier.model = model;
@@ -372,6 +405,16 @@ export async function reviewTask(options: {
           id: launchId,
           reviewerIndex,
           role,
+          // The tier this launch actually ran on: a cheap first pass whose
+          // provider failed falls back to a review-tier model, and recording it
+          // as economy would misattribute that spend.
+          ...(reviewEscalation
+            ? {
+                costTier:
+                  plan.cheap && modelIndex === 0 ? ("economy" as const) : ("premium" as const),
+              }
+            : {}),
+          ...(plan.reason ? { escalationReason: plan.reason } : {}),
           startedAt: Date.now(),
           usage: { input: 0, output: 0, cost: 0, turns: 0 },
           promptCharacters: promptContext.characters,
@@ -534,18 +577,78 @@ export async function reviewTask(options: {
         reviewLaunches.push(launch);
 
         const canFallback =
-          failureReason?.kind === "provider_failure" && modelIndex < models.length - 1;
+          failureReason?.kind === "provider_failure" && modelIndex < launchModels.length - 1;
         if (canFallback) continue;
+        // A provider or process failure says nothing about the cheap model's
+        // judgment, so it is never an escalation trigger: the fallback chain
+        // above already tried the configured models, and escalating would only
+        // repeat a failure against a different endpoint.
         if (failureReason) return { operationalFailure: failureReason.message };
-        if (!parsed) return { operationalFailure: "reviewer gave no VERDICT line" };
-        if (reviewPolicy !== "single" && criteriaCount > 0 && !launch.criterionEvidence) {
+        // The remaining failure and non-approval paths are what the premium
+        // reviewer is for: a verdict with nothing usable in it wastes the whole
+        // executor attempt, and a rejection decides a re-run.
+        if (!parsed) {
           return {
-            operationalFailure: launch.errorMessage ?? "reviewer criterion evidence invalid",
+            operationalFailure: "reviewer gave no VERDICT line",
+            doubt: "reviewer gave no VERDICT line",
+          };
+        }
+        if (reviewPolicy !== "single" && criteriaCount > 0 && !launch.criterionEvidence) {
+          const message = launch.errorMessage ?? "reviewer criterion evidence invalid";
+          return { operationalFailure: message, doubt: message };
+        }
+        if (!parsed.approved) {
+          return {
+            verdict: parsed,
+            report: outcome.finalReport,
+            doubt: "reviewer did not approve",
           };
         }
         return { verdict: parsed, report: outcome.finalReport };
       }
       return { operationalFailure: "reviewer launch failed" };
+    };
+
+    /**
+     * One logical reviewer, possibly on both sides of the ladder: a cheap
+     * first pass whose doubtful result is re-run on the review tier. The
+     * escalated verdict replaces the cheap one for that reviewer, so
+     * `confirm` still needs requiredApprovals distinct approvals and the
+     * find-and-refute disagreement comparison still sees one verdict per
+     * logical reviewer. The launch caps bound the extra launch like any
+     * other; when escalation cannot run, the cheap verdict stands rather than
+     * being discarded.
+     */
+    const runLogicalReviewer = async (
+      reviewerIndex: number,
+      role: NonNullable<ReviewLaunch["role"]>,
+      finderReport?: string
+    ): Promise<
+      | { verdict: { approved: boolean; notes: string }; report: string }
+      | { operationalFailure: string }
+      | { launchLimit: true }
+    > => {
+      const plan = reviewerLaunchPlan({
+        escalation: reviewEscalation,
+        reviewerIndex,
+        role,
+        riskyPaths,
+      });
+      const first = await launchReviewer(reviewerIndex, role, finderReport, plan);
+      if (!plan.cheap || !("doubt" in first) || !first.doubt) return first;
+      const escalated = await launchReviewer(
+        reviewerIndex,
+        role,
+        finderReport,
+        reviewerLaunchPlan({
+          escalation: reviewEscalation,
+          reviewerIndex,
+          role,
+          riskyPaths,
+          doubt: first.doubt,
+        })
+      );
+      return "verdict" in escalated || "launchLimit" in escalated ? escalated : first;
     };
 
     // Re-review of work an intact panel already approved costs one reviewer,
@@ -560,12 +663,12 @@ export async function reviewTask(options: {
     let operationalFailure: string | undefined;
     let launchLimitReached = false;
     if (reviewPolicy === "find-and-refute") {
-      const finder = await launchReviewer(1, "finder");
+      const finder = await runLogicalReviewer(1, "finder");
       if ("launchLimit" in finder) launchLimitReached = true;
       else if ("operationalFailure" in finder) operationalFailure = finder.operationalFailure;
       else {
         logicalResults.push(finder);
-        const refuter = await launchReviewer(2, "refuter", finder.report);
+        const refuter = await runLogicalReviewer(2, "refuter", finder.report);
         if ("launchLimit" in refuter) launchLimitReached = true;
         else if ("operationalFailure" in refuter) operationalFailure = refuter.operationalFailure;
         else logicalResults.push(refuter);
@@ -573,7 +676,7 @@ export async function reviewTask(options: {
     } else {
       const count = reviewPolicy === "confirm" ? requiredApprovals : 1;
       for (let index = 1; index <= count; index += 1) {
-        const result = await launchReviewer(
+        const result = await runLogicalReviewer(
           index,
           reviewPolicy === "single" ? "single" : "confirmer"
         );

@@ -27,6 +27,13 @@ export interface HistoricalLaunchCost {
 
 export interface ProjectedCostEstimate {
   estimatedUsd: number;
+  /**
+   * Projected spend per launch kind. A plan whose reviewers outspend its
+   * executors is the drive's most expensive silent drift — one real drive put
+   * $4.17 of $4.41 (94.7%) into review — and the split is only visible if the
+   * forecast keeps it.
+   */
+  byKind: { executor: number; reviewer: number };
   launchUpperBound: number;
   sourceLaunches: {
     historical: number;
@@ -60,6 +67,7 @@ export function calculateProjectedCost(
   let historicalSamples = 0;
   const usedHistoricalKeys = new Set<string>();
   const sourceLaunches = { historical: 0, modelMetadata: 0, staticFallback: 0 };
+  const byKind = { executor: 0, reviewer: 0 };
 
   for (const demand of demands) {
     if (!Number.isFinite(demand.launches) || demand.launches <= 0) continue;
@@ -68,26 +76,28 @@ export function calculateProjectedCost(
       ? historyKey(demand.tier, demand.kind, demand.model)
       : undefined;
     const sample = matchingHistoryKey ? historical.get(matchingHistoryKey) : undefined;
+    let demandCost: number;
     if (matchingHistoryKey && sample && sample.samples > 0) {
-      estimatedUsd += (sample.cost / sample.samples) * demand.launches;
+      demandCost = (sample.cost / sample.samples) * demand.launches;
       sourceLaunches.historical += demand.launches;
       if (!usedHistoricalKeys.has(matchingHistoryKey)) {
         usedHistoricalKeys.add(matchingHistoryKey);
         historicalSamples += sample.samples;
       }
-      continue;
-    }
-    if (demand.modelCost) {
-      estimatedUsd += metadataCostPerLaunch(demand.modelCost) * demand.launches;
+    } else if (demand.modelCost) {
+      demandCost = metadataCostPerLaunch(demand.modelCost) * demand.launches;
       sourceLaunches.modelMetadata += demand.launches;
-      continue;
+    } else {
+      demandCost = FORECAST_STATIC_COST_PER_LAUNCH * demand.launches;
+      sourceLaunches.staticFallback += demand.launches;
     }
-    estimatedUsd += FORECAST_STATIC_COST_PER_LAUNCH * demand.launches;
-    sourceLaunches.staticFallback += demand.launches;
+    estimatedUsd += demandCost;
+    byKind[demand.kind] += demandCost;
   }
 
   return {
     estimatedUsd,
+    byKind,
     launchUpperBound,
     sourceLaunches,
     historicalSamples,

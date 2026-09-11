@@ -10,7 +10,7 @@ import {
   updateTask,
   validatePlan,
 } from "./board.js";
-import { loadConfig, resolveTierModels } from "./config.js";
+import { effectiveReviewCostCap, loadConfig, resolveTierModels } from "./config.js";
 import {
   boardUsage,
   launchBudgetShortfall,
@@ -49,6 +49,7 @@ export {
 import { createQuotaStatusResolver, type QuotaStatusResolver } from "./provider-quota.js";
 import { executeTask } from "./workflow-execution.js";
 import { reviewTask } from "./workflow-review.js";
+import { type ReviewEscalation } from "./workflow-review-policy.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
 import {
   createWorktree,
@@ -75,7 +76,7 @@ export {
   snapshot,
   type TaskSnapshot,
 } from "./workflow-policy.js";
-export { reviewTask } from "./workflow-review.js";
+export { CHEAP_REVIEW_THINKING, reviewTask } from "./workflow-review.js";
 export type {
   StartExecutor,
   TrackRun,
@@ -141,6 +142,8 @@ export async function driveBoard(options: {
   humanRetryTaskId?: string;
   humanRetryExpectedRiskToken?: string;
   humanRetryOwnerSession?: string;
+  /** Cheap-first-pass review ladder, resolved from config by the caller. */
+  reviewEscalation?: ReviewEscalation;
 }): Promise<DriveSummary> {
   const {
     cwd,
@@ -431,7 +434,7 @@ export async function driveBoard(options: {
               // not abort the whole drive: only this task loses its retained
               // recovery state, and it starts from a fresh baseline instead.
               try {
-                worktrees.set(task.id, restoreWorktree(cwd, retained));
+                worktrees.set(task.id, restoreWorktree(cwd, retained, task.id));
               } catch (error) {
                 options.onNotice?.(
                   `${task.id}: retained recovery checkout could not be restored (${error instanceof Error ? error.message : String(error)}); starting a fresh attempt from HEAD.`
@@ -447,6 +450,19 @@ export async function driveBoard(options: {
               created.push(ref);
               worktrees.set(task.id, ref);
             }
+          }
+          // Isolation was requested for this batch. A task with no verified
+          // checkout would run in the shared tree, where its edits cannot be
+          // attributed to it — the observed failure mode was a full executor
+          // attempt (plus a review cycle) whose work the artifact gate could
+          // not find. Fail the launch instead of degrading to the shared tree.
+          const unisolated = isolateBatch
+            ? dispatchable.filter((task) => !worktrees.has(task.id)).map((task) => task.id)
+            : [];
+          if (unisolated.length > 0) {
+            throw new Error(
+              `Isolated checkouts could not be established for ${unisolated.join(", ")}; refusing to run them in the shared checkout. Retry the drive, or run /maestro doctor if it recurs.`
+            );
           }
         } catch (error) {
           for (const ref of created) removeWorktree(cwd, ref);
@@ -593,23 +609,19 @@ export async function driveBoard(options: {
         );
         // Reviews on hard tiers can cost nearly as much as the attempts they
         // judge; maxCostPerReview lets an operator cap that separately, and the
-        // remaining run budget bounds the launch either way.
-        const reviewCostCap =
-          config.maxCostPerReview && config.maxCostPerReview > 0
-            ? config.maxCostPerReview
-            : config.maxCostPerTask;
-        const reviewCapSource =
-          config.maxCostPerReview && config.maxCostPerReview > 0
-            ? "maxCostPerReview"
-            : "maxCostPerTask";
+        // remaining run budget bounds the launch either way. The inheritance
+        // rule lives in one place so the plan-gate warning cannot disagree with
+        // what the launch actually enforces.
+        const reviewCostCap = effectiveReviewCostCap(config);
+        const reviewCapSource = reviewCostCap.source;
         const reviewBudget = remainingRunBudget(afterRuns.tasks, reviewMaxRunCost);
-        const reviewLaunchCaps = [reviewCostCap, reviewBudget].filter(
+        const reviewLaunchCaps = [reviewCostCap.usd, reviewBudget].filter(
           (cap): cap is number => cap !== undefined && cap > 0
         );
         const reviewLaunchCapSource =
           reviewBudget !== undefined &&
           reviewBudget > 0 &&
-          (reviewCostCap <= 0 || reviewBudget < reviewCostCap)
+          (reviewCostCap.usd <= 0 || reviewBudget < reviewCostCap.usd)
             ? "remaining run budget (maxRunCost)"
             : reviewCapSource;
         const reviewResults = await mapWithConcurrencyLimit(
@@ -645,6 +657,7 @@ export async function driveBoard(options: {
             reviewOptions.watchdogIdleSeconds = config.watchdogIdleSeconds;
             reviewOptions.watchdogWarningTurns = config.watchdogWarningTurns;
             reviewOptions.watchdogTerminationTurns = config.watchdogTerminationTurns;
+            if (options.reviewEscalation) reviewOptions.reviewEscalation = options.reviewEscalation;
             if (options.onRetentionWarning)
               reviewOptions.onRetentionWarning = options.onRetentionWarning;
             if (signal) reviewOptions.signal = signal;
@@ -796,7 +809,11 @@ export async function driveBoard(options: {
 }
 
 export { artifactFindings } from "./artifact-policy.js";
-export { sessionLabel, taskCommitMessage } from "./workflow-review-policy.js";
+export {
+  type ReviewEscalation,
+  sessionLabel,
+  taskCommitMessage,
+} from "./workflow-review-policy.js";
 
 /**
  * Sleep that ends early on abort or a pause request (polled every second, the
