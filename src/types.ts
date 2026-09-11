@@ -34,6 +34,13 @@ export interface ReviewLaunch {
   reviewerIndex?: number;
   role?: "single" | "confirmer" | "finder" | "refuter";
   verdict?: "approve" | "request_changes";
+  /**
+   * Which side of the review cost ladder produced this launch: "economy" is
+   * the cheap first pass (reviewCheapModel), "premium" the review tier.
+   */
+  costTier?: "economy" | "premium";
+  /** Why this launch ran on the review tier instead of the cheap first pass. */
+  escalationReason?: string;
   criterionEvidence?: Array<{ criterion: number; passed: boolean; evidence: string }>;
   model?: string;
   provider?: string;
@@ -449,6 +456,18 @@ export interface RecipeTask {
 
 export type ReviewPolicy = "single" | "confirm" | "find-and-refute";
 
+/**
+ * When the review cost ladder leaves the cheap first-pass model behind.
+ *
+ * - "off": every reviewer runs on the review tier (the pre-ladder behaviour).
+ * - "doubt": escalate only when a cheap verdict is unusable or not an approval.
+ * - "risk": the default; "doubt" plus any change under a money or
+ *   migration/schema path, where a cheap clean approval is worth the least.
+ * - "always": the first reviewer of an attempt is cheap, every later one is
+ *   premium (a paid panel after the cheap gate agrees).
+ */
+export type ReviewEscalationPolicy = "off" | "doubt" | "risk" | "always";
+
 export interface WorkflowRecipe {
   kind: "pi-maestro-recipe";
   version: 1;
@@ -499,6 +518,13 @@ export interface MaestroConfig {
   maxCostPerTask: number;
   /** Abort one reviewer launch once its cost (USD) exceeds this. 0 inherits maxCostPerTask. */
   maxCostPerReview?: number;
+  /**
+   * Cheap first-pass reviewer model for the review cost ladder. Unset keeps
+   * every reviewer on the review tier model.
+   */
+  reviewCheapModel?: string;
+  /** What escalates a reviewer from reviewCheapModel to the review tier model. */
+  reviewEscalation?: ReviewEscalationPolicy;
   /** Stop starting executor batches once active (non-cancelled) board cost (USD) exceeds this. 0 disables the cap. */
   maxRunCost: number;
   /** Consecutive genuine reviewer rejections before a task escalates instead of retrying. */

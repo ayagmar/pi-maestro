@@ -1145,6 +1145,74 @@ test("boards with a stalled attempt stay valid and survive archive/restore", () 
   }
 });
 
+test("review launch cost tier and escalation reason round-trip and are validated", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-board-"));
+  try {
+    const board = emptyBoard();
+    const task = createTask(board, { title: "Ladder", brief: "work", tier: "standard" });
+    task.attempts.push({
+      index: 1,
+      logFile: "executor.log",
+      thinking: "high",
+      startedAt: 1,
+      usage: { input: 1, output: 2, cost: 0.01, turns: 3 },
+      touchedFiles: [],
+      reviewLaunches: [
+        {
+          id: "T1-review-1-1-1",
+          reviewerIndex: 1,
+          role: "confirmer",
+          startedAt: 1,
+          usage: { input: 1, output: 1, cost: 0.001, turns: 1 },
+          costTier: "economy",
+          verdict: "request_changes",
+        },
+        {
+          id: "T1-review-1-1-2",
+          reviewerIndex: 1,
+          role: "confirmer",
+          startedAt: 2,
+          usage: { input: 1, output: 1, cost: 0.05, turns: 1 },
+          costTier: "premium",
+          escalationReason: "cheap first pass was inconclusive: reviewer did not approve",
+          verdict: "approve",
+        },
+      ],
+    });
+    saveBoard(cwd, board);
+
+    const [first, second] = loadBoard(cwd).tasks[0]?.attempts[0]?.reviewLaunches ?? [];
+    assert.equal(first?.costTier, "economy");
+    assert.equal(first?.escalationReason, undefined);
+    assert.equal(second?.costTier, "premium");
+    assert.match(second?.escalationReason ?? "", /cheap first pass was inconclusive/);
+
+    // An unknown tier is not a board this build can trust, and neither is a
+    // non-string escalation reason.
+    mkdirSync(join(cwd, ".pi", "maestro", "archive"), { recursive: true });
+    for (const [field, value] of [
+      ["costTier", "cheap"],
+      ["escalationReason", 7],
+    ] as const) {
+      const invalid = structuredClone(board);
+      const launch = invalid.tasks[0]?.attempts[0]?.reviewLaunches?.[0] as unknown as Record<
+        string,
+        unknown
+      >;
+      launch[field] = value;
+      const file = join(cwd, ".pi", "maestro", "archive", `${field}-board.json`);
+      writeFileSync(file, JSON.stringify(invalid));
+      assert.throws(
+        () => restoreArchivedBoard(cwd, file, loadBoard(cwd).revision ?? 0),
+        /not a valid maestro board/,
+        field
+      );
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("restoreArchivedBoard rejects invalid optional Attempt fields without replacing live board", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-test-"));
   try {

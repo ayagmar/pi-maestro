@@ -218,6 +218,11 @@ export function applySettingsChange(
     config.maxCostPerTask = value === "off" ? 0 : Number(value.slice(1));
   } else if (id === "maxCostPerReview") {
     config.maxCostPerReview = value === "inherit" ? 0 : Number(value.slice(1));
+  } else if (id === "reviewCheapModel") {
+    if (value === "(none)" || value === "(pi default)") delete config.reviewCheapModel;
+    else config.reviewCheapModel = value;
+  } else if (id === "reviewEscalation") {
+    config.reviewEscalation = value as NonNullable<MaestroConfig["reviewEscalation"]>;
   } else if (id === "reviewRejectionLimit") {
     config.reviewRejectionLimit = Number(value);
   } else if (id === "maxRunCost") {
@@ -708,6 +713,33 @@ export async function showSettings(
           values: ["inherit", "$1", "$2", "$5", "$10"],
           description:
             "Abort one reviewer launch after it exceeds this cost. Inherit uses the per-attempt cap.",
+        },
+        {
+          id: "reviewCheapModel",
+          label: "Cheap first-pass reviewer",
+          currentValue: displayModelValue(
+            ctx.modelRegistry,
+            modelChoices.fallback,
+            config.reviewCheapModel ?? "(none)",
+            preferredProvider
+          ),
+          description:
+            "Model for the first reviewer launch. The review tier model takes over when that pass is doubtful, the change touches money or migration/schema paths, or a refuter stage runs. (none) reviews everything on the review tier.",
+          submenu: (_current, close) =>
+            createModelPicker(
+              "cheap first-pass reviewer model",
+              modelChoices.fallback,
+              config.reviewCheapModel ?? "(none)",
+              close
+            ),
+        },
+        {
+          id: "reviewEscalation",
+          label: "Review escalation trigger",
+          currentValue: config.reviewCheapModel ? (config.reviewEscalation ?? "risk") : "n/a",
+          values: ["risk", "doubt", "always", "off"],
+          description:
+            "risk (default): escalate a doubtful verdict or any money/migration path. doubt: only an unusable or rejecting cheap verdict. always: premium after the first reviewer. off: no ladder. Only applies when a cheap first-pass reviewer is set.",
         },
         {
           id: "reviewRejectionLimit",

@@ -39,6 +39,7 @@ export const DEFAULT_CONFIG: MaestroConfig = {
   maxReviewerLaunches: 4,
   maxCostPerTask: 5,
   maxCostPerReview: 0,
+  reviewEscalation: "risk",
   maxRunCost: 25,
   reviewRejectionLimit: 2,
   retryContext: "resume",
@@ -226,6 +227,10 @@ export function mergeConfig(
     maxReviewerLaunches: override.maxReviewerLaunches ?? base.maxReviewerLaunches ?? 4,
     maxCostPerTask: override.maxCostPerTask ?? base.maxCostPerTask,
     maxCostPerReview: override.maxCostPerReview ?? base.maxCostPerReview ?? 0,
+    ...((override.reviewCheapModel ?? base.reviewCheapModel)
+      ? { reviewCheapModel: override.reviewCheapModel ?? base.reviewCheapModel }
+      : {}),
+    reviewEscalation: override.reviewEscalation ?? base.reviewEscalation ?? "risk",
     maxRunCost: override.maxRunCost ?? base.maxRunCost,
     reviewRejectionLimit: override.reviewRejectionLimit ?? base.reviewRejectionLimit ?? 2,
     retryContext: override.retryContext ?? base.retryContext ?? "resume",
@@ -283,6 +288,8 @@ const CONFIG_KEYS = new Set([
   "maxReviewerLaunches",
   "maxCostPerTask",
   "maxCostPerReview",
+  "reviewCheapModel",
+  "reviewEscalation",
   "maxRunCost",
   "reviewRejectionLimit",
   "retryContext",
@@ -330,6 +337,18 @@ export function validateConfig(value: unknown): string | undefined {
     !["resume", "fresh"].includes(config.retryContext as string)
   ) {
     return "retryContext must be resume or fresh";
+  }
+  if (
+    config.reviewEscalation !== undefined &&
+    !["off", "doubt", "risk", "always"].includes(config.reviewEscalation as string)
+  ) {
+    return "reviewEscalation must be off, doubt, risk, or always";
+  }
+  if (
+    config.reviewCheapModel !== undefined &&
+    (typeof config.reviewCheapModel !== "string" || config.reviewCheapModel.trim() === "")
+  ) {
+    return "reviewCheapModel must be a non-empty model pattern";
   }
   const ranges: Record<string, [number, number]> = {
     maxParallel: [1, 64],
@@ -655,6 +674,8 @@ export function describeConfig(config: MaestroConfig): string {
     `maxReviewerLaunches: ${config.maxReviewerLaunches ?? 4}`,
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
     `maxCostPerReview: ${!config.maxCostPerReview ? "inherit maxCostPerTask" : `$${config.maxCostPerReview}`}`,
+    `reviewCheapModel: ${config.reviewCheapModel ?? "(unset — every reviewer uses the review tier model)"}`,
+    `reviewEscalation: ${config.reviewEscalation ?? "risk"}${config.reviewCheapModel ? "" : " (inactive without reviewCheapModel)"}`,
     `maxRunCost: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,
     `reviewRejectionLimit: ${config.reviewRejectionLimit ?? 2}`,
     `retryContext: ${config.retryContext ?? "resume"}`,

@@ -49,6 +49,7 @@ export {
 import { createQuotaStatusResolver, type QuotaStatusResolver } from "./provider-quota.js";
 import { executeTask } from "./workflow-execution.js";
 import { reviewTask } from "./workflow-review.js";
+import { type ReviewEscalation } from "./workflow-review-policy.js";
 import { type StartExecutor, type TrackRun, type WorkflowUpdate } from "./workflow-runtime.js";
 import {
   createWorktree,
@@ -141,6 +142,8 @@ export async function driveBoard(options: {
   humanRetryTaskId?: string;
   humanRetryExpectedRiskToken?: string;
   humanRetryOwnerSession?: string;
+  /** Cheap-first-pass review ladder, resolved from config by the caller. */
+  reviewEscalation?: ReviewEscalation;
 }): Promise<DriveSummary> {
   const {
     cwd,
@@ -658,6 +661,7 @@ export async function driveBoard(options: {
             reviewOptions.watchdogIdleSeconds = config.watchdogIdleSeconds;
             reviewOptions.watchdogWarningTurns = config.watchdogWarningTurns;
             reviewOptions.watchdogTerminationTurns = config.watchdogTerminationTurns;
+            if (options.reviewEscalation) reviewOptions.reviewEscalation = options.reviewEscalation;
             if (options.onRetentionWarning)
               reviewOptions.onRetentionWarning = options.onRetentionWarning;
             if (signal) reviewOptions.signal = signal;
@@ -809,7 +813,11 @@ export async function driveBoard(options: {
 }
 
 export { artifactFindings } from "./artifact-policy.js";
-export { sessionLabel, taskCommitMessage } from "./workflow-review-policy.js";
+export {
+  type ReviewEscalation,
+  sessionLabel,
+  taskCommitMessage,
+} from "./workflow-review-policy.js";
 
 /**
  * Sleep that ends early on abort or a pause request (polled every second, the

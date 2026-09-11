@@ -39,7 +39,9 @@ export function taskLaunches(task: Task): DashboardLaunch[] {
         kind: "review",
         attempt,
         review,
-        label: `review #${review.reviewerIndex ?? index + 1} · ${review.role ?? "reviewer"}`,
+        // The cost ladder is only legible if the board says which side of it a
+        // launch ran on, and what escalated a premium reviewer.
+        label: `review #${review.reviewerIndex ?? index + 1} · ${review.role ?? "reviewer"}${review.costTier === "economy" ? " · economy" : ""}${review.escalationReason ? ` · escalated (${review.escalationReason})` : ""}`,
       });
     }
     return launches;

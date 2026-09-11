@@ -299,6 +299,11 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
   );
   assert.match(validateConfig({ maxParallel: -1 }) ?? "", /maxParallel/);
   assert.match(validateConfig({ logEvents: "verbose" }) ?? "", /logEvents/);
+  assert.match(validateConfig({ reviewEscalation: "sometimes" }) ?? "", /reviewEscalation/);
+  assert.equal(validateConfig({ reviewEscalation: "doubt" }), undefined);
+  assert.match(validateConfig({ reviewCheapModel: "  " }) ?? "", /reviewCheapModel/);
+  assert.match(validateConfig({ reviewCheapModel: 7 }) ?? "", /reviewCheapModel/);
+  assert.equal(validateConfig({ reviewCheapModel: "anthropic/claude-haiku-4-5" }), undefined);
   assert.match(validateConfig({ cleanupCompletedTasks: "yes" }) ?? "", /boolean/);
   assert.match(validateConfig({ livePanes: "yes" }) ?? "", /livePanes must be boolean/);
   assert.match(

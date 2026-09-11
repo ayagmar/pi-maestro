@@ -38,6 +38,8 @@ import {
 } from "../src/workflow.js";
 import {
   reviewEvidence,
+  reviewerLaunchPlan,
+  riskyChangePaths,
   selfReportedBlocker,
   verdictEvidenceConflict,
 } from "../src/workflow-review-policy.js";
@@ -675,6 +677,275 @@ test("malformed convergence evidence is an operational failure and launch cap is
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("the review ladder keeps a clean cheap approval on the cheap model", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-approve-"));
+  try {
+    const task = reviewPolicyTask(cwd, "single");
+    const launchedModels: string[] = [];
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "low", model: "premium/reviewer" },
+      maxReviewerLaunches: 4,
+      reviewEscalation: { model: "cheap/reviewer", policy: "risk" },
+      startExecutor: (options) => {
+        launchedModels.push(options.tier.model ?? "(inherited)");
+        return queuedReviewerReports([{}])(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    // One cheap launch, no premium spend: this is the whole point of the ladder.
+    assert.deepEqual(launchedModels, ["cheap/reviewer"]);
+    assert.equal(result.status, "approved");
+    const launches = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewLaunches;
+    assert.deepEqual(
+      launches?.map(({ costTier, escalationReason }) => ({ costTier, escalationReason })),
+      [{ costTier: "economy", escalationReason: undefined }]
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a cheap verdict that is not a clean approval escalates to the review tier", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-reject-"));
+  try {
+    const task = reviewPolicyTask(cwd, "single");
+    const launchedModels: string[] = [];
+    // The queue is shared across launches: the cheap pass rejects, the
+    // escalated premium reviewer is the deciding one.
+    const reports = queuedReviewerReports([
+      { finalReport: "Cheap pass found a defect.\nVERDICT: REQUEST_CHANGES\n1. broken" },
+      {},
+    ]);
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "low", model: "premium/reviewer" },
+      maxReviewerLaunches: 4,
+      reviewEscalation: { model: "cheap/reviewer", policy: "risk" },
+      startExecutor: (options) => {
+        launchedModels.push(options.tier.model ?? "(inherited)");
+        return reports(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.deepEqual(launchedModels, ["cheap/reviewer", "premium/reviewer"]);
+    assert.equal(result.status, "approved");
+    const launches = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewLaunches;
+    assert.equal(launches?.length, 2);
+    assert.equal(launches?.[0]?.costTier, "economy");
+    assert.equal(launches?.[0]?.escalationReason, undefined);
+    assert.equal(launches?.[1]?.costTier, "premium");
+    assert.match(
+      launches?.[1]?.escalationReason ?? "",
+      /cheap first pass was inconclusive: reviewer did not approve/
+    );
+    // Both launches are billed to the attempt; the escalated verdict settles it.
+    assert.equal(launches?.[1]?.verdict, "approve");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an unusable cheap verdict escalates instead of failing the review", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-unusable-"));
+  try {
+    const task = reviewPolicyTask(cwd, "confirm");
+    const launchedModels: string[] = [];
+    // A cheap reviewer that ignored the criterion contract would have failed
+    // the whole review; the premium reviewer answers it instead.
+    const reports = queuedReviewerReports([{ finalReport: "looks fine to me" }, {}, {}]);
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "low", model: "premium/reviewer" },
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
+      reviewEscalation: { model: "cheap/reviewer", policy: "doubt" },
+      startExecutor: (options) => {
+        launchedModels.push(options.tier.model ?? "(inherited)");
+        return reports(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.deepEqual(launchedModels, ["cheap/reviewer", "premium/reviewer", "cheap/reviewer"]);
+    assert.equal(result.status, "approved");
+    const launches = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewLaunches;
+    assert.match(launches?.[1]?.escalationReason ?? "", /inconclusive: reviewer gave no VERDICT line/);
+    assert.equal(launches?.[1]?.costTier, "premium");
+    // confirm still needs two distinct approvals: #1 escalated, #2 on the cheap pass.
+    assert.deepEqual(
+      launches?.map((launch) => launch.reviewerIndex),
+      [1, 1, 2]
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("escalation honours the reviewer launch cap and keeps the cheap verdict", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-cap-"));
+  try {
+    const task = reviewPolicyTask(cwd, "single");
+    const launchedModels: string[] = [];
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "low", model: "premium/reviewer" },
+      maxReviewerLaunches: 1,
+      reviewEscalation: { model: "cheap/reviewer", policy: "risk" },
+      startExecutor: (options) => {
+        launchedModels.push(options.tier.model ?? "(inherited)");
+        return queuedReviewerReports([
+          { finalReport: "All good.\nVERDICT: REQUEST_CHANGES\n1. broken" },
+        ])(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    // The cap is authoritative: the escalation launch never happens.
+    assert.deepEqual(launchedModels, ["cheap/reviewer"]);
+    const reviewed = findTask(loadBoard(cwd), task.id)?.attempts.at(-1);
+    assert.equal(reviewed?.reviewLaunches?.length, 1);
+    assert.equal(result.status, "changes_requested");
+    assert.equal(reviewed?.reviewConvergence?.status, "changes_requested");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a risk-sensitive path buys the premium reviewer outright", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-risk-"));
+  try {
+    const { board, task } = boardWithTask("ready_for_review");
+    task.reviewPolicy = "single";
+    task.successCriteria = ["observable result"];
+    const candidate = attempt("executor completed the work");
+    candidate.touchedFiles = ["db/migrations/0007_add_column.sql", "src/app.ts"];
+    task.attempts.push(candidate);
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
+
+    const launchedModels: string[] = [];
+    const reports = queuedReviewerReports([{}]);
+    await reviewTask({
+      cwd,
+      task: findTask(loadBoard(cwd), task.id) ?? task,
+      tier: { thinking: "low", model: "premium/reviewer" },
+      maxReviewerLaunches: 4,
+      reviewEscalation: { model: "cheap/reviewer", policy: "risk" },
+      startExecutor: (options) => {
+        launchedModels.push(options.tier.model ?? "(inherited)");
+        return reports(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.deepEqual(launchedModels, ["premium/reviewer"]);
+    const launches = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewLaunches;
+    assert.equal(launches?.[0]?.costTier, "premium");
+    assert.match(launches?.[0]?.escalationReason ?? "", /0007_add_column\.sql/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("the ladder never converts a find-and-refute disagreement into an approval", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-disagreement-"));
+  try {
+    const task = reviewPolicyTask(cwd, "find-and-refute");
+    const launchedModels: string[] = [];
+    const reports = queuedReviewerReports([
+      // Cheap finder rejects...
+      { finalReport: "CRITERION 1: FAIL — missing wiring\nVERDICT: REQUEST_CHANGES" },
+      // ...the escalated finder approves...
+      {},
+      // ...and the premium refuter rejects: a disagreement, not an approval.
+      { finalReport: "CRITERION 1: FAIL — still broken\nVERDICT: REQUEST_CHANGES" },
+    ]);
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "low", model: "premium/reviewer" },
+      maxReviewerLaunches: 4,
+      reviewEscalation: { model: "cheap/reviewer", policy: "risk" },
+      startExecutor: (options) => {
+        launchedModels.push(options.tier.model ?? "(inherited)");
+        return reports(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.deepEqual(launchedModels, ["cheap/reviewer", "premium/reviewer", "premium/reviewer"]);
+    assert.notEqual(result.status, "approved");
+    const reviewed = findTask(loadBoard(cwd), task.id)?.attempts.at(-1);
+    assert.equal(reviewed?.reviewConvergence?.status, "disagreement");
+    assert.deepEqual(
+      reviewed?.reviewLaunches?.map(({ reviewerIndex, costTier }) => ({ reviewerIndex, costTier })),
+      [
+        { reviewerIndex: 1, costTier: "economy" },
+        { reviewerIndex: 1, costTier: "premium" },
+        { reviewerIndex: 2, costTier: "premium" },
+      ]
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("reviewer escalation decisions follow the configured trigger", () => {
+  const escalation = { model: "cheap/reviewer", policy: "risk" } as const;
+  const plan = (
+    overrides: Partial<Parameters<typeof reviewerLaunchPlan>[0]> = {}
+  ): ReturnType<typeof reviewerLaunchPlan> =>
+    reviewerLaunchPlan({
+      escalation,
+      reviewerIndex: 1,
+      role: "single",
+      riskyPaths: [],
+      ...overrides,
+    });
+
+  assert.equal(plan().cheap, true);
+  assert.equal(plan({ escalation: undefined }).cheap, false);
+  assert.equal(plan({ escalation: { model: "cheap/reviewer", policy: "off" } }).cheap, false);
+  // Doubt, risky paths, later panel members, and the refuter all buy premium.
+  assert.match(plan({ doubt: "reviewer did not approve" }).reason ?? "", /did not approve/);
+  assert.match(plan({ riskyPaths: ["db/migrations/1.sql"] }).reason ?? "", /risk-sensitive/);
+  assert.equal(plan({ escalation: { model: "cheap/reviewer", policy: "always" } }).cheap, true);
+  assert.equal(
+    plan({ escalation: { model: "cheap/reviewer", policy: "always" }, reviewerIndex: 2 }).cheap,
+    false
+  );
+  assert.equal(
+    plan({ escalation: { model: "cheap/reviewer", policy: "doubt" }, reviewerIndex: 2 }).cheap,
+    true
+  );
+  assert.equal(plan({ role: "refuter", reviewerIndex: 2 }).cheap, false);
+
+  // Risk detection names the paths that matter and leaves ordinary code alone.
+  assert.deepEqual(riskyChangePaths(["src/app.ts", "test/app.test.ts"]), []);
+  assert.deepEqual(
+    riskyChangePaths([
+      "db/migrations/0007_x.sql",
+      "src/schema.ts",
+      "src/billing/invoice.ts",
+      "src/app.ts",
+    ]),
+    ["db/migrations/0007_x.sql", "src/billing/invoice.ts", "src/schema.ts"]
+  );
 });
 
 test("reviewer provider fallbacks retain the logical reviewer index", async () => {

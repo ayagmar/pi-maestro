@@ -13,7 +13,7 @@ import {
   updateBoard,
   validatePlan,
 } from "./board.js";
-import { loadConfig, resolveTierModels } from "./config.js";
+import { loadConfig, resolveTierModel, resolveTierModels } from "./config.js";
 import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { truncateCharacters, truncateText } from "./format.js";
@@ -36,6 +36,7 @@ import {
   type TierConfig,
 } from "./types.js";
 import { driveBoard, preflightTaskTiers } from "./workflow.js";
+import { type ReviewEscalation } from "./workflow-review-policy.js";
 import { type DriveSummary, formatDriveSummary } from "./workflow-policy.js";
 import { type WorkflowRun } from "./workflow-runtime.js";
 
@@ -537,6 +538,7 @@ export class DriveRuntimeController {
       ? new Map<string, TierConfig>()
       : preflightTaskTiers(unresolved, config, ctx.modelRegistry, ctx.model?.provider);
 
+    let reviewEscalation: ReviewEscalation | undefined;
     if (!board.planPending && unresolved.length > 0) {
       const reviewTier: TierConfig = {
         ...(config.tiers.review ?? { thinking: "high", tools: "read,grep,find,ls" }),
@@ -554,6 +556,32 @@ export class DriveRuntimeController {
       if (fallbacks.length === 0) delete reviewTier.fallbacks;
       else reviewTier.fallbacks = fallbacks.filter((model): model is string => model !== undefined);
       resolvedTiers.set("review", reviewTier);
+
+      // The cheap first pass is resolved like any other model pattern so the
+      // reviewer can never silently land on a different provider serving the
+      // same id. A configured model that cannot be used stops the drive here,
+      // where the message is actionable, rather than degrading every reviewer
+      // back to the premium tier without saying so.
+      const cheapPattern = config.reviewCheapModel?.trim();
+      if (cheapPattern) {
+        const escalation = resolveTierModel(
+          "review (cheap first pass)",
+          { model: cheapPattern, thinking: reviewTier.thinking },
+          ctx.modelRegistry,
+          ctx.model?.provider
+        );
+        if (!escalation.ok || !escalation.modelArg) {
+          throw new Error(
+            escalation.ok
+              ? `reviewCheapModel "${cheapPattern}" did not resolve to a usable model.`
+              : escalation.error
+          );
+        }
+        reviewEscalation = {
+          model: escalation.modelArg,
+          policy: config.reviewEscalation ?? "risk",
+        };
+      }
     }
 
     const driveOptions: Parameters<typeof driveBoard>[0] = {
@@ -598,6 +626,7 @@ export class DriveRuntimeController {
         }
       },
     };
+    if (reviewEscalation) driveOptions.reviewEscalation = reviewEscalation;
     if (taskIds) driveOptions.taskIds = taskIds;
     if (signal) driveOptions.signal = signal;
     if (shouldPause) driveOptions.shouldPause = shouldPause;

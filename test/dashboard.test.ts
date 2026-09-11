@@ -1191,6 +1191,52 @@ test("dashboard is width-safe in its narrow single-pane layout", () => {
   }
 });
 
+test("dashboard launch labels say which side of the review ladder ran", () => {
+  const task = makeTask({
+    attempts: [
+      {
+        index: 1,
+        logFile: "attempt.log",
+        thinking: "low",
+        startedAt: 1,
+        usage: { input: 2, output: 1, cost: 0.01, turns: 1 },
+        touchedFiles: [],
+        reviewLaunches: [
+          {
+            id: "T1-review-1-1-1",
+            reviewerIndex: 1,
+            role: "confirmer",
+            startedAt: 2,
+            usage: { input: 1, output: 1, cost: 0.001, turns: 1 },
+            costTier: "economy",
+            verdict: "request_changes",
+          },
+          {
+            id: "T1-review-1-1-2",
+            reviewerIndex: 1,
+            role: "confirmer",
+            startedAt: 3,
+            usage: { input: 1, output: 1, cost: 0.05, turns: 1 },
+            costTier: "premium",
+            escalationReason: "cheap first pass was inconclusive: reviewer did not approve",
+            verdict: "approve",
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    taskLaunches(task)
+      .filter((launch) => launch.kind === "review")
+      .map((launch) => launch.label),
+    [
+      "review #1 · confirmer · economy",
+      "review #1 · confirmer · escalated (cheap first pass was inconclusive: reviewer did not approve)",
+    ]
+  );
+});
+
 test("dashboard derives legacy launches and drills down through phase, task, and launch", () => {
   const task = makeTask({
     attempts: [

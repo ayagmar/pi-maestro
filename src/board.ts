@@ -982,6 +982,10 @@ function isReviewLaunch(value: unknown): boolean {
     (value.verdict === undefined ||
       value.verdict === "approve" ||
       value.verdict === "request_changes") &&
+    (value.costTier === undefined ||
+      value.costTier === "economy" ||
+      value.costTier === "premium") &&
+    (value.escalationReason === undefined || typeof value.escalationReason === "string") &&
     (value.criterionEvidence === undefined ||
       (Array.isArray(value.criterionEvidence) &&
         value.criterionEvidence.every(
