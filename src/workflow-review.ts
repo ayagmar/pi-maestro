@@ -405,8 +405,14 @@ export async function reviewTask(options: {
           id: launchId,
           reviewerIndex,
           role,
+          // The tier this launch actually ran on: a cheap first pass whose
+          // provider failed falls back to a review-tier model, and recording it
+          // as economy would misattribute that spend.
           ...(reviewEscalation
-            ? { costTier: plan.cheap ? ("economy" as const) : ("premium" as const) }
+            ? {
+                costTier:
+                  plan.cheap && modelIndex === 0 ? ("economy" as const) : ("premium" as const),
+              }
             : {}),
           ...(plan.reason ? { escalationReason: plan.reason } : {}),
           startedAt: Date.now(),

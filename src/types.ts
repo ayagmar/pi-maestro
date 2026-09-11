@@ -35,8 +35,10 @@ export interface ReviewLaunch {
   role?: "single" | "confirmer" | "finder" | "refuter";
   verdict?: "approve" | "request_changes";
   /**
-   * Which side of the review cost ladder produced this launch: "economy" is
-   * the cheap first pass (reviewCheapModel), "premium" the review tier.
+   * Which side of the review cost ladder this launch actually ran on:
+   * "economy" is the cheap first pass (reviewCheapModel), "premium" the review
+   * tier — including a cheap first pass that fell back to a review-tier model
+   * after its own provider failed.
    */
   costTier?: "economy" | "premium";
   /** Why this launch ran on the review tier instead of the cheap first pass. */

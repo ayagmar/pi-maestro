@@ -874,6 +874,52 @@ test("a risk-sensitive path buys the premium reviewer outright", async () => {
   }
 });
 
+test("a cheap launch that falls back to a review-tier model records the tier it used", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-fallback-"));
+  try {
+    const task = reviewPolicyTask(cwd, "single");
+    const launchedModels: string[] = [];
+    const reports = queuedReviewerReports([
+      // The cheap model's provider fails; the review tier's fallback answers.
+      {
+        exitCode: 1,
+        errorMessage: "rate limit exceeded",
+        failureCause: "provider",
+        finalReport: "",
+      },
+      {},
+    ]);
+    const result = await reviewTask({
+      cwd,
+      task,
+      tier: { thinking: "max", model: "premium/reviewer", fallbacks: ["premium/backup"] },
+      maxReviewerLaunches: 4,
+      reviewEscalation: { model: "cheap/reviewer", policy: "risk" },
+      startExecutor: (options) => {
+        launchedModels.push(options.tier.model ?? "(inherited)");
+        return reports(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.deepEqual(launchedModels, ["cheap/reviewer", "premium/backup"]);
+    assert.equal(result.status, "approved");
+    const launches = findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewLaunches;
+    // Both raw launches belong to logical reviewer 1; the second ran on the
+    // review tier, so it is not billed as an economy launch.
+    assert.deepEqual(
+      launches?.map(({ reviewerIndex, costTier, model }) => ({ reviewerIndex, costTier, model })),
+      [
+        { reviewerIndex: 1, costTier: "economy", model: "cheap/reviewer" },
+        { reviewerIndex: 1, costTier: "premium", model: "premium/backup" },
+      ]
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("the ladder never converts a find-and-refute disagreement into an approval", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-ladder-disagreement-"));
   try {
