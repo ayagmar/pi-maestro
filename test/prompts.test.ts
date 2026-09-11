@@ -7,6 +7,7 @@ import {
   buildRetryFollowUpPrompt,
   buildReviewPrompt,
   buildSupervisorBriefing,
+  MAX_CHANGED_FILES_LENGTH,
   MAX_INJECTED_CONTEXT_LENGTH,
   MODEL_PROMPT_BUDGET,
   parseVerdict,
@@ -214,6 +215,99 @@ test("review prompt includes only a bounded diff when the attempt has one", () =
   assert.equal(diff.length, 8_000);
   assert.match(diff, /\[\.\.\. lower-priority context omitted;.*\]$/);
   assert.doesNotMatch(buildReviewPrompt(makeTask(), "Done."), /## Bounded display diff/);
+});
+
+test("review prompt names the changed files with diffstat counts and bounds the list", () => {
+  const diff = [
+    "diff --git a/src/app.ts b/src/app.ts",
+    "--- a/src/app.ts",
+    "+++ b/src/app.ts",
+    "@@ -1,2 +1,3 @@",
+    "-old line",
+    "+new line",
+    "+another line",
+    "diff --git a/src/gone.ts b/src/gone.ts",
+    "deleted file mode 100644",
+    "--- a/src/gone.ts",
+    "+++ /dev/null",
+    "-bye",
+  ].join("\n");
+  const attempt = {
+    index: 1,
+    logFile: "attempt.log",
+    thinking: "low",
+    startedAt: 0,
+    usage: { input: 0, output: 0, cost: 0, turns: 1 },
+    touchedFiles: ["src/app.ts", "src/gone.ts", "tests/app.test.ts"],
+    diff,
+  };
+  const prompt = buildReviewPrompt(makeTask({ attempts: [attempt] }), "Done.");
+  const section = injectedSection(prompt, "## Files changed\n");
+
+  // Scope is stated, per-file counts come from the bounded diff, and a path
+  // the diff does not cover is disclosed as such instead of silently dropped.
+  assert.match(section, /3 Git-attributed path\(s\) changed/);
+  assert.match(section, /- src\/app\.ts \(\+2\/-1\)/);
+  assert.match(section, /- src\/gone\.ts \(\+0\/-1\)/);
+  assert.match(section, /- tests\/app\.test\.ts \(no lines in the bounded diff\)/);
+  assert.match(section, /instead of rediscovering the change set/);
+  // The section is accounted for like every other prompt section.
+  const entry = accountPromptContext(prompt).sections.find(
+    (candidate) => candidate.name === "Files changed"
+  );
+  assert.ok(entry, "Files changed must be reported by accountPromptContext");
+  assert.equal(entry.omitted, false);
+
+  // A long change set is bounded by entry count, and the dropped paths are
+  // disclosed rather than silently missing.
+  const many = makeTask({
+    attempts: [
+      {
+        ...attempt,
+        touchedFiles: Array.from({ length: 200 }, (_, index) => `src/file-${index}.ts`),
+      },
+    ],
+  });
+  const bounded = buildReviewPrompt(many, "Done.");
+  const boundedSection = injectedSection(bounded, "## Files changed\n");
+  const boundedEntry = accountPromptContext(bounded).sections.find(
+    (candidate) => candidate.name === "Files changed"
+  );
+  assert.match(boundedSection, /- src\/file-39\.ts \(no lines in the bounded diff\)/);
+  assert.doesNotMatch(boundedSection, /- src\/file-40\.ts /);
+  assert.match(boundedSection, /\+160 more changed path\(s\), not listed/);
+  assert.ok(boundedSection.length <= MAX_CHANGED_FILES_LENGTH);
+  assert.equal(boundedEntry?.characters, boundedSection.length + "## Files changed\n".length);
+  // The rest of the prompt still fits the deterministic budget.
+  assert.ok(accountPromptContext(bounded).characters <= MODEL_PROMPT_BUDGET);
+
+  // Pathological path lengths hit the character bound, which truncates the
+  // section and is reported as an omitted section.
+  const verbose = makeTask({
+    attempts: [
+      {
+        ...attempt,
+        touchedFiles: Array.from(
+          { length: 20 },
+          (_, index) => `src/${`directory-${index}/`.repeat(20)}file.ts`
+        ),
+      },
+    ],
+  });
+  const truncatedSection = injectedSection(
+    buildReviewPrompt(verbose, "Done."),
+    "## Files changed\n"
+  );
+  assert.match(truncatedSection, /\[\.\.\. lower-priority context omitted;.*\]$/);
+  const truncatedEntry = accountPromptContext(buildReviewPrompt(verbose, "Done.")).sections.find(
+    (candidate) => candidate.name === "Files changed"
+  );
+  assert.equal(truncatedEntry?.characters, MAX_CHANGED_FILES_LENGTH);
+  assert.equal(truncatedEntry?.omitted, true);
+
+  // No attributable paths means no section: an investigation reports a result,
+  // not a diff.
+  assert.doesNotMatch(buildReviewPrompt(makeTask(), "Done."), /## Files changed/);
 });
 
 test("parseVerdict handles approve, request changes, and missing verdicts", () => {
