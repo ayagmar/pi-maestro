@@ -654,6 +654,26 @@ export function describeTier(tier: TierConfig): string {
   return `${model} thinking=${tier.thinking}${tools}${watchdog}`;
 }
 
+export interface EffectiveReviewCostCap {
+  usd: number;
+  source: "maxCostPerReview" | "maxCostPerTask";
+}
+
+/**
+ * The cap that actually bounds one reviewer launch.
+ *
+ * `maxCostPerReview: 0` means "inherit maxCostPerTask", which silently left a
+ * real drive with a $40 reviewer ceiling while its two reviews cost $1.84 and
+ * $2.33 — well under the cap, so nothing ever stopped them. Naming the
+ * effective number is what makes that inheritance visible.
+ */
+export function effectiveReviewCostCap(config: MaestroConfig): EffectiveReviewCostCap {
+  if (config.maxCostPerReview && config.maxCostPerReview > 0) {
+    return { usd: config.maxCostPerReview, source: "maxCostPerReview" };
+  }
+  return { usd: config.maxCostPerTask, source: "maxCostPerTask" };
+}
+
 export function describeConfig(config: MaestroConfig): string {
   const lines = [
     `preset: ${matchingPreset(config)}`,
@@ -673,7 +693,11 @@ export function describeConfig(config: MaestroConfig): string {
     `reviewRequiredApprovals: ${config.reviewRequiredApprovals ?? 2}`,
     `maxReviewerLaunches: ${config.maxReviewerLaunches ?? 4}`,
     `maxCostPerTask: ${config.maxCostPerTask === 0 ? "off" : `$${config.maxCostPerTask}`}`,
-    `maxCostPerReview: ${!config.maxCostPerReview ? "inherit maxCostPerTask" : `$${config.maxCostPerReview}`}`,
+    `maxCostPerReview: ${
+      !config.maxCostPerReview
+        ? `inherit maxCostPerTask ($${effectiveReviewCostCap(config).usd} per reviewer launch)`
+        : `$${config.maxCostPerReview}`
+    }`,
     `reviewCheapModel: ${config.reviewCheapModel ?? "(unset — every reviewer uses the review tier model)"}`,
     `reviewEscalation: ${config.reviewEscalation ?? "risk"}${config.reviewCheapModel ? "" : " (inactive without reviewCheapModel)"}`,
     `maxRunCost: ${config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`}`,

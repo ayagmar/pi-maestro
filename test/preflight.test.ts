@@ -117,7 +117,11 @@ test("preflight warns at the plan gate when reviewers project to dominate spend"
     launchUpperBound: 18,
     sourceLaunches: { historical: 0, modelMetadata: 18, staticFallback: 0 },
     historicalSamples: 0,
-    assumptions: { inputTokensPerLaunch: 20_000, outputTokensPerLaunch: 4_000, staticCostPerLaunch: 0.1 },
+    assumptions: {
+      inputTokensPerLaunch: 20_000,
+      outputTokensPerLaunch: 4_000,
+      staticCostPerLaunch: 0.1,
+    },
   };
   const warned = preflightWorkflow(board, settings, undefined, lopsided);
   const warning = warned.warnings.find((entry) => /projected review spend/.test(entry));
@@ -125,6 +129,18 @@ test("preflight warns at the plan gate when reviewers project to dominate spend"
   assert.match(warning, /5\.0× the projected executor spend/);
   assert.match(warning, /reviewPolicy "single"/);
   assert.match(warning, /cheaper review-tier model/);
+  // `maxCostPerReview: 0` inherits the per-attempt cap silently; the warning
+  // names the effective number and its source.
+  assert.match(warning, /up to \$5\.00 before the maxCostPerTask cap stops it/);
+  assert.match(
+    preflightWorkflow(
+      board,
+      { ...settings, maxCostPerReview: 2 },
+      undefined,
+      lopsided
+    ).warnings.find((entry) => /projected review spend/.test(entry)) ?? "",
+    /up to \$2\.00 before the maxCostPerReview cap stops it/
+  );
   // The gate report carries the same warning, and the warning itself names
   // both sides of the split (the plan-review viewport is height-bounded, so
   // the preflight line itself stays its original length).

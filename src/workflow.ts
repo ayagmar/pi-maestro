@@ -10,7 +10,7 @@ import {
   updateTask,
   validatePlan,
 } from "./board.js";
-import { loadConfig, resolveTierModels } from "./config.js";
+import { effectiveReviewCostCap, loadConfig, resolveTierModels } from "./config.js";
 import {
   boardUsage,
   launchBudgetShortfall,
@@ -609,23 +609,19 @@ export async function driveBoard(options: {
         );
         // Reviews on hard tiers can cost nearly as much as the attempts they
         // judge; maxCostPerReview lets an operator cap that separately, and the
-        // remaining run budget bounds the launch either way.
-        const reviewCostCap =
-          config.maxCostPerReview && config.maxCostPerReview > 0
-            ? config.maxCostPerReview
-            : config.maxCostPerTask;
-        const reviewCapSource =
-          config.maxCostPerReview && config.maxCostPerReview > 0
-            ? "maxCostPerReview"
-            : "maxCostPerTask";
+        // remaining run budget bounds the launch either way. The inheritance
+        // rule lives in one place so the plan-gate warning cannot disagree with
+        // what the launch actually enforces.
+        const reviewCostCap = effectiveReviewCostCap(config);
+        const reviewCapSource = reviewCostCap.source;
         const reviewBudget = remainingRunBudget(afterRuns.tasks, reviewMaxRunCost);
-        const reviewLaunchCaps = [reviewCostCap, reviewBudget].filter(
+        const reviewLaunchCaps = [reviewCostCap.usd, reviewBudget].filter(
           (cap): cap is number => cap !== undefined && cap > 0
         );
         const reviewLaunchCapSource =
           reviewBudget !== undefined &&
           reviewBudget > 0 &&
-          (reviewCostCap <= 0 || reviewBudget < reviewCostCap)
+          (reviewCostCap.usd <= 0 || reviewBudget < reviewCostCap.usd)
             ? "remaining run budget (maxRunCost)"
             : reviewCapSource;
         const reviewResults = await mapWithConcurrencyLimit(

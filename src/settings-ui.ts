@@ -16,6 +16,7 @@ import {
 import {
   type ConfigScope,
   configFile,
+  effectiveReviewCostCap,
   findPreset,
   loadConfig,
   matchingPreset,
@@ -711,8 +712,7 @@ export async function showSettings(
           label: "Cost cap per reviewer launch (USD)",
           currentValue: !config.maxCostPerReview ? "inherit" : `$${config.maxCostPerReview}`,
           values: ["inherit", "$1", "$2", "$5", "$10"],
-          description:
-            "Abort one reviewer launch after it exceeds this cost. Inherit uses the per-attempt cap.",
+          description: `Abort one reviewer launch after it exceeds this cost. Inherit uses the per-attempt cap ($${effectiveReviewCostCap(config).usd} per reviewer launch).`,
         },
         {
           id: "reviewCheapModel",

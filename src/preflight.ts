@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { effectiveReviewCostCap } from "./config.js";
 import { type ProjectedCostEstimate, staticProjectedCost } from "./cost-forecast-policy.js";
 import { type Board, type MaestroConfig, type Task } from "./types.js";
 
@@ -39,13 +40,17 @@ export const REVIEW_SPEND_WARNING_FLOOR_USD = 1;
  * moment the two levers — review policy and review-tier model — are still free
  * to change.
  */
-export function reviewSpendWarning(projectedCost: ProjectedCostEstimate): string | undefined {
+export function reviewSpendWarning(
+  projectedCost: ProjectedCostEstimate,
+  config: MaestroConfig
+): string | undefined {
   const { reviewer, executor } = projectedCost.byKind;
   if (reviewer <= 0) return undefined;
   if (projectedCost.estimatedUsd < REVIEW_SPEND_WARNING_FLOOR_USD) return undefined;
   if (reviewer < REVIEW_SPEND_WARNING_MULTIPLE * executor) return undefined;
   const multiple = executor > 0 ? `${(reviewer / executor).toFixed(1)}×` : "∞";
-  return `projected review spend ($${reviewer.toFixed(2)}) is ${multiple} the projected executor spend ($${executor.toFixed(2)}) — reviewers are the dominant cost; consider reviewPolicy "single" for mechanical tasks, or a cheaper review-tier model`;
+  const cap = effectiveReviewCostCap(config);
+  return `projected review spend ($${reviewer.toFixed(2)}) is ${multiple} the projected executor spend ($${executor.toFixed(2)}) — reviewers are the dominant cost; consider reviewPolicy "single" for mechanical tasks, a cheaper review-tier model, or a cheap first pass (reviewCheapModel). One reviewer launch may spend up to $${cap.usd.toFixed(2)} before the ${cap.source} cap stops it`;
 }
 
 /**
@@ -125,7 +130,7 @@ export function preflightWorkflow(
     warnings.push(`runtime will stop at maxTotalLaunchesPerRun=${config.maxTotalLaunchesPerRun}`);
   }
   warnings.push(...taskShapeWarnings(selected).slice(0, 5));
-  const reviewSpend = reviewSpendWarning(projectedCostEstimate);
+  const reviewSpend = reviewSpendWarning(projectedCostEstimate, config);
   if (reviewSpend) warnings.push(reviewSpend);
   const size = workflowSize(selected.length);
 
