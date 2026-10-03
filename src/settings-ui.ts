@@ -1,5 +1,6 @@
 import {
   type ExtensionCommandContext,
+  getSelectListTheme,
   getSettingsListTheme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -284,13 +285,6 @@ export async function showSettings(
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
     let settingsFocused = false;
     let activeModelInput: Input | undefined;
-    const pickerTheme = {
-      selectedPrefix: (text: string) => theme.fg("accent", text),
-      selectedText: (text: string) => theme.fg("accent", text),
-      description: (text: string) => theme.fg("muted", text),
-      scrollInfo: (text: string) => theme.fg("dim", text),
-      noMatch: (text: string) => theme.fg("warning", text),
-    };
 
     const createModelPicker = (
       title: string,
@@ -338,7 +332,7 @@ export async function showSettings(
             if (choice.value === "(none)") item.description = "Do not configure a fallback";
             return item;
           });
-        list = new SelectList(items, Math.min(Math.max(items.length, 1), 10), pickerTheme);
+        list = new SelectList(items, Math.min(Math.max(items.length, 1), 10), getSelectListTheme());
         const currentIndex = items.findIndex((item) => item.value === currentValue);
         if (!input.getValue() && currentIndex >= 0) list.setSelectedIndex(currentIndex);
         list.onSelect = (item) => finish(item.value);

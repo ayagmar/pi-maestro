@@ -608,7 +608,6 @@ test("gated plan editor saves title, brief, tier, dependencies, and cancellation
             ],
           },
           { keys: select(2) },
-          { keys: [clearLine, "New self-contained brief", enter] },
           { keys: select(3) },
           { keys: select(2) },
           { keys: select(4) },
@@ -633,9 +632,16 @@ test("gated plan editor saves title, brief, tier, dependencies, and cancellation
         ],
       };
       const { ctx, notices, command } = loadMaestro(cwd, undefined, owner, script);
+      const editorCalls: Array<{ title: string; prefill: string | undefined }> = [];
+      // Multi-line fields use pi's stock editor dialog (external editor, user keybindings).
+      ctx.ui.editor = async (title, prefill) => {
+        editorCalls.push({ title, prefill });
+        return "New self-contained brief";
+      };
 
       await command.handler("plan", ctx);
 
+      assert.deepEqual(editorCalls, [{ title: "Task brief", prefill: "Old brief" }]);
       const saved = findTask(loadBoard(cwd), "T1");
       assert.equal(saved?.title, "New title");
       assert.equal(saved?.brief, "New self-contained brief");
