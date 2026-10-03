@@ -369,8 +369,9 @@ trusted user/default value:
   longer chains. Review configuration accepts the same tier shape, and review launches use the same
   provider-failure fallback rules. Each raw review fallback launch counts toward
   `maxReviewerLaunches` and remains attached to its logical reviewer.
-- `thinking` — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. Per GPT-5.6 guidance: start
-  medium, test one level lower, raise only when results show a gain.
+- `thinking` — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Maestro passes it to the
+  executor's `--thinking`, and pi clamps it to the nearest level the model supports. Per GPT-5.6
+  guidance: start medium, test one level lower, raise only when results show a gain.
 - `tools` — comma-separated allowlist passed to the executor. Every preset's `review` tier defaults
   to `read,grep,find,ls`, so automated reviewers are read-only by default. This field is
   configurable: adding `bash` or other write-capable tools removes that guarantee; this is not a
