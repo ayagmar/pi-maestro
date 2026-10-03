@@ -153,19 +153,24 @@ test("documentation matches review fallback, reset, and settled-task behavior", 
 
 test("declared package shape contains runtime and required documentation", () => {
   const pkg = JSON.parse(read("package.json")) as {
+    name: string;
     files: string[];
     main: string;
     repository: { url: string };
     homepage: string;
-    bugs: string;
+    bugs: { url: string };
     peerDependencies: Record<string, string>;
+    publishConfig?: { access?: string };
     scripts: Record<string, string>;
     pi?: { image?: string };
   };
+  // The unscoped "pi-maestro" npm name belongs to an unrelated project.
+  assert.equal(pkg.name, "@ayagmar/pi-maestro");
+  assert.equal(pkg.publishConfig?.access, "public");
   assert.equal(pkg.main, "./src/index.ts");
   assert.equal(pkg.repository.url, "git+https://github.com/ayagmar/pi-maestro.git");
   assert.equal(pkg.homepage, "https://github.com/ayagmar/pi-maestro#readme");
-  assert.equal(pkg.bugs, "https://github.com/ayagmar/pi-maestro/issues");
+  assert.equal(pkg.bugs.url, "https://github.com/ayagmar/pi-maestro/issues");
   assert.doesNotMatch(pkg.pi?.image ?? "", /placehold\.co/i);
   for (const entry of [
     "src/",
@@ -174,8 +179,13 @@ test("declared package shape contains runtime and required documentation", () =>
     "CONTRIBUTING.md",
     "CHANGELOG.md",
     "SECURITY.md",
+    "LICENSE",
   ]) {
     assert.ok(pkg.files.includes(entry));
+  }
+  // The Astro docs site lives under src/ but is not part of the extension runtime.
+  for (const siteDirectory of ["src/pages/", "src/layouts/", "src/styles/", "src/data/"]) {
+    assert.ok(pkg.files.includes(`!${siteDirectory}`), `${siteDirectory} must not be published`);
   }
   assert.equal(existsSync(join(root, pkg.main)), true);
   for (const excluded of [".pi/", "plans/", "test/", "scripts/"]) {
@@ -183,5 +193,6 @@ test("declared package shape contains runtime and required documentation", () =>
   }
   assert.match(read("scripts/smoke-test.mjs"), /registers exactly three model tools/);
   assert.match(pkg.scripts.check ?? "", /package-smoke-test/);
-  assert.ok(Object.values(pkg.peerDependencies).every((range) => range !== "*"));
+  // Pi provides its own packages at runtime; peers must accept whatever host version loads us.
+  assert.ok(Object.values(pkg.peerDependencies).every((range) => range === "*"));
 });
