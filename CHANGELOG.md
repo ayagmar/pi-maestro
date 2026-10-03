@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Compatibility
+
+- **Breaking:** Pi Maestro now requires pi 1.0 or newer. The package is developed and tested against pi 1.0.1; earlier pi releases are no longer supported.
+
 ### Robustness
 
 - A session is resumed only inside the checkout it recorded. pi refuses to resume a session whose working directory is gone, and an interrupted attempt whose clean worktree had been pruned made the next launch fail with `Stored session working directory does not exist` instead of doing the work. When the retained checkout is unavailable the attempt now starts fresh.

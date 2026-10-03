@@ -2,9 +2,9 @@
 
 [![MIT licensed](https://img.shields.io/badge/license-MIT-d9a520.svg)](LICENSE)
 [![Node.js 22 or 24](https://img.shields.io/badge/node-22%20%7C%2024-2f6f44.svg)](package.json)
-[![Pi 0.82.x](https://img.shields.io/badge/pi-0.82.x-243746.svg)](https://github.com/badlogic/pi-mono)
+[![Pi 1.0+](https://img.shields.io/badge/pi-1.0%2B-243746.svg)](https://github.com/earendil-works/pi-mono)
 
-Orchestrator/executor workflows for [pi](https://github.com/badlogic/pi-mono).
+Orchestrator/executor workflows for [pi](https://github.com/earendil-works/pi-mono).
 
 The model in your interactive session becomes the **orchestrator**: it plans a goal into small
 tasks, delegates each task to a cheap **fresh-context executor** (a separate `pi` process), and an
@@ -62,11 +62,12 @@ pi install /path/to/pi-maestro
 
 The npm package is scoped: the unscoped `pi-maestro` name on npm belongs to an unrelated project.
 Try it for one session without installing with `pi -e npm:@ayagmar/pi-maestro`, and update an
-installed copy with `pi update npm:@ayagmar/pi-maestro`.
+installed copy with `pi update npm:@ayagmar/pi-maestro`. A project-scoped install (`pi install -l …`)
+loads only in projects you have trusted in pi.
 
 ## Compatibility and support
 
-Pi Maestro requires Node.js 22 or 24 and is tested against the `0.82.x` Pi package line. Pi supplies its own packages to extensions at runtime, so the Pi peer dependencies accept any version (`*`) as Pi's package guidelines require; the tested Pi line above is the supported one. Before `1.0.0`, only the latest published `0.1.x` release receives fixes.
+Pi Maestro requires pi 1.0 or newer (tested against `1.0.x`) and Node.js 22.19 or newer. Earlier pi releases are not supported. Pi supplies its own packages to extensions at runtime, so the Pi peer dependencies accept any version (`*`) as Pi's package guidelines require; the tested Pi line above is the supported one. Before Pi Maestro `1.0.0`, only the latest published `0.1.x` release receives fixes.
 
 Report bugs through [GitHub Issues](https://github.com/ayagmar/pi-maestro/issues). Report suspected vulnerabilities privately using the repository Security tab; see [SECURITY.md](SECURITY.md).
 

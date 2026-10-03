@@ -42,15 +42,10 @@ export function transferParkedDriveControl(cwd: string, newOwnerSession: string)
  * literal text "/maestro handoff" landed in the conversation as a user
  * message, the model replied conversationally, and no handoff ever happened —
  * which silently broke both maestro_drive intervene handoff and the automatic
- * context-pressure handoff. The pinned 0.82 extension types predate the
- * option (that runtime ignores it), hence the widened options type.
+ * context-pressure handoff.
  */
 export function requestHandoffCommand(pi: Pick<ExtensionAPI, "sendUserMessage">): void {
-  const options: { deliverAs: "followUp"; expandPromptTemplates?: boolean } = {
-    deliverAs: "followUp",
-    expandPromptTemplates: true,
-  };
-  pi.sendUserMessage(`/${COMMAND} handoff`, options);
+  pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp", expandPromptTemplates: true });
 }
 
 export function notify(
