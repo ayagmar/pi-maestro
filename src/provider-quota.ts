@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { userDataDirectory } from "./config.js";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 /**
  * When a provider's exhausted usage window will reopen.
@@ -63,7 +63,7 @@ function codexWindow(
 }
 
 function defaultReadAuthFile(): string | undefined {
-  const file = join(userDataDirectory(), "auth.json");
+  const file = join(getAgentDir(), "auth.json");
   if (!existsSync(file)) return undefined;
   return readFileSync(file, "utf-8");
 }

@@ -1,7 +1,4 @@
-import {
-  type ExtensionCommandContext,
-  type ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type OverlayHandle } from "@earendil-works/pi-tui";
 import { loadBoard } from "./board.js";
 import { loadConfig } from "./config.js";
@@ -10,7 +7,7 @@ import { type DriveRuntimeController } from "./drive-controller.js";
 import { notify } from "./handoff.js";
 import { collectLivePaneLaunches } from "./live-pane-launches.js";
 import { LivePaneComponent, type LivePaneLaunch } from "./live-pane.js";
-import { sessionSwitchBlocked } from "./session-control.js";
+import { isCommandContext, sessionSwitchBlocked } from "./session-control.js";
 import { type SessionNavigator } from "./session-navigator.js";
 import { type Board } from "./types.js";
 
@@ -32,7 +29,7 @@ export interface LivePaneControllerDependencies {
 
 const responsiveVisibility = (width: number): boolean => width >= 100;
 
-/** Rows shown in the below-editor agent selector, matched by the shortcut cycle. */
+/** Rows shown in the agent selector widget, matched by the shortcut cycle. */
 export const AGENT_SELECTOR_ROWS = 6;
 
 export class LivePaneController {
@@ -47,7 +44,7 @@ export class LivePaneController {
   }
 
   /**
-   * The bounded, ordered agent list shared by the below-editor selector widget
+   * The bounded, ordered agent list shared by the agent selector widget
    * and the ctrl+alt+j/k cycle: live launches first (board order), then the
    * most recent settled ones. One ordering for both, or the selection marker
    * would point at rows the widget does not show.
@@ -264,8 +261,4 @@ export class LivePaneController {
     if (ctx.mode !== "tui") return false;
     return this.dependencies.sessionOwnsBoard(ctx, loadBoard(ctx.cwd));
   }
-}
-
-function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
-  return "switchSession" in ctx;
 }

@@ -259,12 +259,8 @@ export function mergeConfig(
   };
 }
 
-export function userDataDirectory(): string {
-  return getAgentDir();
-}
-
 export function configFile(scope: ConfigScope, cwd: string): string {
-  if (scope === "user") return join(userDataDirectory(), USER_CONFIG_FILE);
+  if (scope === "user") return join(getAgentDir(), USER_CONFIG_FILE);
   return join(cwd, PROJECT_CONFIG_FILE);
 }
 

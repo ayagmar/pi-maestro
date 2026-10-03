@@ -1,4 +1,8 @@
 import { sep } from "node:path";
+import {
+  type ExtensionCommandContext,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { findTask } from "./board.js";
 import { type Board, type PausedDriveState } from "./types.js";
 
@@ -34,6 +38,14 @@ export function sessionCanResumePausedDrive(
 ): boolean {
   if (paused.reason !== "paused") return true;
   return sessionCanControlDrive(paused.ownerSession, currentSession);
+}
+
+/**
+ * Shortcut handlers and lifecycle events get a plain context; only command
+ * handlers can switch sessions.
+ */
+export function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
+  return "switchSession" in ctx;
 }
 
 export function sessionSwitchBlocked(activeDrive: boolean, liveRunCount: number): boolean {
