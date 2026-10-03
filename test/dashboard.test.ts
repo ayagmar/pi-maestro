@@ -2544,6 +2544,43 @@ test("live pane watches mixed reviewer and executor logs without selection flapp
   }
 });
 
+test("live pane reports the fallback selection when the selected launch disappears", () => {
+  const launch = (taskId: string): LivePaneLaunch => ({
+    key: `execute:${taskId}`,
+    taskId,
+    title: `Task ${taskId}`,
+    kind: "execute",
+    logFile: `/missing/live-pane-selection-${taskId}.jsonl`,
+    turns: 0,
+    cost: 0,
+    lastActivity: "working",
+  });
+  let launches = [launch("T1"), launch("T2"), launch("T3")];
+  const selections: Array<string | undefined> = [];
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    onSelectionChange: (key) => selections.push(key),
+    height: 9,
+  });
+  try {
+    pane.focused = true;
+    pane.render(80);
+    pane.handleInput("\x1b[C");
+    assert.equal(selections.at(-1), "execute:T2");
+
+    // The selected launch leaves the list (archived board, reset): the pane
+    // follows the next launch, and the shared agent selector must hear it.
+    launches = [launch("T1"), launch("T3")];
+    assert.match(pane.render(80).join("\n"), /T3 · Task T3/);
+    assert.equal(selections.at(-1), "execute:T3");
+  } finally {
+    pane.dispose();
+  }
+});
+
 test("live pane windows multiple agents without consuming every transcript row", () => {
   const launches: LivePaneLaunch[] = Array.from({ length: 8 }, (_, index) => ({
     key: `execute:T${index + 1}`,

@@ -1007,7 +1007,8 @@ export class LivePaneComponent {
         ...this.launchOrder.slice(settledIndex + 1),
         ...this.launchOrder.slice(0, Math.max(0, settledIndex)),
       ].find((key) => liveKeys.has(key));
-      this.selectedKey = following ?? launches[0]?.key;
+      // Through updateSelection: the shared agent selector must follow too.
+      this.updateSelection(following ?? launches[0]?.key);
       const next = launches.find((launch) => launch.key === this.selectedKey);
       this.settledNotice = settled
         ? `✓ ${settled.taskId} settled${next ? ` · following ${next.taskId}` : ""}`
