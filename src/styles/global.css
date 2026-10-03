@@ -263,12 +263,6 @@ kbd {
 .mobile-menu summary::-webkit-details-marker {
   display: none;
 }
-.mobile-menu summary span {
-  display: block;
-  width: 1rem;
-  height: 1px;
-  background: var(--ink);
-}
 .mobile-menu nav {
   position: absolute;
   top: 3.25rem;
@@ -280,13 +274,6 @@ kbd {
   border: 1px solid var(--line);
   background: var(--paper);
   box-shadow: 0 8px 24px oklch(0.2 0.03 245 / 0.14);
-}
-.mobile-menu nav a {
-  padding: 0.7rem 0.8rem;
-  text-decoration: none;
-}
-.mobile-menu nav a:hover {
-  background: var(--surface);
 }
 
 .hero {
@@ -512,9 +499,6 @@ kbd {
   color: var(--muted);
   font-size: var(--text-lead);
 }
-.section-dark .section-intro p {
-  color: oklch(0.76 0.02 245);
-}
 .signal-rule {
   width: 2.5rem;
   height: 0.22rem;
@@ -565,9 +549,6 @@ kbd {
   max-width: 34ch;
   margin: 0;
   color: var(--muted);
-}
-.role:first-child p {
-  color: var(--ink-soft);
 }
 
 .flow-layout {
@@ -1007,9 +988,6 @@ kbd {
   color: var(--ink-soft);
   background: var(--surface);
 }
-.prose blockquote p {
-  margin: 0;
-}
 .prose code:not(pre code) {
   padding: 0.12rem 0.3rem;
   color: var(--honey-deep);
@@ -1022,18 +1000,6 @@ kbd {
   padding: 1rem 1.2rem;
   border: 1px solid var(--honey-deep);
   background: var(--honey-pale);
-}
-.prose .callout p {
-  margin: 0;
-  color: var(--ink);
-}
-.prose .callout strong {
-  display: block;
-  margin-bottom: 0.2rem;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
 }
 .docs-next {
   display: grid;
@@ -1127,9 +1093,6 @@ kbd {
   padding-left: 1.4rem;
   border-left: 1px solid var(--line);
 }
-.docs-card:hover h2 {
-  color: var(--honey-deep);
-}
 .docs-card h2 {
   margin: 0.65rem 0 0.45rem;
   font-size: 1.35rem;
@@ -1212,6 +1175,46 @@ td {
 }
 tr:last-child td {
   border-bottom: 0;
+}
+
+/* Contextual descendant overrides, ordered by ascending specificity, follow every generic
+   descendant rule they refine (Biome noDescendingSpecificity). */
+.mobile-menu summary span {
+  display: block;
+  width: 1rem;
+  height: 1px;
+  background: var(--ink);
+}
+.mobile-menu nav a {
+  padding: 0.7rem 0.8rem;
+  text-decoration: none;
+}
+.prose blockquote p {
+  margin: 0;
+}
+.section-dark .section-intro p {
+  color: oklch(0.76 0.02 245);
+}
+.role:first-child p {
+  color: var(--ink-soft);
+}
+.prose .callout p {
+  margin: 0;
+  color: var(--ink);
+}
+.prose .callout strong {
+  display: block;
+  margin-bottom: 0.2rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.docs-card:hover h2 {
+  color: var(--honey-deep);
+}
+.mobile-menu nav a:hover {
+  background: var(--surface);
 }
 
 @media (max-width: 900px) {
