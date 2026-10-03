@@ -1985,6 +1985,53 @@ test("live pane parses only appended session entries", () => {
   }
 });
 
+test("live pane applies appended context edits to earlier session entries", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-context-edit-"));
+  const sessionFile = join(directory, "session.jsonl");
+  copyFileSync(livePaneSessionFixture, sessionFile);
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [
+      {
+        key: "execute:T1:edit",
+        taskId: "T1",
+        title: "Edited transcript",
+        kind: "execute",
+        logFile: "/missing/raw-log.jsonl",
+        sessionFile,
+        turns: 1,
+        cost: 0,
+        lastActivity: "working",
+      },
+    ],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    tui: fakeTui,
+    cwd: directory,
+    height: 30,
+  });
+  try {
+    assert.match(pane.render(80).join("\n"), /Inspect the fixture/);
+    appendFileSync(
+      sessionFile,
+      `${JSON.stringify({
+        type: "context_edit",
+        id: "edit-1",
+        parentId: "tool-result-1",
+        timestamp: "2026-01-01T00:00:04.000Z",
+        targetId: "user-1",
+        replacement: { content: [{ type: "text", text: "Edited fixture prompt" }] },
+      })}\n`
+    );
+    const rendered = pane.render(80).join("\n");
+    assert.match(rendered, /Edited fixture prompt/);
+    assert.doesNotMatch(rendered, /Inspect the fixture/);
+  } finally {
+    pane.dispose();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("live pane rerenders at a new width without reparsing unchanged session history", () => {
   const pane = new LivePaneComponent(fakeTheme, {
     getLaunches: () => [

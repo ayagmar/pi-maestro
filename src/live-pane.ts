@@ -655,7 +655,13 @@ export class LivePaneComponent {
       let rebuildProjection = false;
       for (const entry of entries) {
         if (entry.parentId !== transcript.leafId) rebuildProjection = true;
-        if (entry.type === "compaction" || entry.type === "branch_summary") {
+        // These rewrite earlier context rather than append to it: a
+        // context_edit replaces or hides an earlier entry's content.
+        if (
+          entry.type === "compaction" ||
+          entry.type === "branch_summary" ||
+          entry.type === "context_edit"
+        ) {
           rebuildProjection = true;
         }
         transcript.entries.push(entry);
