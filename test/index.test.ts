@@ -5118,7 +5118,7 @@ test("typing a goal after /maestro plan points at /maestro start with the text i
   );
 });
 
-test("the below-editor agent selector marks a selection the shortcuts can move", async () => {
+test("the agent selector widget marks a selection the shortcuts can move", async () => {
   await withBoard(
     (cwd) => {
       saveConfig("project", cwd, {

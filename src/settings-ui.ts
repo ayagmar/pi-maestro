@@ -137,7 +137,6 @@ function tierDescription(name: string): string {
   return TIER_DESCRIPTIONS[name] ?? "Custom tier.";
 }
 
-/** Apply one UI setting to a resolved config. Presets replace the full config. */
 /**
  * Section summaries are the only thing visible without opening a section, so
  * they state what a drive will actually do and call out the settings that
@@ -180,6 +179,7 @@ export function watchdogSummary(config: MaestroConfig): string {
   return parts.join(" · ");
 }
 
+/** Apply one UI setting to a resolved config. Presets replace the full config. */
 export function applySettingsChange(
   currentConfig: MaestroConfig,
   id: string,
