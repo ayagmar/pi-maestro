@@ -220,7 +220,7 @@ export default function maestro(
     ctx.ui.setWorkingMessage(
       `maestro ${status.approved}/${active} · ${running} executor(s) · $${usage.cost.toFixed(2)}`
     );
-    // Claude-style agent selector under the editor: one row per launch, a
+    // Claude-style agent selector above the editor: one row per launch, a
     // movable selection marker, and the stats right-aligned. ctrl+alt+j/k
     // moves the selection; ctrl+alt+w opens the viewer on it.
     ctx.ui.setWidget(COMMAND, (tui, theme) => {

@@ -15,4 +15,3 @@ export const KILL_GRACE_MS = 5000;
 export const MAX_PERSISTED_REPORT_CHARS = 16_000;
 /** Discovery JSON is validated in bytes and must remain intact up to this contract limit. */
 export const MAX_DISCOVERY_REPORT_BYTES = 64_000;
-export const CONTEXT_NUDGE_PERCENT = 65;

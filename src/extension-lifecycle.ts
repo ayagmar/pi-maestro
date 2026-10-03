@@ -1,7 +1,7 @@
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadBoard, sweepDispatchState } from "./board.js";
 import { loadConfig, setProjectConfigTrust } from "./config.js";
-import { COMMAND, CONTEXT_NUDGE_PERCENT, MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
+import { COMMAND, MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import {
   acknowledgeDeliveredDecision,
   armDeliveredDecisionNudge,
@@ -89,7 +89,8 @@ export function registerMaestroLifecycle(
     try {
       const usage = ctx.getContextUsage();
       const config = loadConfig(ctx.cwd);
-      const threshold = (config.handoffContextRatio ?? CONTEXT_NUDGE_PERCENT / 100) * 100;
+      // loadConfig always fills handoffContextRatio; 0.68 matches its default.
+      const threshold = (config.handoffContextRatio ?? 0.68) * 100;
       if (!usage || usage.percent === null || threshold <= 0 || usage.percent < threshold) return;
 
       const board = loadBoard(ctx.cwd);
