@@ -206,6 +206,8 @@ interface CommandCtx {
       options?: Record<string, unknown>
     ) => Promise<T>;
     confirm?: (title: string, message: string) => Promise<boolean>;
+    select?: (title: string, options: string[]) => Promise<string | undefined>;
+    editor?: (title: string, prefill?: string) => Promise<string | undefined>;
   };
 }
 
@@ -1877,6 +1879,58 @@ test("workflow browser exposes metadata, actions, and a readable preview", async
       await command.handler("workflows", ctx);
 
       assert.equal(script.steps.length, 0);
+    }
+  );
+});
+
+test("workflow browser falls back to pi's stock dialogs outside the TUI", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: "Reusable task",
+        brief: "Exercise the workflow browser",
+        tier: "standard",
+        writePaths: ["src/reusable.ts"],
+        successCriteria: ["Workflow remains reusable"],
+      });
+      saveBoard(cwd, board);
+      saveRecipeFromBoard("project", cwd, "browser-test", board);
+    },
+    async (cwd) => {
+      // An empty step script fails the test if any custom TUI modal opens.
+      const { ctx, command, notices } = loadMaestro(
+        cwd,
+        undefined,
+        owner,
+        { steps: [] },
+        { mode: "rpc" }
+      );
+      const prompts: { title: string; options: string[] }[] = [];
+      const answers = [
+        (options: string[]) => options.find((option) => option.startsWith("browser-test")),
+        (options: string[]) => options.find((option) => option.startsWith("View workflow")),
+        () => undefined,
+      ];
+      ctx.ui.select = async (title, options) => {
+        prompts.push({ title, options });
+        return answers.shift()?.(options);
+      };
+
+      await command.handler("workflows", ctx);
+
+      assert.deepEqual(
+        prompts.map((prompt) => prompt.title),
+        ["Maestro workflows", "Workflow · browser-test", "Maestro workflows"]
+      );
+      assert.ok(
+        prompts[1]?.options.includes(
+          "Remove workflow — Delete the project definition after confirmation"
+        )
+      );
+      assert.ok(
+        notices.some((notice) => /Workflow · browser-test[\s\S]*Reusable task/.test(notice))
+      );
     }
   );
 });

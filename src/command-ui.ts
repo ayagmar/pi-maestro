@@ -11,12 +11,28 @@ import {
   Text,
 } from "@earendil-works/pi-tui";
 
+/**
+ * ctx.ui.custom renders only in the TUI; in RPC mode it resolves undefined
+ * at once, which made every Maestro picker a silent no-op there. Outside
+ * the TUI these helpers use pi's stock dialogs, which RPC forwards to the
+ * client.
+ */
+function usesStockDialogs(ctx: ExtensionCommandContext): boolean {
+  return ctx.mode !== "tui";
+}
+
 export async function editText(
   ctx: ExtensionCommandContext,
   title: string,
   value: string,
   multiline: boolean
 ): Promise<string | null> {
+  if (usesStockDialogs(ctx)) {
+    if (!ctx.hasUI) return null;
+    const next = await ctx.ui.editor(title, value);
+    if (next === undefined) return null;
+    return multiline ? next : next.replace(/\s*\r?\n\s*/g, " ").trim();
+  }
   return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
     const hint = new Text(
       theme.fg(
@@ -73,6 +89,15 @@ export async function pickFromList(
   title: string,
   items: SelectItem[]
 ): Promise<string | null> {
+  if (usesStockDialogs(ctx)) {
+    if (!ctx.hasUI || items.length === 0) return null;
+    const labels = items.map((item) =>
+      item.description ? `${item.label} — ${item.description}` : item.label
+    );
+    const picked = await ctx.ui.select(title, labels);
+    if (picked === undefined) return null;
+    return items[labels.indexOf(picked)]?.value ?? null;
+  }
   return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
     const container = new Container();
     container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));

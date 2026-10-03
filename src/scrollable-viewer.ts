@@ -29,6 +29,11 @@ export async function showScrollableText(
   title: string,
   lines: string[]
 ): Promise<void> {
+  if (ctx.mode !== "tui") {
+    // ctx.ui.custom renders nothing outside the TUI; RPC forwards notify.
+    if (ctx.hasUI) ctx.ui.notify(`${title}\n\n${lines.join("\n")}`, "info");
+    return;
+  }
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
     let offset = 0;
     const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
@@ -65,6 +70,10 @@ export async function showScrollableMarkdown(
   title: string,
   markdownText: string
 ): Promise<void> {
+  if (ctx.mode !== "tui") {
+    if (ctx.hasUI) ctx.ui.notify(`${title}\n\n${markdownText}`, "info");
+    return;
+  }
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
     let offset = 0;
     let rendered: string[] = [];

@@ -24,6 +24,8 @@ async function firstFrame(
 ): Promise<string[]> {
   let frame: string[] = [];
   const ctx = {
+    mode: "tui",
+    hasUI: true,
     ui: {
       custom: async (
         factory: (
