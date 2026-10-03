@@ -19,7 +19,13 @@ import {
   saveStoredRecipe,
   updateBoard,
 } from "../src/board.js";
-import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/config.js";
+import {
+  DEFAULT_CONFIG,
+  isProjectConfigTrusted,
+  loadConfig,
+  saveConfig,
+  setProjectConfigTrust,
+} from "../src/config.js";
 import { deliverPendingDecision } from "../src/drive-controller.js";
 import maestro, {
   assertKnownTaskIds,
@@ -173,9 +179,10 @@ interface CommandCtx {
   cwd: string;
   hasUI: boolean;
   mode: "tui" | "rpc" | "print";
+  isProjectTrusted: () => boolean;
   modelRegistry: object;
   sessionManager: {
-    getEntries?: () => unknown[];
+    getEntries: () => unknown[];
     getLeafId?: () => string | undefined;
     getSessionFile: () => string;
     getSessionName: () => string | undefined;
@@ -219,6 +226,7 @@ interface UiScript {
 interface HostOptions {
   mode?: CommandCtx["mode"];
   hasUI?: boolean;
+  projectTrusted?: boolean;
   rows?: number;
   columns?: number;
 }
@@ -382,8 +390,10 @@ function loadMaestro(
     cwd,
     hasUI: host.hasUI ?? true,
     mode: host.mode ?? "tui",
+    isProjectTrusted: () => host.projectTrusted ?? true,
     modelRegistry: {},
     sessionManager: {
+      getEntries: () => [],
       getLeafId: () => "leaf-1",
       getSessionFile: () => sessionFile,
       getSessionName: () => undefined,
@@ -450,6 +460,26 @@ function renderLatestWidget(runtime: { widgets: unknown[]; tui: TestTui }, width
   const component = factory(runtime.tui, fakeTheme) as TestComponent;
   return component.render?.(width) ?? [];
 }
+
+test("session startup honors project config only in trusted projects", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-trust-test-"));
+  try {
+    saveConfig("project", cwd, { ...DEFAULT_CONFIG, maxRunCost: 123 });
+
+    const untrusted = loadMaestro(cwd, undefined, owner, undefined, { projectTrusted: false });
+    untrusted.events.get("session_start")?.({ previousSessionFile: undefined }, untrusted.ctx);
+    assert.equal(isProjectConfigTrusted(), false);
+    assert.notEqual(loadConfig(cwd).maxRunCost, 123);
+
+    const trusted = loadMaestro(cwd, undefined, owner, undefined, { projectTrusted: true });
+    trusted.events.get("session_start")?.({ previousSessionFile: undefined }, trusted.ctx);
+    assert.equal(isProjectConfigTrusted(), true);
+    assert.equal(loadConfig(cwd).maxRunCost, 123);
+  } finally {
+    setProjectConfigTrust(true);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 test("session startup preserves a running task with an active dispatch lease", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-startup-recovery-test-"));
@@ -3331,6 +3361,7 @@ test("handoff replaces the session once and briefs the fresh supervisor context"
         const fresh: FreshCtx = {
           ...ctx,
           sessionManager: {
+            getEntries: () => [],
             getSessionFile: () => "/sessions/fresh.jsonl",
             getSessionName: () => undefined,
           },

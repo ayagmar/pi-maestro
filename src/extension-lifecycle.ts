@@ -131,18 +131,8 @@ export function registerMaestroLifecycle(
   pi.on("session_start", (event, ctx) => {
     dependencies.setCommandCwd(ctx.cwd);
     // Project-local .pi/maestro.json can steer budgets, tiers, and tool
-    // lists; honor it only for projects the user told pi to trust. Contexts
-    // without the trust API (legacy harnesses) keep the trusted default.
-    const trustApi = (ctx as { isProjectTrusted?: () => boolean }).isProjectTrusted;
-    if (typeof trustApi === "function") {
-      try {
-        setProjectConfigTrust(trustApi.call(ctx));
-      } catch {
-        setProjectConfigTrust(false);
-      }
-    } else {
-      setProjectConfigTrust(true);
-    }
+    // lists; honor it only for projects the user told pi to trust.
+    setProjectConfigTrust(ctx.isProjectTrusted());
     state.start();
     dependencies.closeLivePane();
     dependencies.clearSuppressedPane();
@@ -353,11 +343,7 @@ export function registerMaestroLifecycle(
 }
 
 function sessionContainsDecision(ctx: ExtensionContext, decisionId: string): boolean {
-  const sessionManager = ctx.sessionManager as typeof ctx.sessionManager & {
-    getEntries?: () => unknown[];
-  };
-  if (typeof sessionManager.getEntries !== "function") return false;
-  return sessionManager.getEntries().some((entry) => {
+  return ctx.sessionManager.getEntries().some((entry) => {
     if (!entry || typeof entry !== "object") return false;
     const record = entry as unknown as Record<string, unknown>;
     const details = record.details;

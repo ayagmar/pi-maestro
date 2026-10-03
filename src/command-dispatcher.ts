@@ -47,17 +47,14 @@ export interface CommandViews {
 }
 
 export class MaestroCommandDispatcher {
-  private readonly completions: MaestroCommandCompletions;
+  private readonly completions = new MaestroCommandCompletions();
 
   constructor(
-    initialCwd: string,
     private readonly runtime: RunCommandRuntime,
     private readonly session: RunCommandSession,
     private readonly navigation: CommandNavigation,
     private readonly views: CommandViews
-  ) {
-    this.completions = new MaestroCommandCompletions(initialCwd);
-  }
+  ) {}
 
   setCwd(cwd: string): void {
     this.completions.setCwd(cwd);

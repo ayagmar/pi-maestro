@@ -389,7 +389,6 @@ export default function maestro(
   });
 
   const commandDispatcher = new MaestroCommandDispatcher(
-    process.cwd(),
     commandRuntime,
     commandSession,
     sessionNavigator,
