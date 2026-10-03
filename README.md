@@ -53,14 +53,20 @@ you ──▶ orchestrator (SOTA model, your session)
 ## Install
 
 ```bash
+pi install npm:@ayagmar/pi-maestro
+# or straight from GitHub
 pi install git:github.com/ayagmar/pi-maestro
 # or from a local checkout
 pi install /path/to/pi-maestro
 ```
 
+The npm package is scoped: the unscoped `pi-maestro` name on npm belongs to an unrelated project.
+Try it for one session without installing with `pi -e npm:@ayagmar/pi-maestro`, and update an
+installed copy with `pi update npm:@ayagmar/pi-maestro`.
+
 ## Compatibility and support
 
-Pi Maestro requires Node.js 22 or 24 and is tested against the `0.82.x` Pi package line. Its peer ranges intentionally stop before `0.83.0`; newer Pi releases require an explicit compatibility update rather than being accepted silently. Before `1.0.0`, only the latest published `0.1.x` release receives fixes.
+Pi Maestro requires Node.js 22 or 24 and is tested against the `0.82.x` Pi package line. Pi supplies its own packages to extensions at runtime, so the Pi peer dependencies accept any version (`*`) as Pi's package guidelines require; the tested Pi line above is the supported one. Before `1.0.0`, only the latest published `0.1.x` release receives fixes.
 
 Report bugs through [GitHub Issues](https://github.com/ayagmar/pi-maestro/issues). Report suspected vulnerabilities privately using the repository Security tab; see [SECURITY.md](SECURITY.md).
 
