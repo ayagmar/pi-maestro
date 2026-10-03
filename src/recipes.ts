@@ -1,3 +1,4 @@
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   createTask,
   listStoredRecipeFiles,
@@ -7,7 +8,7 @@ import {
   saveStoredRecipe,
   validatePlan,
 } from "./board.js";
-import { loadConfig, userDataDirectory } from "./config.js";
+import { loadConfig } from "./config.js";
 import {
   type Board,
   type RecipeInput,
@@ -398,7 +399,7 @@ function expandTask(task: RecipeTask, input: Record<string, RecipeInputValue>): 
 }
 
 function userDirectory(scope: RecipeScope): string | undefined {
-  return scope === "user" ? userDataDirectory() : undefined;
+  return scope === "user" ? getAgentDir() : undefined;
 }
 
 function rejectUnknownFields(

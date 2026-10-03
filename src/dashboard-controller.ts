@@ -21,7 +21,7 @@ import { notify } from "./handoff.js";
 import { manuallyApproveTask } from "./manual-approval.js";
 import { pruneTaskLogs } from "./retention.js";
 import { findSessionFile } from "./runner.js";
-import { sessionSwitchBlocked } from "./session-control.js";
+import { isCommandContext, sessionSwitchBlocked } from "./session-control.js";
 import { type SessionNavigator } from "./session-navigator.js";
 import { parkInactiveWorktrees } from "./worktree.js";
 
@@ -182,8 +182,4 @@ export async function showDashboard(
     return;
   }
   await sessionNavigator.openReviewer(ctx, selection.taskId);
-}
-
-function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
-  return "switchSession" in ctx;
 }
