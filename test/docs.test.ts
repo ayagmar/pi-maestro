@@ -191,8 +191,19 @@ test("declared package shape contains runtime and required documentation", () =>
   for (const excluded of [".pi/", "plans/", "test/", "scripts/"]) {
     assert.equal(pkg.files.includes(excluded), false);
   }
-  assert.match(read("scripts/smoke-test.mjs"), /registers exactly three model tools/);
-  assert.match(pkg.scripts.check ?? "", /package-smoke-test/);
+  // The smoke test loads the package through the real pi CLI; test/package.test.ts
+  // covers the packed file list and the registered model tools.
+  assert.match(read("scripts/smoke-test.mjs"), /--mode", "rpc"/);
+  for (const script of [
+    "typecheck",
+    "lint",
+    "format:check",
+    "test",
+    "test:integration",
+    "smoke-test",
+  ]) {
+    assert.match(pkg.scripts.check ?? "", new RegExp(`pnpm run ${script}(?: |$)`));
+  }
   // Pi provides its own packages at runtime; peers must accept whatever host version loads us.
   assert.ok(Object.values(pkg.peerDependencies).every((range) => range === "*"));
 });

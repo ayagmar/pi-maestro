@@ -564,7 +564,7 @@ Maestro is not a sandbox, CI service, analytics database, or generic plugin syst
 
 ```bash
 pnpm install
-pnpm run check    # typecheck + source/packed smoke tests + tests + lint + format
+pnpm run check    # typecheck + lint + format + unit/integration tests + pi CLI smoke test
 ```
 
 Quick manual test:
@@ -572,6 +572,19 @@ Quick manual test:
 ```bash
 pi -e ./src/index.ts
 ```
+
+## Releasing
+
+Releases are cut from GitHub Actions — never from a laptop.
+
+1. Merge Conventional Commits (`feat:`, `fix:`, `feat!:` …) into `master`.
+2. Run **Actions → Release → Run workflow** (or `gh workflow run release.yml -f increment=auto`).
+   `auto` derives the bump from the commits; pick `patch`/`minor`/`major` to override. Tick `dry_run` to preview.
+3. The workflow runs `pnpm run check`, then release-it bumps `package.json`, updates `CHANGELOG.md`,
+   tags `vX.Y.Z`, pushes and creates the GitHub release, and finally `npm publish` publishes with
+   provenance through npm trusted publishing (OIDC — no npm token stored in the repo).
+
+Preview locally with `pnpm release:dry`.
 
 ## License
 

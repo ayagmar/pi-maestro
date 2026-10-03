@@ -5,11 +5,21 @@ updates:
     schedule:
       interval: weekly
     groups:
-      production-and-development:
+      pi:
         patterns:
-          - "*"
+          - "@earendil-works/*"
+          - "typebox"
+      dev-dependencies:
+        dependency-type: development
+        exclude-patterns:
+          - "@earendil-works/*"
+          - "typebox"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"

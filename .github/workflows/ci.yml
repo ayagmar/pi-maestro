@@ -2,85 +2,38 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [master]
   pull_request:
-    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [22, 24]
-
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
-        with:
-          version: 10
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: "pnpm"
+          node-version: 24
+          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Type check
-        run: pnpm run typecheck
+      - name: Check
+        run: pnpm run check
 
-      - name: Smoke test
-        run: pnpm run smoke-test
-
-      - name: Test packed artifact
-        run: pnpm run package-smoke-test
-
-      - name: Run tests
-        run: pnpm run test
-
-      # Spawns real `pi --mode rpc` subprocesses against a local scripted model
-      # server. No provider account, no tokens, no outbound network.
-      - name: Run integration tests
-        run: pnpm run test:integration
-
-      - name: Lint (Biome)
-        run: pnpm run lint
-
-      - name: Check formatting (Biome)
-        run: pnpm run format:check
-
-  # Windows support is best-effort: taskkill tree cleanup, the hard-link lock protocol,
-  # and attached fallback still need a real hosted run. Non-blocking until proven stable.
-  check-windows:
-    runs-on: windows-latest
-    continue-on-error: true
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Type check
-        run: pnpm run typecheck
-
-      - name: Run tests
-        run: pnpm run test
+      - name: Package contents
+        run: npm pack --dry-run
