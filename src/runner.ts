@@ -27,6 +27,8 @@ import {
   boundedText,
   compactEvent,
   extractText,
+  HANDLED_PROMPT_ERROR,
+  promptHandledWithoutRun,
   WATCHDOG_STEER_MESSAGES,
 } from "./detached-policy.mjs";
 import {
@@ -438,7 +440,8 @@ export interface JsonEvent {
   command?: string;
   success?: boolean;
   error?: string;
-  data?: { sessionFile?: string };
+  /** RPC response payload: get_state carries sessionFile, prompt carries disposition. */
+  data?: { sessionFile?: string; disposition?: string };
   toolName?: string;
   args?: Record<string, unknown> | null;
   message?: {
@@ -780,6 +783,20 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       if (event.type === "response" && event.command === "prompt" && event.success === false) {
         result.errorMessage = event.error ?? "executor rejected the prompt";
         result.failureCause = "provider";
+        if (!proc.stdin.writableEnded) proc.stdin.end();
+        if (process.platform === "win32") kill("SIGTERM");
+        setTimeout(() => {
+          if (proc.exitCode === null) kill("SIGTERM");
+        }, KILL_GRACE_MS).unref();
+        return;
+      }
+
+      // An extension command or input handler in the executor consumed the
+      // prompt: no run started, so agent_settled never arrives and the
+      // executor would sit idle until the watchdog killed it.
+      if (promptHandledWithoutRun(event)) {
+        result.errorMessage = HANDLED_PROMPT_ERROR;
+        result.failureCause = "process";
         if (!proc.stdin.writableEnded) proc.stdin.end();
         if (process.platform === "win32") kill("SIGTERM");
         setTimeout(() => {

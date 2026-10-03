@@ -5,6 +5,8 @@
 ### Compatibility
 
 - **Breaking:** Pi Maestro now requires pi 1.0 or newer. The package is developed and tested against pi 1.0.1; earlier pi releases are no longer supported.
+- An executor whose prompt pi reports as `handled` (an extension command or input handler in the executor consumed it, so no agent run started) now fails at once with that reason. Previously the executor sat idle until the watchdog killed it.
+- The live agent pane marks a launch finished on `agent_settled` instead of `agent_end`, so a launch pi is about to retry or continue no longer shows as done.
 
 ### Robustness
 
