@@ -1,6 +1,8 @@
 export interface PolicyEvent {
   type: string;
   command?: string;
+  success?: boolean;
+  data?: { disposition?: string };
 }
 
 export interface PolicyMessage {
@@ -13,6 +15,8 @@ export declare const WATCHDOG_STEER_MESSAGES: Record<
   string
 >;
 
+export declare const HANDLED_PROMPT_ERROR: string;
+export declare function promptHandledWithoutRun(event: PolicyEvent): boolean;
 export declare function compactEvent(event: PolicyEvent): boolean;
 export declare function extractText(message: PolicyMessage | undefined): string;
 export declare function boundedText(report: string, maxChars: number): string;

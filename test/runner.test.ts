@@ -339,6 +339,52 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
+for (const detached of [false, true]) {
+  test(`${detached ? "detached" : "attached"} executor fails fast when pi handles the prompt without a run`, async () => {
+    if (detached && process.platform === "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "maestro-runner-handled-"));
+    const fakePi = join(root, "fake-pi.mjs");
+    // pi 1.0 answers a prompt consumed by an extension command or input
+    // handler with disposition "handled"; agent_settled never follows.
+    writeFileSync(
+      fakePi,
+      `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "prompt") console.log(JSON.stringify({ type: "response", command: "prompt", success: true, data: { disposition: "handled" } }));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+    );
+    const originalScript = process.argv[1];
+    if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+    process.argv[1] = fakePi;
+    try {
+      const run = startExecutor({
+        stateDir: root,
+        runId: `handled-${detached ? "detached" : "attached"}`,
+        cwd: root,
+        prompt: "/some-extension-command",
+        tier: { thinking: "low" },
+        detached,
+        watchdogIdleSeconds: 0,
+      });
+      const outcome = await run.outcome;
+      assert.equal(outcome.failureCause, "process");
+      assert.match(outcome.errorMessage ?? "", /no agent run started/);
+      assert.equal(outcome.aborted, false);
+    } finally {
+      process.argv[1] = originalScript;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("detached watchdog gives post-steer work its grace period", async () => {
   if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "maestro-detached-watchdog-"));

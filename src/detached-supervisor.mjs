@@ -19,6 +19,8 @@ import {
   compactEvent,
   EXIT_SETTLE_DRAIN_MS,
   extractText,
+  HANDLED_PROMPT_ERROR,
+  promptHandledWithoutRun,
   WATCHDOG_STEER_MESSAGES,
 } from "./detached-policy.mjs";
 
@@ -199,6 +201,12 @@ const processEvent = (event) => {
   if (event.type === "response" && event.command === "prompt" && event.success === false) {
     errorMessage = event.error ?? "executor rejected the prompt";
     failureCause = "provider";
+    if (!child.stdin.writableEnded) child.stdin.end();
+    setTimeout(() => killChild("SIGTERM"), config.killGraceMs).unref();
+  }
+  if (promptHandledWithoutRun(event)) {
+    errorMessage = HANDLED_PROMPT_ERROR;
+    failureCause = "process";
     if (!child.stdin.writableEnded) child.stdin.end();
     setTimeout(() => killChild("SIGTERM"), config.killGraceMs).unref();
   }

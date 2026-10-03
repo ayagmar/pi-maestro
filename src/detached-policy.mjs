@@ -12,6 +12,23 @@ export const WATCHDOG_STEER_MESSAGES = {
     "Converge now. Stop expanding the review: finish verifying the remaining acceptance criteria and end with your VERDICT line within the next few turns.",
 };
 
+export const HANDLED_PROMPT_ERROR =
+  "the executor's prompt was consumed by an extension command or input handler; no agent run started";
+
+/**
+ * pi answers an RPC prompt with data.disposition "handled" when an extension
+ * command or input handler consumed it. No run starts, so agent_settled
+ * never follows.
+ */
+export function promptHandledWithoutRun(event) {
+  return (
+    event.type === "response" &&
+    event.command === "prompt" &&
+    event.success !== false &&
+    event.data?.disposition === "handled"
+  );
+}
+
 export function compactEvent(event) {
   return (
     event.type === "tool_execution_start" ||
