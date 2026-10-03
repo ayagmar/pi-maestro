@@ -1,15 +1,10 @@
-import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-  Container,
-  Editor,
-  type EditorTheme,
-  Input,
-  Key,
-  matchesKey,
-  type SelectItem,
-  SelectList,
-  Text,
-} from "@earendil-works/pi-tui";
+  type ExtensionCommandContext,
+  getSelectListTheme,
+  keyHint,
+  rawKeyHint,
+} from "@earendil-works/pi-coding-agent";
+import { Container, Input, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 
 /**
  * ctx.ui.custom renders only in the TUI; in RPC mode it resolves undefined
@@ -21,45 +16,34 @@ function usesStockDialogs(ctx: ExtensionCommandContext): boolean {
   return ctx.mode !== "tui";
 }
 
+/**
+ * Multi-line text goes through pi's stock editor dialog in every mode: it
+ * follows the user's keybindings and offers the external editor. pi has no
+ * prefilled single-line input dialog, so the TUI keeps a small custom one.
+ */
 export async function editText(
   ctx: ExtensionCommandContext,
   title: string,
   value: string,
   multiline: boolean
 ): Promise<string | null> {
-  if (usesStockDialogs(ctx)) {
+  if (multiline || usesStockDialogs(ctx)) {
     if (!ctx.hasUI) return null;
     const next = await ctx.ui.editor(title, value);
     if (next === undefined) return null;
     return multiline ? next : next.replace(/\s*\r?\n\s*/g, " ").trim();
   }
   return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+    const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
     const hint = new Text(
-      theme.fg(
-        "dim",
-        multiline
-          ? "enter save · esc cancel · use \\ + enter for newline"
-          : "enter save · esc cancel"
-      ),
+      `${keyHint("tui.input.submit", "save")}  ${keyHint("tui.select.cancel", "cancel")}`,
       1,
       0
     );
-    const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
-    const editorTheme: EditorTheme = {
-      borderColor: (text) => theme.fg("accent", text),
-      selectList: {
-        selectedPrefix: (text) => theme.fg("accent", text),
-        selectedText: (text) => theme.fg("accent", text),
-        description: (text) => theme.fg("muted", text),
-        scrollInfo: (text) => theme.fg("dim", text),
-        noMatch: (text) => theme.fg("warning", text),
-      },
-    };
-    const field = multiline ? new Editor(tui, editorTheme) : new Input();
-    if (field instanceof Editor) field.setText(value);
-    else field.setValue(value);
+    const field = new Input();
+    field.setValue(value);
     field.onSubmit = (next) => done(next);
-    if (field instanceof Input) field.onEscape = () => done(null);
+    field.onEscape = () => done(null);
 
     return {
       render: (width: number) => [
@@ -73,10 +57,6 @@ export async function editText(
         hint.invalidate();
       },
       handleInput: (data: string) => {
-        if (field instanceof Editor && matchesKey(data, Key.escape)) {
-          done(null);
-          return;
-        }
         field.handleInput(data);
         tui.requestRender();
       },
@@ -98,20 +78,22 @@ export async function pickFromList(
     if (picked === undefined) return null;
     return items[labels.indexOf(picked)]?.value ?? null;
   }
+  // pi's stock select dialog has no per-item descriptions, which most Maestro
+  // menus rely on, so the TUI renders its own list with pi's list theme.
   return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
     const container = new Container();
     container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
-    const list = new SelectList(items, Math.min(items.length, 12), {
-      selectedPrefix: (text) => theme.fg("accent", text),
-      selectedText: (text) => theme.fg("accent", text),
-      description: (text) => theme.fg("muted", text),
-      scrollInfo: (text) => theme.fg("dim", text),
-      noMatch: (text) => theme.fg("warning", text),
-    });
+    const list = new SelectList(items, Math.min(items.length, 12), getSelectListTheme());
     list.onSelect = (item) => done(item.value);
     list.onCancel = () => done(null);
     container.addChild(list);
-    container.addChild(new Text(theme.fg("dim", "↑↓ navigate · enter select · esc close"), 1, 0));
+    container.addChild(
+      new Text(
+        `${rawKeyHint("↑↓", "navigate")}  ${keyHint("tui.select.confirm", "select")}  ${keyHint("tui.select.cancel", "close")}`,
+        1,
+        0
+      )
+    );
     return {
       render: (width: number) => container.render(width),
       invalidate: () => container.invalidate(),
