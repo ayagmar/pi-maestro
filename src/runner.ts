@@ -11,7 +11,7 @@ import {
   readSync,
   statSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { type Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
@@ -420,16 +420,36 @@ export function createExecutorSessionDir(projectCwd: string, runId: string): str
   return directory;
 }
 
-function piInvocation(args: string[]): { command: string; args: string[] } {
+export interface PiProcessInfo {
+  /** process.argv[1]: pi's entry script under Node or Bun. */
+  script: string | undefined;
+  execPath: string;
+  /** PI_MAESTRO_EXECUTOR_COMMAND override. */
+  command: string | undefined;
+}
+
+/** Mirrors pi's own subagent example (examples/extensions/subagent). */
+export function piInvocation(
+  args: string[],
+  current: PiProcessInfo = {
+    script: process.argv[1],
+    execPath: process.execPath,
+    command: process.env.PI_MAESTRO_EXECUTOR_COMMAND,
+  }
+): { command: string; args: string[] } {
   // Re-executing the current script only reproduces pi when that script *is*
   // pi. Integration tests run under a test runner whose argv[1] is the test
   // file, so they select the installed binary explicitly.
-  if (process.env.PI_MAESTRO_EXECUTOR_COMMAND) {
-    return { command: process.env.PI_MAESTRO_EXECUTOR_COMMAND, args };
+  if (current.command) return { command: current.command, args };
+  // A standalone Bun-compiled pi reports a virtual entry script that is not
+  // a real argument: passing it on would reach the executor as a prompt.
+  const virtualScript = current.script?.startsWith("/$bunfs/root/") ?? false;
+  if (current.script && !virtualScript && existsSync(current.script)) {
+    return { command: current.execPath, args: [current.script, ...args] };
   }
-  const currentScript = process.argv[1];
-  if (currentScript && existsSync(currentScript)) {
-    return { command: process.execPath, args: [currentScript, ...args] };
+  // Not a generic runtime: execPath is the pi executable itself.
+  if (!/^(node|bun)(\.exe)?$/.test(basename(current.execPath).toLowerCase())) {
+    return { command: current.execPath, args };
   }
   return { command: "pi", args };
 }

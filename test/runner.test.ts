@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   applyAssistantMessage,
@@ -23,6 +24,7 @@ import {
   classifyFailure,
   detachedAttemptIsLive,
   mapWithConcurrencyLimit,
+  piInvocation,
   projectSessionDir,
   qualifiedModel,
   type RunOutcome,
@@ -964,6 +966,32 @@ process.stdin.on("end", () => process.exit(0));
     process.argv[1] = originalScript;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("executor invocation re-runs pi the way pi itself is running", () => {
+  const args = ["--mode", "rpc"];
+  const script = fileURLToPath(import.meta.url);
+  assert.deepEqual(piInvocation(args, { script, execPath: "/usr/bin/node", command: undefined }), {
+    command: "/usr/bin/node",
+    args: [script, ...args],
+  });
+  assert.deepEqual(piInvocation(args, { script, execPath: "/usr/bin/node", command: "pi-dev" }), {
+    command: "pi-dev",
+    args,
+  });
+  // A Bun-compiled pi binary: the virtual entry script must not be passed on.
+  assert.deepEqual(
+    piInvocation(args, {
+      script: "/$bunfs/root/pi",
+      execPath: "/opt/pi/bin/pi",
+      command: undefined,
+    }),
+    { command: "/opt/pi/bin/pi", args }
+  );
+  assert.deepEqual(
+    piInvocation(args, { script: undefined, execPath: "/usr/bin/node", command: undefined }),
+    { command: "pi", args }
+  );
 });
 
 test("executor sessions are nested under the main project Pi directory and hidden from resume", async () => {
