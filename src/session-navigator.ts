@@ -26,8 +26,12 @@ export class SessionNavigator {
       return;
     }
     const target = this.previousSession;
-    this.previousSession = ctx.sessionManager.getSessionFile();
-    await ctx.switchSession(target);
+    // Read before switching: a completed switch invalidates ctx. A cancelled
+    // switch (maestro's own guard, another extension, or the user) keeps the
+    // current session, so the return target must survive it.
+    const current = ctx.sessionManager.getSessionFile();
+    const result = await ctx.switchSession(target);
+    if (!result.cancelled) this.previousSession = current;
   }
 
   async openReviewer(ctx: ExtensionCommandContext, taskId: string): Promise<void> {
