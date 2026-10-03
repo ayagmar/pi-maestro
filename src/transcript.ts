@@ -62,7 +62,9 @@ export function parseLogLine(line: string): TranscriptItem[] {
     }
     return items;
   }
-  if (event.type === "agent_end") {
+  // agent_end closes one low-level run only: pi can still retry, compact, or
+  // drain queued steering and follow-ups. agent_settled is the real end.
+  if (event.type === "agent_settled") {
     return [{ kind: "status", text: "— agent finished —" }];
   }
   if (event.type === "maestro_log_capped") {
