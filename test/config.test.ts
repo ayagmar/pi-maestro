@@ -196,6 +196,36 @@ test("resolveTierModel prefers the orchestrator's provider when it serves the pa
   assert.deepEqual(result, { ok: true, modelArg: "anthropic/claude-fable-5" });
 });
 
+test("resolveTierModel prefers an exact model id over a longer id containing it", () => {
+  // getAvailable() order is the registry's, not a ranking: a variant listed
+  // first must not win over the model the tier actually names.
+  const registry = fakeRegistry([
+    { provider: "openai", id: "gpt-5.6-sol-mini" },
+    { provider: "anthropic", id: "claude-sonnet-5-thinking" },
+    { provider: "openai", id: "gpt-5.6-sol" },
+    { provider: "openai-codex", id: "gpt-5.6-sol-codex" },
+  ]);
+  assert.deepEqual(
+    resolveTierModel("standard", { model: "gpt-5.6-sol", thinking: "medium" }, registry),
+    { ok: true, modelArg: "openai/gpt-5.6-sol" }
+  );
+  // An exact id elsewhere still beats a mere substring on the preferred provider.
+  assert.deepEqual(
+    resolveTierModel(
+      "standard",
+      { model: "gpt-5.6-sol", thinking: "medium" },
+      registry,
+      "openai-codex"
+    ),
+    { ok: true, modelArg: "openai/gpt-5.6-sol" }
+  );
+  // Without an exact id, substring matching still applies.
+  assert.deepEqual(
+    resolveTierModel("standard", { model: "sonnet-5", thinking: "medium" }, registry),
+    { ok: true, modelArg: "anthropic/claude-sonnet-5-thinking" }
+  );
+});
+
 test("resolveTierModels preserves order, provider preference, and skips unavailable patterns", () => {
   const registry = fakeRegistry([
     { provider: "other", id: "primary-model" },
