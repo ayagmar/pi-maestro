@@ -1,4 +1,5 @@
-import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 
 export interface TranscriptItem {
   /** `notice` is an out-of-band Maestro message (e.g. the log cap); it never means the run ended. */
@@ -89,26 +90,39 @@ export class TranscriptTail {
   readonly items: TranscriptItem[] = [];
   private offset = 0;
   private buffer = "";
+  // A poll can land mid-character while the writer is mid-line; the decoder
+  // carries a split UTF-8 sequence over to the next poll.
+  private decoder = new StringDecoder("utf8");
+  private identity: { device: number; inode: number } | undefined;
 
   constructor(readonly file: string) {}
 
   poll(): void {
-    if (!existsSync(this.file)) return;
-    const size = statSync(this.file).size;
-    if (size < this.offset) {
-      // File was truncated (rerun reusing the log path): start over.
-      this.offset = 0;
-      this.buffer = "";
-      this.items.length = 0;
-    }
-    if (size <= this.offset) return;
-
-    const fd = openSync(this.file, "r");
+    let fd: number;
     try {
-      const chunk = Buffer.alloc(size - this.offset);
-      readSync(fd, chunk, 0, chunk.length, this.offset);
-      this.offset = size;
-      this.buffer += chunk.toString("utf-8");
+      fd = openSync(this.file, "r");
+    } catch {
+      return; // Not written yet, or removed by log retention.
+    }
+    try {
+      const stat = fstatSync(fd);
+      const replaced =
+        this.identity !== undefined &&
+        (stat.dev !== this.identity.device || stat.ino !== this.identity.inode);
+      if (replaced || stat.size < this.offset) {
+        // Truncated or replaced (a rerun reusing the log path): start over.
+        this.offset = 0;
+        this.buffer = "";
+        this.decoder = new StringDecoder("utf8");
+        this.items.length = 0;
+      }
+      this.identity = { device: stat.dev, inode: stat.ino };
+      if (stat.size <= this.offset) return;
+
+      const chunk = Buffer.alloc(stat.size - this.offset);
+      const read = readSync(fd, chunk, 0, chunk.length, this.offset);
+      this.offset += read;
+      this.buffer += this.decoder.write(chunk.subarray(0, read));
     } finally {
       closeSync(fd);
     }
