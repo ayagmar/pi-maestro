@@ -32,10 +32,6 @@ import {
 } from "./dashboard-controls.js";
 import { type TranscriptItem, TranscriptTail } from "./transcript.js";
 
-function wrapText(text: string, width: number): string[] {
-  return wrapTextWithAnsi(text, width);
-}
-
 /** Shared transcript projection used by the dashboard and agent-session viewer. */
 export function styledTranscriptLines(
   theme: Theme,
@@ -62,13 +58,13 @@ export function styledTranscriptLines(
       continue;
     }
     if (item.kind === "notice") {
-      for (const line of wrapText(item.text, safeWidth)) {
+      for (const line of wrapTextWithAnsi(item.text, safeWidth)) {
         lines.push(theme.fg("warning", line));
       }
       continue;
     }
     for (const raw of item.text.split("\n")) {
-      for (const line of wrapText(raw, safeWidth)) {
+      for (const line of wrapTextWithAnsi(raw, safeWidth)) {
         lines.push(theme.fg("toolOutput", line));
       }
     }

@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { type Attempt, type Task, type Usage } from "./types.js";
 
 export function lastAttemptReport(task: Task): string | undefined {
@@ -70,11 +70,6 @@ export function relativeTime(timestamp: number): string {
 
 export function singleLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
-}
-
-export function padToWidth(line: string, width: number): string {
-  const w = visibleWidth(line);
-  return w >= width ? truncateToWidth(line, width) : line + " ".repeat(width - w);
 }
 
 export function wrapText(text: string, width: number): string[] {

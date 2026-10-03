@@ -22,7 +22,6 @@ import {
   executorUsage,
   lastAttemptReport,
   latestFailure,
-  padToWidth,
   relativeTime,
   singleLine,
   wrapText,
@@ -743,7 +742,7 @@ export class Dashboard {
         continue;
       }
       const l = left[i] ?? " ".repeat(listWidth);
-      lines.push(`${padToWidth(l, listWidth)} ${theme.fg("dim", "│")} ${r}`);
+      lines.push(`${truncateToWidth(l, listWidth, "...", true)} ${theme.fg("dim", "│")} ${r}`);
     }
 
     lines.push(theme.fg("dim", "─".repeat(width)));
