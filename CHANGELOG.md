@@ -10,6 +10,7 @@
 - The agent selector widget truncates every row to the terminal width. A long task title on a narrow terminal produced a row wider than the screen, which pi's regular (main-screen) TUI mode rejects by crashing.
 - The live agent pane applies `context_edit` session entries as they arrive. An executor transcript that edited or hid an earlier message kept showing the old content until the pane reloaded the session.
 - `/maestro back` keeps its return target when the session switch is cancelled (by maestro's own active-work guard, another extension, or the user). Previously the cancelled attempt replaced the target with the current session, so the way back was lost.
+- The plan, brief and workflow viewers no longer advertise PgUp/PgDn in pi's fullscreen mode (the pi 1.0 default), where pi's own viewport takes those keys; the arrow keys page the viewer. Their key-hint line is also cut to the terminal width.
 
 ### Robustness
 

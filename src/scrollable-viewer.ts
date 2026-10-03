@@ -1,5 +1,5 @@
 import { type ExtensionCommandContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Key, Markdown, matchesKey, Text } from "@earendil-works/pi-tui";
+import { Key, Markdown, matchesKey, type TUI, Text, truncateToWidth } from "@earendil-works/pi-tui";
 
 const TEXT_PAGE_SIZE = 18;
 const SCROLL_STEP = 10;
@@ -11,6 +11,17 @@ export function scrollableTextOffset(
   pageSize = TEXT_PAGE_SIZE
 ): number {
   return Math.max(0, Math.min(Math.max(0, lineCount - pageSize), offset + delta));
+}
+
+/**
+ * In pi's fullscreen mode (the 1.0 default) PgUp/PgDn scroll pi's own
+ * viewport before an inline component sees them, so only the arrows page
+ * this viewer there.
+ */
+export function scrollHint(tui: Pick<TUI, "mode">): string {
+  return tui.mode === "fullscreen"
+    ? "↑↓ scroll · enter/esc close"
+    : "↑↓/PgUp/PgDn scroll · enter/esc close";
 }
 
 export async function showScrollableText(
@@ -28,7 +39,7 @@ export async function showScrollableText(
           ...heading.render(width),
           ...content.render(width),
           "",
-          theme.fg("dim", "↑↓/PgUp/PgDn scroll · enter/esc close"),
+          truncateToWidth(theme.fg("dim", scrollHint(tui)), width),
         ];
       },
       invalidate: () => heading.invalidate(),
@@ -71,7 +82,7 @@ export async function showScrollableMarkdown(
         return [
           ...heading.render(width),
           ...rendered.slice(offset, offset + pageSize),
-          theme.fg("dim", "↑↓/PgUp/PgDn scroll · enter/esc close"),
+          truncateToWidth(theme.fg("dim", scrollHint(tui)), width),
         ];
       },
       invalidate: () => {
