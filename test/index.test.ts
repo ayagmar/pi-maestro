@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { type ExtensionAPI, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { taskFingerprint } from "../src/artifact-policy.js";
 import {
   archiveBoard,
@@ -443,11 +444,11 @@ function loadMaestro(
   };
 }
 
-function renderLatestWidget(runtime: { widgets: unknown[]; tui: TestTui }): string[] {
+function renderLatestWidget(runtime: { widgets: unknown[]; tui: TestTui }, width = 80): string[] {
   const factory = runtime.widgets.at(-1);
   if (typeof factory !== "function") return [];
   const component = factory(runtime.tui, fakeTheme) as TestComponent;
-  return component.render?.(80) ?? [];
+  return component.render?.(width) ?? [];
 }
 
 test("session startup preserves a running task with an active dispatch lease", () => {
@@ -4880,6 +4881,56 @@ test("manual agent viewer works when automatic panes are disabled", async () => 
       });
       viewer.component.handleInput(escapeKey);
       await waitFor(() => viewer.closed, "manual agent viewer did not close");
+      finish?.({
+        exitCode: 1,
+        usage: { input: 0, output: 0, cost: 0, turns: 1 },
+        finalReport: "cancelled",
+        touchedFiles: [],
+        aborted: true,
+        failureCause: "user_abort",
+      });
+    }
+  );
+});
+
+test("agent selector widget never renders a line wider than the terminal", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, livePanes: false, autoCommit: false });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      createTask(board, {
+        title: `A very long task title ${"that keeps going ".repeat(12)}`,
+        brief: "run",
+        tier: "standard",
+      });
+      board.ownerSessions = [owner];
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      let finish: ((outcome: RunOutcome) => void) | undefined;
+      const runtime = loadMaestro(cwd, () => ({
+        attempt: executorAttempt(),
+        outcome: new Promise<RunOutcome>((resolve) => {
+          finish = resolve;
+        }),
+        steer: () => {},
+        followUp: () => {},
+        abort: () => {},
+      }));
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "narrow-widget",
+        { action: "start" },
+        runtime.ctx
+      );
+      await waitFor(() => finish !== undefined, "executor did not launch");
+      for (const width of [24, 40, 80]) {
+        const lines = renderLatestWidget(runtime, width);
+        assert.notDeepEqual(lines, []);
+        for (const line of lines) {
+          assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}: ${line}`);
+        }
+      }
       finish?.({
         exitCode: 1,
         usage: { input: 0, output: 0, cost: 0, turns: 1 },

@@ -4,7 +4,14 @@ import {
   type ExtensionContext,
   getMarkdownTheme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, type SelectItem, Text, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  Container,
+  Markdown,
+  type SelectItem,
+  Text,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import {
   consumeQuarantineNotice,
   findTask,
@@ -257,9 +264,16 @@ export default function maestro(
           const left = `${marker}${glyph}${id}${launch.title}`;
           const gap = Math.max(2, width - visibleWidth(left) - visibleWidth(stats));
           const line = `${left}${" ".repeat(gap)}${stats}`;
-          return visibleWidth(line) > width ? `${marker}${glyph}${id}${launch.title}` : line;
+          // Pi's main-screen renderer throws on any line wider than the
+          // terminal, so a long task title on a narrow terminal must be cut.
+          return visibleWidth(line) > width ? truncateToWidth(left, width) : line;
         });
-        lines.push(theme.fg("dim", "  ctrl+alt+j/k select · ctrl+alt+w view · ctrl+alt+b board"));
+        lines.push(
+          truncateToWidth(
+            theme.fg("dim", "  ctrl+alt+j/k select · ctrl+alt+w view · ctrl+alt+b board"),
+            width
+          )
+        );
         return lines;
       };
       return {
