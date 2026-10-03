@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -89,4 +89,58 @@ test("TranscriptTail tolerates a missing file", () => {
   const tail = new TranscriptTail("/nonexistent/path/log.jsonl");
   tail.poll();
   assert.equal(tail.items.length, 0);
+});
+
+test("TranscriptTail keeps a multi-byte character split across polls intact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "maestro-tail-utf8-"));
+  const file = join(dir, "log.jsonl");
+  try {
+    const line = Buffer.from(
+      `${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "café ✓ done" }] },
+      })}\n`
+    );
+    // The writer is mid-line, and mid-character, when the first poll runs.
+    const split = line.indexOf(Buffer.from("é")) + 1;
+    writeFileSync(file, line.subarray(0, split));
+    const tail = new TranscriptTail(file);
+    tail.poll();
+    assert.equal(tail.items.length, 0);
+
+    appendFileSync(file, line.subarray(split));
+    tail.poll();
+    assert.deepEqual(tail.items, [{ kind: "text", text: "café ✓ done" }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TranscriptTail starts over when the log file is replaced", () => {
+  const dir = mkdtempSync(join(tmpdir(), "maestro-tail-replace-"));
+  const file = join(dir, "log.jsonl");
+  const event = (command: string) =>
+    `${JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command } })}\n`;
+  try {
+    writeFileSync(file, event("first"));
+    const tail = new TranscriptTail(file);
+    tail.poll();
+    assert.deepEqual(
+      tail.items.map((item) => item.text),
+      ["$ first"]
+    );
+
+    // A replacement at least as large as what was read must not be read
+    // from the old offset.
+    const replacement = join(dir, "replacement.jsonl");
+    writeFileSync(replacement, `${event("second")}${event("third")}`);
+    renameSync(replacement, file);
+    tail.poll();
+    assert.deepEqual(
+      tail.items.map((item) => item.text),
+      ["$ second", "$ third"]
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
