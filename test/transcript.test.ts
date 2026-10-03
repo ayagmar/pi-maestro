@@ -42,9 +42,12 @@ test("parseLogLine maps events to transcript items", () => {
   assert.equal(capped[0]?.kind, "notice");
   assert.match(capped[0]?.text ?? "", /1\.0 MB cap/);
   assert.match(capped[0]?.text ?? "", /run continues/);
-  assert.deepEqual(parseLogLine(JSON.stringify({ type: "agent_end" })), [
+  assert.deepEqual(parseLogLine(JSON.stringify({ type: "agent_settled" })), [
     { kind: "status", text: "— agent finished —" },
   ]);
+  // A retry, compaction, or queued follow-up can follow agent_end.
+  assert.deepEqual(parseLogLine(JSON.stringify({ type: "agent_end", willRetry: true })), []);
+  assert.deepEqual(parseLogLine(JSON.stringify({ type: "agent_end", willRetry: false })), []);
   assert.deepEqual(parseLogLine(JSON.stringify({ type: "turn_start" })), []);
   assert.deepEqual(parseLogLine("not json"), []);
 });
