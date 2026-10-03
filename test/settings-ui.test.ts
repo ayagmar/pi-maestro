@@ -105,6 +105,19 @@ test("picker selects bare primary and fallback values without qualifying them", 
   assert.equal(config.tiers.standard?.fallbacks?.[0], "claude-sonnet-5");
 });
 
+test("picker marks the exact model a bare pattern resolves to, not a longer variant", () => {
+  const registry = registryWithModels([
+    { provider: "openai", id: "gpt-5.6-sol-mini" },
+    { provider: "openai", id: "gpt-5.6-sol" },
+  ]);
+  const items = buildModelPickerChoices(registry, buildModelChoices(registry).model, "gpt-5.6-sol");
+  assert.deepEqual(
+    items.find((item) => item.value === "gpt-5.6-sol"),
+    { value: "gpt-5.6-sol", label: "openai/gpt-5.6-sol" }
+  );
+  assert.ok(items.some((item) => item.value === "openai/gpt-5.6-sol-mini"));
+});
+
 test("settings model choices retain static menus when no authenticated models are available", () => {
   const choices = buildModelChoices(registryWithModels([]));
 

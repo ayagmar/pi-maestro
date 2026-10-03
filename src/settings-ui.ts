@@ -20,6 +20,7 @@ import {
   effectiveReviewCostCap,
   findPreset,
   loadConfig,
+  matchBareModelPattern,
   matchingPreset,
   PRESETS,
   saveConfig,
@@ -104,14 +105,12 @@ export function buildModelPickerChoices(
   const items = choices.map((choice) => ({ value: choice, label: choice }));
   if (currentValue.startsWith("(") || currentValue.includes("/")) return items;
 
-  const pattern = currentValue.toLowerCase();
-  const candidates = modelRegistry
-    .getAvailable()
-    .filter((model) => model.id.toLowerCase().includes(pattern));
-  const preferred = preferredProvider
-    ? candidates.find((model) => model.provider === preferredProvider)
-    : undefined;
-  const selected = preferred ?? candidates[0];
+  // The same resolution a drive applies, so the picker shows what will run.
+  const selected = matchBareModelPattern(
+    modelRegistry.getAvailable(),
+    currentValue,
+    preferredProvider
+  );
   if (!selected) return items;
 
   const qualifiedValue = `${selected.provider}/${selected.id}`;

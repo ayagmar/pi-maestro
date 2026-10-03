@@ -763,25 +763,36 @@ export function resolveTierModel(
     return { ok: true, modelArg: `${result.provider}/${result.id}` };
   }
 
-  const pattern = tier.model.toLowerCase();
-  const candidates = modelRegistry
-    .getAvailable()
-    .filter((model) => model.id.toLowerCase().includes(pattern));
-  if (candidates.length === 0) {
+  const chosen = matchBareModelPattern(modelRegistry.getAvailable(), tier.model, preferredProvider);
+  if (!chosen) {
     return {
       ok: false,
       error: `Tier "${tierName}": no authed provider serves "${tier.model}". Run /login or pick another model in /maestro config (see pi --list-models ${tier.model}).`,
     };
   }
+  return { ok: true, modelArg: `${chosen.provider}/${chosen.id}` };
+}
 
+/**
+ * The authenticated model a bare (provider-less) pattern selects. An exact id
+ * beats an id that merely contains the pattern, whatever order the registry
+ * lists them in; among equals, the orchestrator's provider wins.
+ */
+export function matchBareModelPattern<T extends { provider: string; id: string }>(
+  available: readonly T[],
+  pattern: string,
+  preferredProvider?: string
+): T | undefined {
+  const normalized = pattern.toLowerCase();
+  const exact = available.filter((model) => model.id.toLowerCase() === normalized);
+  const candidates =
+    exact.length > 0
+      ? exact
+      : available.filter((model) => model.id.toLowerCase().includes(normalized));
   const preferred = preferredProvider
     ? candidates.find((model) => model.provider === preferredProvider)
     : undefined;
-  const chosen = preferred ?? candidates[0];
-  if (!chosen) {
-    return { ok: false, error: `Tier "${tierName}": no usable model for "${tier.model}".` };
-  }
-  return { ok: true, modelArg: `${chosen.provider}/${chosen.id}` };
+  return preferred ?? candidates[0];
 }
 
 function findQualifiedModel(modelRegistry: ModelRegistry, reference: string) {
