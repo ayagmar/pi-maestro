@@ -220,3 +220,17 @@ test("supported pi line in user docs matches the pi devDependency", () => {
     assert.doesNotMatch(text, /`0\.[5-9]\d\.x`/, `${doc} still names a pre-1.0 pi line`);
   }
 });
+
+test("README and docs site lead with the same npm install command", () => {
+  const install = "pi install npm:@ayagmar/pi-maestro";
+  for (const doc of [
+    "README.md",
+    "src/pages/index.astro",
+    "src/pages/docs/getting-started.astro",
+  ]) {
+    assert.ok(read(doc).includes(install), `${doc} must show ${install}`);
+  }
+  for (const doc of ["src/pages/index.astro", "src/pages/docs/getting-started.astro"]) {
+    assert.ok(read(doc).includes(`data-copy="${install}"`), `${doc} must copy ${install}`);
+  }
+});
