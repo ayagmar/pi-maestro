@@ -39,16 +39,20 @@ Bug fixes should add a behavioral regression test. Registration assertions do no
   most of the coverage. Use `test/helpers/executors.ts` rather than hand-rolling a fake:
   `settlingExecutor` for runs that should just finish, `heldExecutors` for asserting behavior while
   a run is still live.
-- **`test/executor-integration.test.ts`** drives real `pi --mode rpc` subprocesses against a local
+- **`test/integration/executor.test.ts`** (run by `pnpm run test:integration`, part of
+  `pnpm run check`) drives real `pi --mode rpc` subprocesses against a local
   scripted model server (`test/helpers/stub-model-server.ts`). It covers the RPC transport, session
   writing, Git attribution, and process teardown that fake executors cannot reach — with no provider
   account, no tokens, and no outbound network. Reach for this layer when a bug involves the executor
   process, Git, or the filesystem rather than a scheduling decision; several production bugs lived
   precisely in that gap while every fake-executor suite stayed green.
 - **`test/boundaries.test.ts`** asserts capability boundaries only: which modules may spawn
-  processes or execute Git, and the published package shape. It deliberately does not assert where
+  processes or execute Git, the three-tool model surface in source, and that the package adds no
+  runtime dependencies or framework directories. It deliberately does not assert where
   ordinary functions live — those checks pass on completely broken code (gutting a function while
   keeping its name left them all green) and only tax refactors.
+- **`test/package.test.ts`** checks the packed tarball: it ships the runtime and public docs but no
+  docs-site, test, or tooling files, and the manifest entry registers exactly the three model tools.
 
 Preserve dirty trees, stashes, checkpoint branches, logs, and archives. Maestro task checkouts are ephemeral: checkpoint recoverable task edits before parking an idle checkout, and restore it only for active work. Never make an empty path list stage or commit all dirty files.
 
