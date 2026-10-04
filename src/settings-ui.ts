@@ -747,27 +747,29 @@ export async function showSettings(
     };
 
     let navigation: SettingsList;
+    // One source for each section summary, so a change redraws the same text
+    // the menu first showed (spend caps, disabled guards, review policy).
+    const tierCount = () =>
+      `${Object.keys(config.tiers).filter((name) => name !== "review").length} tiers`;
+    const navigationSummaries: Record<string, () => string> = {
+      general: () => essentialsSummary(config),
+      execution: () => executionSummary(config),
+      limits: () => limitsSummary(config),
+      watchdog: () => watchdogSummary(config),
+      tiers: tierCount,
+      review: () =>
+        `${config.reviewPolicy ?? "single"} · ${displayModelValue(
+          ctx.modelRegistry,
+          modelChoices.model,
+          config.tiers.review?.model ?? "(pi default)",
+          preferredProvider
+        )}`,
+    };
+    const navigationSummary = (id: string): string => navigationSummaries[id]?.() ?? "";
     const updateNavigationValues = () => {
-      navigation.updateValue("general", matchingPreset(config));
-      navigation.updateValue(
-        "general",
-        `${matchingPreset(config)} · ${config.maxParallel} parallel`
-      );
-      navigation.updateValue(
-        "execution",
-        config.useWorktrees ? "isolated checkouts" : "shared checkout"
-      );
-      navigation.updateValue("limits", limitsSummary(config));
-      navigation.updateValue("watchdog", watchdogSummary(config));
-      navigation.updateValue(
-        "tiers",
-        `${Object.keys(config.tiers).filter((name) => name !== "review").length} tiers`
-      );
-      const reviewModel = config.tiers.review?.model ?? "(pi default)";
-      navigation.updateValue(
-        "review",
-        displayModelValue(ctx.modelRegistry, modelChoices.model, reviewModel, preferredProvider)
-      );
+      for (const id of Object.keys(navigationSummaries)) {
+        navigation.updateValue(id, navigationSummary(id));
+      }
     };
 
     const createSection = (section: string, close: (selectedValue?: string) => void) => {
@@ -800,47 +802,42 @@ export async function showSettings(
       {
         id: "general",
         label: "Essentials",
-        currentValue: essentialsSummary(config),
+        currentValue: navigationSummary("general"),
         description: "Models, how much runs at once, and how much it may spend.",
         submenu: (_current, close) => createSection("general", close),
       },
       {
         id: "execution",
         label: "How work runs",
-        currentValue: executionSummary(config),
+        currentValue: navigationSummary("execution"),
         description: "Isolation, live panes, and what happens after a drive finishes.",
         submenu: (_current, close) => createSection("execution", close),
       },
       {
         id: "limits",
         label: "Safety limits",
-        currentValue: limitsSummary(config),
+        currentValue: navigationSummary("limits"),
         description: "Runaway guards. Leave these alone until a real run trips one.",
         submenu: (_current, close) => createSection("limits", close),
       },
       {
         id: "watchdog",
         label: "Watchdog & logging",
-        currentValue: watchdogSummary(config),
+        currentValue: navigationSummary("watchdog"),
         description: "Stall detection, automatic context handoff, and run-log detail.",
         submenu: (_current, close) => createSection("watchdog", close),
       },
       {
         id: "tiers",
         label: "Tier model settings",
-        currentValue: `${Object.keys(config.tiers).filter((name) => name !== "review").length} tiers`,
+        currentValue: navigationSummary("tiers"),
         description: "Primary model, fallback, and thinking level for executor tiers.",
         submenu: (_current, close) => createSection("tiers", close),
       },
       {
         id: "review",
         label: "Review",
-        currentValue: `${config.reviewPolicy ?? "single"} · ${displayModelValue(
-          ctx.modelRegistry,
-          modelChoices.model,
-          config.tiers.review?.model ?? "(pi default)",
-          preferredProvider
-        )}`,
+        currentValue: navigationSummary("review"),
         description: "How hard new tasks are reviewed, and which model does it.",
         submenu: (_current, close) => createSection("review", close),
       },
