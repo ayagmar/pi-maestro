@@ -1463,11 +1463,6 @@ export function forceStatus(task: Task, status: TaskStatus): void {
   task.updatedAt = Date.now();
 }
 
-/** @deprecated Prefer transition, or forceStatus for an explicit manual override. */
-export function setStatus(task: Task, status: TaskStatus): void {
-  forceStatus(task, status);
-}
-
 /**
  * A task is runnable when it is pending work and all dependencies are approved.
  * With explicit=true (task named directly in a scoped drive), failed and

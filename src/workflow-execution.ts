@@ -349,7 +349,6 @@ export async function executeTask(options: {
     if (run.attempt.provider === undefined && selectedProvider !== undefined) {
       run.attempt.provider = selectedProvider;
     }
-    if (run.attempt.model === undefined && model !== undefined) run.attempt.model = model;
     if (worktree) {
       run.attempt.worktreePath = worktree.worktreePath;
       run.attempt.branch = worktree.branch;
