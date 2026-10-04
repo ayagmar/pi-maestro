@@ -3615,6 +3615,51 @@ test("handoff refuses an empty board or live executors", async () => {
   );
 });
 
+test("slash drive launches executors with the session's project trust", async () => {
+  for (const projectTrusted of [true, false]) {
+    await withBoard(
+      (cwd) => {
+        const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+        createTask(board, { title: "Work", brief: "do it", tier: "standard" });
+        saveBoard(cwd, board);
+      },
+      async (cwd) => {
+        let received!: (options: Parameters<StartExecutor>[0]) => void;
+        const launched = new Promise<Parameters<StartExecutor>[0]>((resolve) => {
+          received = resolve;
+        });
+        const startExecutor: StartExecutor = (options) => {
+          received(options);
+          return {
+            attempt: executorAttempt(),
+            outcome: new Promise<RunOutcome>((resolve) => {
+              options.signal?.addEventListener("abort", () =>
+                resolve({
+                  exitCode: 1,
+                  usage: { input: 0, output: 0, cost: 0, turns: 0 },
+                  finalReport: "",
+                  touchedFiles: [],
+                  aborted: true,
+                })
+              );
+            }),
+            steer: () => {},
+            followUp: () => {},
+            abort: () => {},
+          };
+        };
+        const { ctx, command } = loadMaestro(cwd, startExecutor, owner, undefined, {
+          projectTrusted,
+        });
+        await command.handler("drive", ctx);
+        const options = await launched;
+        assert.equal(options.projectTrusted, projectTrusted);
+        await command.handler("abort", ctx);
+      }
+    );
+  }
+});
+
 test("session switches are cancelled while a slash drive owns active work", async () => {
   await withBoard(
     (cwd) => {
