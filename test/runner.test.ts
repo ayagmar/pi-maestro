@@ -1105,9 +1105,10 @@ process.stdin.on("end", () => process.exit(0));
   }
 });
 
-test("executors inherit the parent's project trust on both transports", async () => {
+test("executors inherit the parent's project trust and session root on both transports", async () => {
   const root = mkdtempSync(join(tmpdir(), "maestro-runner-trust-"));
   const projectCwd = join(root, "project");
+  const customRoot = join(root, "custom-sessions");
   const fakePi = join(root, "fake-pi.mjs");
   const argsDir = join(root, "args");
   mkdirSync(projectCwd, { recursive: true });
@@ -1131,7 +1132,10 @@ process.stdin.on("end", () => process.exit(0));
 `
   );
 
-  const launch = async (label: string, extra: { projectTrusted?: boolean; detached?: boolean }) => {
+  const launch = async (
+    label: string,
+    extra: { projectTrusted?: boolean; sessionRoot?: string; detached?: boolean }
+  ) => {
     process.env.MAESTRO_TEST_LABEL = label;
     const run = startExecutor({
       stateDir: join(projectCwd, ".pi", "maestro"),
@@ -1144,6 +1148,7 @@ process.stdin.on("end", () => process.exit(0));
     });
     await run.outcome;
     return {
+      sessionDir: run.attempt.sessionDir ?? "",
       args: JSON.parse(readFileSync(join(argsDir, `${label}.json`), "utf8")) as string[],
     };
   };
@@ -1153,17 +1158,26 @@ process.stdin.on("end", () => process.exit(0));
   if (originalScript === undefined) throw new Error("test runner script path is unavailable");
   process.argv[1] = fakePi;
   try {
-    const trusted = await launch("trusted", { projectTrusted: true });
+    const trusted = await launch("trusted", { projectTrusted: true, sessionRoot: customRoot });
     assert.ok(trusted.args.includes("--approve"));
     assert.ok(!trusted.args.includes("--no-approve"));
+    assert.equal(dirname(trusted.sessionDir), join(customRoot, ".maestro"));
+    assert.equal(trusted.args[trusted.args.indexOf("--session-dir") + 1], trusted.sessionDir);
 
-    const untrusted = await launch("untrusted", { projectTrusted: false });
+    // An in-memory parent session reports "" and falls back to Pi's default layout.
+    const untrusted = await launch("untrusted", { projectTrusted: false, sessionRoot: "" });
     assert.ok(untrusted.args.includes("--no-approve"));
     assert.ok(!untrusted.args.includes("--approve"));
+    assert.equal(dirname(untrusted.sessionDir), join(projectSessionDir(projectCwd), ".maestro"));
 
     if (process.platform !== "win32") {
-      const detached = await launch("detached", { projectTrusted: false, detached: true });
+      const detached = await launch("detached", {
+        projectTrusted: false,
+        sessionRoot: customRoot,
+        detached: true,
+      });
       assert.ok(detached.args.includes("--no-approve"));
+      assert.equal(dirname(detached.sessionDir), join(customRoot, ".maestro"));
     }
   } finally {
     process.argv[1] = originalScript;
