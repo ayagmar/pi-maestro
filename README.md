@@ -520,7 +520,8 @@ Maestro is not a sandbox, CI service, analytics database, or generic plugin syst
   invalid user or project config is preserved beside it as `maestro.json.corrupt-<timestamp>` and
   that scope falls back to lower-precedence configuration.
 - Executors are `pi --mode rpc` child processes. Each raw launch receives a unique
-  `--session-dir` under Pi's default per-project session directory at `.maestro/<launch>/`.
+  `--session-dir` under the owner session's Pi session directory (the default per-project
+  directory, or a configured `sessionDir` / `PI_CODING_AGENT_SESSION_DIR`) at `.maestro/<launch>/`.
   The nested transcript stays available through `/maestro agents` and exact board references;
   recursive usage reports include it without adding it to Pi's ordinary `/resume` list. Attempts
   retain descriptive, numbered names and their exact session path, with raw event logs under

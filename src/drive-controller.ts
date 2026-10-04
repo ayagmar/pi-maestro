@@ -593,10 +593,11 @@ export class DriveRuntimeController {
       cwd: ctx.cwd,
       config,
       resolvedTiers,
-      // Executors inherit this session's trust: an RPC child has no UI to ask
-      // and a worktree cwd has no stored decision.
+      // Executors inherit this session's trust and session root; neither is
+      // visible to an RPC child running in a worktree.
       startExecutor: (startOptions) =>
         services.startExecutor({
+          sessionRoot: ctx.sessionManager.getSessionDir(),
           projectTrusted: ctx.isProjectTrusted(),
           ...startOptions,
         }),

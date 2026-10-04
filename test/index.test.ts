@@ -185,6 +185,7 @@ interface CommandCtx {
     getEntries: () => unknown[];
     getLeafId?: () => string | undefined;
     getSessionFile: () => string;
+    getSessionDir: () => string;
     getSessionName: () => string | undefined;
   };
   waitForIdle?: () => Promise<void>;
@@ -229,6 +230,7 @@ interface HostOptions {
   mode?: CommandCtx["mode"];
   hasUI?: boolean;
   projectTrusted?: boolean;
+  sessionDir?: string;
   rows?: number;
   columns?: number;
 }
@@ -398,6 +400,7 @@ function loadMaestro(
       getEntries: () => [],
       getLeafId: () => "leaf-1",
       getSessionFile: () => sessionFile,
+      getSessionDir: () => host.sessionDir ?? "",
       getSessionName: () => undefined,
     },
     ui,
@@ -3423,6 +3426,7 @@ test("handoff replaces the session once and briefs the fresh supervisor context"
           sessionManager: {
             getEntries: () => [],
             getSessionFile: () => "/sessions/fresh.jsonl",
+            getSessionDir: () => "/sessions",
             getSessionName: () => undefined,
           },
           sendMessage: async (message, sendOptions) => {
@@ -3615,7 +3619,7 @@ test("handoff refuses an empty board or live executors", async () => {
   );
 });
 
-test("slash drive launches executors with the session's project trust", async () => {
+test("slash drive launches executors with the session's trust and session directory", async () => {
   for (const projectTrusted of [true, false]) {
     await withBoard(
       (cwd) => {
@@ -3650,10 +3654,12 @@ test("slash drive launches executors with the session's project trust", async ()
         };
         const { ctx, command } = loadMaestro(cwd, startExecutor, owner, undefined, {
           projectTrusted,
+          sessionDir: "/custom/sessions/project",
         });
         await command.handler("drive", ctx);
         const options = await launched;
         assert.equal(options.projectTrusted, projectTrusted);
+        assert.equal(options.sessionRoot, "/custom/sessions/project");
         await command.handler("abort", ctx);
       }
     );

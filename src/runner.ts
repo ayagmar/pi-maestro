@@ -401,7 +401,11 @@ function safeSessionDirectoryLabel(runId: string): string {
   return label || "run";
 }
 
-/** Mirror Pi's public default per-project session layout under its configured agent directory. */
+/**
+ * Mirror Pi's public default per-project session layout under its configured
+ * agent directory. Used only when the owner session's directory is unknown
+ * or in-memory; see StartExecutorOptions.sessionRoot.
+ */
 export function projectSessionDir(projectCwd: string): string {
   const resolvedCwd = resolve(projectCwd);
   const safePath = `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
@@ -413,8 +417,13 @@ export function projectSessionDir(projectCwd: string): string {
  * Pi's picker lists only JSONL files directly in the project session directory,
  * while recursive usage scanners still discover this nested transcript.
  */
-export function createExecutorSessionDir(projectCwd: string, runId: string): string {
-  const namespace = join(projectSessionDir(projectCwd), SESSION_NAMESPACE);
+export function createExecutorSessionDir(
+  projectCwd: string,
+  runId: string,
+  sessionRoot?: string
+): string {
+  // `||` on purpose: an in-memory parent session reports "" as its directory.
+  const namespace = join(sessionRoot || projectSessionDir(projectCwd), SESSION_NAMESPACE);
   ensurePrivateDirectory(namespace);
   const directory = join(namespace, `${safeSessionDirectoryLabel(runId)}-${randomUUID()}`);
   ensurePrivateDirectory(directory);
@@ -520,8 +529,8 @@ export function touchedFile(event: JsonEvent, cwd: string): string | undefined {
  * Spawn a fresh-context pi executor as a child process in RPC mode.
  *
  * RPC mode (vs plain JSON print mode) lets the caller steer or abort the
- * executor mid-run via stdin commands. Its transcript is nested beneath Pi's
- * normal per-project session directory so usage scanners retain it without
+ * executor mid-run via stdin commands. Its transcript is nested beneath the
+ * owner session's directory so usage scanners retain it without
  * adding the child to Pi's ordinary /resume list. Every stdout event is also
  * mirrored to stateDir/logs/<runId>.jsonl for live tailing.
  */
@@ -531,6 +540,13 @@ export interface StartExecutorOptions {
   cwd: string;
   /** Main project cwd used to group sessions when cwd is an ephemeral worktree. */
   projectCwd?: string;
+  /**
+   * The parent session's directory (`ctx.sessionManager.getSessionDir()`).
+   * Executor sessions nest beneath it so a custom `sessionDir` setting or
+   * PI_CODING_AGENT_SESSION_DIR is honored. Empty (an in-memory session) or
+   * absent falls back to Pi's default per-project directory.
+   */
+  sessionRoot?: string;
   /**
    * The parent session's resolved project trust (`ctx.isProjectTrusted()`).
    * An RPC child has no UI to ask, and a worktree cwd has no stored decision,
@@ -583,7 +599,11 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
   // transcript unreachable from the attempt record.
   const sessionDir = options.resumeSessionFile
     ? dirname(options.resumeSessionFile)
-    : createExecutorSessionDir(options.projectCwd ?? options.cwd, options.runId);
+    : createExecutorSessionDir(
+        options.projectCwd ?? options.cwd,
+        options.runId,
+        options.sessionRoot
+      );
   const attempt: Attempt = {
     index: 0,
     logFile,
