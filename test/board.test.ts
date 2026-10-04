@@ -41,6 +41,7 @@ import {
   replaceBoardWithArchive,
   restoreArchivedBoard,
   saveBoard,
+  scopedDependencyGaps,
   setStatus,
   sweepDispatchState,
   taskFailureCause,
@@ -131,6 +132,31 @@ test("isRunnable requires approved dependencies", () => {
   setStatus(dep, "approved");
   assert.equal(isRunnable(board, task), true);
   assert.equal(blockedReason(board, task), undefined);
+});
+
+test("scopedDependencyGaps walks shared dependencies once", () => {
+  // Each task depends on every earlier one: a path-by-path walk visited
+  // 2^(n-1) chains and froze a scoped /maestro simulate.
+  const board = emptyBoard();
+  for (let index = 0; index < 40; index += 1) {
+    createTask(board, {
+      title: `Task ${index + 1}`,
+      brief: "work",
+      tier: "standard",
+      dependsOn: board.tasks.map((task) => task.id),
+    });
+  }
+  const gaps = scopedDependencyGaps(board, ["T40"]);
+  assert.equal(gaps.length, 39);
+  assert.deepEqual(
+    gaps.map((gap) => gap.dependencyId).sort((left, right) => left.localeCompare(right)),
+    board.tasks
+      .slice(0, 39)
+      .map((task) => task.id)
+      .sort((left, right) => left.localeCompare(right))
+  );
+  // Selected dependencies are part of the scope, not gaps.
+  assert.deepEqual(scopedDependencyGaps(board, ["T2", "T1"]), []);
 });
 
 test("isRunnable refuses every task while plan approval is pending", () => {

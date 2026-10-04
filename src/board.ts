@@ -1647,10 +1647,16 @@ export function scopedDependencyGaps(
   for (const taskId of selected) {
     const task = findTask(board, taskId);
     if (!task) continue;
+    // Shared dependencies are walked once: without this, a plan where each
+    // task depends on every earlier one took exponentially many steps.
+    const visited = new Set<string>();
     const visit = (dependencyId: string) => {
       const dependency = findTask(board, dependencyId);
       if (!dependency || dependency.status === "approved") return;
-      if (!selected.has(dependency.id.toUpperCase())) {
+      const key = dependency.id.toUpperCase();
+      if (visited.has(key)) return;
+      visited.add(key);
+      if (!selected.has(key)) {
         gaps.push({ taskId: task.id, dependencyId: dependency.id });
       }
       for (const nested of dependency.dependsOn) visit(nested);
