@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import {
+  billedUsage,
   boundedBytes,
   boundedText,
   compactEvent,
@@ -190,6 +191,14 @@ const evaluateWatchdog = () => {
   }
 };
 
+const enforceCostCap = () => {
+  if (config.maxCost > 0 && state.usage.cost > config.maxCost) {
+    errorMessage = `cost cap exceeded: $${state.usage.cost.toFixed(4)} > $${config.maxCost} (${config.maxCostSource ?? "maxCostPerTask"})`;
+    failureCause = "cost_cap";
+    abortWithCause("cost_cap");
+  }
+};
+
 const processEvent = (event) => {
   lastEventAt = Date.now();
   if (event.type === "extension_ui_request" && event.id) {
@@ -239,11 +248,16 @@ const processEvent = (event) => {
       state.finalReport = boundedReport(text);
       if (readOnlyProgress && rawReportLength >= priorLength + 80) resetWatchdog();
     }
-    if (config.maxCost > 0 && state.usage.cost > config.maxCost) {
-      errorMessage = `cost cap exceeded: $${state.usage.cost.toFixed(4)} > $${config.maxCost} (${config.maxCostSource ?? "maxCostPerTask"})`;
-      failureCause = "cost_cap";
-      abortWithCause("cost_cap");
-    }
+    enforceCostCap();
+  }
+  const billed = billedUsage(event);
+  if (billed) {
+    // Billed outside assistant messages (compaction, usage entries, tool
+    // results): totals and the cap move, turns and the report do not.
+    state.usage.input += billed.input ?? 0;
+    state.usage.output += billed.output ?? 0;
+    state.usage.cost += billed.cost?.total ?? 0;
+    enforceCostCap();
   }
   const touched = touchedFile(event);
   if (touched && !state.touchedFiles.includes(touched)) {
