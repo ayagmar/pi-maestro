@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   codexQuotaStatus,
@@ -13,8 +16,16 @@ const NOW = Date.UTC(2026, 8, 6, 16, 30, 0);
 function deps(overrides: Partial<QuotaResolverDependencies> = {}): QuotaResolverDependencies {
   return {
     fetch: (async () => new Response("{}", { status: 500 })) as typeof fetch,
-    readAuthFile: () =>
-      JSON.stringify({ "openai-codex": { access: "token-123", accountId: "acct-1" } }),
+    readCredential: (providerId) =>
+      providerId === "openai-codex"
+        ? {
+            type: "oauth",
+            access: "token-123",
+            refresh: "refresh-123",
+            expires: NOW + 3_600_000,
+            accountId: "acct-1",
+          }
+        : undefined,
     now: () => NOW,
     timeoutMs: 1_000,
     ...overrides,
@@ -63,10 +74,20 @@ test("codex usage is fetched with pi's stored OAuth credentials and parsed into 
 });
 
 test("missing credentials, HTTP errors, and network failures all fall back to undefined", async () => {
-  assert.equal(await codexQuotaStatus(deps({ readAuthFile: () => undefined })), undefined);
-  assert.equal(await codexQuotaStatus(deps({ readAuthFile: () => "{not json" })), undefined);
+  assert.equal(await codexQuotaStatus(deps({ readCredential: () => undefined })), undefined);
   assert.equal(
-    await codexQuotaStatus(deps({ readAuthFile: () => JSON.stringify({ anthropic: {} }) })),
+    await codexQuotaStatus(deps({ readCredential: () => ({ type: "api_key", key: "sk-test" }) })),
+    undefined,
+    "an API-key credential has no OAuth token for the usage endpoint"
+  );
+  assert.equal(
+    await codexQuotaStatus(
+      deps({
+        readCredential: () => {
+          throw new Error("unreadable auth.json");
+        },
+      })
+    ),
     undefined
   );
   assert.equal(
@@ -97,6 +118,41 @@ test("the resolver only knows Codex; other providers fall back to probing", asyn
   );
   assert.equal(await resolver("anthropic"), undefined);
   assert.equal((await resolver("openai-codex"))?.windows.length, 2);
+});
+
+test("by default the resolver reads the token pi stored in its own auth.json", async () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-quota-agent-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  // Editors on Windows save a byte-order mark; pi's own reader tolerates it.
+  writeFileSync(
+    join(agentDir, "auth.json"),
+    `\uFEFF${JSON.stringify({
+      "openai-codex": {
+        type: "oauth",
+        access: "stored-token",
+        refresh: "refresh",
+        expires: NOW + 3_600_000,
+        accountId: "stored-account",
+      },
+    })}`
+  );
+  const seen: Array<Record<string, string>> = [];
+  try {
+    const resolver = createQuotaStatusResolver({
+      fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
+        seen.push(init?.headers as Record<string, string>);
+        return new Response(JSON.stringify(usagePayload), { status: 200 });
+      }) as typeof fetch,
+    });
+    assert.equal((await resolver("openai-codex"))?.windows.length, 2);
+    assert.equal(seen[0]?.Authorization, "Bearer stored-token");
+    assert.equal(seen[0]?.["ChatGPT-Account-Id"], "stored-account");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(agentDir, { recursive: true, force: true });
+  }
 });
 
 test("the reopening moment is the latest reset among exhausted windows", () => {

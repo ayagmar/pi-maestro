@@ -1,6 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type Credential } from "@earendil-works/pi-ai";
+import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 
 /**
  * When a provider's exhausted usage window will reopen.
@@ -29,7 +28,8 @@ export type QuotaStatusResolver = (provider: string) => Promise<QuotaStatus | un
 
 export interface QuotaResolverDependencies {
   fetch: typeof fetch;
-  readAuthFile: () => string | undefined;
+  /** The provider's credential as pi stored it in auth.json. */
+  readCredential: (providerId: string) => Credential | undefined;
   now: () => number;
   timeoutMs: number;
 }
@@ -62,12 +62,6 @@ function codexWindow(
   };
 }
 
-function defaultReadAuthFile(): string | undefined {
-  const file = join(getAgentDir(), "auth.json");
-  if (!existsSync(file)) return undefined;
-  return readFileSync(file, "utf-8");
-}
-
 /**
  * Codex publishes `used_percent` and `reset_at` per rate window on its usage
  * endpoint, authenticated with the same OAuth token pi stores in auth.json.
@@ -77,26 +71,24 @@ function defaultReadAuthFile(): string | undefined {
 export async function codexQuotaStatus(
   deps: QuotaResolverDependencies
 ): Promise<QuotaStatus | undefined> {
-  let credentials: { access?: string; accountId?: string } | undefined;
+  let credential: Credential | undefined;
   try {
-    const raw = deps.readAuthFile();
-    if (!raw) return undefined;
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const entry = parsed["openai-codex"];
-    if (entry && typeof entry === "object") credentials = entry as typeof credentials;
+    credential = deps.readCredential("openai-codex");
   } catch {
     return undefined;
   }
-  if (!credentials?.access) return undefined;
+  const access = credential && "access" in credential ? credential.access : undefined;
+  if (typeof access !== "string" || !access) return undefined;
+  const accountId = credential && "accountId" in credential ? credential.accountId : undefined;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), deps.timeoutMs);
   try {
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${credentials.access}`,
+      Authorization: `Bearer ${access}`,
       Accept: "application/json",
     };
-    if (credentials.accountId) headers["ChatGPT-Account-Id"] = credentials.accountId;
+    if (typeof accountId === "string" && accountId) headers["ChatGPT-Account-Id"] = accountId;
     const response = await deps.fetch(CODEX_USAGE_URL, { headers, signal: controller.signal });
     if (!response.ok) return undefined;
     const data = (await response.json()) as {
@@ -122,7 +114,7 @@ export function createQuotaStatusResolver(
 ): QuotaStatusResolver {
   const deps: QuotaResolverDependencies = {
     fetch: overrides.fetch ?? fetch,
-    readAuthFile: overrides.readAuthFile ?? defaultReadAuthFile,
+    readCredential: overrides.readCredential ?? ((providerId) => readStoredCredential(providerId)),
     now: overrides.now ?? Date.now,
     timeoutMs: overrides.timeoutMs ?? 10_000,
   };
