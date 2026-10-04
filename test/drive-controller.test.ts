@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { captureApprovedProvenance } from "../src/artifact-policy.js";
-import { createTask, listArchivedBoards, loadBoard, saveBoard, updateBoard } from "../src/board.js";
+import {
+  createTask,
+  listArchivedBoards,
+  listCorruptBoardFiles,
+  loadBoard,
+  saveBoard,
+  updateBoard,
+} from "../src/board.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/config.js";
 import {
   armDeliveredDecisionNudge,
@@ -15,13 +22,24 @@ import {
   persistActiveDrive,
   persistDriveDecision,
   resolveDriveDecision,
+  setActiveDriveWait,
   type LiveRun,
 } from "../src/drive-controller.js";
-import { markDecisionAwaitingHuman } from "../src/drive-preflight.js";
+import { markDecisionAwaitingHuman, validateDriveStart } from "../src/drive-preflight.js";
 import { startDriveHeartbeat } from "../src/drive-summary.js";
 import { type Board, type DriveDecision } from "../src/types.js";
 
 const owner = "/tmp/maestro-owner.jsonl";
+
+/**
+ * Reload the board from disk instead of this process's parse cache, the way
+ * a restarted pi or a second session first reads it.
+ */
+function reloadFromDisk(cwd: string): Board {
+  const future = new Date(Date.now() + 60_000);
+  utimesSync(join(cwd, ".pi", "maestro", "board.json"), future, future);
+  return loadBoard(cwd);
+}
 
 function decision(overrides: Partial<DriveDecision> = {}): DriveDecision {
   return {
@@ -748,8 +766,43 @@ test("decision evidence is bounded by characters, not only lines", () => {
       },
       flood
     );
-    const evidence = loadBoard(cwd).activeDecision?.evidence ?? "";
+    const evidence = reloadFromDisk(cwd).activeDecision?.evidence ?? "";
     assert.ok(evidence.length <= 12_100, `evidence is ${evidence.length} characters`);
     assert.match(evidence, /more characters\)/);
+    // A decision the writer accepts must survive the loader's validation.
+    assert.deepEqual(listCorruptBoardFiles(cwd), []);
+  });
+});
+
+test("a long drive wait reason persists within the board's limits", () => {
+  withBoard((cwd) => {
+    saveBoard(cwd, { version: 1, nextTaskNumber: 1, tasks: [] });
+    const reserved = persistActiveDrive(cwd, { id: "drive-1", startedAt: Date.now() });
+    assert.equal(reserved.ok, true);
+    const taskIds = Array.from({ length: 80 }, (_, index) => `T${index + 100}`);
+    setActiveDriveWait(cwd, "drive-1", {
+      until: Date.now() + 60_000,
+      reason: `transient provider failure for ${taskIds.join(", ")}; retrying in 15s`,
+      taskIds,
+    });
+    const waiting = reloadFromDisk(cwd).activeDrive?.waiting;
+    assert.deepEqual(listCorruptBoardFiles(cwd), []);
+    assert.ok(waiting, "the wait survives a reload");
+    assert.ok(waiting.reason.length <= 400);
+    assert.match(waiting.reason, /^transient provider failure for T100, /);
+    assert.equal(waiting.taskIds.length, 64);
+  });
+});
+
+test("a drive scoped past the persisted task-id limit is refused before it starts", () => {
+  withBoard((cwd) => {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    for (let index = 0; index < 65; index += 1) {
+      createTask(board, { title: `Task ${index}`, brief: "work", tier: "standard" });
+    }
+    saveBoard(cwd, board);
+    const ids = board.tasks.map((task) => task.id);
+    const ctx = { cwd } as unknown as Parameters<typeof validateDriveStart>[0];
+    assert.throws(() => validateDriveStart(ctx, ids), /at most 64 tasks/);
   });
 });
