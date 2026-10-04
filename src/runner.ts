@@ -1205,6 +1205,9 @@ function monitorDetachedExecutor(
     if (terminal?.model !== undefined) result.model = terminal.model;
     if (terminal?.sessionFile) attempt.sessionFile = terminal.sessionFile;
     result.exitCode = terminal?.exitCode ?? (abortCause ? 1 : exitCode);
+    // Older supervisors recorded exit 0 alongside a provider error; an error
+    // is a failed launch on both transports.
+    if (terminal?.errorMessage && result.exitCode === 0) result.exitCode = 1;
     // A terminal record that settled cleanly before a racing local abort is
     // authoritative completed work, not a cancellation.
     const abortTookEffect = abortCause !== undefined && result.exitCode !== 0;

@@ -380,6 +380,8 @@ process.stdin.on("end", () => process.exit(0));
       assert.equal(outcome.failureCause, "process");
       assert.match(outcome.errorMessage ?? "", /no agent run started/);
       assert.equal(outcome.aborted, false);
+      assert.equal(outcome.exitCode, 1);
+      assert.equal(run.attempt.exitCode, 1);
     } finally {
       process.argv[1] = originalScript;
       rmSync(root, { recursive: true, force: true });
@@ -669,6 +671,37 @@ test("a clean detached terminal outcome outranks a racing local abort", async ()
     } catch {
       // Already gone.
     }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a detached terminal record with an error settles as a failed launch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-exit-error-"));
+  const logFile = join(root, "events.jsonl");
+  const exitFile = join(root, "exit.json");
+  writeFileSync(logFile, "");
+  // Supervisors before this fix wrote exit 0 when pi itself exited cleanly
+  // after a provider error, so the timeline showed the launch as settled.
+  writeFileSync(
+    exitFile,
+    `${JSON.stringify({ version: 1, exitCode: 0, errorMessage: "provider overloaded", failureCause: "provider" })}\n`
+  );
+  const attempt: Attempt = {
+    index: 1,
+    logFile,
+    thinking: "low",
+    startedAt: Date.now(),
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+    detached: true,
+    exitFile,
+  };
+  try {
+    const outcome = await reattachDetachedExecutor(attempt, root).outcome;
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(attempt.exitCode, 1);
+    assert.equal(outcome.failureReason?.kind, "provider_failure");
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

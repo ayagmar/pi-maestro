@@ -370,7 +370,9 @@ const finish = (code, signal, viaDrain = false) => {
   }
   if (abortCause === "user_abort") failureCause = "user_abort";
   if (abortCause === "process") failureCause = "process";
-  const exitCode = abortCause ? 1 : (code ?? 1);
+  // Pi can exit 0 after a provider error, a rejected prompt, or a prompt an
+  // extension handled; the attached transport records those as failures too.
+  const exitCode = abortCause || errorMessage ? 1 : (code ?? 1);
   if (exitCode !== 0 && !errorMessage && !abortCause) {
     errorMessage =
       stderrTail.trim() || `detached executor terminated by ${signal ?? `exit ${exitCode}`}`;
