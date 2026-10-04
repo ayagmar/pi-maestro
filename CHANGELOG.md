@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## Pi 1.0 migration notes (hand-written, precede the first generated release)
 
 ### Compatibility
 
