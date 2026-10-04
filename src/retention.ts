@@ -139,6 +139,26 @@ export interface LogCleanupResult {
   warnings: string[];
 }
 
+/**
+ * A detached launch keeps its control, exit, and stderr files next to its
+ * event log. They only matter while that run is live, so they go with it;
+ * left behind, every detached launch added three files the logs directory
+ * never shed.
+ */
+const DETACHED_COMPANION_SUFFIXES = [".control", ".exit", ".stderr"] as const;
+
+function removeDetachedCompanions(logFile: string, warnings: string[]): void {
+  for (const suffix of DETACHED_COMPANION_SUFFIXES) {
+    const companion = `${logFile}${suffix}`;
+    try {
+      unlinkSync(companion);
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      if (code !== "ENOENT") addWarning(warnings, warning("could not delete", companion, error));
+    }
+  }
+}
+
 /** Delete only snapshot-confirmed files which are still stale after live-state rechecks. */
 export function cleanupStaleLogs(
   cwd: string,
@@ -183,7 +203,9 @@ export function cleanupStaleLogs(
         removed.push(entry);
       } catch (error) {
         addWarning(warnings, warning("could not delete", entry.file, error));
+        continue;
       }
+      removeDetachedCompanions(entry.file, warnings);
     } catch (error) {
       addWarning(warnings, warning("could not inspect", confirmedFile, error));
     }

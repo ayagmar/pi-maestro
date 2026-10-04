@@ -88,6 +88,31 @@ test("approval pruning removes only the approved task's superseded logs", () => 
   }
 });
 
+test("pruning a detached launch's log also removes its control, exit, and stderr files", () => {
+  const { cwd, board, logs } = fixture();
+  try {
+    const companions = [".control", ".exit", ".stderr"];
+    for (const suffix of companions) {
+      writeFileSync(join(logs, `T1-attempt-1.jsonl${suffix}`), suffix);
+      writeFileSync(join(logs, `T1-attempt-2.jsonl${suffix}`), suffix);
+    }
+    const result = pruneTaskLogs(
+      cwd,
+      "T1",
+      () => board,
+      () => false
+    );
+    assert.deepEqual(result.warnings, []);
+    for (const suffix of companions) {
+      assert.equal(existsSync(join(logs, `T1-attempt-1.jsonl${suffix}`)), false);
+      // The retained latest attempt keeps everything.
+      assert.equal(existsSync(join(logs, `T1-attempt-2.jsonl${suffix}`)), true);
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("cleanup rechecks liveness immediately before deletion", () => {
   const { cwd, board, logs } = fixture();
   try {
