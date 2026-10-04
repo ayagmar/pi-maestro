@@ -189,6 +189,52 @@ test("settings model search owns focus only while its picker is active", async (
   }
 });
 
+test("section summaries keep their full text after a setting changes", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-settings-summary-"));
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const context = {
+    cwd,
+    modelRegistry: registryWithModels([{ provider: "openai", id: "gpt-test" }]),
+    ui: {
+      notify: () => {},
+      custom: async (factory: (...args: unknown[]) => unknown) => {
+        const component = factory({ requestRender: () => {} }, theme, {}, () => {}) as {
+          focused: boolean;
+          render(width: number): string[];
+          handleInput(data: string): void;
+        };
+        component.focused = true;
+        const row = (label: string) =>
+          component
+            .render(160)
+            .join("\n")
+            .split("\n")
+            .find((line) => line.includes(label)) ?? "";
+        assert.match(row("Essentials"), /3 at a time · \$25 cap/);
+        assert.match(row("Review"), /single · /);
+
+        // Essentials → "Max parallel executors" (second row) → cycle 3 → 4.
+        component.handleInput("\r");
+        component.handleInput("\x1b[B");
+        component.handleInput("\r");
+        component.handleInput("\x1b");
+
+        assert.match(row("Essentials"), /4 at a time · \$25 cap/);
+        assert.match(row("Review"), /single · /);
+      },
+    },
+  } as unknown as ExtensionCommandContext;
+
+  try {
+    await showSettings(context, "project");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("model picker changes preserve qualified values, sentinels, and fallback chains", () => {
   let config = structuredClone(DEFAULT_CONFIG);
   const standard = config.tiers.standard;
