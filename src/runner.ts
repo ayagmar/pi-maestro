@@ -24,6 +24,7 @@ import {
   SESSION_NAMESPACE,
 } from "./constants.js";
 import {
+  billedUsage,
   boundedBytes,
   boundedText,
   compactEvent,
@@ -506,15 +507,45 @@ export function applyAssistantMessage(
     if (result.failureCause === "provider") delete result.failureCause;
   }
 
+  const exceededCostCap = applyCostCap(result, attempt, maxCost, maxCostSource);
+
+  const text = extractText(message);
+  if (text) result.finalReport = text;
+  return exceededCostCap;
+}
+
+function applyCostCap(
+  result: RunOutcome,
+  attempt: Attempt,
+  maxCost: number | undefined,
+  maxCostSource: string
+): boolean {
   const exceededCostCap = Boolean(maxCost && attempt.usage.cost > maxCost);
   if (exceededCostCap) {
     result.errorMessage = `cost cap exceeded: $${attempt.usage.cost.toFixed(4)} > $${maxCost} (${maxCostSource})`;
     result.failureCause = "cost_cap";
   }
-
-  const text = extractText(message);
-  if (text) result.finalReport = text;
   return exceededCostCap;
+}
+
+/**
+ * Adds usage pi bills outside assistant messages (compaction summaries,
+ * usage entries, tool results). It is not a turn and carries no report or
+ * provider state, so only the totals and the cost cap move.
+ */
+export function applyBilledUsage(
+  result: RunOutcome,
+  attempt: Attempt,
+  event: JsonEvent,
+  maxCost?: number,
+  maxCostSource = "maxCostPerTask"
+): boolean {
+  const usage = billedUsage(event);
+  if (!usage) return false;
+  attempt.usage.input += usage.input ?? 0;
+  attempt.usage.output += usage.output ?? 0;
+  attempt.usage.cost += usage.cost?.total ?? 0;
+  return applyCostCap(result, attempt, maxCost, maxCostSource);
 }
 
 export function touchedFile(event: JsonEvent, cwd: string): string | undefined {
@@ -902,6 +933,13 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
           watchdogSteeredAt = undefined;
           watchdogSteeredTime = undefined;
         }
+      }
+
+      if (
+        applyBilledUsage(result, attempt, event, options.maxCost, options.maxCostSource) &&
+        !abortCause
+      ) {
+        abortWithCause("cost_cap");
       }
 
       const touched = touchedFile(event, options.cwd);
@@ -1307,6 +1345,9 @@ function monitorDetachedExecutor(
       ) {
         abortWithCause("cost_cap");
       }
+    }
+    if (applyBilledUsage(result, attempt, event, options.maxCost, options.maxCostSource)) {
+      abortWithCause("cost_cap");
     }
     const touched = touchedFile(event, cwd);
     if (touched && !attempt.touchedFiles.includes(touched)) attempt.touchedFiles.push(touched);

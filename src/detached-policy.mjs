@@ -29,6 +29,22 @@ export function promptHandledWithoutRun(event) {
   );
 }
 
+/**
+ * Usage pi bills outside assistant messages: compaction summaries
+ * (compaction_end result.usage, present even when the compaction then
+ * retries), usage entries such as cache warming (entry_appended), and
+ * toolResult message usage. pi's own session stats count all of these.
+ * Assistant message_end usage is accounted separately with the turn.
+ */
+export function billedUsage(event) {
+  if (event.type === "compaction_end") return event.result?.usage;
+  if (event.type === "entry_appended" && event.entry?.type === "usage") return event.entry.usage;
+  if (event.type === "message_end" && event.message?.role === "toolResult") {
+    return event.message.usage;
+  }
+  return undefined;
+}
+
 export function compactEvent(event) {
   return (
     event.type === "tool_execution_start" ||
@@ -37,6 +53,9 @@ export function compactEvent(event) {
     event.type === "agent_end" ||
     event.type === "agent_settled" ||
     event.type === "message_end" ||
+    // Billed outside assistant messages; kept so replay and reattach recover the spend.
+    event.type === "compaction_end" ||
+    (event.type === "entry_appended" && event.entry?.type === "usage") ||
     (event.type === "response" && event.command === "get_state")
   );
 }

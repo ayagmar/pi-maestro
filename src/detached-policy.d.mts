@@ -3,6 +3,15 @@ export interface PolicyEvent {
   command?: string;
   success?: boolean;
   data?: { disposition?: string };
+  result?: { usage?: BilledUsage } | null;
+  entry?: { type?: string; usage?: BilledUsage };
+  message?: { role?: string; usage?: BilledUsage };
+}
+
+export interface BilledUsage {
+  input?: number;
+  output?: number;
+  cost?: { total?: number };
 }
 
 export interface PolicyMessage {
@@ -17,6 +26,7 @@ export declare const WATCHDOG_STEER_MESSAGES: Record<
 
 export declare const HANDLED_PROMPT_ERROR: string;
 export declare function promptHandledWithoutRun(event: PolicyEvent): boolean;
+export declare function billedUsage(event: PolicyEvent): BilledUsage | undefined;
 export declare function compactEvent(event: PolicyEvent): boolean;
 export declare function extractText(message: PolicyMessage | undefined): string;
 export declare function boundedText(report: string, maxChars: number): string;

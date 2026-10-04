@@ -17,8 +17,10 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { compactEvent } from "../src/detached-policy.mjs";
 import {
   applyAssistantMessage,
+  applyBilledUsage,
   boundedReportBytes,
   cappedLogWriter,
   classifyFailure,
@@ -342,6 +344,61 @@ process.stdin.on("data", (chunk) => {
 });
 
 for (const detached of [false, true]) {
+  test(`${detached ? "detached" : "attached"} executor counts compaction spend against the cost cap`, async () => {
+    if (detached && process.platform === "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "maestro-runner-compaction-cost-"));
+    const fakePi = join(root, "fake-pi.mjs");
+    // Each assistant turn stays under the cap; the auto-compaction summary
+    // call that follows pushes the run over it.
+    writeFileSync(
+      fakePi,
+      `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "prompt") {
+      console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.05 } }, content: [{ type: "text", text: "working" }] } }));
+      console.log(JSON.stringify({ type: "compaction_start", reason: "threshold" }));
+      console.log(JSON.stringify({ type: "compaction_end", reason: "threshold", result: { summary: "s", usage: { input: 50000, output: 2000, cost: { total: 0.4 } } }, aborted: false, willRetry: false }));
+      console.log(JSON.stringify({ type: "agent_settled" }));
+    }
+    if (command.type === "abort") process.exit(1);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+    );
+    const originalScript = process.argv[1];
+    if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+    process.argv[1] = fakePi;
+    try {
+      const run = startExecutor({
+        stateDir: root,
+        runId: `compaction-cost-${detached ? "detached" : "attached"}`,
+        cwd: root,
+        prompt: "run",
+        tier: { thinking: "low" },
+        detached,
+        maxCost: 0.1,
+        logEvents: "compact",
+      });
+      const outcome = await run.outcome;
+      assert.equal(outcome.failureCause, "cost_cap");
+      assert.ok(Math.abs(outcome.usage.cost - 0.45) < 1e-9);
+      assert.equal(outcome.usage.turns, 1);
+      // The compact log keeps the billed event so a reattached monitor can recover it.
+      assert.match(readFileSync(run.attempt.logFile, "utf-8"), /"compaction_end"/);
+    } finally {
+      process.argv[1] = originalScript;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const detached of [false, true]) {
   test(`${detached ? "detached" : "attached"} executor fails fast when pi handles the prompt without a run`, async () => {
     if (detached && process.platform === "win32") return;
     const root = mkdtempSync(join(tmpdir(), "maestro-runner-handled-"));
@@ -623,6 +680,54 @@ test("detached monitor handles UTF-8 splits and log truncation incrementally", a
     const outcome = await run.outcome;
     assert.equal(outcome.finalReport, "after truncation");
     assert.equal(outcome.usage.turns, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a reattached monitor recovers compaction spend from the event log", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-compaction-"));
+  const logFile = join(root, "events.jsonl");
+  const controlFile = join(root, "control.jsonl");
+  const exitFile = join(root, "exit.json");
+  writeFileSync(
+    logFile,
+    [
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          usage: { cost: { total: 0.1 } },
+          content: [{ type: "text", text: "done" }],
+        },
+      },
+      { type: "compaction_end", result: { usage: { input: 9, output: 1, cost: { total: 0.3 } } } },
+      { type: "entry_appended", entry: { type: "usage", usage: { cost: { total: 0.05 } } } },
+    ]
+      .map((event) => `${JSON.stringify(event)}\n`)
+      .join("")
+  );
+  writeFileSync(controlFile, "");
+  const attempt: Attempt = {
+    index: 1,
+    logFile,
+    thinking: "low",
+    startedAt: Date.now(),
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+    detached: true,
+    pid: process.pid,
+    controlFile,
+    exitFile,
+  };
+  try {
+    const run = reattachDetachedExecutor(attempt, root);
+    await wait(150);
+    writeFileSync(exitFile, `${JSON.stringify({ version: 1, exitCode: 0 })}\n`);
+    const outcome = await run.outcome;
+    assert.ok(Math.abs(outcome.usage.cost - 0.45) < 1e-9);
+    assert.equal(outcome.usage.input, 9);
+    assert.equal(outcome.usage.turns, 1);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2013,6 +2118,83 @@ test("successful assistant event crossing the cost cap retains a cost-cap failur
   assert.equal(classifyFailure(outcome)?.kind, "cost_cap");
   assert.equal(outcome.finalReport, "Work completed");
   assert.equal(outcome.usage.cost, 0.12);
+});
+
+test("usage billed outside assistant messages counts toward cost and the cap, not turns", () => {
+  const attempt: Attempt = {
+    index: 1,
+    logFile: "log",
+    thinking: "low",
+    startedAt: 0,
+    usage: { input: 100, output: 10, cost: 0.05, turns: 3 },
+    touchedFiles: [],
+  };
+  const outcome: RunOutcome = {
+    exitCode: 0,
+    usage: attempt.usage,
+    finalReport: "report so far",
+    touchedFiles: [],
+    aborted: false,
+  };
+  const usage = (total: number) => ({ input: 1_000, output: 200, cost: { total } });
+
+  // A compaction that then retries has still been billed.
+  assert.equal(
+    applyBilledUsage(
+      outcome,
+      attempt,
+      { type: "compaction_end", result: { usage: usage(0.02) }, willRetry: true } as never,
+      1
+    ),
+    false
+  );
+  applyBilledUsage(outcome, attempt, {
+    type: "entry_appended",
+    entry: { type: "usage", kind: "cache_warm", usage: usage(0.01) },
+  } as never);
+  applyBilledUsage(outcome, attempt, {
+    type: "message_end",
+    message: { role: "toolResult", usage: usage(0.01) },
+  } as never);
+  // Not billed: other appended entries, failed compactions, assistant turns.
+  applyBilledUsage(outcome, attempt, {
+    type: "entry_appended",
+    entry: { type: "custom", usage: usage(5) },
+  } as never);
+  applyBilledUsage(outcome, attempt, {
+    type: "compaction_end",
+    result: undefined,
+    aborted: true,
+  } as never);
+  applyBilledUsage(outcome, attempt, {
+    type: "message_end",
+    message: { role: "assistant", usage: usage(5) },
+  });
+
+  assert.equal(attempt.usage.turns, 3);
+  assert.equal(attempt.usage.input, 3_100);
+  assert.equal(attempt.usage.output, 610);
+  assert.ok(Math.abs(attempt.usage.cost - 0.09) < 1e-9);
+  assert.equal(outcome.failureCause, undefined);
+  assert.equal(outcome.finalReport, "report so far");
+
+  const exceeded = applyBilledUsage(
+    outcome,
+    attempt,
+    { type: "compaction_end", result: { usage: usage(0.5) } } as never,
+    0.5
+  );
+  assert.equal(exceeded, true);
+  assert.equal(outcome.failureCause, "cost_cap");
+  assert.equal(outcome.errorMessage, "cost cap exceeded: $0.5900 > $0.5 (maxCostPerTask)");
+  assert.equal(attempt.usage.turns, 3);
+});
+
+test("compact logs keep the events that carry billed usage", () => {
+  assert.equal(compactEvent({ type: "compaction_end" }), true);
+  assert.equal(compactEvent({ type: "entry_appended", entry: { type: "usage" } }), true);
+  assert.equal(compactEvent({ type: "entry_appended", entry: { type: "custom" } }), false);
+  assert.equal(compactEvent({ type: "compaction_start" }), false);
 });
 
 test("a budget-bound cost cap names the run budget and steers recovery to it", () => {
