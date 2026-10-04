@@ -16,6 +16,7 @@ import { type Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { isProjectConfigTrusted } from "./config.js";
 import {
   KILL_GRACE_MS,
   LOGS_DIR,
@@ -530,6 +531,13 @@ export interface StartExecutorOptions {
   cwd: string;
   /** Main project cwd used to group sessions when cwd is an ephemeral worktree. */
   projectCwd?: string;
+  /**
+   * The parent session's resolved project trust (`ctx.isProjectTrusted()`).
+   * An RPC child has no UI to ask, and a worktree cwd has no stored decision,
+   * so the child is told explicitly. Defaults to the trust recorded at
+   * session start.
+   */
+  projectTrusted?: boolean;
   prompt: string;
   tier: TierConfig;
   /** Human-readable session name shown in pi's session picker (e.g. "T3 · add replay command"). */
@@ -597,6 +605,10 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
   if (options.resumeSessionFile) args.push("--session", options.resumeSessionFile);
   if (options.tier.model) args.push("--model", options.tier.model);
   if (options.tier.tools) args.push("--tools", options.tier.tools);
+  // Children inherit the parent's trust decision: "trust this session only"
+  // and `--approve` live only in the parent's memory, and `--no-approve` must
+  // not be undone by a stored decision in the child.
+  args.push((options.projectTrusted ?? isProjectConfigTrusted()) ? "--approve" : "--no-approve");
   // Integration tests replace the user's environment with a scripted model
   // provider so the real RPC transport can be exercised without a provider
   // account or the developer's own installed packages. Nothing in normal

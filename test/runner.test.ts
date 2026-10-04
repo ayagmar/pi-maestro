@@ -1105,6 +1105,74 @@ process.stdin.on("end", () => process.exit(0));
   }
 });
 
+test("executors inherit the parent's project trust on both transports", async () => {
+  const root = mkdtempSync(join(tmpdir(), "maestro-runner-trust-"));
+  const projectCwd = join(root, "project");
+  const fakePi = join(root, "fake-pi.mjs");
+  const argsDir = join(root, "args");
+  mkdirSync(projectCwd, { recursive: true });
+  mkdirSync(argsDir, { recursive: true });
+  writeFileSync(
+    fakePi,
+    `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+const args = process.argv.slice(2);
+writeFileSync(join(${JSON.stringify(argsDir)}, process.env.MAESTRO_TEST_LABEL + ".json"), JSON.stringify(args));
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (JSON.parse(line).type === "prompt") console.log(JSON.stringify({ type: "agent_settled" }));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+
+  const launch = async (label: string, extra: { projectTrusted?: boolean; detached?: boolean }) => {
+    process.env.MAESTRO_TEST_LABEL = label;
+    const run = startExecutor({
+      stateDir: join(projectCwd, ".pi", "maestro"),
+      runId: label,
+      cwd: projectCwd,
+      projectCwd,
+      prompt: "run",
+      tier: { thinking: "low" },
+      ...extra,
+    });
+    await run.outcome;
+    return {
+      args: JSON.parse(readFileSync(join(argsDir, `${label}.json`), "utf8")) as string[],
+    };
+  };
+
+  const originalScript = process.argv[1];
+  const originalLabel = process.env.MAESTRO_TEST_LABEL;
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  try {
+    const trusted = await launch("trusted", { projectTrusted: true });
+    assert.ok(trusted.args.includes("--approve"));
+    assert.ok(!trusted.args.includes("--no-approve"));
+
+    const untrusted = await launch("untrusted", { projectTrusted: false });
+    assert.ok(untrusted.args.includes("--no-approve"));
+    assert.ok(!untrusted.args.includes("--approve"));
+
+    if (process.platform !== "win32") {
+      const detached = await launch("detached", { projectTrusted: false, detached: true });
+      assert.ok(detached.args.includes("--no-approve"));
+    }
+  } finally {
+    process.argv[1] = originalScript;
+    if (originalLabel === undefined) delete process.env.MAESTRO_TEST_LABEL;
+    else process.env.MAESTRO_TEST_LABEL = originalLabel;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("executor signal termination is recorded as a process failure", async () => {
   if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "maestro-runner-signal-"));

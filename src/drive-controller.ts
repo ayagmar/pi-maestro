@@ -593,7 +593,13 @@ export class DriveRuntimeController {
       cwd: ctx.cwd,
       config,
       resolvedTiers,
-      startExecutor: services.startExecutor,
+      // Executors inherit this session's trust: an RPC child has no UI to ask
+      // and a worktree cwd has no stored decision.
+      startExecutor: (startOptions) =>
+        services.startExecutor({
+          projectTrusted: ctx.isProjectTrusted(),
+          ...startOptions,
+        }),
       onUpdate: (taskId, update, kind) => this.applyUpdate(ctx, taskId, update, kind, services),
       onRoundUpdate: (round, phase, ids) => {
         const board = loadBoard(ctx.cwd);
