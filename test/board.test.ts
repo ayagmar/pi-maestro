@@ -42,7 +42,6 @@ import {
   restoreArchivedBoard,
   saveBoard,
   scopedDependencyGaps,
-  setStatus,
   sweepDispatchState,
   taskFailureCause,
   taskGroup,
@@ -129,7 +128,7 @@ test("isRunnable requires approved dependencies", () => {
   assert.equal(isRunnable(board, task), false);
   assert.equal(blockedReason(board, task), "blocked by T1");
 
-  setStatus(dep, "approved");
+  forceStatus(dep, "approved");
   assert.equal(isRunnable(board, task), true);
   assert.equal(blockedReason(board, task), undefined);
 });
@@ -171,22 +170,22 @@ test("isRunnable refuses every task while plan approval is pending", () => {
 test("changes_requested tasks are runnable again", () => {
   const board = emptyBoard();
   const task = createTask(board, { title: "A", brief: "do a", tier: "standard" });
-  setStatus(task, "changes_requested");
+  forceStatus(task, "changes_requested");
   assert.equal(isRunnable(board, task), true);
-  setStatus(task, "ready_for_review");
+  forceStatus(task, "ready_for_review");
   assert.equal(isRunnable(board, task), false);
 });
 
 test("failed and cancelled tasks are runnable only when explicitly named", () => {
   const board = emptyBoard();
   const task = createTask(board, { title: "A", brief: "do a", tier: "standard" });
-  setStatus(task, "failed");
+  forceStatus(task, "failed");
   assert.equal(isRunnable(board, task), false);
   assert.equal(isRunnable(board, task, true), true);
-  setStatus(task, "cancelled");
+  forceStatus(task, "cancelled");
   assert.equal(isRunnable(board, task), false);
   assert.equal(isRunnable(board, task, true), true);
-  setStatus(task, "approved");
+  forceStatus(task, "approved");
   assert.equal(isRunnable(board, task, true), false);
 });
 
