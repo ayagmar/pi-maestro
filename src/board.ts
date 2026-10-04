@@ -14,7 +14,14 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { completionFreshness } from "./artifact-policy.js";
-import { MAX_DISCOVERY_REPORT_BYTES, MAX_PERSISTED_REPORT_CHARS, STATE_DIR } from "./constants.js";
+import {
+  MAX_DECISION_EVIDENCE_CHARS,
+  MAX_DISCOVERY_REPORT_BYTES,
+  MAX_DRIVE_TASK_IDS,
+  MAX_DRIVE_WAIT_REASON_CHARS,
+  MAX_PERSISTED_REPORT_CHARS,
+  STATE_DIR,
+} from "./constants.js";
 import {
   appendPrivateFile,
   ensurePrivateDirectory,
@@ -691,7 +698,7 @@ function isPausedDrive(value: unknown): boolean {
       value.reason === "escalation_required") &&
     (value.taskIds === undefined ||
       (Array.isArray(value.taskIds) &&
-        value.taskIds.length <= 64 &&
+        value.taskIds.length <= MAX_DRIVE_TASK_IDS &&
         value.taskIds.every((id) => typeof id === "string")))
   );
 }
@@ -703,7 +710,7 @@ function isActiveDrive(value: unknown): boolean {
     (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
     (value.taskIds === undefined ||
       (Array.isArray(value.taskIds) &&
-        value.taskIds.length <= 64 &&
+        value.taskIds.length <= MAX_DRIVE_TASK_IDS &&
         value.taskIds.every((id) => typeof id === "string"))) &&
     isNumber(value.startedAt) &&
     (value.waiting === undefined || isDriveWait(value.waiting))
@@ -715,9 +722,9 @@ function isDriveWait(value: unknown): boolean {
   return (
     isNumber(value.until) &&
     typeof value.reason === "string" &&
-    value.reason.length <= 400 &&
+    value.reason.length <= MAX_DRIVE_WAIT_REASON_CHARS &&
     Array.isArray(value.taskIds) &&
-    value.taskIds.length <= 64 &&
+    value.taskIds.length <= MAX_DRIVE_TASK_IDS &&
     value.taskIds.every((id) => typeof id === "string")
   );
 }
@@ -731,10 +738,11 @@ function isDriveDecision(value: unknown): boolean {
     (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
     typeof value.kind === "string" &&
     Array.isArray(value.taskIds) &&
-    value.taskIds.length <= 64 &&
+    value.taskIds.length <= MAX_DRIVE_TASK_IDS &&
     value.taskIds.every((id) => typeof id === "string") &&
     typeof value.evidence === "string" &&
-    value.evidence.length <= 4000 &&
+    // Room for truncateCharacters' "… (N more characters)" marker.
+    value.evidence.length <= MAX_DECISION_EVIDENCE_CHARS + 64 &&
     Array.isArray(value.allowedInterventions) &&
     value.allowedInterventions.every((item) => interventions.includes(String(item))) &&
     isNumber(value.createdAt) &&

@@ -14,6 +14,11 @@ import {
   validatePlan,
 } from "./board.js";
 import { loadConfig, resolveTierModel, resolveTierModels } from "./config.js";
+import {
+  MAX_DECISION_EVIDENCE_CHARS,
+  MAX_DRIVE_TASK_IDS,
+  MAX_DRIVE_WAIT_REASON_CHARS,
+} from "./constants.js";
 import { confirmDriveScale, validateDriveStart } from "./drive-preflight.js";
 import { formatDrivePulse, unexpectedDriveSummary } from "./drive-summary.js";
 import { truncateCharacters, truncateText } from "./format.js";
@@ -700,13 +705,13 @@ export function persistDriveDecision(
       kind: summary.stoppedBecause.code,
       taskIds: (summary.stoppedBecause.taskIds ?? summary.tasks.map((task) => task.id)).slice(
         0,
-        64
+        MAX_DRIVE_TASK_IDS
       ),
       // Evidence is injected verbatim into the owner conversation. The line
       // bound alone never bit (an escalation with executor-report tails is
       // hundreds of lines but well under 4000), so a character bound keeps a
       // multi-task decision from flooding the orchestrator's context.
-      evidence: truncateCharacters(truncateText(evidence, 200), 12_000),
+      evidence: truncateCharacters(truncateText(evidence, 200), MAX_DECISION_EVIDENCE_CHARS),
       allowedInterventions: summary.stoppedBecause.code === "completed" ? [] : ["handoff", "abort"],
       createdAt: Date.now(),
     };
@@ -969,6 +974,10 @@ export function persistActiveDrive(cwd: string, activeDrive: ActiveDriveState): 
   return result;
 }
 
+function truncateToCharacters(text: string, maxCharacters: number): string {
+  return text.length <= maxCharacters ? text : `${text.slice(0, maxCharacters - 1)}…`;
+}
+
 /** Record (or clear) the deliberate sleep of the current drive so projections can show it. */
 export function setActiveDriveWait(
   cwd: string,
@@ -978,8 +987,15 @@ export function setActiveDriveWait(
   if (!driveId) return;
   updateBoard(cwd, (board) => {
     if (board.activeDrive?.id !== driveId) return false;
-    if (wait) board.activeDrive.waiting = wait;
-    else if (board.activeDrive.waiting) delete board.activeDrive.waiting;
+    // Many retried tasks name themselves in the reason; the board loader
+    // rejects (and quarantines) records past these bounds.
+    if (wait) {
+      board.activeDrive.waiting = {
+        ...wait,
+        reason: truncateToCharacters(wait.reason, MAX_DRIVE_WAIT_REASON_CHARS),
+        taskIds: wait.taskIds.slice(0, MAX_DRIVE_TASK_IDS),
+      };
+    } else if (board.activeDrive.waiting) delete board.activeDrive.waiting;
     else return false;
     return true;
   });

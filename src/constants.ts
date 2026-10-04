@@ -13,5 +13,11 @@ export const USER_CONFIG_FILE = "maestro.json";
 export const KILL_GRACE_MS = 5000;
 /** Ordinary persisted executor and reviewer reports retain bounded evidence. */
 export const MAX_PERSISTED_REPORT_CHARS = 16_000;
+/** Most task ids one persisted drive, pause, wait, or decision record may name. */
+export const MAX_DRIVE_TASK_IDS = 64;
+/** Decision evidence injected into the owner conversation, before its truncation marker. */
+export const MAX_DECISION_EVIDENCE_CHARS = 12_000;
+/** A drive wait reason shown on the status line. */
+export const MAX_DRIVE_WAIT_REASON_CHARS = 400;
 /** Discovery JSON is validated in bytes and must remain intact up to this contract limit. */
 export const MAX_DISCOVERY_REPORT_BYTES = 64_000;

@@ -7,7 +7,7 @@ import {
   validatePlan,
 } from "./board.js";
 import { loadConfig } from "./config.js";
-import { COMMAND } from "./constants.js";
+import { COMMAND, MAX_DRIVE_TASK_IDS } from "./constants.js";
 import { preflightWorkflowWithCost } from "./cost-forecast.js";
 import { notify } from "./handoff.js";
 import { formatWorkflowPreflight, preflightWorkflow } from "./preflight.js";
@@ -43,6 +43,13 @@ export function validateDriveStart(ctx: ExtensionContext, taskIds: string[] | un
   const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
   if (validationError) throw new Error(validationError);
   assertKnownTaskIds(board, taskIds);
+  // The persisted drive record names its scope; a longer scope would make
+  // the board fail validation on its next load.
+  if (taskIds && taskIds.length > MAX_DRIVE_TASK_IDS) {
+    throw new Error(
+      `A scoped drive can name at most ${MAX_DRIVE_TASK_IDS} tasks; omit the task list to drive the whole board.`
+    );
+  }
   if (board.planPending) throw new Error("Plan approval is pending.");
   const preflight = preflightWorkflow(board, config, taskIds);
   if (preflight.requiresConfirmation && board.scaleApproval?.signature !== preflight.signature) {
