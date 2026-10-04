@@ -207,3 +207,16 @@ test("declared package shape contains runtime and required documentation", () =>
   // Pi provides its own packages at runtime; peers must accept whatever host version loads us.
   assert.ok(Object.values(pkg.peerDependencies).every((range) => range === "*"));
 });
+
+test("supported pi line in user docs matches the pi devDependency", () => {
+  const pkg = JSON.parse(read("package.json")) as { devDependencies: Record<string, string> };
+  const range = pkg.devDependencies["@earendil-works/pi-coding-agent"] ?? "";
+  const [major, minor] = range.replace(/^[^\d]*/, "").split(".");
+  const line = `\`${major}.${minor}.x\``;
+  for (const doc of ["README.md", "SECURITY.md"]) {
+    const text = read(doc);
+    assert.ok(text.includes(line), `${doc} must name the tested pi line ${line}`);
+    // Pi Maestro's own `0.1.x` line is fine; pi's pre-1.0 lines were 0.5x through 0.8x.
+    assert.doesNotMatch(text, /`0\.[5-9]\d\.x`/, `${doc} still names a pre-1.0 pi line`);
+  }
+});
