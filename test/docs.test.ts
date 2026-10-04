@@ -216,7 +216,7 @@ test("supported pi line in user docs matches the pi devDependency", () => {
   for (const doc of ["README.md", "SECURITY.md"]) {
     const text = read(doc);
     assert.ok(text.includes(line), `${doc} must name the tested pi line ${line}`);
-    // Pi Maestro's own `0.1.x` line is fine; pi's pre-1.0 lines were 0.5x through 0.8x.
+    // Pi's pre-1.0 lines were 0.5x through 0.8x.
     assert.doesNotMatch(text, /`0\.[5-9]\d\.x`/, `${doc} still names a pre-1.0 pi line`);
   }
 });
