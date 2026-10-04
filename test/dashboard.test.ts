@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFileSync, copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1915,6 +1922,90 @@ test("live pane falls back to raw rows for unavailable session transcripts", () 
       }
     }
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function sessionPane(sessionFile: string, cwd: string): LivePaneComponent {
+  return new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [
+      {
+        key: "execute:T1:readonly",
+        taskId: "T1",
+        title: "Read-only transcript",
+        kind: "execute",
+        logFile: "/missing/raw-log.jsonl",
+        sessionFile,
+        turns: 1,
+        cost: 0,
+        lastActivity: "working",
+      },
+    ],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    tui: fakeTui,
+    cwd,
+    height: 30,
+  });
+}
+
+test("live pane never writes to the session files it views", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-readonly-"));
+  try {
+    // pi creates a session file with "wx" and fills it afterwards; a render
+    // in between must not stamp its own header into the empty file.
+    const emptySession = join(directory, "empty.jsonl");
+    writeFileSync(emptySession, "");
+    const emptyPane = sessionPane(emptySession, directory);
+    try {
+      emptyPane.render(80);
+      assert.equal(readFileSync(emptySession, "utf-8"), "");
+    } finally {
+      emptyPane.dispose();
+    }
+
+    // Older transcripts are migrated in memory, never rewritten on disk.
+    const olderSession = join(directory, "older.jsonl");
+    const olderContents = readFileSync(livePaneSessionFixture, "utf-8").replace(
+      '"version":3',
+      '"version":2'
+    );
+    writeFileSync(olderSession, olderContents);
+    const olderPane = sessionPane(olderSession, directory);
+    try {
+      assert.match(olderPane.render(80).join("\n"), /Assistant fixture answer/);
+      assert.equal(readFileSync(olderSession, "utf-8"), olderContents);
+    } finally {
+      olderPane.dispose();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("live pane keeps a half-written session record until it completes", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-maestro-live-pane-partial-"));
+  const sessionFile = join(directory, "session.jsonl");
+  const record = JSON.stringify({
+    type: "message",
+    id: "user-2",
+    parentId: "tool-result-1",
+    timestamp: "2026-01-01T00:00:04.000Z",
+    message: { role: "user", content: [{ type: "text", text: "Completed later" }], timestamp: 4 },
+  });
+  writeFileSync(
+    sessionFile,
+    `${readFileSync(livePaneSessionFixture, "utf-8")}${record.slice(0, 40)}`
+  );
+  const pane = sessionPane(sessionFile, directory);
+  try {
+    assert.doesNotMatch(pane.render(80).join("\n"), /Completed later/);
+    appendFileSync(sessionFile, `${record.slice(40)}\n`);
+    assert.match(pane.render(80).join("\n"), /Completed later/);
+    assert.equal(richTranscriptState(pane, "execute:T1:readonly").entries.length, 4);
+  } finally {
+    pane.dispose();
     rmSync(directory, { recursive: true, force: true });
   }
 });

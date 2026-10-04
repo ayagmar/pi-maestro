@@ -4,9 +4,11 @@ import { type UserMessage } from "@earendil-works/pi-ai";
 import {
   AssistantMessageComponent,
   buildSessionContext,
+  type FileEntry,
   getMarkdownTheme,
+  migrateSessionEntries,
+  parseSessionEntries,
   type SessionEntry,
-  SessionManager,
   type SessionMessageEntry,
   sessionEntryToContextMessages,
   type Theme,
@@ -592,23 +594,38 @@ export class LivePaneComponent {
     file: SessionFileStat
   ): boolean {
     try {
-      const session = SessionManager.open(transcript.sessionFile);
-      transcript.entries = [...session.getEntries()];
-      transcript.entriesById = new Map(transcript.entries.map((entry) => [entry.id, entry]));
-      transcript.leafId = session.getLeafId();
-      const rendered = this.buildSessionTranscript(
-        session.buildSessionContext().messages,
-        tui,
-        cwd
+      // Read-only projection: SessionManager.open would write to the file it
+      // opens (a fresh header into an empty file pi has just created with
+      // "wx" and not yet filled, or a migrated copy of an older transcript).
+      const bytes = readSessionBytes(transcript.sessionFile, 0, file.size);
+      const decoder = new StringDecoder("utf8");
+      const text = decoder.write(bytes);
+      const completeEnd = text.lastIndexOf("\n") + 1;
+      const fileEntries: FileEntry[] = parseSessionEntries(text.slice(0, completeEnd));
+      if (!fileEntries.some((entry) => entry.type === "session")) {
+        throw new Error("not a pi session transcript");
+      }
+      migrateSessionEntries(fileEntries);
+      transcript.entries = fileEntries.filter(
+        (entry): entry is SessionEntry => entry.type !== "session"
       );
+      transcript.entriesById = new Map(transcript.entries.map((entry) => [entry.id, entry]));
+      transcript.leafId = transcript.entries.at(-1)?.id ?? null;
+      const context = buildSessionContext(
+        transcript.entries,
+        transcript.leafId,
+        transcript.entriesById
+      );
+      const rendered = this.buildSessionTranscript(context.messages, tui, cwd);
       transcript.container = rendered.container;
       transcript.pendingTools = rendered.pendingTools;
-      transcript.fileSize = file.size;
+      transcript.fileSize = bytes.length;
       transcript.device = file.device;
       transcript.inode = file.inode;
-      transcript.previousTail = readSessionTail(transcript.sessionFile, file.size);
-      transcript.decoder = new StringDecoder("utf8");
-      transcript.lineBuffer = "";
+      transcript.previousTail = readSessionTail(transcript.sessionFile, bytes.length);
+      // A record still being written stays buffered for the next append.
+      transcript.decoder = decoder;
+      transcript.lineBuffer = text.slice(completeEnd);
       transcript.cachedWidth = undefined;
       transcript.cachedLines = undefined;
       return true;
