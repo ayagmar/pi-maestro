@@ -1130,7 +1130,7 @@ test("task-id argument completion includes board tasks", async () => {
 test("scrollable text clamps to the last full page", () => {
   let offset = 0;
   for (let index = 0; index < 10; index += 1) {
-    offset = scrollableTextOffset(offset, 10, 60);
+    offset = scrollableTextOffset(offset, 10, 60, 18);
   }
   assert.equal(offset, 42);
 });
