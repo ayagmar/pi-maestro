@@ -867,10 +867,7 @@ export async function showSettings(
     container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
     container.addChild(
       new Text(
-        theme.fg(
-          "muted",
-          " Changes save immediately. Esc returns to a section, then closes settings."
-        ),
+        `${theme.fg("muted", " Changes save immediately · ")}${hint(theme, keybindings, "tui.select.cancel", "returns to a section, then closes settings")}`,
         1,
         0
       )

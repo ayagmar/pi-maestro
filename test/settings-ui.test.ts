@@ -199,7 +199,10 @@ test("settings model search owns focus only while its picker is active", async (
 test("the model picker selects with a remapped confirm key", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-settings-remap-"));
   // pi installs the user's keybindings globally and injects the same manager.
-  const remapped = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.confirm": "ctrl+g" });
+  const remapped = new KeybindingsManager(TUI_KEYBINDINGS, {
+    "tui.select.confirm": "ctrl+g",
+    "tui.select.cancel": "ctrl+q",
+  });
   setKeybindings(remapped);
   const theme = {
     fg: (_color: string, text: string) => text,
@@ -223,7 +226,10 @@ test("the model picker selects with a remapped confirm key", async () => {
         for (let step = 0; step < tierRow - firstRow; step += 1) component.handleInput("\x1b[B");
         component.handleInput("\x07");
         component.handleInput("\x07");
-        assert.match(stripVTControlCharacters(component.render(100).join("\n")), /ctrl\+g select/);
+        const picker = stripVTControlCharacters(component.render(100).join("\n"));
+        assert.match(picker, /ctrl\+g select/);
+        assert.match(picker, /ctrl\+q back/);
+        assert.match(picker, /ctrl\+q returns to a section/);
         // "(pi default)" is current; move to the authenticated model and pick it.
         component.handleInput("\x1b[B");
         component.handleInput("\x07");
