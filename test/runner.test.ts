@@ -1185,6 +1185,65 @@ process.stdin.on("end", () => process.exit(0));
   });
 }
 
+test("attached executor settles and reaps a descendant that holds its pipes after exit", {
+  timeout: 15_000,
+}, async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-attached-straggler-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  const pidFile = join(root, "straggler.pid");
+  writeFileSync(
+    fakePi,
+    `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (JSON.parse(line).type !== "prompt") continue;
+    // Inherits our stdout and stderr pipes and ignores SIGTERM.
+    const straggler = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: ["ignore", "inherit", "inherit"] });
+    writeFileSync(${JSON.stringify(pidFile)}, String(straggler.pid));
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done with straggler" }] } }));
+    console.log(JSON.stringify({ type: "agent_settled" }));
+    setTimeout(() => process.exit(0), 50);
+  }
+});
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  let stragglerPid: number | undefined;
+  try {
+    const outcome = await startExecutor({
+      stateDir: root,
+      runId: "attached-straggler",
+      cwd: root,
+      prompt: "run",
+      tier: { thinking: "low" },
+    }).outcome;
+    stragglerPid = Number(readFileSync(pidFile, "utf8"));
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.finalReport, "done with straggler");
+    await wait(200);
+    assert.throws(() => process.kill(stragglerPid ?? 0, 0), /ESRCH/);
+  } finally {
+    process.argv[1] = originalScript;
+    if (existsSync(pidFile)) stragglerPid = Number(readFileSync(pidFile, "utf8"));
+    if (stragglerPid) {
+      try {
+        process.kill(stragglerPid, "SIGKILL");
+      } catch {
+        // Already reaped.
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a corrupt detached control record is skipped without ending the run", async () => {
   if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "maestro-detached-control-corrupt-"));

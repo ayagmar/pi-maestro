@@ -28,6 +28,7 @@ import {
   boundedBytes,
   boundedText,
   compactEvent,
+  EXIT_SETTLE_DRAIN_MS,
   eventShapeError,
   extractText,
   HANDLED_PROMPT_ERROR,
@@ -1001,6 +1002,7 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
     };
 
     proc.stdout.on("data", (data: Buffer) => {
+      if (settled) return;
       buffer += stdoutDecoder.write(data);
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -1011,14 +1013,24 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       stderr = `${stderr}${data.toString()}`.slice(-16_000);
     });
 
-    proc.on("close", (code, signal) => {
+    let drainTimer: NodeJS.Timeout | undefined;
+    const settle = (code: number | null, signal: NodeJS.Signals | null, viaDrain: boolean) => {
       if (settled) return;
       settled = true;
       cleanup();
+      if (drainTimer) clearTimeout(drainTimer);
       buffer += stdoutDecoder.end();
       if (buffer.trim()) processLine(buffer);
       result.exitCode = code ?? 1;
-      if ((abortCause || logWriteError) && process.platform !== "win32") kill("SIGKILL");
+      // The root's exit does not prove its process group is gone: a drained
+      // settle means a descendant still holds the pipes.
+      if ((viaDrain || abortCause || logWriteError) && process.platform !== "win32") {
+        kill("SIGKILL");
+      }
+      if (viaDrain) {
+        proc.stdout.destroy();
+        proc.stderr.destroy();
+      }
       if (code === null && !result.errorMessage && !abortCause) {
         result.errorMessage = `executor terminated by ${signal ?? "an unknown signal"}`;
         result.failureCause = "process";
@@ -1069,7 +1081,15 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       attempt.endedAt = Date.now();
       attempt.exitCode = result.exitCode;
       resolveAfterLog(() => resolve(result));
+    };
+    // "close" waits for every stdio pipe. A tool-spawned descendant that
+    // inherited pi's stdout and outlived it would hold the outcome, the task
+    // claim and the drive forever, so drain briefly after exit and settle.
+    proc.on("exit", (code, signal) => {
+      if (settled) return;
+      drainTimer = setTimeout(() => settle(code, signal, true), EXIT_SETTLE_DRAIN_MS);
     });
+    proc.on("close", (code, signal) => settle(code, signal, false));
 
     proc.on("error", (error) => {
       if (settled) return;
