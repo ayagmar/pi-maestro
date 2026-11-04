@@ -198,271 +198,344 @@ export async function executeTask(options: {
       return snapshot(dispatch?.task ?? task, dispatch?.note ?? "execute dispatch declined");
     }
     const attemptIndex = dispatch.attemptIndex;
-    updateTask(cwd, task.id, (fresh) => {
-      if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
-      const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
-      if (attempt && executionFingerprint) attempt.executionFingerprint = executionFingerprint;
-      if (attempt && executionComponentHashes) {
-        attempt.executionComponentHashes = executionComponentHashes;
-      }
-    });
-    const attemptTier: TierConfig = { ...tier };
-    delete attemptTier.fallbacks;
-    if (model === undefined) delete attemptTier.model;
-    else attemptTier.model = model;
-    if (task.discovery) attemptTier.tools = DISCOVERY_TOOLS;
-
-    // A review-rejection retry continues the rejected attempt's own session:
-    // the model keeps everything it already read (billed at cached rates) and
-    // only the reviewer's findings are new. Provider fallbacks (modelIndex > 0)
-    // start fresh — a resumed launch that hits a provider failure therefore
-    // falls back to a clean launch instead of a half-poisoned transcript — and
-    // human retries keep their deliberately isolated rerun semantics.
-    // pi refuses to resume a session whose recorded working directory is
-    // gone, so a continuation is only possible in the very checkout the
-    // previous attempt ran in. When that checkout could not be retained (a
-    // clean interrupted worktree was pruned, or its branch is missing) the
-    // attempt starts fresh instead of failing at launch — a real drive lost an
-    // attempt to "Stored session working directory does not exist".
-    const sameCheckout =
-      previousAttempt?.worktreePath === undefined
-        ? worktree === undefined
-        : worktree?.worktreePath === previousAttempt.worktreePath &&
-          existsSync(previousAttempt.worktreePath);
-    const resumeSessionFile =
-      config.retryContext !== "fresh" &&
-      modelIndex === 0 &&
-      !humanRetry &&
-      !task.discovery &&
-      sameCheckout &&
-      (task.status === "changes_requested" ||
-        continuesCostCappedAttempt ||
-        continuesInterruptedSession) &&
-      previousAttempt?.sessionFile !== undefined &&
-      existsSync(previousAttempt.sessionFile)
-        ? previousAttempt.sessionFile
-        : undefined;
-    const basePrompt = resumeSessionFile
-      ? continuesCostCappedAttempt
-        ? buildCostCapResumePrompt(task, previousAttempt?.usage.cost ?? 0)
-        : continuesInterruptedSession
-          ? buildProviderInterruptionResumePrompt(
-              task,
-              previousAttempt?.failureReason?.message ?? "provider failure"
-            )
-          : buildRetryFollowUpPrompt(task)
-      : buildExecutorPrompt(task, dependencyReports);
-    const prompt = task.discovery
-      ? `${basePrompt}\n\n${discoveryInstructions(task.discovery.allowedWritePaths)}`
-      : basePrompt;
-    const promptContext = accountPromptContext(prompt);
-    const watchdogIdleSeconds = tier.watchdogIdleSeconds ?? config.watchdogIdleSeconds;
-    const watchdogWarningTurns = tier.watchdogWarningTurns ?? config.watchdogWarningTurns;
-    const watchdogTerminationTurns =
-      tier.watchdogTerminationTurns ?? config.watchdogTerminationTurns;
-    // Without a worktree the executor mutates the shared checkout directly.
-    // Tool events under-report bash mutations (sed -i, git apply, codegen),
-    // so attribute changes by content against a pre-run Git baseline instead.
-    const changeBaseline = worktree ? undefined : captureChangeBaseline(cwd);
-    const runOptions: Parameters<StartExecutor>[0] = {
-      stateDir: stateDir(cwd),
-      runId: `${task.id}-attempt-${attemptIndex}`,
-      cwd: worktree?.worktreePath ?? cwd,
-      projectCwd: cwd,
-      prompt,
-      tier: attemptTier,
-      sessionLabel: sessionLabel(task, "attempt", attemptIndex),
-      ...(config.logEvents === undefined ? {} : { logEvents: config.logEvents }),
-      ...(config.maxLogBytesPerRun === undefined ? {} : { maxLogBytes: config.maxLogBytesPerRun }),
-      ...(watchdogIdleSeconds === undefined ? {} : { watchdogIdleSeconds }),
-      ...(watchdogWarningTurns === undefined ? {} : { watchdogWarningTurns }),
-      ...(watchdogTerminationTurns === undefined ? {} : { watchdogTerminationTurns }),
-      runKind: isReadOnlyTask(task) ? "investigation" : "implementation",
-      ...(resumeSessionFile ? { resumeSessionFile } : {}),
-      ...(task.discovery
-        ? { maxReportChars: MAX_DISCOVERY_REPORT_BYTES, maxReportBytes: MAX_DISCOVERY_REPORT_BYTES }
-        : {}),
-      ...(config.detachedExecutors ? { detached: true } : {}),
-      onUpdate: (update) => {
-        const sessionFile = update.sessionFile;
-        if (sessionFile) {
-          updateTask(cwd, task.id, (fresh) => {
-            const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
-            if (attempt) attempt.sessionFile = sessionFile;
-          });
-        }
-        onUpdate(task.id, update, "execute");
-      },
-    };
-    if (signal) runOptions.signal = signal;
-    // The per-attempt cap and the remaining run budget both bound this launch;
-    // without the run-budget bound, a launch dispatched just under the run cap
-    // could overshoot it by a full attempt before the next between-round check.
-    // Name whichever bound is binding: a budget-capped failure blamed on
-    // maxCostPerTask sends the operator to the wrong knob.
-    const perTaskCap = config.maxCostPerTask > 0 ? config.maxCostPerTask : undefined;
-    const budgetCap =
-      remainingRunBudget !== undefined && remainingRunBudget > 0 ? remainingRunBudget : undefined;
-    const launchCap =
-      perTaskCap !== undefined && budgetCap !== undefined
-        ? Math.min(perTaskCap, budgetCap)
-        : (perTaskCap ?? budgetCap);
-    if (launchCap !== undefined) {
-      runOptions.maxCost = launchCap;
-      runOptions.maxCostSource =
-        budgetCap !== undefined && (perTaskCap === undefined || budgetCap < perTaskCap)
-          ? "remaining run budget (maxRunCost)"
-          : "maxCostPerTask";
-    }
-
-    let run: ExecutorHandle;
+    // The claim is held until the attempt's final record is persisted:
+    // releasing it earlier left a crash or attribution failure with a running
+    // task that nothing owned and nothing could recover.
+    let settled = false;
     try {
-      run = startExecutor(runOptions);
-    } catch (error) {
-      const message = redactFailureMessage(error instanceof Error ? error.message : String(error));
-      const failed = updateTask(cwd, task.id, (fresh) => {
+      updateTask(cwd, task.id, (fresh) => {
+        if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
         const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
-        if (attempt) {
-          attempt.endedAt = Date.now();
-          attempt.exitCode = 1;
-          attempt.errorMessage = message;
-          // A launch that never spawned says nothing about the task. A real
-          // board burned all four of a task's attempts on "spawn pi ENOENT"
-          // at $0 each and had to be superseded to recover from a PATH blip.
-          attempt.consumesAttempt = false;
-          attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+        if (attempt && executionFingerprint) attempt.executionFingerprint = executionFingerprint;
+        if (attempt && executionComponentHashes) {
+          attempt.executionComponentHashes = executionComponentHashes;
         }
-        forceStatus(fresh, "failed");
       });
-      lifecycle.release();
-      return snapshot(failed ?? task, message);
-    }
-    run.attempt.index = attemptIndex;
-    if (resumeSessionFile) run.attempt.resumed = true;
-    if (executionFingerprint) run.attempt.executionFingerprint = executionFingerprint;
-    if (executionComponentHashes) run.attempt.executionComponentHashes = executionComponentHashes;
-    run.attempt.promptCharacters = promptContext.characters;
-    run.attempt.promptApproximateTokens = promptContext.approximateTokens;
-    run.attempt.promptSections = promptContext.sections;
-    if (run.attempt.model === undefined && model !== undefined) run.attempt.model = model;
-    const selectedProvider = providerFromModel(run.attempt.model);
-    if (run.attempt.provider === undefined && selectedProvider !== undefined) {
-      run.attempt.provider = selectedProvider;
-    }
-    if (worktree) {
-      run.attempt.worktreePath = worktree.worktreePath;
-      run.attempt.branch = worktree.branch;
-    }
-    const untrack = trackRun({
-      taskId: task.id,
-      kind: "execute",
-      turns: 0,
-      cost: 0,
-      lastActivity: "starting…",
-      handle: run,
-    });
+      const attemptTier: TierConfig = { ...tier };
+      delete attemptTier.fallbacks;
+      if (model === undefined) delete attemptTier.model;
+      else attemptTier.model = model;
+      if (task.discovery) attemptTier.tools = DISCOVERY_TOOLS;
 
-    updateTask(cwd, task.id, (fresh) => {
-      const reserved = fresh.attempts.findIndex((attempt) => attempt.index === attemptIndex);
-      if (reserved >= 0) fresh.attempts[reserved] = run.attempt;
-    });
-    if (run.attempt.detached) {
-      lifecycle.extendLease?.(DETACHED_DISPATCH_LEASE_MS);
-    }
-
-    let outcome: RunOutcome;
-    try {
-      outcome = await run.outcome;
-    } catch (error) {
-      outcome = rejectedRunOutcome(run, error);
-      run.attempt.endedAt = Date.now();
-    } finally {
-      lifecycle.release();
-      untrack();
-    }
-    if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
-    const settledModel = qualifiedModel(outcome.model, run.attempt.model ?? model);
-    if (settledModel !== undefined) run.attempt.model = settledModel;
-    const provider = providerFromModel(run.attempt.model);
-    if (provider !== undefined) run.attempt.provider = provider;
-    if (outcome.errorMessage) run.attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
-    run.attempt.exitCode = outcome.exitCode;
-    run.attempt.usage = { ...outcome.usage };
-    const priorWorktreeFiles =
-      worktree && task.attempts.at(-1)?.branch === worktree.branch
-        ? (task.attempts.at(-1)?.touchedFiles ?? [])
-        : [];
-    const baselineChanges = changeBaseline
-      ? changedPathsSinceBaseline(cwd, changeBaseline)
-      : undefined;
-    run.attempt.touchedFiles =
-      worktree && worktreeExists(worktree)
-        ? [
-            ...new Set([
-              ...priorWorktreeFiles,
-              ...worktreeChangedPaths(worktree.worktreePath, cwd),
-            ]),
-          ].sort()
-        : [...new Set([...outcome.touchedFiles, ...(baselineChanges ?? [])])].sort();
-
-    const status: TaskStatus = outcome.aborted
-      ? "cancelled"
-      : outcome.exitCode !== 0 || outcome.errorMessage
-        ? "failed"
-        : "ready_for_review";
-    const classifiedFailure = classifyFailure(outcome);
-    // Legacy/test executors may omit failureCause. A zero-turn launch is still
-    // treated as provider setup failure unless it carries an explicit process cause.
-    const inferredProviderFailure =
-      status === "failed" &&
-      outcome.usage.turns === 0 &&
-      outcome.failureCause === undefined &&
-      classifiedFailure?.kind === "executor_failure";
-    const providerFailure =
-      status === "failed" &&
-      !outcome.aborted &&
-      (classifiedFailure?.kind === "provider_failure" || inferredProviderFailure);
-    const canFallback = providerFailure && modelIndex < models.length - 1;
-    // A zero-turn process failure (spawn ENOENT, immediate crash before any
-    // model turn) is an environment problem, not evidence about the task;
-    // consuming maxAttempts for it forced a supersession to recover from a
-    // transient PATH blip. Rounds and the launch cap still bound retries.
-    const environmentFailure =
-      status === "failed" &&
-      !outcome.aborted &&
-      outcome.usage.turns === 0 &&
-      outcome.failureCause === "process" &&
-      run.attempt.touchedFiles.length === 0;
-    run.attempt.consumesAttempt = !providerFailure && !environmentFailure;
-    if (environmentFailure && environmentFailureBackoffMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, environmentFailureBackoffMs));
-    }
-    if (providerFailure) run.attempt.providerFailure = true;
-    const failureReason = inferredProviderFailure
-      ? classifyFailure({ ...outcome, failureCause: "provider" })
-      : classifiedFailure;
-    if (failureReason) run.attempt.failureReason = failureReason;
-
-    if (status === "ready_for_review") {
-      try {
-        const paths = worktree ? undefined : run.attempt.touchedFiles;
-        const since = worktree ? worktreeForkPoint(worktree.worktreePath, cwd) : undefined;
-        const diff = captureDiff(worktree?.worktreePath ?? cwd, paths, since);
-        if (diff) run.attempt.diff = diff;
-      } catch {
-        // Diff context is best-effort and must never change the executor outcome.
+      // A review-rejection retry continues the rejected attempt's own session:
+      // the model keeps everything it already read (billed at cached rates) and
+      // only the reviewer's findings are new. Provider fallbacks (modelIndex > 0)
+      // start fresh — a resumed launch that hits a provider failure therefore
+      // falls back to a clean launch instead of a half-poisoned transcript — and
+      // human retries keep their deliberately isolated rerun semantics.
+      // pi refuses to resume a session whose recorded working directory is
+      // gone, so a continuation is only possible in the very checkout the
+      // previous attempt ran in. When that checkout could not be retained (a
+      // clean interrupted worktree was pruned, or its branch is missing) the
+      // attempt starts fresh instead of failing at launch — a real drive lost an
+      // attempt to "Stored session working directory does not exist".
+      const sameCheckout =
+        previousAttempt?.worktreePath === undefined
+          ? worktree === undefined
+          : worktree?.worktreePath === previousAttempt.worktreePath &&
+            existsSync(previousAttempt.worktreePath);
+      const resumeSessionFile =
+        config.retryContext !== "fresh" &&
+        modelIndex === 0 &&
+        !humanRetry &&
+        !task.discovery &&
+        sameCheckout &&
+        (task.status === "changes_requested" ||
+          continuesCostCappedAttempt ||
+          continuesInterruptedSession) &&
+        previousAttempt?.sessionFile !== undefined &&
+        existsSync(previousAttempt.sessionFile)
+          ? previousAttempt.sessionFile
+          : undefined;
+      const basePrompt = resumeSessionFile
+        ? continuesCostCappedAttempt
+          ? buildCostCapResumePrompt(task, previousAttempt?.usage.cost ?? 0)
+          : continuesInterruptedSession
+            ? buildProviderInterruptionResumePrompt(
+                task,
+                previousAttempt?.failureReason?.message ?? "provider failure"
+              )
+            : buildRetryFollowUpPrompt(task)
+        : buildExecutorPrompt(task, dependencyReports);
+      const prompt = task.discovery
+        ? `${basePrompt}\n\n${discoveryInstructions(task.discovery.allowedWritePaths)}`
+        : basePrompt;
+      const promptContext = accountPromptContext(prompt);
+      const watchdogIdleSeconds = tier.watchdogIdleSeconds ?? config.watchdogIdleSeconds;
+      const watchdogWarningTurns = tier.watchdogWarningTurns ?? config.watchdogWarningTurns;
+      const watchdogTerminationTurns =
+        tier.watchdogTerminationTurns ?? config.watchdogTerminationTurns;
+      // Without a worktree the executor mutates the shared checkout directly.
+      // Tool events under-report bash mutations (sed -i, git apply, codegen),
+      // so attribute changes by content against a pre-run Git baseline instead.
+      const changeBaseline = worktree ? undefined : captureChangeBaseline(cwd);
+      const runOptions: Parameters<StartExecutor>[0] = {
+        stateDir: stateDir(cwd),
+        runId: `${task.id}-attempt-${attemptIndex}`,
+        cwd: worktree?.worktreePath ?? cwd,
+        projectCwd: cwd,
+        prompt,
+        tier: attemptTier,
+        sessionLabel: sessionLabel(task, "attempt", attemptIndex),
+        ...(config.logEvents === undefined ? {} : { logEvents: config.logEvents }),
+        ...(config.maxLogBytesPerRun === undefined
+          ? {}
+          : { maxLogBytes: config.maxLogBytesPerRun }),
+        ...(watchdogIdleSeconds === undefined ? {} : { watchdogIdleSeconds }),
+        ...(watchdogWarningTurns === undefined ? {} : { watchdogWarningTurns }),
+        ...(watchdogTerminationTurns === undefined ? {} : { watchdogTerminationTurns }),
+        runKind: isReadOnlyTask(task) ? "investigation" : "implementation",
+        ...(resumeSessionFile ? { resumeSessionFile } : {}),
+        ...(task.discovery
+          ? {
+              maxReportChars: MAX_DISCOVERY_REPORT_BYTES,
+              maxReportBytes: MAX_DISCOVERY_REPORT_BYTES,
+            }
+          : {}),
+        ...(config.detachedExecutors ? { detached: true } : {}),
+        onUpdate: (update) => {
+          const sessionFile = update.sessionFile;
+          if (sessionFile) {
+            updateTask(cwd, task.id, (fresh) => {
+              const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
+              if (attempt) attempt.sessionFile = sessionFile;
+            });
+          }
+          onUpdate(task.id, update, "execute");
+        },
+      };
+      if (signal) runOptions.signal = signal;
+      // The per-attempt cap and the remaining run budget both bound this launch;
+      // without the run-budget bound, a launch dispatched just under the run cap
+      // could overshoot it by a full attempt before the next between-round check.
+      // Name whichever bound is binding: a budget-capped failure blamed on
+      // maxCostPerTask sends the operator to the wrong knob.
+      const perTaskCap = config.maxCostPerTask > 0 ? config.maxCostPerTask : undefined;
+      const budgetCap =
+        remainingRunBudget !== undefined && remainingRunBudget > 0 ? remainingRunBudget : undefined;
+      const launchCap =
+        perTaskCap !== undefined && budgetCap !== undefined
+          ? Math.min(perTaskCap, budgetCap)
+          : (perTaskCap ?? budgetCap);
+      if (launchCap !== undefined) {
+        runOptions.maxCost = launchCap;
+        runOptions.maxCostSource =
+          budgetCap !== undefined && (perTaskCap === undefined || budgetCap < perTaskCap)
+            ? "remaining run budget (maxRunCost)"
+            : "maxCostPerTask";
       }
+
+      let run: ExecutorHandle;
+      try {
+        run = startExecutor(runOptions);
+      } catch (error) {
+        const message = redactFailureMessage(
+          error instanceof Error ? error.message : String(error)
+        );
+        settled = true;
+        const failed = updateTask(cwd, task.id, (fresh) => {
+          if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
+          const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
+          if (attempt) {
+            attempt.endedAt = Date.now();
+            attempt.exitCode = 1;
+            attempt.errorMessage = message;
+            // A launch that never spawned says nothing about the task. A real
+            // board burned all four of a task's attempts on "spawn pi ENOENT"
+            // at $0 each and had to be superseded to recover from a PATH blip.
+            attempt.consumesAttempt = false;
+            attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+          }
+          forceStatus(fresh, "failed");
+        });
+        return snapshot(failed ?? task, message);
+      }
+      run.attempt.index = attemptIndex;
+      if (resumeSessionFile) run.attempt.resumed = true;
+      if (executionFingerprint) run.attempt.executionFingerprint = executionFingerprint;
+      if (executionComponentHashes) run.attempt.executionComponentHashes = executionComponentHashes;
+      run.attempt.promptCharacters = promptContext.characters;
+      run.attempt.promptApproximateTokens = promptContext.approximateTokens;
+      run.attempt.promptSections = promptContext.sections;
+      if (run.attempt.model === undefined && model !== undefined) run.attempt.model = model;
+      const selectedProvider = providerFromModel(run.attempt.model);
+      if (run.attempt.provider === undefined && selectedProvider !== undefined) {
+        run.attempt.provider = selectedProvider;
+      }
+      if (worktree) {
+        run.attempt.worktreePath = worktree.worktreePath;
+        run.attempt.branch = worktree.branch;
+      }
+      let untrack: (() => void) | undefined;
+      let outcome: RunOutcome;
+      let launched = false;
+      try {
+        untrack = trackRun({
+          taskId: task.id,
+          kind: "execute",
+          turns: 0,
+          cost: 0,
+          lastActivity: "starting…",
+          handle: run,
+        });
+        updateTask(cwd, task.id, (fresh) => {
+          if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
+          const reserved = fresh.attempts.findIndex((attempt) => attempt.index === attemptIndex);
+          if (reserved >= 0) fresh.attempts[reserved] = run.attempt;
+        });
+        if (run.attempt.detached) {
+          lifecycle.extendLease?.(DETACHED_DISPATCH_LEASE_MS);
+        }
+        launched = true;
+        outcome = await run.outcome;
+      } catch (error) {
+        // A tracking or persistence failure after spawn must not leave the
+        // child running unsupervised: stop it and settle the attempt as failed.
+        if (!launched) {
+          run.abort();
+          await run.outcome.catch(() => undefined);
+        }
+        outcome = rejectedRunOutcome(run, error);
+        run.attempt.endedAt = Date.now();
+      } finally {
+        untrack?.();
+      }
+      if (outcome.finalReport) run.attempt.finalReport = outcome.finalReport;
+      const settledModel = qualifiedModel(outcome.model, run.attempt.model ?? model);
+      if (settledModel !== undefined) run.attempt.model = settledModel;
+      const provider = providerFromModel(run.attempt.model);
+      if (provider !== undefined) run.attempt.provider = provider;
+      if (outcome.errorMessage)
+        run.attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
+      run.attempt.exitCode = outcome.exitCode;
+      run.attempt.usage = { ...outcome.usage };
+      const priorWorktreeFiles =
+        worktree && task.attempts.at(-1)?.branch === worktree.branch
+          ? (task.attempts.at(-1)?.touchedFiles ?? [])
+          : [];
+      let attributionError: string | undefined;
+      try {
+        const baselineChanges = changeBaseline
+          ? changedPathsSinceBaseline(cwd, changeBaseline)
+          : undefined;
+        run.attempt.touchedFiles =
+          worktree && worktreeExists(worktree)
+            ? [
+                ...new Set([
+                  ...priorWorktreeFiles,
+                  ...worktreeChangedPaths(worktree.worktreePath, cwd),
+                ]),
+              ].sort()
+            : [...new Set([...outcome.touchedFiles, ...(baselineChanges ?? [])])].sort();
+      } catch (error) {
+        attributionError = attributionFailureMessage(error);
+        run.attempt.touchedFiles = [...new Set(outcome.touchedFiles)].sort();
+      }
+      if (attributionError && !outcome.aborted) {
+        // Work that cannot be attributed cannot be reviewed; settle the attempt
+        // as failed instead of escaping with the task still marked running.
+        outcome = { ...outcome, exitCode: outcome.exitCode || 1, errorMessage: attributionError };
+        delete outcome.failureReason;
+        if (outcome.failureCause === undefined) outcome.failureCause = "process";
+        run.attempt.errorMessage = attributionError;
+        run.attempt.exitCode = outcome.exitCode;
+      }
+
+      const status: TaskStatus = outcome.aborted
+        ? "cancelled"
+        : outcome.exitCode !== 0 || outcome.errorMessage
+          ? "failed"
+          : "ready_for_review";
+      const classifiedFailure = classifyFailure(outcome);
+      // Legacy/test executors may omit failureCause. A zero-turn launch is still
+      // treated as provider setup failure unless it carries an explicit process cause.
+      const inferredProviderFailure =
+        status === "failed" &&
+        outcome.usage.turns === 0 &&
+        outcome.failureCause === undefined &&
+        classifiedFailure?.kind === "executor_failure";
+      const providerFailure =
+        status === "failed" &&
+        !outcome.aborted &&
+        (classifiedFailure?.kind === "provider_failure" || inferredProviderFailure);
+      const canFallback = providerFailure && modelIndex < models.length - 1;
+      // A zero-turn process failure (spawn ENOENT, immediate crash before any
+      // model turn) is an environment problem, not evidence about the task;
+      // consuming maxAttempts for it forced a supersession to recover from a
+      // transient PATH blip. Rounds and the launch cap still bound retries.
+      const environmentFailure =
+        status === "failed" &&
+        !outcome.aborted &&
+        outcome.usage.turns === 0 &&
+        outcome.failureCause === "process" &&
+        run.attempt.touchedFiles.length === 0;
+      run.attempt.consumesAttempt = !providerFailure && !environmentFailure;
+      if (environmentFailure && environmentFailureBackoffMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, environmentFailureBackoffMs));
+      }
+      if (providerFailure) run.attempt.providerFailure = true;
+      const failureReason = inferredProviderFailure
+        ? classifyFailure({ ...outcome, failureCause: "provider" })
+        : classifiedFailure;
+      if (failureReason) run.attempt.failureReason = failureReason;
+
+      if (status === "ready_for_review") {
+        try {
+          const paths = worktree ? undefined : run.attempt.touchedFiles;
+          const since = worktree ? worktreeForkPoint(worktree.worktreePath, cwd) : undefined;
+          const diff = captureDiff(worktree?.worktreePath ?? cwd, paths, since);
+          if (diff) run.attempt.diff = diff;
+        } catch {
+          // Diff context is best-effort and must never change the executor outcome.
+        }
+      }
+
+      let claimLost = false;
+      settled = true;
+      updated = updateTask(cwd, task.id, (fresh) => {
+        const reserved = fresh.attempts.findIndex((attempt) => attempt.index === attemptIndex);
+        // A replacement owner may have recovered this dispatch; its state wins.
+        if (fresh.dispatchClaim?.id !== dispatch.claimId || reserved < 0) {
+          claimLost = true;
+          return;
+        }
+        transition(fresh, status);
+        fresh.attempts[reserved] = run.attempt;
+      });
+      if (claimLost) {
+        return snapshot(
+          updated ?? task,
+          `${task.id} attempt ${attemptIndex} settled after its dispatch claim was replaced; its outcome was not recorded`
+        );
+      }
+      if (canFallback) continue;
+
+      const note =
+        status === "failed" || outcome.aborted ? run.attempt.failureReason?.message : undefined;
+      return snapshot(updated ?? task, note);
+    } finally {
+      if (!settled) {
+        // An unexpected error (Git baseline, board write) escaped before the
+        // final record; fail the reserved attempt rather than leave it running.
+        try {
+          updateTask(cwd, task.id, (fresh) => {
+            if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
+            const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
+            if (attempt && attempt.endedAt === undefined) {
+              const message = "attempt settlement failed unexpectedly";
+              attempt.endedAt = Date.now();
+              attempt.exitCode = 1;
+              attempt.errorMessage = message;
+              attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+            }
+            forceStatus(fresh, "failed");
+          });
+        } catch {
+          // The startup sweep recovers a running task left without a claim.
+        }
+      }
+      lifecycle.release();
     }
-
-    updated = updateTask(cwd, task.id, (fresh) => {
-      transition(fresh, status);
-      fresh.attempts[fresh.attempts.length - 1] = run.attempt;
-    });
-    if (canFallback) continue;
-
-    const note =
-      status === "failed" || outcome.aborted ? run.attempt.failureReason?.message : undefined;
-    return snapshot(updated ?? task, note);
   }
 
   return snapshot(updated ?? task);
@@ -486,20 +559,35 @@ export function settleReattachedDetachedAttempt(
   if (outcome.errorMessage) attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
   const failureReason = classifyFailure(outcome);
   if (failureReason) attempt.failureReason = failureReason;
-  if (
-    attempt.worktreePath &&
-    worktreeExists({
-      worktreePath: attempt.worktreePath,
-      branch: attempt.branch ?? "",
-    })
-  ) {
-    attempt.touchedFiles = worktreeChangedPaths(attempt.worktreePath, cwd);
-  } else {
+  let attributionError: string | undefined;
+  try {
+    if (
+      attempt.worktreePath &&
+      worktreeExists({
+        worktreePath: attempt.worktreePath,
+        branch: attempt.branch ?? "",
+      })
+    ) {
+      attempt.touchedFiles = worktreeChangedPaths(attempt.worktreePath, cwd);
+    } else {
+      attempt.touchedFiles = [...outcome.touchedFiles];
+    }
+  } catch (error) {
+    attributionError = attributionFailureMessage(error);
     attempt.touchedFiles = [...outcome.touchedFiles];
+    if (!outcome.aborted) {
+      attempt.errorMessage = attributionError;
+      attempt.exitCode = outcome.exitCode || 1;
+      attempt.failureReason = {
+        kind: "executor_failure",
+        message: attributionError,
+        retryable: true,
+      };
+    }
   }
   const status: TaskStatus = outcome.aborted
     ? "cancelled"
-    : outcome.exitCode === 0 && !outcome.errorMessage
+    : outcome.exitCode === 0 && !outcome.errorMessage && !attributionError
       ? "ready_for_review"
       : "failed";
   if (status === "ready_for_review") {
@@ -522,6 +610,11 @@ export function settleReattachedDetachedAttempt(
   });
   releaseTaskDispatch(cwd, taskId, claimId);
   return updated;
+}
+
+function attributionFailureMessage(error: unknown): string {
+  const detail = redactFailureMessage(error instanceof Error ? error.message : String(error));
+  return `could not attribute the attempt's changes: ${detail}`;
 }
 
 export function rejectedRunOutcome(run: ExecutorHandle, error: unknown): RunOutcome {

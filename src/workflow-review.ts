@@ -334,7 +334,10 @@ export async function reviewTask(options: {
           attempt.reviewConvergence = convergenceRecord(
             reviewPolicy,
             "operational_failure",
-            effectiveRequiredApprovals(fresh, reviewPolicy, reviewRequiredApprovals),
+            effectiveRequiredApprovals(fresh, reviewPolicy, reviewRequiredApprovals, {
+              candidateTree,
+              taskFingerprint: currentExecutionFingerprint?.fingerprint,
+            }),
             0,
             0,
             notes,
@@ -415,6 +418,10 @@ export async function reviewTask(options: {
               }
             : {}),
           ...(plan.reason ? { escalationReason: plan.reason } : {}),
+          ...(candidateTree ? { candidateTree } : {}),
+          ...(currentExecutionFingerprint
+            ? { taskFingerprint: currentExecutionFingerprint.fingerprint }
+            : {}),
           startedAt: Date.now(),
           usage: { input: 0, output: 0, cost: 0, turns: 0 },
           promptCharacters: promptContext.characters,
@@ -656,7 +663,8 @@ export async function reviewTask(options: {
     const requiredApprovals = effectiveRequiredApprovals(
       dispatch.task,
       reviewPolicy,
-      reviewRequiredApprovals
+      reviewRequiredApprovals,
+      { candidateTree, taskFingerprint: currentExecutionFingerprint?.fingerprint }
     );
     const logicalResults: Array<{ verdict: { approved: boolean; notes: string }; report: string }> =
       [];

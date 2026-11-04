@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -7,6 +8,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +21,7 @@ import {
   archiveBoard,
   attemptFailureCause,
   blockedReason,
+  claimTaskDispatch,
   consumeQuarantineNotice,
   createTask,
   filterTasksByGroup,
@@ -36,12 +39,14 @@ import {
   loadStatusHistory,
   normalizeTaskContract,
   planValidationMessage,
+  reclaimStaleLock,
   rejectPlan,
   replaceBoard,
   replaceBoardWithArchive,
   restoreArchivedBoard,
   saveBoard,
   scopedDependencyGaps,
+  staleLockOwner,
   supersessionChain,
   sweepDispatchState,
   taskFailureCause,
@@ -55,6 +60,7 @@ import {
 } from "../src/board.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { parseDiscoveryOutput } from "../src/discovery.js";
+import { processStartId } from "../src/runner.js";
 import { type Attempt, type Board, type TaskStatus } from "../src/types.js";
 
 function emptyBoard(): Board {
@@ -1628,4 +1634,130 @@ test("a broad glob in writePaths is named as the overlap cause", () => {
   const message = planValidationMessage(validatePlan(board)) ?? "";
   assert.match(message, /claims every file under that tree/);
   assert.match(message, /list the specific files each task edits/);
+});
+
+test("a contender that observed a stale board lock cannot remove the lock acquired after another contender reclaimed it", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-lock-reclaim-race-"));
+  try {
+    mkdirSync(join(cwd, ".pi", "maestro"), { recursive: true });
+    const file = join(cwd, ".pi", "maestro", "board.lock");
+    const old = new Date(Date.now() - 120_000);
+    writeFileSync(file, JSON.stringify({ pid: 999_999_999, token: "dead-owner" }));
+    utimesSync(file, old, old);
+
+    // Both sessions observe the same dead owner before either reclaims it.
+    const slow = staleLockOwner(file);
+    const fast = staleLockOwner(file);
+    assert.ok(slow && fast);
+    assert.equal(reclaimStaleLock(file, fast), true);
+    // The fast session then acquires a fresh lock at the same path.
+    writeFileSync(file, JSON.stringify({ pid: process.pid, token: "live-owner" }), { flag: "wx" });
+
+    assert.equal(reclaimStaleLock(file, slow), false);
+    assert.equal(JSON.parse(readFileSync(file, "utf-8")).token, "live-owner");
+    assert.deepEqual(
+      readdirSync(join(cwd, ".pi", "maestro")).filter((name) => name.includes(".stale-")),
+      []
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an expired dispatch lease held by another live process is not reclaimed until that process exits", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-live-owner-claim-"));
+  // Another pi session whose event loop was blocked past the lease by a slow Git hook.
+  const owner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+    stdio: "ignore",
+  });
+  try {
+    assert.ok(owner.pid);
+    const board = emptyBoard();
+    const task = createTask(board, { title: "Busy", brief: "work", tier: "standard" });
+    forceStatus(task, "running");
+    const ownerStart = processStartId(owner.pid);
+    task.dispatchClaim = {
+      id: "live-owner-claim",
+      kind: "execute",
+      claimedAt: Date.now() - 120_000,
+      expiresAt: Date.now() - 60_000,
+      ownerPid: owner.pid,
+      ...(ownerStart ? { ownerStart } : {}),
+    };
+    task.attempts.push({
+      index: 1,
+      logFile: join(cwd, "attempt.jsonl"),
+      thinking: "low",
+      startedAt: Date.now() - 120_000,
+      usage: { input: 0, output: 0, cost: 0, turns: 3 },
+      touchedFiles: [],
+    });
+    saveBoard(cwd, board);
+
+    assert.deepEqual(sweepDispatchState(cwd), []);
+    const declined = claimTaskDispatch(cwd, task.id, "execute", () => true);
+    assert.equal(declined?.claimed, false);
+    let kept = findTask(loadBoard(cwd), task.id);
+    assert.equal(kept?.status, "running");
+    assert.equal(kept?.dispatchClaim?.id, "live-owner-claim");
+    assert.equal(kept?.attempts[0]?.endedAt, undefined);
+
+    const exited = new Promise((resolve) => owner.once("exit", resolve));
+    owner.kill("SIGKILL");
+    await exited;
+    assert.equal(sweepDispatchState(cwd).length, 1);
+    kept = findTask(loadBoard(cwd), task.id);
+    assert.equal(kept?.status, "failed");
+    assert.equal(kept?.dispatchClaim, undefined);
+  } finally {
+    owner.kill("SIGKILL");
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("startup recovers a running task that a previous build left without a dispatch claim", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-unclaimed-running-"));
+  try {
+    // Written by the previous release, which released the claim before
+    // persisting the attempt and then crashed: no claim, attempt still open.
+    mkdirSync(join(cwd, ".pi", "maestro"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "maestro", "board.json"),
+      JSON.stringify({
+        version: 1,
+        nextTaskNumber: 2,
+        revision: 7,
+        tasks: [
+          {
+            id: "T1",
+            title: "Abandoned",
+            brief: "work",
+            tier: "standard",
+            status: "running",
+            dependsOn: [],
+            attempts: [
+              {
+                index: 1,
+                logFile: "T1-attempt-1.jsonl",
+                thinking: "low",
+                startedAt: 1,
+                usage: { input: 10, output: 10, cost: 0.1, turns: 4 },
+                touchedFiles: [],
+              },
+            ],
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+      })
+    );
+
+    assert.equal(sweepDispatchState(cwd).length, 1);
+    const recovered = findTask(loadBoard(cwd), "T1");
+    assert.equal(recovered?.status, "failed");
+    assert.notEqual(recovered?.attempts[0]?.endedAt, undefined);
+    assert.equal(recovered?.attempts[0]?.failureReason?.retryable, true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

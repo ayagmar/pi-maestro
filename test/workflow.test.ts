@@ -49,7 +49,7 @@ import {
   omnibusRejection,
   providerBlockedTask,
 } from "../src/workflow-stop-policy.js";
-import { createWorktree } from "../src/worktree.js";
+import { createWorktree, snapshotArtifact } from "../src/worktree.js";
 
 const tier = { thinking: "low" };
 const config: MaestroConfig = {
@@ -294,9 +294,10 @@ test("re-review of an already approved panel costs one confirmer, not a fresh pa
   try {
     const task = reviewPolicyTask(cwd, "confirm");
     // The panel already approved this attempt; only a mechanical retry remains.
-    updateTask(cwd, task.id, (fresh) => {
+    updateTask(cwd, task.id, (fresh, board) => {
       const current = fresh.attempts.at(-1);
       if (!current) return;
+      const reviewed = taskFingerprint(board, fresh, loadConfig(cwd))?.fingerprint;
       current.reviewLaunches = [1, 2].map((reviewerIndex) => ({
         id: `${fresh.id}-review-1-${reviewerIndex}-${reviewerIndex}`,
         reviewerIndex,
@@ -304,6 +305,7 @@ test("re-review of an already approved panel costs one confirmer, not a fresh pa
         startedAt: Date.now(),
         usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
         verdict: "approve" as const,
+        ...(reviewed ? { taskFingerprint: reviewed } : {}),
       }));
     });
     const refreshed = findTask(loadBoard(cwd), task.id);
@@ -5885,6 +5887,162 @@ test("adding a tier fallback does not invalidate an executed candidate", () => {
       taskFingerprint(board, changedTier, tieredConfig)?.fingerprint,
       before.fingerprint
     );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an executor whose changes cannot be attributed settles as failed and releases its claim", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-attribution-failure-"));
+  // The checkout exists but its Git metadata is gone, so attribution fails.
+  const checkout = mkdtempSync(join(tmpdir(), "maestro-attribution-checkout-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    const result = await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      worktree: { worktreePath: checkout, branch: "maestro/T1-attempt-1" },
+      startExecutor: executor({
+        finalReport: "done",
+        usage: { input: 1, output: 1, cost: 0, turns: 2 },
+      }),
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(result.status, "failed");
+    assert.equal(persisted?.status, "failed");
+    assert.equal(persisted?.dispatchClaim, undefined);
+    assert.match(persisted?.attempts[0]?.errorMessage ?? "", /could not attribute/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+test("an executor whose dispatch claim was replaced does not overwrite the replacement's attempt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-replaced-claim-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let finish!: (outcome: RunOutcome) => void;
+    const outcome = new Promise<RunOutcome>((resolve) => {
+      finish = resolve;
+    });
+    const execution = executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      startExecutor: () => ({
+        attempt: attempt(),
+        outcome,
+        steer: () => {},
+        followUp: () => {},
+        abort: () => {},
+      }),
+      onUpdate,
+      trackRun,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Another session recovered the dispatch and started attempt 2.
+    updateTask(cwd, task.id, (fresh) => {
+      fresh.dispatchClaim = { id: "replacement", kind: "execute", claimedAt: Date.now() };
+      fresh.attempts.push({ ...attempt(), index: 2, logFile: "replacement.jsonl" });
+    });
+    finish({
+      exitCode: 0,
+      usage: { input: 0, output: 0, cost: 0, turns: 1 },
+      finalReport: "late report",
+      touchedFiles: [],
+      aborted: false,
+    });
+    await execution;
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.deepEqual(
+      persisted?.attempts.map((candidate) => candidate.index),
+      [1, 2]
+    );
+    assert.equal(persisted?.attempts.at(-1)?.logFile, "replacement.jsonl");
+    assert.equal(persisted?.attempts.at(-1)?.finalReport, undefined);
+    assert.equal(persisted?.status, "running");
+    assert.equal(persisted?.dispatchClaim?.id, "replacement");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("panel approvals of an earlier candidate do not shrink the panel for a changed candidate", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-confirm-changed-candidate-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, ".gitignore"), ".pi/\n");
+    writeFileSync(join(cwd, "a.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    const { board, task } = boardWithTask("ready_for_review");
+    task.reviewPolicy = "confirm";
+    task.writePaths = ["a.txt"];
+    task.successCriteria = ["observable result"];
+    task.attempts.push({ ...attempt("executor completed the work"), touchedFiles: ["a.txt"] });
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
+
+    // A two-reviewer panel approved candidate A; integration then failed.
+    writeFileSync(join(cwd, "a.txt"), "candidate A\n");
+    const candidateA = snapshotArtifact(cwd, ["a.txt"]);
+    const reviewed = taskFingerprint(loadBoard(cwd), task, loadConfig(cwd))?.fingerprint;
+    assert.ok(candidateA && reviewed);
+    updateTask(cwd, task.id, (fresh) => {
+      const current = fresh.attempts.at(-1);
+      if (!current) return;
+      current.reviewLaunches = [1, 2].map((reviewerIndex) => ({
+        id: `${fresh.id}-review-1-${reviewerIndex}-${reviewerIndex}`,
+        reviewerIndex,
+        role: "confirmer" as const,
+        startedAt: Date.now(),
+        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+        verdict: "approve" as const,
+        candidateTree: candidateA,
+        taskFingerprint: reviewed,
+      }));
+    });
+    // The operator fixes the candidate in place: candidate B, same attempt.
+    writeFileSync(join(cwd, "a.txt"), "candidate B\n");
+    const refreshed = findTask(loadBoard(cwd), task.id);
+    assert.ok(refreshed);
+
+    let reviewerLaunches = 0;
+    const result = await reviewTask({
+      cwd,
+      task: refreshed,
+      tier,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
+      startExecutor: (options) => {
+        reviewerLaunches += 1;
+        return queuedReviewerReports([{}])(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.status, "approved", result.note);
+    assert.equal(reviewerLaunches, 2, "candidate B needs its own two approvals");
+    const persisted = findTask(loadBoard(cwd), task.id)?.attempts.at(-1);
+    assert.equal(persisted?.reviewConvergence?.requiredApprovals, 2);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

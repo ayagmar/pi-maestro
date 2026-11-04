@@ -37,6 +37,7 @@ import {
 import {
   type Attempt,
   type Board,
+  type DispatchClaim,
   type FailureKind,
   type MaestroConfig,
   type PlanTaskEdits,
@@ -433,11 +434,21 @@ async function acquireBoardLockAsync(cwd: string): Promise<BoardLock> {
   throw new Error("Timed out waiting for maestro board lock");
 }
 
-interface StaleLockOwner {
-  identity: string;
+/**
+ * Identity of a lock file observed as stale. Reclamation compares the file it
+ * claims against this observation, not against another post-observation stat:
+ * a contender that observed the same dead owner may resume after a faster
+ * contender already reclaimed it and acquired a fresh lock at the same path.
+ */
+export interface StaleLockOwner {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+  token: string;
 }
 
-function staleLockOwner(file: string): StaleLockOwner | undefined {
+/** Exported for the reclamation race test; normal callers go through the board lock. */
+export function staleLockOwner(file: string): StaleLockOwner | undefined {
   try {
     const stat = statSync(file);
     if (Date.now() - stat.mtimeMs <= BOARD_LOCK_STALE_MS) return undefined;
@@ -458,19 +469,30 @@ function staleLockOwner(file: string): StaleLockOwner | undefined {
       }
     }
     const token = typeof owner.token === "string" ? owner.token : "invalid";
-    return { identity: `${stat.dev}-${stat.ino}-${token}` };
+    return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, token };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return undefined;
     // Old malformed lock files are reclaimable, but their inode still provides
     // the identity used by the ownership-safe hard-link protocol below.
     const stat = statSync(file);
-    return { identity: `${stat.dev}-${stat.ino}-invalid` };
+    return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, token: "invalid" };
   }
 }
 
-function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
-  const claimed = `${file}.stale-${owner.identity}`;
+function lockTokenOf(file: string): string {
+  try {
+    const owner = JSON.parse(readFileSync(file, "utf-8")) as { token?: unknown };
+    return typeof owner.token === "string" ? owner.token : "invalid";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+    return "invalid";
+  }
+}
+
+/** Exported for the reclamation race test; normal callers go through the board lock. */
+export function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
+  const claimed = `${file}.stale-${owner.dev}-${owner.ino}-${owner.token}`;
   try {
     // linkSync is the ownership claim: exactly one contender can create this
     // name. Losers never unlink board.lock and therefore cannot remove the
@@ -484,9 +506,19 @@ function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
 
   let reclaimed = false;
   try {
-    const current = statSync(file);
+    // The claimed link must still be the very file observed as stale. A
+    // contender that finished reclaiming already removed its claim name, so
+    // this link may point at a replacement owner's fresh lock instead.
     const stale = statSync(claimed);
-    if (current.dev === stale.dev && current.ino === stale.ino) {
+    const current = statSync(file);
+    if (
+      stale.dev === owner.dev &&
+      stale.ino === owner.ino &&
+      stale.mtimeMs === owner.mtimeMs &&
+      lockTokenOf(claimed) === owner.token &&
+      current.dev === stale.dev &&
+      current.ino === stale.ino
+    ) {
       unlinkSync(file);
       reclaimed = true;
     }
@@ -1254,10 +1286,12 @@ export function claimTaskDispatch(
   let attemptIndex: number | undefined;
   const task = updateTask(cwd, taskId, (fresh, board) => {
     if (fresh.dispatchClaim) {
-      const expiresAt =
-        fresh.dispatchClaim.expiresAt ?? fresh.dispatchClaim.claimedAt + DISPATCH_LEASE_MS;
-      if (expiresAt > Date.now()) {
+      if (!dispatchClaimExpired(fresh.dispatchClaim)) {
         note = `${fresh.id} dispatch declined; held by ${fresh.dispatchClaim.id} (${fresh.dispatchClaim.kind})`;
+        return;
+      }
+      if (dispatchOwnerIsLive(fresh.dispatchClaim)) {
+        note = `${fresh.id} dispatch declined; held by ${fresh.dispatchClaim.id} (${fresh.dispatchClaim.kind}) in live process ${fresh.dispatchClaim.ownerPid}`;
         return;
       }
       const detachedAttempt = fresh.attempts.at(-1);
@@ -1273,7 +1307,15 @@ export function claimTaskDispatch(
       return;
     }
     const now = Date.now();
-    fresh.dispatchClaim = { id: claimId, kind, claimedAt: now, expiresAt: now + DISPATCH_LEASE_MS };
+    const ownerStart = processStartId(process.pid);
+    fresh.dispatchClaim = {
+      id: claimId,
+      kind,
+      claimedAt: now,
+      expiresAt: now + DISPATCH_LEASE_MS,
+      ownerPid: process.pid,
+      ...(ownerStart ? { ownerStart } : {}),
+    };
     delete fresh.dispatchNote;
     claimed = true;
     if (kind === "execute") {
@@ -1334,19 +1376,50 @@ export function renewTaskDispatch(
   return renewed;
 }
 
+function dispatchClaimExpired(claim: DispatchClaim): boolean {
+  return (claim.expiresAt ?? claim.claimedAt + DISPATCH_LEASE_MS) <= Date.now();
+}
+
+/**
+ * A lease is a crash detector, not an ownership transfer. A synchronous Git
+ * command or hook can block the owner's event loop past the lease, so another
+ * session must not take over work whose owning process is still alive. Claims
+ * held by this process belong to the current or a previous (reloaded)
+ * extension instance; those keep plain lease semantics.
+ */
+function dispatchOwnerIsLive(claim: DispatchClaim): boolean {
+  const pid = claim.ownerPid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+    return false;
+  }
+  if (typeof claim.ownerStart === "string") {
+    const current = processStartId(pid);
+    if (current !== undefined && current !== claim.ownerStart) return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function failOrphanedRun(task: Task, message: string): void {
+  const attempt = task.attempts.at(-1);
+  if (attempt && attempt.endedAt === undefined) {
+    attempt.endedAt = Date.now();
+    attempt.exitCode = 1;
+    attempt.errorMessage = message;
+    attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+  }
+  forceStatus(task, "failed");
+}
+
 function recoverExpiredClaim(task: Task): void {
   const claim = task.dispatchClaim;
   if (!claim) return;
   if (claim.kind === "execute" && task.status === "running") {
-    const attempt = task.attempts.at(-1);
-    if (attempt && attempt.endedAt === undefined) {
-      const message = "orphan attempt recovered after expired dispatch lease";
-      attempt.endedAt = Date.now();
-      attempt.exitCode = 1;
-      attempt.errorMessage = message;
-      attempt.failureReason = { kind: "executor_failure", message, retryable: true };
-    }
-    forceStatus(task, "failed");
+    failOrphanedRun(task, "orphan attempt recovered after expired dispatch lease");
   }
   delete task.dispatchClaim;
 }
@@ -1375,16 +1448,24 @@ export function sweepDispatchState(cwd: string): string[] {
           ).length;
     const claimExpired =
       stale.dispatchClaim !== undefined &&
-      (stale.dispatchClaim.expiresAt ?? stale.dispatchClaim.claimedAt + DISPATCH_LEASE_MS) <=
-        Date.now();
-    if (!claimExpired && orphanCount === 0) continue;
+      dispatchClaimExpired(stale.dispatchClaim) &&
+      !dispatchOwnerIsLive(stale.dispatchClaim);
+    // Executors hold their claim until the final attempt record is written,
+    // so a running task without one was abandoned mid-settlement (a crash, or
+    // a build that released the claim before finalizing).
+    const unclaimedRun = stale.status === "running" && stale.dispatchClaim === undefined;
+    if (!claimExpired && orphanCount === 0 && !unclaimedRun) continue;
     updateTask(cwd, stale.id, (task) => {
       const parts: string[] = [];
-      const claimExpired =
-        task.dispatchClaim !== undefined &&
-        (task.dispatchClaim.expiresAt ?? task.dispatchClaim.claimedAt + DISPATCH_LEASE_MS) <=
-          Date.now();
-      if (task.dispatchClaim && claimExpired) {
+      if (task.status === "running" && task.dispatchClaim === undefined) {
+        parts.push("recovered running task with no dispatch claim");
+        failOrphanedRun(task, "orphan attempt recovered: running task had no dispatch owner");
+      }
+      if (
+        task.dispatchClaim &&
+        dispatchClaimExpired(task.dispatchClaim) &&
+        !dispatchOwnerIsLive(task.dispatchClaim)
+      ) {
         parts.push(`cleared stale ${task.dispatchClaim.kind} claim ${task.dispatchClaim.id}`);
         recoverExpiredClaim(task);
       }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -592,4 +593,46 @@ test("the thinking ladder matches pi and accepts its highest level", () => {
     validateConfig({ ...DEFAULT_CONFIG, tiers: { standard: { thinking: "ultra" } } }) ?? "",
     /thinking must be one of/
   );
+});
+
+test("a session reading the config while another saves it never sees a half-written file", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-concurrent-save-"));
+  try {
+    const config = { ...DEFAULT_CONFIG, maxRunCost: 12 };
+    saveConfig("project", cwd, config);
+    // A second pi session saving settings repeatedly in another process.
+    const configModule = new URL("../src/config.ts", import.meta.url).href;
+    const writer = spawn(
+      process.execPath,
+      [
+        "--import=tsx",
+        "--input-type=module",
+        "-e",
+        `const { saveConfig, DEFAULT_CONFIG } = await import(${JSON.stringify(configModule)});
+         const end = Date.now() + 1500;
+         let cost = 12;
+         while (Date.now() < end) saveConfig("project", ${JSON.stringify(cwd)}, { ...DEFAULT_CONFIG, maxRunCost: cost++ });`,
+      ],
+      { stdio: "ignore" }
+    );
+    const exited = new Promise((resolve) => writer.once("exit", resolve));
+    let reads = 0;
+    let running = true;
+    void exited.then(() => {
+      running = false;
+    });
+    while (running) {
+      assert.ok(loadConfig(cwd).maxRunCost >= 12, "a torn read fell back to defaults");
+      reads += 1;
+      if (reads % 50 === 0) await new Promise((resolve) => setImmediate(resolve));
+    }
+    const directory = join(cwd, ".pi");
+    assert.deepEqual(
+      readdirSync(directory).filter((name) => /\.(corrupt|invalid|tmp)-/.test(name)),
+      []
+    );
+    assert.ok(existsSync(join(directory, "maestro.json")));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

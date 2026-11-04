@@ -339,6 +339,9 @@ async function verifyPreparedCandidate(
   ) {
     throw new Error("task, config, or dependency fingerprint changed before promotion");
   }
+  if (signal?.aborted) {
+    throw new Error("the drive stopped before promotion; the reviewed candidate was not promoted");
+  }
 }
 
 function retainVerificationLog(

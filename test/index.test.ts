@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,6 +49,7 @@ import { saveRecipeFromBoard } from "../src/recipes.js";
 import { type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board } from "../src/types.js";
 import { type StartExecutor } from "../src/workflow.js";
+import { createWorktree } from "../src/worktree.js";
 import { executorAttempt, settlingExecutor, waitFor } from "./helpers/executors.js";
 
 /** The keybindings pi injects into `ctx.ui.custom` components. */
@@ -1254,6 +1263,60 @@ test("a second runtime cannot retry work owned by another session", async () => 
       assert.equal(launches, 0);
       assert.match(foreign.notices.at(-1) ?? "", /another session/);
       assert.equal(readFileSync(join(cwd, ".pi", "maestro", "board.json"), "utf-8"), before);
+    }
+  );
+});
+
+test("startup cleanup keeps the checkouts of a running attempt and a claimed review", async () => {
+  await withBoard(
+    (cwd) => {
+      execFileSync("git", ["init", "-q"], { cwd });
+      execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd });
+      writeFileSync(join(cwd, ".gitignore"), ".pi/\n");
+      writeFileSync(join(cwd, "base.txt"), "base\n");
+      execFileSync("git", ["add", "."], { cwd });
+      execFileSync("git", ["commit", "-qm", "base"], { cwd });
+
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      // T1: an executor in another session that has not changed its checkout yet.
+      // T2: a reviewer in another session reading a ready_for_review checkout.
+      for (const [status, kind] of [
+        ["running", "execute"],
+        ["ready_for_review", "review"],
+      ] as const) {
+        const task = createTask(board, { title: kind, brief: kind, tier: "standard" });
+        const ref = createWorktree(cwd, task.id, 1);
+        if (kind === "review") writeFileSync(join(ref.worktreePath, "base.txt"), "candidate\n");
+        forceStatus(task, status);
+        task.dispatchClaim = {
+          id: `${kind}-claim`,
+          kind,
+          claimedAt: Date.now(),
+          expiresAt: Date.now() + 60_000,
+        };
+        task.attempts.push({
+          ...executorAttempt(),
+          index: 1,
+          worktreePath: ref.worktreePath,
+          branch: ref.branch,
+        });
+      }
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const before = loadBoard(cwd).tasks.map((task) => task.attempts[0]?.worktreePath ?? "");
+      const runtime = loadMaestro(cwd);
+      runtime.events.get("session_start")?.({ reason: "startup" }, runtime.ctx);
+
+      for (const worktreePath of before) assert.equal(existsSync(worktreePath), true, worktreePath);
+      const candidate = before[1] ?? "";
+      assert.equal(readFileSync(join(candidate, "base.txt"), "utf-8"), "candidate\n");
+      assert.equal(
+        execFileSync("git", ["status", "--porcelain"], { cwd: candidate, encoding: "utf-8" }),
+        " M base.txt\n",
+        "the reviewed checkout must not be checkpointed under the reviewer"
+      );
     }
   );
 });
@@ -4266,6 +4329,69 @@ test("active drive shutdown persists owner-scoped internal error for reload deli
       assert.equal(foreign.messages.length, 0);
       await new Promise((resolve) => setTimeout(resolve, 10));
       assert.equal(loadBoard(cwd).activeDecision?.kind, "error");
+    }
+  );
+});
+
+test("shutdown stops a drive from launching its queued tasks", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, maxParallel: 1 });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      for (const name of ["first", "queued"]) {
+        createTask(board, {
+          title: `Work ${name}`,
+          brief: `change ${name}`,
+          tier: "standard",
+          writePaths: [`src/${name}.ts`],
+          successCriteria: ["work completes"],
+        });
+      }
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const launched: string[] = [];
+      const runtime = loadMaestro(cwd, (options) => {
+        launched.push(options.runId);
+        let finish!: (outcome: RunOutcome) => void;
+        const outcome = new Promise<RunOutcome>((resolve) => {
+          finish = resolve;
+        });
+        return {
+          attempt: executorAttempt(),
+          outcome,
+          steer: () => {},
+          followUp: () => {},
+          abort: () =>
+            finish({
+              exitCode: 1,
+              usage: { input: 0, output: 0, cost: 0, turns: 1 },
+              finalReport: "",
+              touchedFiles: [],
+              aborted: true,
+            }),
+        };
+      });
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "start",
+        { action: "start" },
+        runtime.ctx
+      );
+      await waitFor(() => launched.length === 1, "first executor did not launch");
+
+      runtime.events.get("session_shutdown")?.({ reason: "reload" }, runtime.ctx);
+      await waitFor(
+        () => findTask(loadBoard(cwd), "T1")?.dispatchClaim === undefined,
+        "aborted executor did not settle"
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      assert.deepEqual(launched, ["T1-attempt-1"]);
+      const queued = findTask(loadBoard(cwd), "T2");
+      assert.equal(queued?.status, "todo");
+      assert.equal(queued?.attempts.length, 0);
+      assert.equal(queued?.dispatchClaim, undefined);
     }
   );
 });
