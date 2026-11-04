@@ -164,7 +164,8 @@ export function saveRecipeFromBoard(
     {},
     Object.keys(config.tiers),
     Object.keys(config.verificationProfiles ?? {}),
-    config.maxPlanTasks
+    config.maxPlanTasks,
+    config.reviewPolicy
   );
   return saveStoredRecipe(scope, cwd, name, text, userDirectory(scope));
 }
@@ -197,9 +198,9 @@ export function expandRecipe(
   suppliedInput: Record<string, RecipeInputValue>,
   availableTiers: Iterable<string>,
   availableVerificationProfiles: Iterable<string>,
-  maxPlanTasks = 64,
+  maxPlanTasks: number,
   /** The project's `reviewPolicy`, for tasks whose recipe states none. */
-  defaultReviewPolicy?: ReviewPolicy
+  defaultReviewPolicy: ReviewPolicy | undefined
 ): Board {
   const input = resolveInput(recipe.inputs ?? {}, suppliedInput);
   if (recipe.tasks.length > maxPlanTasks) {

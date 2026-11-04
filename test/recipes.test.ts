@@ -92,7 +92,7 @@ test("shipped example recipes parse and expand", () => {
           ? { package: "example-package" }
           : { area: "the dashboard" };
     assert.doesNotThrow(() =>
-      expandRecipe(parsed, inputs, Object.keys(DEFAULT_CONFIG.tiers), [], 64)
+      expandRecipe(parsed, inputs, Object.keys(DEFAULT_CONFIG.tiers), [], 64, undefined)
     );
   }
 });
@@ -279,7 +279,7 @@ test("malformed effective recipes fail with scoped file context", () => {
 
 test("recipe expansion creates an ordinary gated plan and validates dependencies", () => {
   const parsed = parseRecipe(JSON.stringify(recipe("run")));
-  const board = expandRecipe(parsed, {}, ["standard"], []);
+  const board = expandRecipe(parsed, {}, ["standard"], [], 64, undefined);
   assert.equal(board.planPending, true);
   assert.equal(board.tasks[0]?.status, "todo");
   assert.throws(
@@ -288,7 +288,9 @@ test("recipe expansion creates an ordinary gated plan and validates dependencies
         { ...parsed, tasks: [{ ...firstRecipeTask(parsed), dependsOn: ["missing"] }] },
         {},
         ["standard"],
-        []
+        [],
+        64,
+        undefined
       ),
     /undeclared dependency/
   );
@@ -309,7 +311,7 @@ test("recipe save and expansion preserve strict discovery contracts", () => {
     saveRecipeFromBoard("project", cwd, "discovery", board);
     const saved = resolveRecipe(cwd, "discovery").recipe;
     assert.deepEqual(saved.tasks[0]?.discovery?.allowedWritePaths, ["src/**"]);
-    const expanded = expandRecipe(saved, {}, ["standard"], []);
+    const expanded = expandRecipe(saved, {}, ["standard"], [], 64, undefined);
     assert.deepEqual(expanded.tasks[0]?.discovery?.allowedWritePaths, ["src/**"]);
     assert.equal(expanded.tasks[0]?.reviewPolicy, "confirm");
 

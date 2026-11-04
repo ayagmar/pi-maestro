@@ -163,7 +163,8 @@ export async function showWorkflowBrowser(
         parseRecipeInput(rawInput.trim() || undefined),
         Object.keys(config.tiers),
         Object.keys(config.verificationProfiles ?? {}),
-        config.maxPlanTasks
+        config.maxPlanTasks,
+        config.reviewPolicy
       );
       if (action === "preview") {
         await showScrollableText(
