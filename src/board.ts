@@ -433,11 +433,21 @@ async function acquireBoardLockAsync(cwd: string): Promise<BoardLock> {
   throw new Error("Timed out waiting for maestro board lock");
 }
 
-interface StaleLockOwner {
-  identity: string;
+/**
+ * Identity of a lock file observed as stale. Reclamation compares the file it
+ * claims against this observation, not against another post-observation stat:
+ * a contender that observed the same dead owner may resume after a faster
+ * contender already reclaimed it and acquired a fresh lock at the same path.
+ */
+export interface StaleLockOwner {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+  token: string;
 }
 
-function staleLockOwner(file: string): StaleLockOwner | undefined {
+/** Exported for the reclamation race test; normal callers go through the board lock. */
+export function staleLockOwner(file: string): StaleLockOwner | undefined {
   try {
     const stat = statSync(file);
     if (Date.now() - stat.mtimeMs <= BOARD_LOCK_STALE_MS) return undefined;
@@ -458,19 +468,30 @@ function staleLockOwner(file: string): StaleLockOwner | undefined {
       }
     }
     const token = typeof owner.token === "string" ? owner.token : "invalid";
-    return { identity: `${stat.dev}-${stat.ino}-${token}` };
+    return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, token };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return undefined;
     // Old malformed lock files are reclaimable, but their inode still provides
     // the identity used by the ownership-safe hard-link protocol below.
     const stat = statSync(file);
-    return { identity: `${stat.dev}-${stat.ino}-invalid` };
+    return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, token: "invalid" };
   }
 }
 
-function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
-  const claimed = `${file}.stale-${owner.identity}`;
+function lockTokenOf(file: string): string {
+  try {
+    const owner = JSON.parse(readFileSync(file, "utf-8")) as { token?: unknown };
+    return typeof owner.token === "string" ? owner.token : "invalid";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+    return "invalid";
+  }
+}
+
+/** Exported for the reclamation race test; normal callers go through the board lock. */
+export function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
+  const claimed = `${file}.stale-${owner.dev}-${owner.ino}-${owner.token}`;
   try {
     // linkSync is the ownership claim: exactly one contender can create this
     // name. Losers never unlink board.lock and therefore cannot remove the
@@ -484,9 +505,19 @@ function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
 
   let reclaimed = false;
   try {
-    const current = statSync(file);
+    // The claimed link must still be the very file observed as stale. A
+    // contender that finished reclaiming already removed its claim name, so
+    // this link may point at a replacement owner's fresh lock instead.
     const stale = statSync(claimed);
-    if (current.dev === stale.dev && current.ino === stale.ino) {
+    const current = statSync(file);
+    if (
+      stale.dev === owner.dev &&
+      stale.ino === owner.ino &&
+      stale.mtimeMs === owner.mtimeMs &&
+      lockTokenOf(claimed) === owner.token &&
+      current.dev === stale.dev &&
+      current.ino === stale.ino
+    ) {
       unlinkSync(file);
       reclaimed = true;
     }

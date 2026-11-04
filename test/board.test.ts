@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,12 +37,14 @@ import {
   loadStatusHistory,
   normalizeTaskContract,
   planValidationMessage,
+  reclaimStaleLock,
   rejectPlan,
   replaceBoard,
   replaceBoardWithArchive,
   restoreArchivedBoard,
   saveBoard,
   scopedDependencyGaps,
+  staleLockOwner,
   supersessionChain,
   sweepDispatchState,
   taskFailureCause,
@@ -1628,4 +1631,32 @@ test("a broad glob in writePaths is named as the overlap cause", () => {
   const message = planValidationMessage(validatePlan(board)) ?? "";
   assert.match(message, /claims every file under that tree/);
   assert.match(message, /list the specific files each task edits/);
+});
+
+test("a contender that observed a stale board lock cannot remove the lock acquired after another contender reclaimed it", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-lock-reclaim-race-"));
+  try {
+    mkdirSync(join(cwd, ".pi", "maestro"), { recursive: true });
+    const file = join(cwd, ".pi", "maestro", "board.lock");
+    const old = new Date(Date.now() - 120_000);
+    writeFileSync(file, JSON.stringify({ pid: 999_999_999, token: "dead-owner" }));
+    utimesSync(file, old, old);
+
+    // Both sessions observe the same dead owner before either reclaims it.
+    const slow = staleLockOwner(file);
+    const fast = staleLockOwner(file);
+    assert.ok(slow && fast);
+    assert.equal(reclaimStaleLock(file, fast), true);
+    // The fast session then acquires a fresh lock at the same path.
+    writeFileSync(file, JSON.stringify({ pid: process.pid, token: "live-owner" }), { flag: "wx" });
+
+    assert.equal(reclaimStaleLock(file, slow), false);
+    assert.equal(JSON.parse(readFileSync(file, "utf-8")).token, "live-owner");
+    assert.deepEqual(
+      readdirSync(join(cwd, ".pi", "maestro")).filter((name) => name.includes(".stale-")),
+      []
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
