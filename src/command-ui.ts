@@ -7,19 +7,23 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Input, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 
+type KeybindingId = Parameters<KeybindingsManager["getKeys"]>[0];
+
 /**
  * Formats a configured keybinding with the manager pi injects into
  * `ctx.ui.custom`. pi's exported `keyHint` reads the keybindings of whichever
  * pi-coding-agent copy the import resolves to, which can be the extension's
  * own and renders `app.*` ids without keys.
  */
-function hint(
+export function hint(
   theme: Theme,
   keybindings: KeybindingsManager,
-  id: Parameters<KeybindingsManager["getKeys"]>[0],
+  ids: KeybindingId | readonly KeybindingId[],
   description: string
 ): string {
-  const keys = keybindings.getKeys(id).join("/");
+  const keys = (typeof ids === "string" ? [ids] : ids)
+    .flatMap((id) => keybindings.getKeys(id))
+    .join("/");
   return keys ? rawKeyHint(keys, description) : theme.fg("muted", description);
 }
 
