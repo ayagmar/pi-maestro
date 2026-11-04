@@ -5889,3 +5889,92 @@ test("adding a tier fallback does not invalidate an executed candidate", () => {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("an executor whose changes cannot be attributed settles as failed and releases its claim", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-attribution-failure-"));
+  // The checkout exists but its Git metadata is gone, so attribution fails.
+  const checkout = mkdtempSync(join(tmpdir(), "maestro-attribution-checkout-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    const result = await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      worktree: { worktreePath: checkout, branch: "maestro/T1-attempt-1" },
+      startExecutor: executor({
+        finalReport: "done",
+        usage: { input: 1, output: 1, cost: 0, turns: 2 },
+      }),
+      onUpdate,
+      trackRun,
+    });
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.equal(result.status, "failed");
+    assert.equal(persisted?.status, "failed");
+    assert.equal(persisted?.dispatchClaim, undefined);
+    assert.match(persisted?.attempts[0]?.errorMessage ?? "", /could not attribute/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+test("an executor whose dispatch claim was replaced does not overwrite the replacement's attempt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-replaced-claim-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    let finish!: (outcome: RunOutcome) => void;
+    const outcome = new Promise<RunOutcome>((resolve) => {
+      finish = resolve;
+    });
+    const execution = executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config,
+      startExecutor: () => ({
+        attempt: attempt(),
+        outcome,
+        steer: () => {},
+        followUp: () => {},
+        abort: () => {},
+      }),
+      onUpdate,
+      trackRun,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Another session recovered the dispatch and started attempt 2.
+    updateTask(cwd, task.id, (fresh) => {
+      fresh.dispatchClaim = { id: "replacement", kind: "execute", claimedAt: Date.now() };
+      fresh.attempts.push({ ...attempt(), index: 2, logFile: "replacement.jsonl" });
+    });
+    finish({
+      exitCode: 0,
+      usage: { input: 0, output: 0, cost: 0, turns: 1 },
+      finalReport: "late report",
+      touchedFiles: [],
+      aborted: false,
+    });
+    await execution;
+
+    const persisted = findTask(loadBoard(cwd), task.id);
+    assert.deepEqual(
+      persisted?.attempts.map((candidate) => candidate.index),
+      [1, 2]
+    );
+    assert.equal(persisted?.attempts.at(-1)?.logFile, "replacement.jsonl");
+    assert.equal(persisted?.attempts.at(-1)?.finalReport, undefined);
+    assert.equal(persisted?.status, "running");
+    assert.equal(persisted?.dispatchClaim?.id, "replacement");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

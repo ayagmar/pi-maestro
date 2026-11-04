@@ -1404,19 +1404,22 @@ function dispatchOwnerIsLive(claim: DispatchClaim): boolean {
   }
 }
 
+function failOrphanedRun(task: Task, message: string): void {
+  const attempt = task.attempts.at(-1);
+  if (attempt && attempt.endedAt === undefined) {
+    attempt.endedAt = Date.now();
+    attempt.exitCode = 1;
+    attempt.errorMessage = message;
+    attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+  }
+  forceStatus(task, "failed");
+}
+
 function recoverExpiredClaim(task: Task): void {
   const claim = task.dispatchClaim;
   if (!claim) return;
   if (claim.kind === "execute" && task.status === "running") {
-    const attempt = task.attempts.at(-1);
-    if (attempt && attempt.endedAt === undefined) {
-      const message = "orphan attempt recovered after expired dispatch lease";
-      attempt.endedAt = Date.now();
-      attempt.exitCode = 1;
-      attempt.errorMessage = message;
-      attempt.failureReason = { kind: "executor_failure", message, retryable: true };
-    }
-    forceStatus(task, "failed");
+    failOrphanedRun(task, "orphan attempt recovered after expired dispatch lease");
   }
   delete task.dispatchClaim;
 }
@@ -1447,9 +1450,17 @@ export function sweepDispatchState(cwd: string): string[] {
       stale.dispatchClaim !== undefined &&
       dispatchClaimExpired(stale.dispatchClaim) &&
       !dispatchOwnerIsLive(stale.dispatchClaim);
-    if (!claimExpired && orphanCount === 0) continue;
+    // Executors hold their claim until the final attempt record is written,
+    // so a running task without one was abandoned mid-settlement (a crash, or
+    // a build that released the claim before finalizing).
+    const unclaimedRun = stale.status === "running" && stale.dispatchClaim === undefined;
+    if (!claimExpired && orphanCount === 0 && !unclaimedRun) continue;
     updateTask(cwd, stale.id, (task) => {
       const parts: string[] = [];
+      if (task.status === "running" && task.dispatchClaim === undefined) {
+        parts.push("recovered running task with no dispatch claim");
+        failOrphanedRun(task, "orphan attempt recovered: running task had no dispatch owner");
+      }
       if (
         task.dispatchClaim &&
         dispatchClaimExpired(task.dispatchClaim) &&

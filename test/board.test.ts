@@ -1714,3 +1714,50 @@ test("an expired dispatch lease held by another live process is not reclaimed un
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("startup recovers a running task that a previous build left without a dispatch claim", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-unclaimed-running-"));
+  try {
+    // Written by the previous release, which released the claim before
+    // persisting the attempt and then crashed: no claim, attempt still open.
+    mkdirSync(join(cwd, ".pi", "maestro"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "maestro", "board.json"),
+      JSON.stringify({
+        version: 1,
+        nextTaskNumber: 2,
+        revision: 7,
+        tasks: [
+          {
+            id: "T1",
+            title: "Abandoned",
+            brief: "work",
+            tier: "standard",
+            status: "running",
+            dependsOn: [],
+            attempts: [
+              {
+                index: 1,
+                logFile: "T1-attempt-1.jsonl",
+                thinking: "low",
+                startedAt: 1,
+                usage: { input: 10, output: 10, cost: 0.1, turns: 4 },
+                touchedFiles: [],
+              },
+            ],
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+      })
+    );
+
+    assert.equal(sweepDispatchState(cwd).length, 1);
+    const recovered = findTask(loadBoard(cwd), "T1");
+    assert.equal(recovered?.status, "failed");
+    assert.notEqual(recovered?.attempts[0]?.endedAt, undefined);
+    assert.equal(recovered?.attempts[0]?.failureReason?.retryable, true);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
