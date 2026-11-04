@@ -95,20 +95,12 @@ export function preflightWorkflow(
   const waves = dependencyWaves(selected);
   const maximumWaveWidth = Math.max(0, ...waves.map((wave) => wave.length));
   const effectiveConcurrency = Math.min(config.maxParallel, maximumWaveWidth);
-  const reviewModels = modelLaunches(config.tiers.review);
   let executorLaunchUpperBound = 0;
   let reviewerLaunchUpperBound = 0;
 
   for (const task of selected) {
     executorLaunchUpperBound += config.maxAttempts * modelLaunches(config.tiers[task.tier]);
-    const logicalReviewers =
-      task.reviewPolicy === "confirm"
-        ? config.reviewRequiredApprovals
-        : task.reviewPolicy === "find-and-refute"
-          ? 2
-          : 1;
-    const rawReviewers = Math.min(config.maxReviewerLaunches, logicalReviewers * reviewModels);
-    reviewerLaunchUpperBound += config.maxAttempts * rawReviewers;
+    reviewerLaunchUpperBound += config.maxAttempts * reviewerLaunchModels(task, config).length;
   }
 
   const totalLaunchUpperBound = executorLaunchUpperBound + reviewerLaunchUpperBound;
@@ -224,6 +216,37 @@ function dependencyWaves(tasks: readonly Task[]): string[][] {
   return waves;
 }
 
+/**
+ * The model of one possible reviewer launch: the cheap first-pass model, or
+ * the review tier model at this index (0 is the primary, then fallbacks).
+ */
+export type ReviewerLaunchModel = "cheap" | number;
+
+/**
+ * Every reviewer launch one review of `task` may make, in launch order, capped
+ * at `maxReviewerLaunches`. A logical reviewer that may take the cheap first
+ * pass can launch the cheap model and the review-tier fallbacks, then escalate
+ * to every review-tier model; this mirrors `reviewerLaunchPlan` at execution,
+ * assuming the worst case (no risk-sensitive paths, every cheap pass doubtful).
+ */
+export function reviewerLaunchModels(task: Task, config: MaestroConfig): ReviewerLaunchModel[] {
+  const premium = Array.from({ length: modelLaunches(config.tiers.review) }, (_, index) => index);
+  const escalation = config.reviewEscalation ?? "risk";
+  const ladder = Boolean(config.reviewCheapModel?.trim()) && escalation !== "off";
+  const roles: Array<"finder" | "refuter" | "reviewer"> =
+    task.reviewPolicy === "find-and-refute"
+      ? ["finder", "refuter"]
+      : Array.from(
+          { length: task.reviewPolicy === "confirm" ? config.reviewRequiredApprovals : 1 },
+          () => "reviewer" as const
+        );
+  const launches = roles.flatMap((role, index): ReviewerLaunchModel[] => {
+    const cheap = ladder && role !== "refuter" && !(escalation === "always" && index > 0);
+    return cheap ? ["cheap", ...premium.slice(1), ...premium] : premium;
+  });
+  return launches.slice(0, config.maxReviewerLaunches);
+}
+
 function modelLaunches(tier: MaestroConfig["tiers"][string] | undefined): number {
   return 1 + (tier?.fallbacks?.length ?? 0);
 }
@@ -267,6 +290,8 @@ function preflightSignature(tasks: readonly Task[], config: MaestroConfig): stri
       maxPlanTasks: config.maxPlanTasks,
       maxTotalLaunchesPerRun: config.maxTotalLaunchesPerRun,
       maxReviewerLaunches: config.maxReviewerLaunches,
+      reviewCheapModel: config.reviewCheapModel,
+      reviewEscalation: config.reviewEscalation,
       reviewRequiredApprovals: config.reviewRequiredApprovals,
       confirmationPlanTasks: config.confirmationPlanTasks,
       confirmationTotalLaunches: config.confirmationTotalLaunches,

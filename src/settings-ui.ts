@@ -6,14 +6,13 @@ import {
 import {
   Container,
   Input,
-  Key,
-  matchesKey,
   type SelectItem,
   SelectList,
   type SettingItem,
   SettingsList,
   Text,
 } from "@earendil-works/pi-tui";
+import { hint } from "./command-ui.js";
 import {
   type ConfigScope,
   configFile,
@@ -267,6 +266,15 @@ export function applySettingsChange(
   return config;
 }
 
+const LIST_ACTIONS = [
+  "tui.select.up",
+  "tui.select.down",
+  "tui.select.pageUp",
+  "tui.select.pageDown",
+  "tui.select.confirm",
+  "tui.select.cancel",
+] as const;
+
 /**
  * Interactive settings editor for maestro. Edits are applied to a full
  * resolved config and written to one scope file, so what you see is exactly
@@ -281,7 +289,7 @@ export async function showSettings(
   const preferredProvider = ctx.model?.provider;
   const persist = () => saveConfig(scope, ctx.cwd, config);
 
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+  await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
     let settingsFocused = false;
     let activeModelInput: Input | undefined;
 
@@ -307,8 +315,13 @@ export async function showSettings(
       };
       const titleText = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
       const searchLabel = new Text(theme.fg("muted", " Search by provider or model id:"), 0, 0);
-      const hint = new Text(
-        theme.fg("dim", " ↑↓ navigate · type to filter · enter select · esc back"),
+      const hints = new Text(
+        ` ${[
+          hint(theme, keybindings, ["tui.select.up", "tui.select.down"], "navigate"),
+          theme.fg("dim", "type to filter"),
+          hint(theme, keybindings, "tui.select.confirm", "select"),
+          hint(theme, keybindings, "tui.select.cancel", "back"),
+        ].join(theme.fg("dim", " · "))}`,
         0,
         0
       );
@@ -353,22 +366,19 @@ export async function showSettings(
           "",
           ...list.render(width),
           "",
-          ...hint.render(width),
+          ...hints.render(width),
         ],
         invalidate: () => {
           titleText.invalidate();
           searchLabel.invalidate();
           input.invalidate();
           list.invalidate();
-          hint.invalidate();
+          hints.invalidate();
         },
         handleInput: (data: string) => {
-          if (
-            matchesKey(data, Key.up) ||
-            matchesKey(data, Key.down) ||
-            matchesKey(data, Key.enter) ||
-            matchesKey(data, Key.escape)
-          ) {
+          // Selection actions follow the user's keybindings; everything else
+          // edits the search text.
+          if (LIST_ACTIONS.some((action) => keybindings.matches(data, action))) {
             list.handleInput(data);
             return;
           }
@@ -857,10 +867,7 @@ export async function showSettings(
     container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
     container.addChild(
       new Text(
-        theme.fg(
-          "muted",
-          " Changes save immediately. Esc returns to a section, then closes settings."
-        ),
+        `${theme.fg("muted", " Changes save immediately · ")}${hint(theme, keybindings, "tui.select.cancel", "returns to a section, then closes settings")}`,
         1,
         0
       )

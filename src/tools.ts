@@ -51,6 +51,12 @@ interface MaestroDetails {
   tasks: TaskSnapshot[];
   rounds?: number;
   stoppedBecause?: DriveSummary["stoppedBecause"];
+  /**
+   * What the model is told beyond the task rows (approval gates, warnings,
+   * recovery guidance). The renderer shows it under the rows so the human
+   * reads the same instructions.
+   */
+  notices?: string;
 }
 
 export interface ModelToolRuntime {
@@ -294,14 +300,19 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       const legacyKindNotice = result.legacyInvestigationTaskIds.length
         ? `\nDeprecated: ${result.legacyInvestigationTaskIds.join(", ")} rel${result.legacyInvestigationTaskIds.length === 1 ? "ies" : "y"} on investigation-phrased brief text to justify writePaths: []. Set kind: "investigation" explicitly; brief-phrasing detection will be removed.`
         : "";
+      const notices = `${replacement}${shapeNotice}${legacyKindNotice}${approval}${worktreeWarning}`;
       return {
         content: [
           {
             type: "text",
-            text: `Created ${created.length} task(s):\n${lines.join("\n")}${replacement}${shapeNotice}${legacyKindNotice}${approval}${worktreeWarning}`,
+            text: `Created ${created.length} task(s):\n${lines.join("\n")}${notices}`,
           },
         ],
-        details: { action: "plan", tasks: created.map((task) => snapshot(task)) },
+        details: {
+          action: "plan",
+          tasks: created.map((task) => snapshot(task)),
+          ...(notices ? { notices: notices.trim() } : {}),
+        },
       };
     },
     renderCall(args, theme) {
@@ -615,6 +626,7 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
           action: "drive",
           tasks: settledTasks.map((task) => snapshot(task)),
           ...(summary ? { rounds: summary.rounds, stoppedBecause: summary.stoppedBecause } : {}),
+          notices: text.slice(0, 6000),
         },
       };
     },
@@ -818,14 +830,18 @@ export function registerMaestroTools(runtime: ModelToolRuntime): void {
       if (!updated) throw new Error(`Unknown task: ${taskId}`);
       const worktreeWarning = parkIdleToolWorktrees(ctx.cwd, driveController);
       refreshUI(ctx);
-      const text = `${
+      const notices = `${
         wasInFlight && editsContractField
-          ? `Updated: ${taskLine(updated)}\nWarning: $${costSoFar.toFixed(4)} of in-flight attempt/review cost was invalidated with invalidateInFlight: true; ${updated.id} was reset to todo and needs re-execution under the new contract.`
-          : `Updated: ${taskLine(updated)}`
+          ? `\nWarning: $${costSoFar.toFixed(4)} of in-flight attempt/review cost was invalidated with invalidateInFlight: true; ${updated.id} was reset to todo and needs re-execution under the new contract.`
+          : ""
       }${worktreeWarning}`;
       return {
-        content: [{ type: "text", text }],
-        details: { action: "update", tasks: [snapshot(updated)] },
+        content: [{ type: "text", text: `Updated: ${taskLine(updated)}${notices}` }],
+        details: {
+          action: "update",
+          tasks: [snapshot(updated)],
+          ...(notices ? { notices: notices.trim() } : {}),
+        },
       };
     },
     renderCall(args, theme) {
@@ -969,7 +985,10 @@ function renderTaskListResult(
       text += `${theme.fg("dim", note.replace(/^/gm, "    "))}\n`;
     }
   }
-  if (details.stoppedBecause) {
+  if (details.notices) {
+    text += `\n${theme.fg("warning", details.notices)}\n`;
+  } else if (details.stoppedBecause) {
+    // Results recorded before `notices` existed still carry the summary.
     const summary = formatDriveSummary({
       rounds: details.rounds ?? 0,
       tasks: details.tasks,

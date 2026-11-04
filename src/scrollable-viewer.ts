@@ -1,27 +1,38 @@
-import { type ExtensionCommandContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Key, Markdown, matchesKey, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  type ExtensionCommandContext,
+  getMarkdownTheme,
+  type KeybindingsManager,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { type Component, Markdown, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { hint } from "./command-ui.js";
 
-const TEXT_PAGE_SIZE = 18;
 const SCROLL_STEP = 10;
 
 export function scrollableTextOffset(
   offset: number,
   delta: number,
   lineCount: number,
-  pageSize = TEXT_PAGE_SIZE
+  pageSize: number
 ): number {
   return Math.max(0, Math.min(Math.max(0, lineCount - pageSize), offset + delta));
 }
 
+const SCROLL_UP = ["tui.select.up", "tui.select.pageUp"] as const;
+const SCROLL_DOWN = ["tui.select.down", "tui.select.pageDown"] as const;
+const CLOSE = ["tui.select.confirm", "tui.select.cancel"] as const;
+
 /**
- * In pi's fullscreen mode (the 1.0 default) PgUp/PgDn scroll pi's own
- * viewport before an inline component sees them, so only the arrows page
- * this viewer there.
+ * The viewer's key hint, from the keybindings pi injects. In pi's fullscreen
+ * mode (the 1.0 default) the page keys scroll pi's own viewport before an
+ * inline component sees them, so only the line keys are advertised there.
  */
-export function scrollHint(tui: Pick<TUI, "mode">): string {
-  return tui.mode === "fullscreen"
-    ? "↑↓ scroll · enter/esc close"
-    : "↑↓/PgUp/PgDn scroll · enter/esc close";
+function scrollHint(tui: Pick<TUI, "mode">, theme: Theme, keybindings: KeybindingsManager): string {
+  const scroll =
+    tui.mode === "fullscreen"
+      ? (["tui.select.up", "tui.select.down"] as const)
+      : (["tui.select.up", "tui.select.down", "tui.select.pageUp", "tui.select.pageDown"] as const);
+  return `${hint(theme, keybindings, scroll, "scroll")}  ${hint(theme, keybindings, CLOSE, "close")}`;
 }
 
 export async function showScrollableText(
@@ -34,35 +45,7 @@ export async function showScrollableText(
     if (ctx.hasUI) ctx.ui.notify(`${title}\n\n${lines.join("\n")}`, "info");
     return;
   }
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-    let offset = 0;
-    const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
-    return {
-      render: (width: number) => {
-        const content = new Text(lines.slice(offset, offset + TEXT_PAGE_SIZE).join("\n"), 1, 0);
-        return [
-          ...heading.render(width),
-          ...content.render(width),
-          "",
-          truncateToWidth(theme.fg("dim", scrollHint(tui)), width),
-        ];
-      },
-      invalidate: () => heading.invalidate(),
-      handleInput: (data: string) => {
-        if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
-          done();
-          return;
-        }
-        if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) {
-          offset = scrollableTextOffset(offset, -SCROLL_STEP, lines.length);
-        }
-        if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) {
-          offset = scrollableTextOffset(offset, SCROLL_STEP, lines.length);
-        }
-        tui.requestRender();
-      },
-    };
-  });
+  await showPaged(ctx, title, new Text(lines.join("\n"), 1, 0));
 }
 
 export async function showScrollableMarkdown(
@@ -74,41 +57,55 @@ export async function showScrollableMarkdown(
     if (ctx.hasUI) ctx.ui.notify(`${title}\n\n${markdownText}`, "info");
     return;
   }
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+  await showPaged(ctx, title, new Markdown(markdownText, 1, 0, getMarkdownTheme()));
+}
+
+/**
+ * Pages `body` by the terminal rows it wraps to at the current width, so a
+ * long paragraph on a narrow terminal still scrolls instead of overflowing
+ * the screen as one source line.
+ */
+async function showPaged(
+  ctx: ExtensionCommandContext,
+  title: string,
+  body: Component
+): Promise<void> {
+  await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
     let offset = 0;
-    let rendered: string[] = [];
-    let renderedWidth = -1;
+    let rows: string[] = [];
+    let rowsWidth = -1;
     const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
-    const markdown = new Markdown(markdownText, 1, 0, getMarkdownTheme());
+    const pageSize = () => Math.max(6, tui.terminal.rows - 6);
     return {
       render: (width: number) => {
-        if (renderedWidth !== width) {
-          rendered = markdown.render(width);
-          renderedWidth = width;
+        if (rowsWidth !== width) {
+          rows = body.render(width);
+          rowsWidth = width;
         }
-        const pageSize = Math.max(6, tui.terminal.rows - 6);
-        offset = Math.min(offset, Math.max(0, rendered.length - pageSize));
+        offset = scrollableTextOffset(offset, 0, rows.length, pageSize());
         return [
           ...heading.render(width),
-          ...rendered.slice(offset, offset + pageSize),
-          truncateToWidth(theme.fg("dim", scrollHint(tui)), width),
+          ...rows.slice(offset, offset + pageSize()),
+          truncateToWidth(scrollHint(tui, theme, keybindings), width),
         ];
       },
       invalidate: () => {
         heading.invalidate();
-        markdown.invalidate();
-        renderedWidth = -1;
+        body.invalidate();
+        rowsWidth = -1;
       },
       handleInput: (data: string) => {
-        if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
+        const pressed = (actions: readonly Parameters<KeybindingsManager["matches"]>[1][]) =>
+          actions.some((action) => keybindings.matches(data, action));
+        if (pressed(CLOSE)) {
           done();
           return;
         }
-        if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) {
-          offset = Math.max(0, offset - SCROLL_STEP);
+        if (pressed(SCROLL_UP)) {
+          offset = scrollableTextOffset(offset, -SCROLL_STEP, rows.length, pageSize());
         }
-        if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) {
-          offset += SCROLL_STEP;
+        if (pressed(SCROLL_DOWN)) {
+          offset = scrollableTextOffset(offset, SCROLL_STEP, rows.length, pageSize());
         }
         tui.requestRender();
       },

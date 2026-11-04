@@ -7,19 +7,23 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Input, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 
+type KeybindingId = Parameters<KeybindingsManager["getKeys"]>[0];
+
 /**
  * Formats a configured keybinding with the manager pi injects into
  * `ctx.ui.custom`. pi's exported `keyHint` reads the keybindings of whichever
  * pi-coding-agent copy the import resolves to, which can be the extension's
  * own and renders `app.*` ids without keys.
  */
-function hint(
+export function hint(
   theme: Theme,
   keybindings: KeybindingsManager,
-  id: Parameters<KeybindingsManager["getKeys"]>[0],
+  ids: KeybindingId | readonly KeybindingId[],
   description: string
 ): string {
-  const keys = keybindings.getKeys(id).join("/");
+  const keys = (typeof ids === "string" ? [ids] : ids)
+    .flatMap((id) => keybindings.getKeys(id))
+    .join("/");
   return keys ? rawKeyHint(keys, description) : theme.fg("muted", description);
 }
 
@@ -31,6 +35,14 @@ function hint(
  */
 function usesStockDialogs(ctx: ExtensionCommandContext): boolean {
   return ctx.mode !== "tui";
+}
+
+/**
+ * Inline pickers and editors wait for the user's answer. Saying so lets
+ * terminals that show pi's program status report it as blocked, not working.
+ */
+function waitingFor(title: string) {
+  return { blocked: { kind: "question" as const, message: title } };
 }
 
 /**
@@ -63,6 +75,13 @@ export async function editText(
     field.onEscape = () => done(null);
 
     return {
+      // Focusable: pi places the hardware (IME) cursor at the field's marker.
+      get focused() {
+        return field.focused;
+      },
+      set focused(value: boolean) {
+        field.focused = value;
+      },
       render: (width: number) => [
         ...heading.render(width),
         ...field.render(width),
@@ -78,7 +97,7 @@ export async function editText(
         tui.requestRender();
       },
     };
-  });
+  }, waitingFor(title));
 }
 
 export async function pickFromList(
@@ -106,7 +125,7 @@ export async function pickFromList(
     container.addChild(list);
     container.addChild(
       new Text(
-        `${rawKeyHint("↑↓", "navigate")}  ${hint(theme, keybindings, "tui.select.confirm", "select")}  ${hint(theme, keybindings, "tui.select.cancel", "close")}`,
+        `${hint(theme, keybindings, ["tui.select.up", "tui.select.down"], "navigate")}  ${hint(theme, keybindings, "tui.select.confirm", "select")}  ${hint(theme, keybindings, "tui.select.cancel", "close")}`,
         1,
         0
       )
@@ -119,5 +138,5 @@ export async function pickFromList(
         tui.requestRender();
       },
     };
-  });
+  }, waitingFor(title));
 }

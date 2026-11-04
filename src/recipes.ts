@@ -16,6 +16,7 @@ import {
   type RecipeScope,
   type RecipeTask,
   type ResolvedRecipe,
+  type ReviewPolicy,
   type WorkflowRecipe,
 } from "./types.js";
 
@@ -196,7 +197,9 @@ export function expandRecipe(
   suppliedInput: Record<string, RecipeInputValue>,
   availableTiers: Iterable<string>,
   availableVerificationProfiles: Iterable<string>,
-  maxPlanTasks = 64
+  maxPlanTasks = 64,
+  /** The project's `reviewPolicy`, for tasks whose recipe states none. */
+  defaultReviewPolicy?: ReviewPolicy
 ): Board {
   const input = resolveInput(recipe.inputs ?? {}, suppliedInput);
   if (recipe.tasks.length > maxPlanTasks) {
@@ -231,6 +234,7 @@ export function expandRecipe(
 
   const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
   for (const task of expandedTasks) {
+    const reviewPolicy = task.reviewPolicy ?? defaultReviewPolicy;
     createTask(board, {
       title: task.title,
       brief: task.brief,
@@ -240,7 +244,7 @@ export function expandRecipe(
       writePaths: task.writePaths,
       ...(task.successCriteria.length > 0 ? { successCriteria: task.successCriteria } : {}),
       ...(task.verificationProfile ? { verificationProfile: task.verificationProfile } : {}),
-      ...(task.reviewPolicy ? { reviewPolicy: task.reviewPolicy } : {}),
+      ...(reviewPolicy ? { reviewPolicy } : {}),
       ...(task.commitMessage ? { commitMessage: task.commitMessage } : {}),
       ...(task.discovery
         ? { discovery: { allowedWritePaths: task.discovery.allowedWritePaths } }

@@ -427,7 +427,7 @@ export function buildSupervisorBriefing(
       "- Never force another attempt by raising the project `maxAttempts`; fix the root cause instead.",
       tierGuidance,
       "- Ask the user before expanding scope beyond the stated goal or making a cost tradeoff.",
-      "- After changing a brief/tier, `/maestro resume` to continue the drive.",
+      "- After changing a brief/tier, call `maestro_drive` action=start for the affected tasks to continue. `/maestro resume` is the user's command for a paused drive; do not tell them to use it after a board correction.",
     ].join("\n"),
   ].join("\n\n");
 }
@@ -436,7 +436,9 @@ export function buildSupervisorBriefing(
 export function buildOrchestratorBriefing(
   goal: string,
   tierGuidance: string,
-  planGate = false
+  planGate = false,
+  /** `useWorktrees` or detached executors: every launch runs in its own checkout. */
+  alwaysIsolated = false
 ): string {
   return [
     "Role: orchestrator. Plan the work, delegate execution to fresh-context executors, keep your own context clean. You do not implement tasks yourself.",
@@ -460,13 +462,15 @@ export function buildOrchestratorBriefing(
       "## Decision rules",
       "- `maestro_drive` action=start already reports the settled outcome; only use inspect when you did not start the drive yourself or the user asks for current state. Never read `.pi/maestro` internals, agent session/log files, or write ad-hoc inspection scripts: those transcripts are megabytes of replayed tool output and reading one destroys your context and prompt cache. Recorded sessions are for the human dashboard, not for you.",
       "- Reference file paths in briefs; paste file contents only when an executor cannot discover them itself.",
-      "- Executors run in isolated checkouts built from committed content. If a brief points at a file, make sure it is committed; uncommitted files do not exist for the executor.",
+      alwaysIsolated
+        ? "- Executors run in isolated checkouts built from committed content. If a brief points at a file, make sure it is committed; uncommitted files do not exist for the executor."
+        : "- A task that runs alone works in this checkout and sees uncommitted files. Tasks that run in parallel are isolated in checkouts built from committed content, where uncommitted files do not exist: commit any file such a brief points at.",
       "- At a provider block: switch to a configured fallback then `/maestro resume`, or ask the user if it is a quota/cost decision. Never blindly retry the same blocked provider.",
       "- At a review escalation or a task that fails twice with the same root cause: `maestro_update` its brief or tier, split it with `maestro_plan`, or cancel it. Never raise the project `maxAttempts` to force another attempt.",
       "- `maestro_update` rejects contract edits to an in-flight attempt (running or ready_for_review) unless `invalidateInFlight: true` explicitly accepts the recorded cost and discarded work; prefer letting it settle.",
       "- At an attempt cap, create one narrowly scoped successor with `maestro_plan` and set `supersedesTaskId` to the capped task. Maestro atomically keeps the predecessor visible as cancelled and rewires every downstream dependency. Then call `maestro_drive` action=start for the successor and rewired dependents. Never perform cancellation and rewiring as separate calls.",
       "- Ask the user before expanding scope beyond the stated goal or making a cost tradeoff.",
-      "- After changing a brief/tier, `/maestro resume` to continue the drive.",
+      "- After changing a brief/tier, call `maestro_drive` action=start for the affected tasks to continue. `/maestro resume` is the user's command for a paused drive; do not tell them to use it after a board correction.",
       "- If planning required heavy investigation, suggest `/maestro handoff` after the plan is on the board: it continues run/review in a fresh session without this session's planning context.",
     ].join("\n"),
   ].join("\n\n");

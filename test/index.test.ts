@@ -225,6 +225,11 @@ interface CommandCtx {
 }
 
 type EventHandler = (event: unknown, ctx: CommandCtx) => unknown;
+type EntryRenderer = (
+  entry: { customType: string; data?: unknown },
+  options: { expanded: boolean },
+  theme: Theme
+) => { render(width: number): string[] } | undefined;
 
 interface TuiStep {
   keys: string[];
@@ -271,6 +276,8 @@ function loadMaestro(
   events: Map<string, EventHandler>;
   userMessages: Array<{ message: string; options?: { deliverAs?: string } }>;
   messages: Array<{ message: unknown; options?: { triggerTurn?: boolean; deliverAs?: string } }>;
+  entries: Array<{ customType: string; data?: unknown }>;
+  entryRenderers: Map<string, EntryRenderer>;
   shortcuts: Map<string, (ctx: CommandCtx) => unknown>;
   overlays: TestOverlay[];
   widgets: unknown[];
@@ -279,6 +286,8 @@ function loadMaestro(
   isEditorFocused(): boolean;
 } {
   const notices: string[] = [];
+  const entries: Array<{ customType: string; data?: unknown }> = [];
+  const entryRenderers = new Map<string, EntryRenderer>();
   const shortcuts = new Map<string, (ctx: CommandCtx) => unknown>();
   const overlays: TestOverlay[] = [];
   const widgets: unknown[] = [];
@@ -433,6 +442,12 @@ function loadMaestro(
       shortcuts.set(key, options.handler);
     },
     registerMessageRenderer: () => {},
+    registerEntryRenderer: (customType: string, renderer: EntryRenderer) => {
+      entryRenderers.set(customType, renderer);
+    },
+    appendEntry: (customType: string, data?: unknown) => {
+      entries.push({ customType, data });
+    },
     setSessionName: () => {},
     setLabel: () => {},
     sendMessage: (message: unknown, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
@@ -462,6 +477,8 @@ function loadMaestro(
     events,
     userMessages,
     messages,
+    entries,
+    entryRenderers,
     shortcuts,
     overlays,
     widgets,
@@ -1139,7 +1156,7 @@ test("task-id argument completion includes board tasks", async () => {
 test("scrollable text clamps to the last full page", () => {
   let offset = 0;
   for (let index = 0; index < 10; index += 1) {
-    offset = scrollableTextOffset(offset, 10, 60);
+    offset = scrollableTextOffset(offset, 10, 60, 18);
   }
   assert.equal(offset, 42);
 });
@@ -1469,6 +1486,7 @@ test("plan diff and recipe preview are bounded read-only inspections", async () 
 test("recipe commands list, inspect, run through the plan gate, save, and remove", async () => {
   await withBoard(
     (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, reviewPolicy: "confirm" });
       saveStoredRecipe(
         "project",
         cwd,
@@ -1501,6 +1519,8 @@ test("recipe commands list, inspect, run through the plan gate, save, and remove
       assert.match(notices.join("\n"), /safe \[project\]|\[project\].*safe/s);
       assert.equal(loadBoard(cwd).planPending, true);
       assert.equal(loadBoard(cwd).tasks[0]?.title, "Build core");
+      // The recipe states no policy, so the task takes the project's.
+      assert.equal(loadBoard(cwd).tasks[0]?.reviewPolicy, "confirm");
 
       await command.handler("recipe save snapshot project", ctx);
       assert.match(notices.at(-1) ?? "", /Saved project recipe/);
@@ -1603,6 +1623,7 @@ test("maestro_plan creates only explicit scoped no-file discovery tasks", async 
 test("discovery append requires confirmation and forces the plan gate", async () => {
   await withBoard(
     (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, reviewPolicy: "confirm" });
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
       addDiscoveryTask(board);
       saveBoard(cwd, board);
@@ -1615,6 +1636,7 @@ test("discovery append requires confirmation and forces the plan gate", async ()
       assert.equal(board.planPending, true);
       assert.equal(board.tasks.length, 2);
       assert.equal(board.tasks[1]?.title, "Generated task");
+      assert.equal(board.tasks[1]?.reviewPolicy, "confirm");
       assert.match(notices[0] ?? "", /Discovery preview.*generated/s);
       assert.match(notices.at(-1) ?? "", /plan approval is required/);
       assert.equal(listArchivedBoards(cwd).length, 0);
@@ -3820,6 +3842,72 @@ test("drive results render the completed summary even with task details present"
   );
 });
 
+test("a plan result shows the approval gate the model was told about", async () => {
+  await withBoard(
+    (cwd) => saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, planGate: true }),
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const plan = tools.get("maestro_plan");
+      assert.ok(plan?.renderResult);
+      const result = await plan.execute(
+        "gated-plan",
+        {
+          tasks: [
+            {
+              title: "Gated work",
+              brief: "Implement gated work",
+              tier: "standard",
+              writePaths: ["src/gated.ts"],
+              successCriteria: ["Gated work passes"],
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(result.content[0]?.text ?? "", /Plan awaits user approval/);
+      for (const expanded of [false, true]) {
+        const text = plan.renderResult(result, { expanded }, fakeTheme).render(200).join("\n");
+        assert.match(text, /T1 Gated work/);
+        assert.match(text, /Plan awaits user approval via \/maestro plan/);
+      }
+    }
+  );
+});
+
+test("a report opened from the dashboard is a session entry the model never sees", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, { title: "Reported", brief: "work", tier: "standard" });
+      const attempt = executorAttempt();
+      attempt.endedAt = 2;
+      attempt.finalReport = "Implemented the reported change";
+      task.attempts.push(attempt);
+      task.status = "ready_for_review";
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const runtime = loadMaestro(cwd);
+      const completion = runtime.command.handler("board", runtime.ctx);
+      const dashboard = runtime.overlays[0];
+      assert.ok(dashboard);
+      for (const key of ["\x1b[C", "p"]) dashboard.component.handleInput(key);
+      await completion;
+
+      assert.deepEqual(runtime.messages, []);
+      const [entry] = runtime.entries;
+      assert.ok(entry, "the report must be appended as a custom entry");
+      const renderer = runtime.entryRenderers.get(entry.customType);
+      assert.ok(renderer, "the report entry type must have a renderer");
+      const text = renderer(entry, { expanded: false }, fakeTheme)?.render(100).join("\n") ?? "";
+      assert.match(text, /T1 Reported — last report/);
+      assert.match(text, /Implemented the reported change/);
+    }
+  );
+});
+
 function setupResetBoard(cwd: string): string {
   const board: Board = { version: 1, nextTaskNumber: 1, goal: "keep this goal", tasks: [] };
   const task = createTask(board, { title: "Reset me", brief: "work", tier: "standard" });
@@ -3878,6 +3966,34 @@ test("replay preserves work added while the archive picker is open", async () =>
   );
 });
 
+/** Runs `run` and returns what it wrote through console.error (pi's headless stderr). */
+async function captureStderr(run: () => Promise<void>): Promise<string[]> {
+  const written: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    written.push(args.map(String).join(" "));
+  };
+  try {
+    await run();
+  } finally {
+    console.error = original;
+  }
+  return written;
+}
+
+test("headless inspection commands write their report to stderr", async () => {
+  await withBoard(setupResetBoard, async (cwd) => {
+    const runtime = loadMaestro(cwd, undefined, owner, undefined, {
+      mode: "print",
+      hasUI: false,
+    });
+    const config = await captureStderr(() => runtime.command.handler("config show", runtime.ctx));
+    assert.match(config.join("\n"), /maxReviewerLaunches: 4/);
+    const costs = await captureStderr(() => runtime.command.handler("costs", runtime.ctx));
+    assert.match(costs.join("\n"), /run: 1 attempt/);
+  });
+});
+
 test("headless reset refuses without an explicit confirmation token", async () => {
   await withBoard(setupResetBoard, async (cwd) => {
     const runtime = loadMaestro(cwd, undefined, owner, undefined, {
@@ -3890,9 +4006,9 @@ test("headless reset refuses without an explicit confirmation token", async () =
     const logBefore = readFileSync(logFile);
     const archivesBefore = listArchivedBoards(cwd);
 
-    await runtime.command.handler("reset", runtime.ctx);
+    const stderr = await captureStderr(() => runtime.command.handler("reset", runtime.ctx));
 
-    assert.match(runtime.notices.at(-1) ?? "", /reset confirm/i);
+    assert.match(stderr.at(-1) ?? "", /reset confirm/i);
     assert.deepEqual(readFileSync(boardFile), boardBefore);
     assert.deepEqual(readFileSync(logFile), logBefore);
     assert.deepEqual(listArchivedBoards(cwd), archivesBefore);
@@ -3908,7 +4024,7 @@ test("headless reset confirm archives the exact revision and clears the board", 
     });
     const before = loadBoard(cwd);
 
-    await runtime.command.handler("reset confirm", runtime.ctx);
+    const stderr = await captureStderr(() => runtime.command.handler("reset confirm", runtime.ctx));
 
     const board = loadBoard(cwd);
     assert.equal(board.tasks.length, 0);
@@ -3919,7 +4035,7 @@ test("headless reset confirm archives the exact revision and clears the board", 
     assert.equal(archived.revision, before.revision);
     assert.equal(archived.goal, before.goal);
     assert.deepEqual(archived.tasks, before.tasks);
-    assert.match(runtime.notices.at(-1) ?? "", /Board reset\. Archived at/);
+    assert.match(stderr.at(-1) ?? "", /Board reset\. Archived at/);
   });
 });
 
@@ -4003,9 +4119,11 @@ test("live-run protection takes precedence over reset confirmation", async () =>
 
       await runtime.command.handler("drive", runtime.ctx);
       await executorStarted;
-      await runtime.command.handler("reset confirm", runtime.ctx);
+      const stderr = await captureStderr(() =>
+        runtime.command.handler("reset confirm", runtime.ctx)
+      );
 
-      assert.match(runtime.notices.at(-1) ?? "", /still running.*before resetting/i);
+      assert.match(stderr.at(-1) ?? "", /still running.*before resetting/i);
       assert.equal(loadBoard(cwd).tasks.length, 1);
       assert.equal(listArchivedBoards(cwd).length, 0);
       await runtime.command.handler("abort", runtime.ctx);

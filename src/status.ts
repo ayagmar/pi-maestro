@@ -63,8 +63,10 @@ export function projectRunPhases(
         task.status === "changes_requested" ||
         task.dispatchNote !== undefined ||
         task.findings?.some((finding) => finding.status === "open") ||
-        task.attempts.some((attempt) =>
-          ["disagreement", "operational_failure"].includes(attempt.reviewConvergence?.status ?? "")
+        // Only the current attempt's convergence is a live condition; earlier
+        // failures that a rerun addressed stay recovery evidence below.
+        ["disagreement", "operational_failure"].includes(
+          task.attempts.at(-1)?.reviewConvergence?.status ?? ""
         )
     );
   const liveReview = board.tasks.some(

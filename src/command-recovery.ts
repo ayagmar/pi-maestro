@@ -188,25 +188,18 @@ export async function handleResetCommand(
   rest: string,
   runtime: RecoveryCommandRuntime
 ): Promise<void> {
-  const reportReset = (message: string, level: "info" | "warning" | "error" = "info") => {
-    if (ctx.hasUI) {
-      notify(ctx, message, level);
-      return;
-    }
-    ctx.ui.notify(message, level);
-    console.error(message);
-  };
   const board = loadBoard(ctx.cwd);
   if (board.tasks.length === 0) {
-    reportReset("Board is already empty.");
+    notify(ctx, "Board is already empty.");
     return;
   }
   if (runtime.hasLiveRuns()) {
-    reportReset("Executors are still running. Abort them before resetting.", "warning");
+    notify(ctx, "Executors are still running. Abort them before resetting.", "warning");
     return;
   }
   if (!ctx.hasUI && rest.trim().toLowerCase() !== "confirm") {
-    reportReset(
+    notify(
+      ctx,
       `Reset refused without explicit confirmation. Run /${COMMAND} reset confirm to archive and clear the board.`,
       "warning"
     );
@@ -219,18 +212,18 @@ export async function handleResetCommand(
     );
     if (!ok) return;
     if (runtime.hasLiveRuns()) {
-      reportReset("Executors started during confirmation. Abort them before resetting.", "warning");
+      notify(ctx, "Executors started during confirmation. Abort them before resetting.", "warning");
       return;
     }
   }
 
   const archivedLogs = captureBoardLogs(ctx.cwd, board);
   for (const warning of archivedLogs.warnings) {
-    reportReset(`Log cleanup warning: ${warning}`, "warning");
+    notify(ctx, `Log cleanup warning: ${warning}`, "warning");
   }
   const parking = parkInactiveWorktrees(ctx.cwd, board, runtime.liveTaskIds());
   for (const warning of parking.warnings) {
-    reportReset(`Worktree cleanup warning: ${warning}`, "warning");
+    notify(ctx, `Worktree cleanup warning: ${warning}`, "warning");
   }
   let archivePath: string | undefined;
   try {
@@ -240,14 +233,15 @@ export async function handleResetCommand(
       board.revision ?? 0
     );
   } catch (error) {
-    reportReset(
+    notify(
+      ctx,
       `${error instanceof Error ? error.message : String(error)}. Inspect the current board and confirm reset again.`,
       "warning"
     );
     return;
   }
   if (!archivePath) {
-    reportReset("Could not archive the board; reset cancelled.", "error");
+    notify(ctx, "Could not archive the board; reset cancelled.", "error");
     return;
   }
   const cleanup = pruneStaleLogs(
@@ -261,5 +255,5 @@ export async function handleResetCommand(
     notify(ctx, `Log cleanup warning: ${cleanup.warnings.join("; ").slice(0, 500)}`, "warning");
   }
   runtime.onBoardChanged();
-  reportReset(`Board reset. Archived at ${archivePath}`);
+  notify(ctx, `Board reset. Archived at ${archivePath}`);
 }

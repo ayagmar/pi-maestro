@@ -63,7 +63,7 @@ export function buildDoctorReport(
   const lines = [
     "Maestro doctor",
     "",
-    `Status: ${formatStatusProjection(projectStatus(board, liveTaskIds, undefined, liveKinds))}`,
+    `Status: ${formatStatusProjection(projectStatus(board, liveTaskIds, config, liveKinds))}`,
     ...(decisionWarnings.length > 0
       ? ["", "Decision warnings:", ...decisionWarnings.map((warning) => `  ${warning}`)]
       : []),

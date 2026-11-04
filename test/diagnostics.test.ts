@@ -64,6 +64,22 @@ test("doctor reports the live reviewer phase", () => {
   }
 });
 
+test("doctor blocks approved work whose approval proof is stale, like the dashboard", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-doctor-"));
+  try {
+    const board = { version: 1 as const, nextTaskNumber: 1, tasks: [] };
+    const task = createTask(board, { title: "Legacy", brief: "old work", tier: "standard" });
+    task.status = "approved";
+    saveBoard(cwd, board);
+
+    const report = buildDoctorReport(cwd, fakeRegistry([]));
+
+    assert.match(report, /Status: blocked · recovery · 0 approved/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("doctor reports quarantined corrupt boards", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-doctor-"));
   try {

@@ -6,6 +6,9 @@
 
 - **Breaking:** Pi Maestro now requires pi 1.5 or newer. The package is developed and tested against pi 1.5.0; earlier pi releases are no longer supported.
 - Key hints in Maestro's text input and list pickers come from the keybindings pi injects into custom components, so remapped keys show correctly. pi's exported `keyHint()` can resolve to a package copy that does not see the user's keybindings.
+- The plan, brief and workflow viewers scroll and close with pi's selection keybindings (`tui.select.up`/`down`/`pageUp`/`pageDown`/`confirm`/`cancel`) and their hints name the user's keys; the list pickers' navigation hint does too. They previously reacted only to the literal arrow, page, Enter and Escape keys.
+- Maestro's inline list pickers and single-line editor pass pi 1.5's `blocked` status to `ctx.ui.custom`, so terminals that show pi's program status report it as waiting for the user instead of working.
+- A task report or review verdict opened from the dashboard or `/maestro board` is added to the session as a custom entry with its own renderer (`pi.appendEntry` and `pi.registerEntryRenderer`), so it no longer enters the model's context. Orchestrator kickoff and decision messages still reach the model.
 - An executor whose prompt pi reports as `handled` (an extension command or input handler in the executor consumed it, so no agent run started) now fails at once with that reason. Previously the executor sat idle until the watchdog killed it.
 - The live agent pane marks a launch finished on `agent_settled` instead of `agent_end`, so a launch pi is about to retry or continue no longer shows as done.
 - The agent selector widget truncates every row to the terminal width. A long task title on a narrow terminal produced a row wider than the screen, which pi's regular (main-screen) TUI mode rejects by crashing.
@@ -56,6 +59,20 @@
 - A successor created with `supersedesTaskId` inherits the predecessor's `dependsOn` in addition to taking over its dependents. A handoff task written as `dependsOn: []` previously became runnable before the work its predecessor had to wait for.
 - Attempt and review launches record one model identity: the configured `provider/model` form wins when it names the reported bare id, so a task no longer shows `[openai-codex/gpt-5.6-sol]` while live and `[gpt-5.6-sol]` once settled, and per-model insight rows no longer split.
 - Run event logs are capped on whole lines and end with a single `maestro_log_capped` marker instead of a truncated JSON fragment followed by silence. The live pane renders the marker as a notice and keeps judging the run's status from the last real event, so a capped log no longer looks like a hung run or a finished one.
+
+### Fixes
+
+- The workflow preflight and cost forecast count the extra reviewer launches a cheap-first review ladder (`reviewCheapModel`) can make when a cheap reviewer is escalated, and price the cheap model at its own rates. A plan could previously skip the scale confirmation while able to launch more reviewers than it reported. Changing `reviewCheapModel` or `reviewEscalation` now asks for confirmation again.
+- Tasks created by `/maestro recipe run` and by applying discovery output inherit the project's `reviewPolicy` when they state none, as `maestro_plan` tasks already did. They previously ran with a single reviewer even when the project asked for `confirm` or `find-and-refute`.
+- `maestro_plan`, `maestro_update` and `maestro_drive` results show their notices under the task rows: the plan approval gate, supersession and shape warnings, the invalidated in-flight cost, and the drive's recovery guidance. The tool card previously showed only the task rows, so the user did not see the `/maestro plan` approval the model was waiting on.
+- The model picker in `/maestro config` follows remapped selection keys (`tui.select.*`), and its key hints and the settings header name the user's keys. It previously reacted only to the arrow keys, Enter and Escape, so a remapped confirm key typed into the search field instead of picking the model.
+- The single-line editor for task titles, dependencies and commit messages takes focus, so pi places the terminal cursor and the input-method (IME) candidate window at the insertion point.
+- The brief and report text viewer pages by wrapped terminal rows and sizes its page to the terminal, like the Markdown viewer. A long single paragraph previously rendered taller than the screen and the scroll keys could not move through it.
+- `/maestro doctor` checks approved tasks for stale approval proof, as the dashboard and inspect already did. It previously reported a board with stale approved work as `complete`.
+- A task rerun after a review disagreement or reviewer failure shows its live phase (execution, review). The dashboard and status line previously stayed on `recovery` for the whole retry because an earlier attempt had failed; that attempt is still listed as recovery evidence.
+- In print (`-p`) and JSON mode, Maestro's command output and notices go to stderr, so `/maestro config show`, `costs`, `insights`, `timeline` and the other reports are no longer silently dropped. JSON stdout stays clean and RPC still receives notifications.
+- The orchestrator and supervisor briefings tell the model to call `maestro_drive` action=start after correcting a brief or tier. They told it to use `/maestro resume`, which reports "No paused autonomous drive to resume" after a reviewer failure or blocked stop, since those leave no paused drive.
+- The orchestrator briefing says executors work in isolated, committed-content checkouts only when they are: always with `useWorktrees` or detached executors, otherwise only for tasks that run in parallel. With the default settings it previously claimed every executor was isolated, so the model asked for commits a lone task did not need.
 
 ### Added
 

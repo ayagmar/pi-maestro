@@ -3,6 +3,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
   getMarkdownTheme,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
@@ -56,6 +57,25 @@ import { showWorkflowBrowser } from "./workflow-browser.js";
 
 export { formatPlanReviewMarkdown } from "./plan-review.js";
 export { scrollableTextOffset } from "./scrollable-viewer.js";
+
+/**
+ * Report and review cards the human opens from the dashboard or board. They
+ * are session entries, not messages, so browsing them never enters the
+ * model's context; orchestrator kickoff and decisions stay messages.
+ */
+const REPORT_ENTRY_TYPE = "maestro-report";
+
+interface ReportCard {
+  markdown: string;
+}
+
+function maestroCard(theme: Theme, markdown: string): Container | Text {
+  if (!markdown) return new Text(theme.fg("accent", "⚡ maestro"), 0, 0);
+  const container = new Container();
+  container.addChild(new Text(theme.fg("accent", "⚡ maestro"), 0, 0));
+  container.addChild(new Markdown(markdown, 0, 0, getMarkdownTheme()));
+  return container;
+}
 
 export interface MaestroDependencies {
   startExecutor: typeof defaultStartExecutor;
@@ -475,10 +495,8 @@ export default function maestro(
     const task = findTask(loadBoard(cwd), taskId);
     if (!task) return;
     const report = lastReport(task) ?? "(no report yet)";
-    pi.sendMessage({
-      customType: MESSAGE_TYPE,
-      content: `## ${task.id} ${task.title} — last report\n\n${report}`,
-      display: true,
+    pi.appendEntry<ReportCard>(REPORT_ENTRY_TYPE, {
+      markdown: `## ${task.id} ${task.title} — last report\n\n${report}`,
     });
   }
 
@@ -486,10 +504,8 @@ export default function maestro(
     const task = findTask(loadBoard(cwd), taskId);
     if (!task) return;
     const review = task.attempts.at(-1)?.reviewReport ?? "(no review yet)";
-    pi.sendMessage({
-      customType: MESSAGE_TYPE,
-      content: `## ${task.id} ${task.title} — review verdict\n\n${review}`,
-      display: true,
+    pi.appendEntry<ReportCard>(REPORT_ENTRY_TYPE, {
+      markdown: `## ${task.id} ${task.title} — review verdict\n\n${review}`,
     });
   }
 
@@ -557,14 +573,12 @@ export default function maestro(
 
   // ------------------------------------------------------------ rendering
 
-  pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, theme) => {
-    const content = typeof message.content === "string" ? message.content : "";
-    if (!content) return new Text(theme.fg("accent", "⚡ maestro"), 0, 0);
-    const container = new Container();
-    container.addChild(new Text(theme.fg("accent", "⚡ maestro"), 0, 0));
-    container.addChild(new Markdown(content, 0, 0, getMarkdownTheme()));
-    return container;
-  });
+  pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, theme) =>
+    maestroCard(theme, typeof message.content === "string" ? message.content : "")
+  );
+  pi.registerEntryRenderer<ReportCard>(REPORT_ENTRY_TYPE, (entry, _options, theme) =>
+    maestroCard(theme, entry.data?.markdown ?? "")
+  );
 
   registerMaestroLifecycle(pi, {
     state: lifecycleState,
