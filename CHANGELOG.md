@@ -49,6 +49,7 @@
 - Tasks created by `/maestro recipe run` and by applying discovery output inherit the project's `reviewPolicy` when they state none, as `maestro_plan` tasks already did. They previously ran with a single reviewer even when the project asked for `confirm` or `find-and-refute`.
 - `maestro_plan`, `maestro_update` and `maestro_drive` results show their notices under the task rows: the plan approval gate, supersession and shape warnings, the invalidated in-flight cost, and the drive's recovery guidance. The tool card previously showed only the task rows, so the user did not see the `/maestro plan` approval the model was waiting on.
 - The model picker in `/maestro config` follows remapped selection keys (`tui.select.*`) and its key hints show them. It previously reacted only to the arrow keys, Enter and Escape, so a remapped confirm key typed into the search field instead of picking the model.
+- The single-line editor for task titles, dependencies and commit messages takes focus, so pi places the terminal cursor and the input-method (IME) candidate window at the insertion point.
 
 ### Added
 

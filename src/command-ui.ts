@@ -67,6 +67,13 @@ export async function editText(
     field.onEscape = () => done(null);
 
     return {
+      // Focusable: pi places the hardware (IME) cursor at the field's marker.
+      get focused() {
+        return field.focused;
+      },
+      set focused(value: boolean) {
+        field.focused = value;
+      },
       render: (width: number) => [
         ...heading.render(width),
         ...field.render(width),
