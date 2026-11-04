@@ -427,7 +427,7 @@ export function buildSupervisorBriefing(
       "- Never force another attempt by raising the project `maxAttempts`; fix the root cause instead.",
       tierGuidance,
       "- Ask the user before expanding scope beyond the stated goal or making a cost tradeoff.",
-      "- After changing a brief/tier, `/maestro resume` to continue the drive.",
+      "- After changing a brief/tier, call `maestro_drive` action=start for the affected tasks to continue. `/maestro resume` is the user's command for a paused drive; do not tell them to use it after a board correction.",
     ].join("\n"),
   ].join("\n\n");
 }
@@ -466,7 +466,7 @@ export function buildOrchestratorBriefing(
       "- `maestro_update` rejects contract edits to an in-flight attempt (running or ready_for_review) unless `invalidateInFlight: true` explicitly accepts the recorded cost and discarded work; prefer letting it settle.",
       "- At an attempt cap, create one narrowly scoped successor with `maestro_plan` and set `supersedesTaskId` to the capped task. Maestro atomically keeps the predecessor visible as cancelled and rewires every downstream dependency. Then call `maestro_drive` action=start for the successor and rewired dependents. Never perform cancellation and rewiring as separate calls.",
       "- Ask the user before expanding scope beyond the stated goal or making a cost tradeoff.",
-      "- After changing a brief/tier, `/maestro resume` to continue the drive.",
+      "- After changing a brief/tier, call `maestro_drive` action=start for the affected tasks to continue. `/maestro resume` is the user's command for a paused drive; do not tell them to use it after a board correction.",
       "- If planning required heavy investigation, suggest `/maestro handoff` after the plan is on the board: it continues run/review in a fresh session without this session's planning context.",
     ].join("\n"),
   ].join("\n\n");
