@@ -12,6 +12,80 @@ export const WATCHDOG_STEER_MESSAGES = {
     "Converge now. Stop expanding the review: finish verifying the remaining acceptance criteria and end with your VERDICT line within the next few turns.",
 };
 
+/** Event type of a diagnostic line recorded in place of a malformed RPC record. */
+export const MALFORMED_EVENT = "maestro_malformed_event";
+
+/** Malformed-record diagnostics written per launch; later ones are dropped. */
+export const MAX_MALFORMED_DIAGNOSTICS = 3;
+
+export function malformedEventDiagnostic(reason) {
+  return JSON.stringify({ type: MALFORMED_EVENT, reason });
+}
+
+const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+// Every reader uses optional chaining or `??`, so null is as harmless as absent.
+const absentOr = (value, check) => value === undefined || value === null || check(value);
+const isString = (value) => typeof value === "string";
+const isAmount = (value) => absentOr(value, (number) => Number.isFinite(number));
+const isUsage = (usage) =>
+  isRecord(usage) &&
+  isAmount(usage.input) &&
+  isAmount(usage.output) &&
+  absentOr(usage.cost, (cost) => isRecord(cost) && isAmount(cost.total));
+const isAssistantContent = (content) =>
+  Array.isArray(content) &&
+  content.every((part) => isRecord(part) && isString(part.type) && absentOr(part.text, isString));
+
+/**
+ * Why a parsed stdout record cannot be used as an RPC event, or undefined when
+ * every field the transports read has the type they assume. A child extension
+ * printing `null` or a malformed usage block must become a diagnostic, not an
+ * exception in the supervising process or corrupted spend totals.
+ */
+export function eventShapeError(value) {
+  if (!isRecord(value) || !isString(value.type))
+    return "record is not an object with a string type";
+  if (!absentOr(value.toolName, isString)) return "toolName is not a string";
+  if (value.type === "response") {
+    if (!absentOr(value.error, isString)) return "response error is not a string";
+    if (isRecord(value.data) && !absentOr(value.data.sessionFile, isString)) {
+      return "response sessionFile is not a string";
+    }
+  }
+  if (
+    value.type === "agent_settled" &&
+    !absentOr(value.aborted, (flag) => typeof flag === "boolean")
+  ) {
+    return "agent_settled aborted is not a boolean";
+  }
+  if (
+    value.type === "compaction_end" &&
+    isRecord(value.result) &&
+    !absentOr(value.result.usage, isUsage)
+  ) {
+    return "compaction usage is malformed";
+  }
+  if (
+    value.type === "entry_appended" &&
+    isRecord(value.entry) &&
+    !absentOr(value.entry.usage, isUsage)
+  ) {
+    return "entry usage is malformed";
+  }
+  const message = value.message;
+  if (isRecord(message)) {
+    if (!absentOr(message.role, isString)) return "message role is not a string";
+    if (!absentOr(message.usage, isUsage)) return "message usage is malformed";
+    if (message.role === "assistant") {
+      if (!absentOr(message.model, isString)) return "assistant model is not a string";
+      if (!absentOr(message.errorMessage, isString))
+        return "assistant errorMessage is not a string";
+      if (!absentOr(message.content, isAssistantContent)) return "assistant content is malformed";
+    }
+  }
+  return undefined;
+}
+
 export const HANDLED_PROMPT_ERROR =
   "the executor's prompt was consumed by an extension command or input handler; no agent run started";
 

@@ -19,8 +19,11 @@ import {
   boundedText,
   compactEvent,
   EXIT_SETTLE_DRAIN_MS,
+  eventShapeError,
   extractText,
   HANDLED_PROMPT_ERROR,
+  MAX_MALFORMED_DIAGNOSTICS,
+  malformedEventDiagnostic,
   promptHandledWithoutRun,
   WATCHDOG_STEER_MESSAGES,
 } from "./detached-policy.mjs";
@@ -119,6 +122,7 @@ let model;
 let errorMessage;
 let failureCause;
 let abortCause;
+let childAborted = false;
 let settled = false;
 let stdoutBuffer = "";
 let controlOffset = 0;
@@ -264,6 +268,7 @@ const processEvent = (event) => {
     state.touchedFiles.push(touched);
     resetWatchdog();
   }
+  if (event.type === "agent_settled" && event.aborted === true) childAborted = true;
   if (event.type === "agent_settled" && !child.stdin.writableEnded) {
     child.stdin.end();
     setTimeout(() => killChild("SIGTERM"), config.killGraceMs).unref();
@@ -271,28 +276,33 @@ const processEvent = (event) => {
   evaluateWatchdog();
 };
 
+const persistLine = (line) => {
+  try {
+    appendBoundedLine(line);
+  } catch (error) {
+    failPersistence("event log", error);
+  }
+};
+let malformedRecords = 0;
 const processStdoutLine = (line) => {
   if (!line.trim()) return;
   let event;
   try {
     event = JSON.parse(line);
   } catch {
-    if (config.logEvents !== "compact") {
-      try {
-        appendBoundedLine(line);
-      } catch (error) {
-        failPersistence("event log", error);
-      }
+    if (config.logEvents !== "compact") persistLine(line);
+    return;
+  }
+  const shapeError = eventShapeError(event);
+  if (shapeError) {
+    if (config.logEvents !== "compact") persistLine(line);
+    malformedRecords += 1;
+    if (malformedRecords <= MAX_MALFORMED_DIAGNOSTICS) {
+      persistLine(malformedEventDiagnostic(shapeError));
     }
     return;
   }
-  if (config.logEvents !== "compact" || compactEvent(event)) {
-    try {
-      appendBoundedLine(line);
-    } catch (error) {
-      failPersistence("event log", error);
-    }
-  }
+  if (config.logEvents !== "compact" || compactEvent(event)) persistLine(line);
   processEvent(event);
 };
 child.stdout.on("data", (chunk) => {
@@ -348,6 +358,7 @@ const pollControl = () => {
         // One corrupt control record must not terminate the whole run.
         continue;
       }
+      if (typeof command !== "object" || command === null || Array.isArray(command)) continue;
       const cause = command.maestroCause;
       delete command.maestroCause;
       if (command.type === "abort") {
@@ -378,6 +389,9 @@ const finish = (code, signal, viaDrain = false) => {
   if (drainTimer) clearTimeout(drainTimer);
   stdoutBuffer += stdoutDecoder.end();
   if (stdoutBuffer.trim()) processStdoutLine(stdoutBuffer);
+  // A run cancelled inside the child (pi >= 1.1 agent_settled.aborted) is a
+  // cancellation even when pi exits 0; Maestro's own causes take precedence.
+  if (childAborted && !abortCause) abortCause = "user_abort";
   // A stall already classified as provider silence keeps that cause.
   if (abortCause === "cost_cap" || (abortCause === "stalled" && failureCause !== "provider")) {
     failureCause = abortCause;
@@ -394,6 +408,7 @@ const finish = (code, signal, viaDrain = false) => {
   }
   const terminal = {
     version: 1,
+    ...(config.transportId ? { transportId: config.transportId } : {}),
     exitCode,
     usage: state.usage,
     finalReport: state.finalReport,

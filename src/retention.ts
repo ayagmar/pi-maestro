@@ -30,7 +30,9 @@ interface LogIdentity {
 }
 
 function logIdentity(name: string): LogIdentity | undefined {
-  const match = /^(.+)-(?:attempt|review)-(\d+)(?:-launch-\d+|-\d+-\d+)?\.jsonl$/.exec(name);
+  // Launches since transport namespacing add `.<8 hex>` before `.jsonl`.
+  const match =
+    /^(.+)-(?:attempt|review)-(\d+)(?:-launch-\d+|-\d+-\d+)?(?:\.[0-9a-f]{8})?\.jsonl$/.exec(name);
   if (!match?.[1] || !match[2]) return undefined;
   return { taskId: match[1], attempt: Number(match[2]) };
 }
@@ -59,7 +61,7 @@ function referencedBoardLogs(cwd: string, board: Board): Map<string, ReferencedL
           return;
         }
         if (launch.id) {
-          // The runner creates this file before the launch's logFile update.
+          // Launches predating transport namespacing logged to `<launch id>.jsonl`.
           add(`${launch.id}.jsonl`, task.id, attempt.index);
           return;
         }

@@ -93,6 +93,8 @@ export interface Attempt {
   detached?: boolean;
   pid?: number;
   processStartId?: string;
+  /** Unique per raw detached launch; its terminal record must carry the same id. */
+  transportId?: string;
   controlFile?: string;
   exitFile?: string;
   stderrFile?: string;
