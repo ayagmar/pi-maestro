@@ -52,6 +52,7 @@
 - The single-line editor for task titles, dependencies and commit messages takes focus, so pi places the terminal cursor and the input-method (IME) candidate window at the insertion point.
 - The brief and report text viewer pages by wrapped terminal rows and sizes its page to the terminal, like the Markdown viewer. A long single paragraph previously rendered taller than the screen and the scroll keys could not move through it.
 - `/maestro doctor` checks approved tasks for stale approval proof, as the dashboard and inspect already did. It previously reported a board with stale approved work as `complete`.
+- A task rerun after a review disagreement or reviewer failure shows its live phase (execution, review). The dashboard and status line previously stayed on `recovery` for the whole retry because an earlier attempt had failed; that attempt is still listed as recovery evidence.
 
 ### Added
 
