@@ -1,13 +1,11 @@
-import { type ExtensionCommandContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import {
-  type Component,
-  Key,
-  Markdown,
-  matchesKey,
-  Text,
-  type TUI,
-  truncateToWidth,
-} from "@earendil-works/pi-tui";
+  type ExtensionCommandContext,
+  getMarkdownTheme,
+  type KeybindingsManager,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import { type Component, Markdown, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { hint } from "./command-ui.js";
 
 const SCROLL_STEP = 10;
 
@@ -20,15 +18,21 @@ export function scrollableTextOffset(
   return Math.max(0, Math.min(Math.max(0, lineCount - pageSize), offset + delta));
 }
 
+const SCROLL_UP = ["tui.select.up", "tui.select.pageUp"] as const;
+const SCROLL_DOWN = ["tui.select.down", "tui.select.pageDown"] as const;
+const CLOSE = ["tui.select.confirm", "tui.select.cancel"] as const;
+
 /**
- * In pi's fullscreen mode (the 1.0 default) PgUp/PgDn scroll pi's own
- * viewport before an inline component sees them, so only the arrows page
- * this viewer there.
+ * The viewer's key hint, from the keybindings pi injects. In pi's fullscreen
+ * mode (the 1.0 default) the page keys scroll pi's own viewport before an
+ * inline component sees them, so only the line keys are advertised there.
  */
-export function scrollHint(tui: Pick<TUI, "mode">): string {
-  return tui.mode === "fullscreen"
-    ? "↑↓ scroll · enter/esc close"
-    : "↑↓/PgUp/PgDn scroll · enter/esc close";
+function scrollHint(tui: Pick<TUI, "mode">, theme: Theme, keybindings: KeybindingsManager): string {
+  const scroll =
+    tui.mode === "fullscreen"
+      ? (["tui.select.up", "tui.select.down"] as const)
+      : (["tui.select.up", "tui.select.down", "tui.select.pageUp", "tui.select.pageDown"] as const);
+  return `${hint(theme, keybindings, scroll, "scroll")}  ${hint(theme, keybindings, CLOSE, "close")}`;
 }
 
 export async function showScrollableText(
@@ -66,7 +70,7 @@ async function showPaged(
   title: string,
   body: Component
 ): Promise<void> {
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+  await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
     let offset = 0;
     let rows: string[] = [];
     let rowsWidth = -1;
@@ -82,7 +86,7 @@ async function showPaged(
         return [
           ...heading.render(width),
           ...rows.slice(offset, offset + pageSize()),
-          truncateToWidth(theme.fg("dim", scrollHint(tui)), width),
+          truncateToWidth(scrollHint(tui, theme, keybindings), width),
         ];
       },
       invalidate: () => {
@@ -91,14 +95,16 @@ async function showPaged(
         rowsWidth = -1;
       },
       handleInput: (data: string) => {
-        if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
+        const pressed = (actions: readonly Parameters<KeybindingsManager["matches"]>[1][]) =>
+          actions.some((action) => keybindings.matches(data, action));
+        if (pressed(CLOSE)) {
           done();
           return;
         }
-        if (matchesKey(data, Key.up) || matchesKey(data, Key.pageUp)) {
+        if (pressed(SCROLL_UP)) {
           offset = scrollableTextOffset(offset, -SCROLL_STEP, rows.length, pageSize());
         }
-        if (matchesKey(data, Key.down) || matchesKey(data, Key.pageDown)) {
+        if (pressed(SCROLL_DOWN)) {
           offset = scrollableTextOffset(offset, SCROLL_STEP, rows.length, pageSize());
         }
         tui.requestRender();

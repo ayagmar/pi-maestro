@@ -117,7 +117,7 @@ export async function pickFromList(
     container.addChild(list);
     container.addChild(
       new Text(
-        `${rawKeyHint("↑↓", "navigate")}  ${hint(theme, keybindings, "tui.select.confirm", "select")}  ${hint(theme, keybindings, "tui.select.cancel", "close")}`,
+        `${hint(theme, keybindings, ["tui.select.up", "tui.select.down"], "navigate")}  ${hint(theme, keybindings, "tui.select.confirm", "select")}  ${hint(theme, keybindings, "tui.select.cancel", "close")}`,
         1,
         0
       )
