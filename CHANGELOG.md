@@ -17,6 +17,7 @@
 
 ### Robustness
 
+- A launch that pi settles with `aborted: true` (an extension inside the executor or reviewer cancelled the run, pi 1.1 and later) is recorded as cancelled on both transports, even when pi exits 0. Previously it counted as a successful launch, so a reviewer's earlier `APPROVE` could be used after the child cancelled. Maestro's own cost-cap and stall stops keep their classification.
 - An executor stdout line that is valid JSON but not an RPC event (`null`, `[]`, a string, or an event whose usage, content or error has the wrong type) is skipped and recorded as at most three `maestro_malformed_event` diagnostics per launch. Previously `null` threw inside the supervising pi process on the attached transport and killed the detached supervisor without a terminal record, and a string cost was concatenated into the spend total.
 - A session is resumed only inside the checkout it recorded. pi refuses to resume a session whose working directory is gone, and an interrupted attempt whose clean worktree had been pruned made the next launch fail with `Stored session working directory does not exist` instead of doing the work. When the retained checkout is unavailable the attempt now starts fresh.
 

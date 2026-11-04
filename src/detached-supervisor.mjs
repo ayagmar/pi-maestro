@@ -122,6 +122,7 @@ let model;
 let errorMessage;
 let failureCause;
 let abortCause;
+let childAborted = false;
 let settled = false;
 let stdoutBuffer = "";
 let controlOffset = 0;
@@ -267,6 +268,7 @@ const processEvent = (event) => {
     state.touchedFiles.push(touched);
     resetWatchdog();
   }
+  if (event.type === "agent_settled" && event.aborted === true) childAborted = true;
   if (event.type === "agent_settled" && !child.stdin.writableEnded) {
     child.stdin.end();
     setTimeout(() => killChild("SIGTERM"), config.killGraceMs).unref();
@@ -387,6 +389,9 @@ const finish = (code, signal, viaDrain = false) => {
   if (drainTimer) clearTimeout(drainTimer);
   stdoutBuffer += stdoutDecoder.end();
   if (stdoutBuffer.trim()) processStdoutLine(stdoutBuffer);
+  // A run cancelled inside the child (pi >= 1.1 agent_settled.aborted) is a
+  // cancellation even when pi exits 0; Maestro's own causes take precedence.
+  if (childAborted && !abortCause) abortCause = "user_abort";
   // A stall already classified as provider silence keeps that cause.
   if (abortCause === "cost_cap" || (abortCause === "stalled" && failureCause !== "provider")) {
     failureCause = abortCause;

@@ -1116,6 +1116,75 @@ process.stdin.on("end", () => process.exit(0));
   });
 }
 
+for (const detached of [false, true]) {
+  test(`${detached ? "detached" : "attached"} launch cancelled inside the child settles as aborted, not approved`, async () => {
+    if (detached && process.platform === "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "maestro-child-abort-"));
+    const fakePi = join(root, "fake-pi.mjs");
+    // A child extension calls ctx.abort() after an approving message; pi
+    // settles with aborted: true and still exits 0.
+    writeFileSync(
+      fakePi,
+      `let buffer = "";
+let settled = false;
+const settle = () => {
+  if (settled) return;
+  settled = true;
+  console.log(JSON.stringify({ type: "agent_settled", aborted: true }));
+};
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type === "abort") settle();
+    if (command.type !== "prompt") continue;
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { cost: { total: 0.5 } }, content: [{ type: "text", text: "VERDICT: APPROVE" }] } }));
+    setTimeout(settle, 50);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+    );
+    const originalScript = process.argv[1];
+    if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+    process.argv[1] = fakePi;
+    try {
+      const cancelled = await startExecutor({
+        stateDir: root,
+        runId: "child-abort",
+        cwd: root,
+        prompt: "review",
+        tier: { thinking: "low" },
+        runKind: "review",
+        detached,
+      }).outcome;
+      assert.equal(cancelled.aborted, true);
+      assert.notEqual(cancelled.exitCode, 0);
+      assert.equal(cancelled.failureReason?.kind, "user_abort");
+
+      // Maestro's own cost-cap stop keeps its classification even though pi
+      // reports the resulting settlement as aborted.
+      const capped = await startExecutor({
+        stateDir: root,
+        runId: "child-abort-capped",
+        cwd: root,
+        prompt: "review",
+        tier: { thinking: "low" },
+        runKind: "review",
+        maxCost: 0.1,
+        detached,
+      }).outcome;
+      assert.equal(capped.aborted, false);
+      assert.equal(capped.failureReason?.kind, "cost_cap");
+    } finally {
+      process.argv[1] = originalScript;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("a corrupt detached control record is skipped without ending the run", async () => {
   if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "maestro-detached-control-corrupt-"));
