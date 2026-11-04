@@ -13,6 +13,7 @@ initTheme("dark");
 test("list pickers show the user's remapped keys from the keybindings pi injects", async () => {
   const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.cancel": "ctrl+g" });
   let rendered: string[] = [];
+  let blocked: unknown;
   const plainTheme = {
     fg: (_color: string, text: string) => text,
     bold: (text: string) => text,
@@ -27,9 +28,11 @@ test("list pickers show the user's remapped keys from the keybindings pi injects
           theme: Theme,
           keys: KeybindingsManager,
           done: (value: T) => void
-        ) => { render(width: number): string[] }
+        ) => { render(width: number): string[] },
+        options?: { blocked?: unknown }
       ) =>
         await new Promise<T>((resolve) => {
+          blocked = options?.blocked;
           const component = factory({ requestRender: () => {} }, plainTheme, keybindings, resolve);
           rendered = component.render(100);
           resolve(null as T);
@@ -38,6 +41,8 @@ test("list pickers show the user's remapped keys from the keybindings pi injects
   } as unknown as ExtensionCommandContext;
 
   await pickFromList(ctx, "Pick", [{ value: "a", label: "A" }]);
+  // The picker waits for an answer; pi reports that to the terminal.
+  assert.deepEqual(blocked, { kind: "question", message: "Pick" });
 
   // biome-ignore lint/suspicious/noControlCharactersInRegex: strips ANSI styling
   const footer = rendered.join("\n").replace(/\x1b\[[0-9;]*m/g, "");

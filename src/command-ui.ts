@@ -38,6 +38,14 @@ function usesStockDialogs(ctx: ExtensionCommandContext): boolean {
 }
 
 /**
+ * Inline pickers and editors wait for the user's answer. Saying so lets
+ * terminals that show pi's program status report it as blocked, not working.
+ */
+function waitingFor(title: string) {
+  return { blocked: { kind: "question" as const, message: title } };
+}
+
+/**
  * Multi-line text goes through pi's stock editor dialog in every mode: it
  * follows the user's keybindings and offers the external editor. pi has no
  * prefilled single-line input dialog, so the TUI keeps a small custom one.
@@ -89,7 +97,7 @@ export async function editText(
         tui.requestRender();
       },
     };
-  });
+  }, waitingFor(title));
 }
 
 export async function pickFromList(
@@ -130,5 +138,5 @@ export async function pickFromList(
         tui.requestRender();
       },
     };
-  });
+  }, waitingFor(title));
 }
