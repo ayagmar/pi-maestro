@@ -4270,6 +4270,69 @@ test("active drive shutdown persists owner-scoped internal error for reload deli
   );
 });
 
+test("shutdown stops a drive from launching its queued tasks", async () => {
+  await withBoard(
+    (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, maxParallel: 1 });
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      for (const name of ["first", "queued"]) {
+        createTask(board, {
+          title: `Work ${name}`,
+          brief: `change ${name}`,
+          tier: "standard",
+          writePaths: [`src/${name}.ts`],
+          successCriteria: ["work completes"],
+        });
+      }
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const launched: string[] = [];
+      const runtime = loadMaestro(cwd, (options) => {
+        launched.push(options.runId);
+        let finish!: (outcome: RunOutcome) => void;
+        const outcome = new Promise<RunOutcome>((resolve) => {
+          finish = resolve;
+        });
+        return {
+          attempt: executorAttempt(),
+          outcome,
+          steer: () => {},
+          followUp: () => {},
+          abort: () =>
+            finish({
+              exitCode: 1,
+              usage: { input: 0, output: 0, cost: 0, turns: 1 },
+              finalReport: "",
+              touchedFiles: [],
+              aborted: true,
+            }),
+        };
+      });
+      startDriveWithoutWaiting(
+        runtime.tools.get("maestro_drive"),
+        "start",
+        { action: "start" },
+        runtime.ctx
+      );
+      await waitFor(() => launched.length === 1, "first executor did not launch");
+
+      runtime.events.get("session_shutdown")?.({ reason: "reload" }, runtime.ctx);
+      await waitFor(
+        () => findTask(loadBoard(cwd), "T1")?.dispatchClaim === undefined,
+        "aborted executor did not settle"
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      assert.deepEqual(launched, ["T1-attempt-1"]);
+      const queued = findTask(loadBoard(cwd), "T2");
+      assert.equal(queued?.status, "todo");
+      assert.equal(queued?.attempts.length, 0);
+      assert.equal(queued?.dispatchClaim, undefined);
+    }
+  );
+});
+
 test("asynchronous drive setup failure cannot leave a silent stopped state", async () => {
   await withBoard(
     (cwd) => {

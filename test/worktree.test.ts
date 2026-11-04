@@ -22,7 +22,7 @@ import { manuallyApproveTask } from "../src/manual-approval.js";
 import { MAX_INJECTED_CONTEXT_LENGTH } from "../src/prompts.js";
 import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/types.js";
-import { reviewTask, type StartExecutor } from "../src/workflow.js";
+import { driveBoard, reviewTask, type StartExecutor } from "../src/workflow.js";
 import {
   assertWorktreeRegistered,
   captureChangeBaseline,
@@ -1168,5 +1168,47 @@ test("pushCurrentBranch backs up the current branch and never throws", () => {
   } finally {
     rmSync(cwd, { recursive: true, force: true });
     rmSync(remote, { recursive: true, force: true });
+  }
+});
+
+test("a drive retired during post-integration verification does not promote the candidate", async () => {
+  const cwd = repository();
+  try {
+    const task = readyTask(cwd);
+    const originalHead = git(cwd, "rev-parse", "HEAD");
+    const ref = createWorktree(cwd, task.id, 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "executor change\n");
+    task.verificationProfile = "slow";
+    task.attempts.push(attempt(ref.worktreePath, ref.branch));
+    const board = { ...loadBoard(cwd), tasks: [task] };
+    const verificationProfiles = {
+      slow: { command: `${process.execPath} -e "setTimeout(() => {}, 3000)"`, timeoutSeconds: 10 },
+    };
+    const config = { ...loadConfig(cwd), autoCommit: false, verificationProfiles };
+    recordExecutionFingerprint(cwd, board, task, config);
+    saveBoard(cwd, board);
+    const retirement = new AbortController();
+
+    const drive = driveBoard({
+      cwd,
+      config,
+      resolvedTiers: new Map([
+        ["standard", { thinking: "low" }],
+        ["review", { thinking: "high" }],
+      ]),
+      startExecutor: approvingReviewer([]),
+      onUpdate: () => {},
+      trackRun: () => () => {},
+      retired: retirement.signal,
+    });
+    // The runtime shuts down (reload) while trusted verification is running.
+    setTimeout(() => retirement.abort(), 500);
+    await drive;
+
+    assert.equal(git(cwd, "rev-parse", "HEAD"), originalHead);
+    assert.notEqual(findTask(loadBoard(cwd), task.id)?.status, "approved");
+    assertNoPreparedIntegration(cwd);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
 });

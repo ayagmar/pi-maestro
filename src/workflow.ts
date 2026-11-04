@@ -116,6 +116,11 @@ export function preflightTaskTiers(
   return resolvedTiers;
 }
 
+const RETIRED_STOP: DriveStopReason = {
+  code: "aborted",
+  message: "drive stopped because the extension runtime shut down",
+};
+
 export async function driveBoard(options: {
   cwd: string;
   config: MaestroConfig;
@@ -144,6 +149,12 @@ export async function driveBoard(options: {
   humanRetryOwnerSession?: string;
   /** Cheap-first-pass review ladder, resolved from config by the caller. */
   reviewEscalation?: ReviewEscalation;
+  /**
+   * Aborted when the owning runtime shuts down. Unlike `signal`, it does not
+   * cancel running executors (detached ones are meant to survive); it stops
+   * queued launches, cancels verification, and refuses promotion.
+   */
+  retired?: AbortSignal;
 }): Promise<DriveSummary> {
   const {
     cwd,
@@ -160,6 +171,7 @@ export async function driveBoard(options: {
     humanRetryTaskId,
     humanRetryExpectedRiskToken,
     humanRetryOwnerSession,
+    retired,
   } = options;
   // Task ids are matched case-insensitively (see findTask), so normalize both
   // the requested ids and each task id before comparing. Comparing raw ids here
@@ -251,6 +263,7 @@ export async function driveBoard(options: {
       if (signal?.aborted) {
         return finish({ code: "aborted", message: "drive aborted by user" });
       }
+      if (retired?.aborted) return finish(RETIRED_STOP);
 
       const board = loadBoard(cwd);
       const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
@@ -476,7 +489,10 @@ export async function driveBoard(options: {
         const executeResults = await mapWithConcurrencyLimit(
           dispatchable,
           config.maxParallel,
-          (task) => {
+          async (task) => {
+            // A queued task must not be claimed after shutdown: its launch
+            // would run against a stale runtime and fail untouched work.
+            if (retired?.aborted) return snapshot(task, RETIRED_STOP.message);
             const tier = resolvedTiers.get(task.tier);
             if (!tier) throw new Error(`No resolved tier for "${task.tier}"`);
             const executeOptions: Parameters<typeof executeTask>[0] = {
@@ -486,7 +502,8 @@ export async function driveBoard(options: {
               tier,
               config,
               startExecutor: boundedStartExecutor,
-              canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+              canStartExecutor: () =>
+                rawLaunches < config.maxTotalLaunchesPerRun && !retired?.aborted,
               humanRetry: task.id.toUpperCase() === humanRetryId,
               onUpdate,
               trackRun,
@@ -527,6 +544,7 @@ export async function driveBoard(options: {
       if (signal?.aborted) {
         return finish({ code: "aborted", message: "drive aborted by user" });
       }
+      if (retired?.aborted) return finish(RETIRED_STOP);
       if (shouldPause?.()) {
         return finish({
           code: "paused",
@@ -627,13 +645,15 @@ export async function driveBoard(options: {
         const reviewResults = await mapWithConcurrencyLimit(
           reviewDispatchable,
           config.maxParallel,
-          (task) => {
+          async (task) => {
+            if (retired?.aborted) return snapshot(task, RETIRED_STOP.message);
             const reviewOptions: Parameters<typeof reviewTask>[0] = {
               cwd,
               task,
               tier: reviewTier,
               startExecutor: boundedStartExecutor,
-              canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+              canStartExecutor: () =>
+                rawLaunches < config.maxTotalLaunchesPerRun && !retired?.aborted,
               autoCommit: config.autoCommit,
               reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
               maxReviewerLaunches: config.maxReviewerLaunches ?? 4,
@@ -660,7 +680,11 @@ export async function driveBoard(options: {
             if (options.reviewEscalation) reviewOptions.reviewEscalation = options.reviewEscalation;
             if (options.onRetentionWarning)
               reviewOptions.onRetentionWarning = options.onRetentionWarning;
-            if (signal) reviewOptions.signal = signal;
+            // Reviewers and verification are attached children, so shutdown
+            // cancels them along with any promotion still pending.
+            const reviewSignal =
+              signal && retired ? AbortSignal.any([signal, retired]) : (signal ?? retired);
+            if (reviewSignal) reviewOptions.signal = reviewSignal;
             return reviewTask(reviewOptions);
           }
         );
@@ -671,6 +695,7 @@ export async function driveBoard(options: {
       if (signal?.aborted) {
         return finish({ code: "aborted", message: "drive aborted by user" });
       }
+      if (retired?.aborted) return finish(RETIRED_STOP);
 
       const freshTasks = selectedTasks();
       const freshBoardAfterRound = loadBoard(cwd);

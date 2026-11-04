@@ -135,6 +135,7 @@ export function registerMaestroLifecycle(
     // lists; honor it only for projects the user told pi to trust.
     setProjectConfigTrust(ctx.isProjectTrusted());
     state.start();
+    driveController.activate();
     dependencies.closeLivePane();
     dependencies.clearSuppressedPane();
     driveController.clearLiveRuns();
