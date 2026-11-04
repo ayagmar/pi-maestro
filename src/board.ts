@@ -37,6 +37,7 @@ import {
 import {
   type Attempt,
   type Board,
+  type DispatchClaim,
   type FailureKind,
   type MaestroConfig,
   type PlanTaskEdits,
@@ -1285,10 +1286,12 @@ export function claimTaskDispatch(
   let attemptIndex: number | undefined;
   const task = updateTask(cwd, taskId, (fresh, board) => {
     if (fresh.dispatchClaim) {
-      const expiresAt =
-        fresh.dispatchClaim.expiresAt ?? fresh.dispatchClaim.claimedAt + DISPATCH_LEASE_MS;
-      if (expiresAt > Date.now()) {
+      if (!dispatchClaimExpired(fresh.dispatchClaim)) {
         note = `${fresh.id} dispatch declined; held by ${fresh.dispatchClaim.id} (${fresh.dispatchClaim.kind})`;
+        return;
+      }
+      if (dispatchOwnerIsLive(fresh.dispatchClaim)) {
+        note = `${fresh.id} dispatch declined; held by ${fresh.dispatchClaim.id} (${fresh.dispatchClaim.kind}) in live process ${fresh.dispatchClaim.ownerPid}`;
         return;
       }
       const detachedAttempt = fresh.attempts.at(-1);
@@ -1304,7 +1307,15 @@ export function claimTaskDispatch(
       return;
     }
     const now = Date.now();
-    fresh.dispatchClaim = { id: claimId, kind, claimedAt: now, expiresAt: now + DISPATCH_LEASE_MS };
+    const ownerStart = processStartId(process.pid);
+    fresh.dispatchClaim = {
+      id: claimId,
+      kind,
+      claimedAt: now,
+      expiresAt: now + DISPATCH_LEASE_MS,
+      ownerPid: process.pid,
+      ...(ownerStart ? { ownerStart } : {}),
+    };
     delete fresh.dispatchNote;
     claimed = true;
     if (kind === "execute") {
@@ -1365,6 +1376,34 @@ export function renewTaskDispatch(
   return renewed;
 }
 
+function dispatchClaimExpired(claim: DispatchClaim): boolean {
+  return (claim.expiresAt ?? claim.claimedAt + DISPATCH_LEASE_MS) <= Date.now();
+}
+
+/**
+ * A lease is a crash detector, not an ownership transfer. A synchronous Git
+ * command or hook can block the owner's event loop past the lease, so another
+ * session must not take over work whose owning process is still alive. Claims
+ * held by this process belong to the current or a previous (reloaded)
+ * extension instance; those keep plain lease semantics.
+ */
+function dispatchOwnerIsLive(claim: DispatchClaim): boolean {
+  const pid = claim.ownerPid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+    return false;
+  }
+  if (typeof claim.ownerStart === "string") {
+    const current = processStartId(pid);
+    if (current !== undefined && current !== claim.ownerStart) return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 function recoverExpiredClaim(task: Task): void {
   const claim = task.dispatchClaim;
   if (!claim) return;
@@ -1406,16 +1445,16 @@ export function sweepDispatchState(cwd: string): string[] {
           ).length;
     const claimExpired =
       stale.dispatchClaim !== undefined &&
-      (stale.dispatchClaim.expiresAt ?? stale.dispatchClaim.claimedAt + DISPATCH_LEASE_MS) <=
-        Date.now();
+      dispatchClaimExpired(stale.dispatchClaim) &&
+      !dispatchOwnerIsLive(stale.dispatchClaim);
     if (!claimExpired && orphanCount === 0) continue;
     updateTask(cwd, stale.id, (task) => {
       const parts: string[] = [];
-      const claimExpired =
-        task.dispatchClaim !== undefined &&
-        (task.dispatchClaim.expiresAt ?? task.dispatchClaim.claimedAt + DISPATCH_LEASE_MS) <=
-          Date.now();
-      if (task.dispatchClaim && claimExpired) {
+      if (
+        task.dispatchClaim &&
+        dispatchClaimExpired(task.dispatchClaim) &&
+        !dispatchOwnerIsLive(task.dispatchClaim)
+      ) {
         parts.push(`cleared stale ${task.dispatchClaim.kind} claim ${task.dispatchClaim.id}`);
         recoverExpiredClaim(task);
       }

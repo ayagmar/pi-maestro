@@ -150,6 +150,10 @@ export interface DispatchClaim {
   claimedAt: number;
   /** Deadline after which crash recovery may atomically reclaim the dispatch. */
   expiresAt?: number;
+  /** Owning pi process; another session never reclaims a claim whose owner is still alive. */
+  ownerPid?: number;
+  /** Kernel start identity of `ownerPid`, so a recycled PID does not keep the claim alive. */
+  ownerStart?: string;
 }
 
 export interface ReviewFinding {

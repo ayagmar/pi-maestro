@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -20,6 +21,7 @@ import {
   archiveBoard,
   attemptFailureCause,
   blockedReason,
+  claimTaskDispatch,
   consumeQuarantineNotice,
   createTask,
   filterTasksByGroup,
@@ -58,6 +60,7 @@ import {
 } from "../src/board.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { parseDiscoveryOutput } from "../src/discovery.js";
+import { processStartId } from "../src/runner.js";
 import { type Attempt, type Board, type TaskStatus } from "../src/types.js";
 
 function emptyBoard(): Board {
@@ -1657,6 +1660,57 @@ test("a contender that observed a stale board lock cannot remove the lock acquir
       []
     );
   } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("an expired dispatch lease held by another live process is not reclaimed until that process exits", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-live-owner-claim-"));
+  // Another pi session whose event loop was blocked past the lease by a slow Git hook.
+  const owner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+    stdio: "ignore",
+  });
+  try {
+    assert.ok(owner.pid);
+    const board = emptyBoard();
+    const task = createTask(board, { title: "Busy", brief: "work", tier: "standard" });
+    forceStatus(task, "running");
+    const ownerStart = processStartId(owner.pid);
+    task.dispatchClaim = {
+      id: "live-owner-claim",
+      kind: "execute",
+      claimedAt: Date.now() - 120_000,
+      expiresAt: Date.now() - 60_000,
+      ownerPid: owner.pid,
+      ...(ownerStart ? { ownerStart } : {}),
+    };
+    task.attempts.push({
+      index: 1,
+      logFile: join(cwd, "attempt.jsonl"),
+      thinking: "low",
+      startedAt: Date.now() - 120_000,
+      usage: { input: 0, output: 0, cost: 0, turns: 3 },
+      touchedFiles: [],
+    });
+    saveBoard(cwd, board);
+
+    assert.deepEqual(sweepDispatchState(cwd), []);
+    const declined = claimTaskDispatch(cwd, task.id, "execute", () => true);
+    assert.equal(declined?.claimed, false);
+    let kept = findTask(loadBoard(cwd), task.id);
+    assert.equal(kept?.status, "running");
+    assert.equal(kept?.dispatchClaim?.id, "live-owner-claim");
+    assert.equal(kept?.attempts[0]?.endedAt, undefined);
+
+    const exited = new Promise((resolve) => owner.once("exit", resolve));
+    owner.kill("SIGKILL");
+    await exited;
+    assert.equal(sweepDispatchState(cwd).length, 1);
+    kept = findTask(loadBoard(cwd), task.id);
+    assert.equal(kept?.status, "failed");
+    assert.equal(kept?.dispatchClaim, undefined);
+  } finally {
+    owner.kill("SIGKILL");
     rmSync(cwd, { recursive: true, force: true });
   }
 });
