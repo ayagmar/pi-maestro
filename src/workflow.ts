@@ -62,6 +62,9 @@ import {
   type WorktreeRef,
 } from "./worktree.js";
 
+/** A launch share of the run budget below this counts as no budget left. */
+const MIN_LAUNCH_ALLOWANCE_USD = 0.01;
+
 export { executeTask } from "./workflow-execution.js";
 export {
   type AttemptSnapshot,
@@ -213,13 +216,77 @@ export async function driveBoard(options: {
   const liveMaxRunCost = options.liveMaxRunCost ?? ((): number => config.maxRunCost);
   let budgetNearlyConsumedWarned = false;
   const humanRetryId = humanRetryTaskId?.trim().toUpperCase();
+  // One spend ledger per drive. A board snapshot of the remaining budget,
+  // handed to every concurrent executor and to each reviewer of a panel, let
+  // each of them spend the same remainder. Every raw launch instead gets a
+  // fair share of the budget left after real settled spend and the caps
+  // already reserved by launches still running.
+  let settledLaunchSpend = 0;
+  let reservedLaunchCaps = 0;
+  let inflightLaunches = 0;
+  let launchSlots = 1;
+  const launchBudgetShare = (): number | undefined => {
+    const maxRunCost = liveMaxRunCost();
+    if (maxRunCost <= 0) return undefined;
+    const spent = Math.max(
+      boardUsage(loadBoard(cwd).tasks).cost,
+      boardCostAtStart + settledLaunchSpend
+    );
+    const available = Math.max(0, maxRunCost - spent - reservedLaunchCaps);
+    return available / Math.max(1, launchSlots - inflightLaunches);
+  };
+  const budgetAllowsLaunch = (): boolean => {
+    const share = launchBudgetShare();
+    return share === undefined || share >= MIN_LAUNCH_ALLOWANCE_USD;
+  };
   const boundedStartExecutor: StartExecutor = (startOptions) => {
     if (rawLaunches >= config.maxTotalLaunchesPerRun) {
       throw new Error(`workflow raw launch limit reached (${config.maxTotalLaunchesPerRun})`);
     }
+    const share = launchBudgetShare();
+    if (share === undefined) {
+      rawLaunches += 1;
+      return startExecutor(startOptions);
+    }
+    if (share < MIN_LAUNCH_ALLOWANCE_USD) {
+      throw new Error(
+        "remaining run budget is already spent or reserved by running launches; raise it with /maestro config budget <usd>"
+      );
+    }
+    const requested =
+      startOptions.maxCost !== undefined && startOptions.maxCost > 0
+        ? startOptions.maxCost
+        : undefined;
+    const launchOptions =
+      requested === undefined || share < requested
+        ? { ...startOptions, maxCost: share, maxCostSource: "remaining run budget (maxRunCost)" }
+        : startOptions;
     rawLaunches += 1;
-    return startExecutor(startOptions);
+    const handle = startExecutor(launchOptions);
+    const reserved = launchOptions.maxCost ?? share;
+    reservedLaunchCaps += reserved;
+    inflightLaunches += 1;
+    const settle = (spent: number) => {
+      reservedLaunchCaps -= reserved;
+      inflightLaunches -= 1;
+      settledLaunchSpend += spent;
+    };
+    return {
+      ...handle,
+      outcome: handle.outcome.then(
+        (outcome) => {
+          settle(outcome.usage.cost);
+          return outcome;
+        },
+        (error: unknown) => {
+          settle(handle.attempt.usage.cost);
+          throw error;
+        }
+      ),
+    };
   };
+  const canStartExecutor = () =>
+    rawLaunches < config.maxTotalLaunchesPerRun && budgetAllowsLaunch();
 
   const selectedTasks = (): Task[] => loadBoard(cwd).tasks.filter(isSelected);
   // Task totals in the summary are board-lifetime; the per-drive delta keeps
@@ -473,6 +540,7 @@ export async function driveBoard(options: {
         // must stop at the budget, not sail past it: the run cap is otherwise
         // only enforced between rounds, after the money is spent.
         const executeBudget = remainingRunBudget(loadBoard(cwd).tasks, liveMaxRunCost());
+        launchSlots = Math.min(config.maxParallel, dispatchable.length);
         const executeResults = await mapWithConcurrencyLimit(
           dispatchable,
           config.maxParallel,
@@ -486,7 +554,7 @@ export async function driveBoard(options: {
               tier,
               config,
               startExecutor: boundedStartExecutor,
-              canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+              canStartExecutor,
               humanRetry: task.id.toUpperCase() === humanRetryId,
               onUpdate,
               trackRun,
@@ -624,6 +692,7 @@ export async function driveBoard(options: {
           (reviewCostCap.usd <= 0 || reviewBudget < reviewCostCap.usd)
             ? "remaining run budget (maxRunCost)"
             : reviewCapSource;
+        launchSlots = Math.min(config.maxParallel, reviewDispatchable.length);
         const reviewResults = await mapWithConcurrencyLimit(
           reviewDispatchable,
           config.maxParallel,
@@ -633,7 +702,7 @@ export async function driveBoard(options: {
               task,
               tier: reviewTier,
               startExecutor: boundedStartExecutor,
-              canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+              canStartExecutor,
               autoCommit: config.autoCommit,
               reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
               maxReviewerLaunches: config.maxReviewerLaunches ?? 4,

@@ -5506,6 +5506,94 @@ test("launch cost caps combine the per-role cap with the remaining run budget", 
   }
 });
 
+test("concurrent executors and panel reviewers draw disjoint shares of one run budget", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-budget-ledger-"));
+  try {
+    // Three parallel executors with $3 left: each spends its whole cap.
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    for (const title of ["One", "Two", "Three"]) {
+      createTask(board, { title, brief: "Do the work", tier: "standard" });
+    }
+    saveBoard(cwd, board);
+    const executorCaps: number[] = [];
+    await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async () => undefined,
+      cwd,
+      config: { ...config, maxParallel: 3, maxCostPerTask: 5, maxRunCost: 3 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        const cap = options.maxCost ?? Number.POSITIVE_INFINITY;
+        if (!options.runId.includes("-review-")) executorCaps.push(cap);
+        return {
+          attempt: attempt(),
+          outcome: new Promise<RunOutcome>((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  exitCode: 1,
+                  usage: { input: 1, output: 1, cost: cap, turns: 1 },
+                  finalReport: "",
+                  touchedFiles: [],
+                  aborted: false,
+                  errorMessage: `cost cap exceeded: $${cap} > $${cap} (remaining run budget (maxRunCost))`,
+                  failureCause: "cost_cap",
+                }),
+              10
+            )
+          ),
+          steer: () => {},
+          followUp: () => {},
+          abort: () => {},
+        };
+      },
+      onUpdate,
+      trackRun,
+    });
+    assert.equal(executorCaps.length, 3);
+    assert.ok(
+      executorCaps.reduce((sum, cap) => sum + cap, 0) <= 3 + 1e-9,
+      `parallel caps ${executorCaps.join(", ")} exceed the $3 run budget`
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+
+  const panelCwd = mkdtempSync(join(tmpdir(), "maestro-budget-ledger-panel-"));
+  try {
+    // A confirm panel runs its reviewers one after another; the second must
+    // see what the first actually spent.
+    reviewPolicyTask(panelCwd, "confirm");
+    const reviewerCaps: Array<number | undefined> = [];
+    const reviewers = queuedReviewerReports([
+      { usage: { input: 1, output: 1, cost: 1.5, turns: 1 } },
+      { usage: { input: 1, output: 1, cost: 1.5, turns: 1 } },
+    ]);
+    await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async () => undefined,
+      cwd: panelCwd,
+      config: { ...config, maxRunCost: 3 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        reviewerCaps.push(options.maxCost);
+        return reviewers(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+    assert.deepEqual(reviewerCaps.slice(0, 2), [3, 1.5]);
+  } finally {
+    rmSync(panelCwd, { recursive: true, force: true });
+  }
+});
+
 test("a rejection retry resumes the prior attempt's session with a findings-only prompt", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-retry-resume-"));
   try {
