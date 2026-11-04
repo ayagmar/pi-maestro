@@ -41,8 +41,8 @@ import {
   type TierConfig,
 } from "./types.js";
 import { driveBoard, preflightTaskTiers } from "./workflow.js";
-import { type ReviewEscalation } from "./workflow-review-policy.js";
 import { type DriveSummary, formatDriveSummary } from "./workflow-policy.js";
+import { type ReviewEscalation } from "./workflow-review-policy.js";
 import { type WorkflowRun } from "./workflow-runtime.js";
 
 export interface LiveRun {

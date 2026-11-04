@@ -1,6 +1,6 @@
 import { updateTask } from "./board.js";
 import { taskUsage, truncateText } from "./format.js";
-import { formatResetClock, quotaReopensAt, type QuotaStatusResolver } from "./provider-quota.js";
+import { formatResetClock, type QuotaStatusResolver, quotaReopensAt } from "./provider-quota.js";
 import { redactFailureMessage } from "./runner.js";
 import { type MaestroConfig, type Task } from "./types.js";
 import {

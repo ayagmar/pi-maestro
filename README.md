@@ -2,7 +2,7 @@
 
 [![MIT licensed](https://img.shields.io/badge/license-MIT-d9a520.svg)](LICENSE)
 [![Node.js 22 or 24](https://img.shields.io/badge/node-22%20%7C%2024-2f6f44.svg)](package.json)
-[![Pi 1.0+](https://img.shields.io/badge/pi-1.0%2B-243746.svg)](https://github.com/earendil-works/pi-mono)
+[![Pi 1.5+](https://img.shields.io/badge/pi-1.5%2B-243746.svg)](https://github.com/earendil-works/pi-mono)
 
 Orchestrator/executor workflows for [pi](https://github.com/earendil-works/pi-mono).
 
@@ -67,7 +67,7 @@ loads only in projects you have trusted in pi.
 
 ## Compatibility and support
 
-Pi Maestro requires pi 1.0 or newer (tested against `1.0.x`) and Node.js 22.19 or newer. Earlier pi releases are not supported. Pi supplies its own packages to extensions at runtime, so the Pi peer dependencies accept any version (`*`) as Pi's package guidelines require; the tested Pi line above is the supported one. Only the latest published Pi Maestro release receives fixes.
+Pi Maestro requires pi 1.5 or newer (tested against `1.5.x`) and Node.js 22.19 or newer. Earlier pi releases are not supported. Pi supplies its own packages to extensions at runtime, so the Pi peer dependencies accept any version (`*`) as Pi's package guidelines require; the tested Pi line above is the supported one. Only the latest published Pi Maestro release receives fixes.
 
 Report bugs through [GitHub Issues](https://github.com/ayagmar/pi-maestro/issues). Report suspected vulnerabilities privately using the repository Security tab; see [SECURITY.md](SECURITY.md).
 

@@ -4,7 +4,7 @@
 
 Only the latest published release receives security fixes. Upgrade to the newest patch before reporting or reproducing an issue.
 
-Pi Maestro requires pi 1.0 or newer and Node.js 22.19 or newer. It is tested against the `1.0.x` line of `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, and `@earendil-works/pi-tui`. Reports against earlier pi releases are out of scope.
+Pi Maestro requires pi 1.5 or newer and Node.js 22.19 or newer. It is tested against the `1.5.x` line of `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, and `@earendil-works/pi-tui`. Reports against earlier pi releases are out of scope.
 
 ## Reporting a vulnerability
 

@@ -7,8 +7,8 @@ import {
   codexQuotaStatus,
   createQuotaStatusResolver,
   formatResetClock,
-  quotaReopensAt,
   type QuotaResolverDependencies,
+  quotaReopensAt,
 } from "../src/provider-quota.js";
 
 const NOW = Date.UTC(2026, 8, 6, 16, 30, 0);

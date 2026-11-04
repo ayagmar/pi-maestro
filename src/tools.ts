@@ -31,8 +31,8 @@ import {
 } from "./drive-controller.js";
 import { markDecisionAwaitingHuman, ScaleConfirmationRequiredError } from "./drive-preflight.js";
 import { formatDrivePulse, startDriveHeartbeat } from "./drive-summary.js";
-import { requestHandoffCommand } from "./handoff.js";
 import { STATUS_GLYPHS, STATUS_LABELS, taskLine, truncateText } from "./format.js";
+import { requestHandoffCommand } from "./handoff.js";
 import { assertPlanTaskLimit, preflightWorkflow, taskShapeWarnings } from "./preflight.js";
 import { canonicalTaskIds } from "./session-control.js";
 import { formatStatusProjection, projectStatus } from "./status.js";

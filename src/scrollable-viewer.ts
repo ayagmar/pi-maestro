@@ -1,5 +1,5 @@
 import { type ExtensionCommandContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Key, Markdown, matchesKey, type TUI, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, Markdown, matchesKey, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 
 const TEXT_PAGE_SIZE = 18;
 const SCROLL_STEP = 10;

@@ -24,6 +24,7 @@ import { type ExecutorHandle, type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board, type MaestroConfig, type Task } from "../src/types.js";
 import { reviewTask, type StartExecutor } from "../src/workflow.js";
 import {
+  assertWorktreeRegistered,
   captureChangeBaseline,
   captureDiff,
   changedPaths,
@@ -32,7 +33,6 @@ import {
   commitAll,
   committedPathsSinceFork,
   createWorktree,
-  assertWorktreeRegistered,
   inspectManagedWorktrees,
   mergeWorktree,
   parkInactiveWorktrees,

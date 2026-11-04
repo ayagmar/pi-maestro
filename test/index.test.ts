@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { type ExtensionAPI, initTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { KeybindingsManager, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { taskFingerprint } from "../src/artifact-policy.js";
 import {
   archiveBoard,
@@ -42,6 +42,9 @@ import { type RunOutcome } from "../src/runner.js";
 import { type Attempt, type Board } from "../src/types.js";
 import { type StartExecutor } from "../src/workflow.js";
 import { executorAttempt, settlingExecutor, waitFor } from "./helpers/executors.js";
+
+/** The keybindings pi injects into `ctx.ui.custom` components. */
+const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
 
 const owner = "/sessions/orchestrator.jsonl";
 const executor = "/sessions/executor.jsonl";
@@ -311,7 +314,7 @@ function loadMaestro(
             editorFocused = true;
             resolve(value);
           };
-          component = factory(tui, fakeTheme, {}, done);
+          component = factory(tui, fakeTheme, keybindings, done);
           component.focused = true;
           editorFocused = false;
           overlay = {
@@ -379,7 +382,7 @@ function loadMaestro(
           component.dispose?.();
           resolve(value);
         };
-        component = factory(tui, fakeTheme, {}, done);
+        component = factory(tui, fakeTheme, keybindings, done);
         step.before?.();
         step.inspect?.(component.render?.(100) ?? []);
         for (const key of step.keys) component.handleInput(key);

@@ -22,8 +22,8 @@ import { DISCOVERY_TOOLS, discoveryInstructions } from "./discovery.js";
 import {
   accountPromptContext,
   buildCostCapResumePrompt,
-  buildProviderInterruptionResumePrompt,
   buildExecutorPrompt,
+  buildProviderInterruptionResumePrompt,
   buildRetryFollowUpPrompt,
 } from "./prompts.js";
 import {
@@ -46,9 +46,9 @@ import { claimDispatchLifecycle } from "./workflow-dispatch.js";
 import {
   consumesMaxAttempt,
   costCapLifted,
-  resumesInterruptedSession,
   endedUnretryably,
   lastReport,
+  resumesInterruptedSession,
   snapshot,
   type TaskSnapshot,
 } from "./workflow-policy.js";
