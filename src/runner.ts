@@ -28,8 +28,11 @@ import {
   boundedBytes,
   boundedText,
   compactEvent,
+  eventShapeError,
   extractText,
   HANDLED_PROMPT_ERROR,
+  MAX_MALFORMED_DIAGNOSTICS,
+  malformedEventDiagnostic,
   promptHandledWithoutRun,
   WATCHDOG_STEER_MESSAGES,
 } from "./detached-policy.mjs";
@@ -826,15 +829,26 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       options.signal?.removeEventListener("abort", abort);
     };
 
+    let malformedRecords = 0;
     const processLine = (line: string) => {
       if (!line.trim()) return;
-      let event: JsonEvent;
+      let parsed: unknown;
       try {
-        event = JSON.parse(line) as JsonEvent;
+        parsed = JSON.parse(line);
       } catch {
         if (options.logEvents !== "compact") persistLogLine(line);
         return;
       }
+      const shapeError = eventShapeError(parsed);
+      if (shapeError) {
+        if (options.logEvents !== "compact") persistLogLine(line);
+        malformedRecords += 1;
+        if (malformedRecords <= MAX_MALFORMED_DIAGNOSTICS) {
+          persistLogLine(malformedEventDiagnostic(shapeError));
+        }
+        return;
+      }
+      const event = parsed as JsonEvent;
       if (options.logEvents !== "compact" || compactEvent(event)) persistLogLine(line);
       lastEventAt = Date.now();
 
@@ -1382,11 +1396,15 @@ function monitorDetachedExecutor(
     try {
       for (const line of readAppendedLines(attempt.logFile, tail)) {
         if (!line.trim()) continue;
+        let parsed: unknown;
         try {
-          processEvent(JSON.parse(line) as JsonEvent);
+          parsed = JSON.parse(line);
         } catch {
           // Ignore malformed records; partial records stay buffered for the next poll.
+          continue;
         }
+        // The supervisor already recorded a diagnostic for a malformed record.
+        if (eventShapeError(parsed) === undefined) processEvent(parsed as JsonEvent);
       }
     } catch {
       // The launcher may not have created its event file yet.

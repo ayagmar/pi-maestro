@@ -19,8 +19,11 @@ import {
   boundedText,
   compactEvent,
   EXIT_SETTLE_DRAIN_MS,
+  eventShapeError,
   extractText,
   HANDLED_PROMPT_ERROR,
+  MAX_MALFORMED_DIAGNOSTICS,
+  malformedEventDiagnostic,
   promptHandledWithoutRun,
   WATCHDOG_STEER_MESSAGES,
 } from "./detached-policy.mjs";
@@ -271,28 +274,33 @@ const processEvent = (event) => {
   evaluateWatchdog();
 };
 
+const persistLine = (line) => {
+  try {
+    appendBoundedLine(line);
+  } catch (error) {
+    failPersistence("event log", error);
+  }
+};
+let malformedRecords = 0;
 const processStdoutLine = (line) => {
   if (!line.trim()) return;
   let event;
   try {
     event = JSON.parse(line);
   } catch {
-    if (config.logEvents !== "compact") {
-      try {
-        appendBoundedLine(line);
-      } catch (error) {
-        failPersistence("event log", error);
-      }
+    if (config.logEvents !== "compact") persistLine(line);
+    return;
+  }
+  const shapeError = eventShapeError(event);
+  if (shapeError) {
+    if (config.logEvents !== "compact") persistLine(line);
+    malformedRecords += 1;
+    if (malformedRecords <= MAX_MALFORMED_DIAGNOSTICS) {
+      persistLine(malformedEventDiagnostic(shapeError));
     }
     return;
   }
-  if (config.logEvents !== "compact" || compactEvent(event)) {
-    try {
-      appendBoundedLine(line);
-    } catch (error) {
-      failPersistence("event log", error);
-    }
-  }
+  if (config.logEvents !== "compact" || compactEvent(event)) persistLine(line);
   processEvent(event);
 };
 child.stdout.on("data", (chunk) => {
@@ -348,6 +356,7 @@ const pollControl = () => {
         // One corrupt control record must not terminate the whole run.
         continue;
       }
+      if (typeof command !== "object" || command === null || Array.isArray(command)) continue;
       const cause = command.maestroCause;
       delete command.maestroCause;
       if (command.type === "abort") {

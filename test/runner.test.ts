@@ -1061,6 +1061,61 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
+for (const detached of [false, true]) {
+  test(`${detached ? "detached" : "attached"} transport turns malformed event records into bounded diagnostics`, async () => {
+    if (detached && process.platform === "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "maestro-malformed-events-"));
+    const fakePi = join(root, "fake-pi.mjs");
+    writeFileSync(
+      fakePi,
+      `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    if (JSON.parse(line).type !== "prompt") continue;
+    for (const record of ["null", "[]", '"x"', "{}"]) console.log(record);
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { cost: { total: "5" } }, content: [{ type: "text", text: "poisoned" }] } }));
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [null] } }));
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cost: { total: 0.02 } }, content: [{ type: "text", text: "valid report" }] } }));
+    console.log(JSON.stringify({ type: "agent_settled" }));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+    );
+    const originalScript = process.argv[1];
+    if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+    process.argv[1] = fakePi;
+    try {
+      const run = startExecutor({
+        stateDir: root,
+        runId: "malformed",
+        cwd: root,
+        prompt: "run",
+        tier: { thinking: "low" },
+        logEvents: "compact",
+        detached,
+      });
+      const outcome = await run.outcome;
+      assert.equal(outcome.exitCode, 0);
+      assert.equal(outcome.finalReport, "valid report");
+      assert.deepEqual(outcome.usage, { input: 1, output: 1, cost: 0.02, turns: 1 });
+      const diagnostics = readFileSync(run.attempt.logFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string; reason?: string })
+        .filter((event) => event.type === "maestro_malformed_event");
+      assert.equal(diagnostics.length, 3);
+      assert.ok(diagnostics.every((event) => typeof event.reason === "string"));
+    } finally {
+      process.argv[1] = originalScript;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("a corrupt detached control record is skipped without ending the run", async () => {
   if (process.platform === "win32") return;
   const root = mkdtempSync(join(tmpdir(), "maestro-detached-control-corrupt-"));

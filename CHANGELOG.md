@@ -17,6 +17,7 @@
 
 ### Robustness
 
+- An executor stdout line that is valid JSON but not an RPC event (`null`, `[]`, a string, or an event whose usage, content or error has the wrong type) is skipped and recorded as at most three `maestro_malformed_event` diagnostics per launch. Previously `null` threw inside the supervising pi process on the attached transport and killed the detached supervisor without a terminal record, and a string cost was concatenated into the spend total.
 - A session is resumed only inside the checkout it recorded. pi refuses to resume a session whose working directory is gone, and an interrupted attempt whose clean worktree had been pruned made the next launch fail with `Stored session working directory does not exist` instead of doing the work. When the retained checkout is unavailable the attempt now starts fresh.
 
 - When `maestro_drive start` is refused because the human-only workflow scale confirmation is required, the open decision is marked `awaitingHuman`: reminder nudges stop, the tool tells the orchestrator nothing further is needed, and the status line reads `awaiting your /maestro drive confirmation`. Previously the reminders kept nagging about a step the orchestrator could not take, and a real supervisor "resolved" the decision with a handoff just to silence them. The reminder text now says explicitly that `intervene` is never a silencer.
