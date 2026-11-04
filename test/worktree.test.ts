@@ -38,6 +38,8 @@ import {
   parkInactiveWorktrees,
   parkWorktree,
   prepareMainTreeIntegration,
+  prepareWorktreeIntegration,
+  promotePreparedIntegration,
   promotePreparedMainTreeIntegration,
   pushCurrentBranch,
   removePreparedIntegration,
@@ -1209,6 +1211,42 @@ test("a drive retired during post-integration verification does not promote the 
     assert.notEqual(findTask(loadBoard(cwd), task.id)?.status, "approved");
     assertNoPreparedIntegration(cwd);
   } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("promotion refuses to land on a different branch than the one prepared against", () => {
+  const cwd = repository();
+  const prepared: Array<ReturnType<typeof prepareMainTreeIntegration>> = [];
+  try {
+    const original = git(cwd, "symbolic-ref", "HEAD");
+    const baseHead = git(cwd, "rev-parse", "HEAD");
+
+    // Main-tree promotion: the user switches to another branch at the same
+    // commit while verification runs; files and index are unchanged.
+    writeFileSync(join(cwd, "shared.txt"), "reviewed\n");
+    const candidateTree = snapshotArtifact(cwd, ["shared.txt"]);
+    assert.ok(candidateTree);
+    const mainTree = prepareMainTreeIntegration(cwd, candidateTree, "fix: reviewed snapshot");
+    prepared.push(mainTree);
+    git(cwd, "checkout", "-q", "-b", "elsewhere");
+    assert.equal(promotePreparedMainTreeIntegration(cwd, mainTree, ["shared.txt"]).ok, false);
+    assert.equal(git(cwd, "rev-parse", "elsewhere"), baseHead);
+    assert.equal(git(cwd, "rev-parse", original), baseHead);
+
+    // Worktree promotion: the user detaches HEAD at the same commit.
+    git(cwd, "checkout", "-q", "--", "shared.txt");
+    git(cwd, "checkout", "-q", original.replace("refs/heads/", ""));
+    const ref = createWorktree(cwd, "T1", 1);
+    writeFileSync(join(ref.worktreePath, "shared.txt"), "task change\n");
+    const merged = prepareWorktreeIntegration(cwd, ref, "feat: task change");
+    prepared.push(merged);
+    git(cwd, "checkout", "-q", "--detach");
+    assert.equal(promotePreparedIntegration(cwd, merged).ok, false);
+    assert.equal(git(cwd, "rev-parse", "HEAD"), baseHead);
+    assert.equal(git(cwd, "rev-parse", original), baseHead);
+  } finally {
+    for (const entry of prepared) removePreparedIntegration(cwd, entry);
     rmSync(cwd, { recursive: true, force: true });
   }
 });

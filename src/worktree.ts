@@ -30,6 +30,8 @@ export interface MergeResult {
 
 export interface MainTreeIdentity {
   head: string;
+  /** What HEAD points at: a branch ref such as `refs/heads/main`, or `HEAD` when detached. */
+  headRef: string;
   indexTree: string;
   porcelainHash: string;
   worktreeTree: string;
@@ -461,10 +463,26 @@ function captureMainTreeIdentity(cwd: string, env?: NodeJS.ProcessEnv): MainTree
   if (!worktreeTree) throw new Error("could not snapshot the main checkout worktree");
   return {
     head: headCommit(cwd),
+    headRef: headTarget(cwd),
     indexTree: git(cwd, ["write-tree"], env),
     porcelainHash: createHash("sha256").update(porcelain).digest("hex"),
     worktreeTree,
   };
+}
+
+/**
+ * The branch a promotion must land on. Two branches (or a detached HEAD) at
+ * the same commit with the same files are otherwise indistinguishable, so a
+ * branch switch during verification would move the work to the wrong branch.
+ */
+function headTarget(cwd: string): string {
+  try {
+    return git(cwd, ["symbolic-ref", "-q", "HEAD"]);
+  } catch (error) {
+    // Exit status 1 with -q means HEAD is detached; anything else is a real failure.
+    if ((error as { status?: number }).status === 1) return "HEAD";
+    throw error;
+  }
 }
 
 export function mainTreeIdentity(cwd: string): MainTreeIdentity {
@@ -709,7 +727,11 @@ export function promotePreparedMainTreeIntegration(
     }
 
     git(mainCwd, ["reset", "--quiet", prepared.integratedCommit, "--", ...paths], preparedIndexEnv);
-    git(mainCwd, ["update-ref", "HEAD", prepared.integratedCommit, prepared.baseCommit]);
+    // Compare-and-swap the captured target, never whatever HEAD points at now.
+    const target = prepared.mainIdentity.headRef;
+    const updateTarget =
+      target === "HEAD" ? ["update-ref", "--no-deref", "HEAD"] : ["update-ref", target];
+    git(mainCwd, [...updateTarget, prepared.integratedCommit, prepared.baseCommit]);
     try {
       renameSync(indexLock, indexFile);
       ownsIndexLock = false;
@@ -717,7 +739,7 @@ export function promotePreparedMainTreeIntegration(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       try {
-        git(mainCwd, ["update-ref", "HEAD", prepared.baseCommit, prepared.integratedCommit]);
+        git(mainCwd, [...updateTarget, prepared.baseCommit, prepared.integratedCommit]);
         return { ok: false, error: `${message}; HEAD was restored` };
       } catch (rollbackError) {
         return {
