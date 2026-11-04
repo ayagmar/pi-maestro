@@ -49,7 +49,7 @@ import {
   omnibusRejection,
   providerBlockedTask,
 } from "../src/workflow-stop-policy.js";
-import { createWorktree } from "../src/worktree.js";
+import { createWorktree, snapshotArtifact } from "../src/worktree.js";
 
 const tier = { thinking: "low" };
 const config: MaestroConfig = {
@@ -294,9 +294,10 @@ test("re-review of an already approved panel costs one confirmer, not a fresh pa
   try {
     const task = reviewPolicyTask(cwd, "confirm");
     // The panel already approved this attempt; only a mechanical retry remains.
-    updateTask(cwd, task.id, (fresh) => {
+    updateTask(cwd, task.id, (fresh, board) => {
       const current = fresh.attempts.at(-1);
       if (!current) return;
+      const reviewed = taskFingerprint(board, fresh, loadConfig(cwd))?.fingerprint;
       current.reviewLaunches = [1, 2].map((reviewerIndex) => ({
         id: `${fresh.id}-review-1-${reviewerIndex}-${reviewerIndex}`,
         reviewerIndex,
@@ -304,6 +305,7 @@ test("re-review of an already approved panel costs one confirmer, not a fresh pa
         startedAt: Date.now(),
         usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
         verdict: "approve" as const,
+        ...(reviewed ? { taskFingerprint: reviewed } : {}),
       }));
     });
     const refreshed = findTask(loadBoard(cwd), task.id);
@@ -5974,6 +5976,73 @@ test("an executor whose dispatch claim was replaced does not overwrite the repla
     assert.equal(persisted?.attempts.at(-1)?.finalReport, undefined);
     assert.equal(persisted?.status, "running");
     assert.equal(persisted?.dispatchClaim?.id, "replacement");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("panel approvals of an earlier candidate do not shrink the panel for a changed candidate", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-confirm-changed-candidate-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" });
+  try {
+    git("init", "-q");
+    git("config", "user.email", "test@local");
+    git("config", "user.name", "Test");
+    writeFileSync(join(cwd, ".gitignore"), ".pi/\n");
+    writeFileSync(join(cwd, "a.txt"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    const { board, task } = boardWithTask("ready_for_review");
+    task.reviewPolicy = "confirm";
+    task.writePaths = ["a.txt"];
+    task.successCriteria = ["observable result"];
+    task.attempts.push({ ...attempt("executor completed the work"), touchedFiles: ["a.txt"] });
+    recordExecutionFingerprint(cwd, board, task);
+    saveBoard(cwd, board);
+
+    // A two-reviewer panel approved candidate A; integration then failed.
+    writeFileSync(join(cwd, "a.txt"), "candidate A\n");
+    const candidateA = snapshotArtifact(cwd, ["a.txt"]);
+    const reviewed = taskFingerprint(loadBoard(cwd), task, loadConfig(cwd))?.fingerprint;
+    assert.ok(candidateA && reviewed);
+    updateTask(cwd, task.id, (fresh) => {
+      const current = fresh.attempts.at(-1);
+      if (!current) return;
+      current.reviewLaunches = [1, 2].map((reviewerIndex) => ({
+        id: `${fresh.id}-review-1-${reviewerIndex}-${reviewerIndex}`,
+        reviewerIndex,
+        role: "confirmer" as const,
+        startedAt: Date.now(),
+        usage: { input: 1, output: 1, cost: 0.01, turns: 1 },
+        verdict: "approve" as const,
+        candidateTree: candidateA,
+        taskFingerprint: reviewed,
+      }));
+    });
+    // The operator fixes the candidate in place: candidate B, same attempt.
+    writeFileSync(join(cwd, "a.txt"), "candidate B\n");
+    const refreshed = findTask(loadBoard(cwd), task.id);
+    assert.ok(refreshed);
+
+    let reviewerLaunches = 0;
+    const result = await reviewTask({
+      cwd,
+      task: refreshed,
+      tier,
+      reviewRequiredApprovals: 2,
+      maxReviewerLaunches: 4,
+      startExecutor: (options) => {
+        reviewerLaunches += 1;
+        return queuedReviewerReports([{}])(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.status, "approved", result.note);
+    assert.equal(reviewerLaunches, 2, "candidate B needs its own two approvals");
+    const persisted = findTask(loadBoard(cwd), task.id)?.attempts.at(-1);
+    assert.equal(persisted?.reviewConvergence?.requiredApprovals, 2);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

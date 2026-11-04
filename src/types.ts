@@ -44,6 +44,10 @@ export interface ReviewLaunch {
   /** Why this launch ran on the review tier instead of the cheap first pass. */
   escalationReason?: string;
   criterionEvidence?: Array<{ criterion: number; passed: boolean; evidence: string }>;
+  /** Git tree of the candidate this reviewer judged. */
+  candidateTree?: string;
+  /** Task fingerprint (contract, execution, verification, dependencies) this reviewer judged. */
+  taskFingerprint?: string;
   model?: string;
   provider?: string;
   sessionFile?: string;
