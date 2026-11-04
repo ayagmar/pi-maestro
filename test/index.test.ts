@@ -216,6 +216,11 @@ interface CommandCtx {
 }
 
 type EventHandler = (event: unknown, ctx: CommandCtx) => unknown;
+type EntryRenderer = (
+  entry: { customType: string; data?: unknown },
+  options: { expanded: boolean },
+  theme: Theme
+) => { render(width: number): string[] } | undefined;
 
 interface TuiStep {
   keys: string[];
@@ -262,6 +267,8 @@ function loadMaestro(
   events: Map<string, EventHandler>;
   userMessages: Array<{ message: string; options?: { deliverAs?: string } }>;
   messages: Array<{ message: unknown; options?: { triggerTurn?: boolean; deliverAs?: string } }>;
+  entries: Array<{ customType: string; data?: unknown }>;
+  entryRenderers: Map<string, EntryRenderer>;
   shortcuts: Map<string, (ctx: CommandCtx) => unknown>;
   overlays: TestOverlay[];
   widgets: unknown[];
@@ -270,6 +277,8 @@ function loadMaestro(
   isEditorFocused(): boolean;
 } {
   const notices: string[] = [];
+  const entries: Array<{ customType: string; data?: unknown }> = [];
+  const entryRenderers = new Map<string, EntryRenderer>();
   const shortcuts = new Map<string, (ctx: CommandCtx) => unknown>();
   const overlays: TestOverlay[] = [];
   const widgets: unknown[] = [];
@@ -424,6 +433,12 @@ function loadMaestro(
       shortcuts.set(key, options.handler);
     },
     registerMessageRenderer: () => {},
+    registerEntryRenderer: (customType: string, renderer: EntryRenderer) => {
+      entryRenderers.set(customType, renderer);
+    },
+    appendEntry: (customType: string, data?: unknown) => {
+      entries.push({ customType, data });
+    },
     setSessionName: () => {},
     setLabel: () => {},
     sendMessage: (message: unknown, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
@@ -453,6 +468,8 @@ function loadMaestro(
     events,
     userMessages,
     messages,
+    entries,
+    entryRenderers,
     shortcuts,
     overlays,
     widgets,
@@ -3792,6 +3809,38 @@ test("a plan result shows the approval gate the model was told about", async () 
         assert.match(text, /T1 Gated work/);
         assert.match(text, /Plan awaits user approval via \/maestro plan/);
       }
+    }
+  );
+});
+
+test("a report opened from the dashboard is a session entry the model never sees", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, { title: "Reported", brief: "work", tier: "standard" });
+      const attempt = executorAttempt();
+      attempt.endedAt = 2;
+      attempt.finalReport = "Implemented the reported change";
+      task.attempts.push(attempt);
+      task.status = "ready_for_review";
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const runtime = loadMaestro(cwd);
+      const completion = runtime.command.handler("board", runtime.ctx);
+      const dashboard = runtime.overlays[0];
+      assert.ok(dashboard);
+      for (const key of ["\x1b[C", "p"]) dashboard.component.handleInput(key);
+      await completion;
+
+      assert.deepEqual(runtime.messages, []);
+      const [entry] = runtime.entries;
+      assert.ok(entry, "the report must be appended as a custom entry");
+      const renderer = runtime.entryRenderers.get(entry.customType);
+      assert.ok(renderer, "the report entry type must have a renderer");
+      const text = renderer(entry, { expanded: false }, fakeTheme)?.render(100).join("\n") ?? "";
+      assert.match(text, /T1 Reported — last report/);
+      assert.match(text, /Implemented the reported change/);
     }
   );
 });
