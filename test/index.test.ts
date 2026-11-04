@@ -3762,6 +3762,40 @@ test("drive results render the completed summary even with task details present"
   );
 });
 
+test("a plan result shows the approval gate the model was told about", async () => {
+  await withBoard(
+    (cwd) => saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, planGate: true }),
+    async (cwd) => {
+      const { ctx, tools } = loadMaestro(cwd);
+      const plan = tools.get("maestro_plan");
+      assert.ok(plan?.renderResult);
+      const result = await plan.execute(
+        "gated-plan",
+        {
+          tasks: [
+            {
+              title: "Gated work",
+              brief: "Implement gated work",
+              tier: "standard",
+              writePaths: ["src/gated.ts"],
+              successCriteria: ["Gated work passes"],
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        ctx
+      );
+      assert.match(result.content[0]?.text ?? "", /Plan awaits user approval/);
+      for (const expanded of [false, true]) {
+        const text = plan.renderResult(result, { expanded }, fakeTheme).render(200).join("\n");
+        assert.match(text, /T1 Gated work/);
+        assert.match(text, /Plan awaits user approval via \/maestro plan/);
+      }
+    }
+  );
+});
+
 function setupResetBoard(cwd: string): string {
   const board: Board = { version: 1, nextTaskNumber: 1, goal: "keep this goal", tasks: [] };
   const task = createTask(board, { title: "Reset me", brief: "work", tier: "standard" });
