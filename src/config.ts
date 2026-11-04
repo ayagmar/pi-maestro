@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
@@ -554,7 +554,17 @@ function configFileIdentity(file: string): string | undefined {
   }
 }
 
-function readConfigFile(file: string): Partial<MaestroConfig> | undefined {
+/**
+ * Move an unreadable config aside, but only if it is still the file that was
+ * read: a concurrent save may have replaced it with a valid one meanwhile.
+ */
+function quarantineIfUnchanged(file: string, identity: string, kind: string): boolean {
+  if (configFileIdentity(file) !== identity) return false;
+  renameSync(file, `${file}.${kind}-${Date.now()}`);
+  return true;
+}
+
+function readConfigFile(file: string, retry = true): Partial<MaestroConfig> | undefined {
   const identity = configFileIdentity(file);
   if (identity === undefined) {
     configCache.delete(file);
@@ -570,7 +580,9 @@ function readConfigFile(file: string): Partial<MaestroConfig> | undefined {
     const error = validateConfig(parsed);
     if (error) {
       configCache.delete(file);
-      renameSync(file, `${file}.invalid-${Date.now()}`);
+      if (!quarantineIfUnchanged(file, identity, "invalid") && retry) {
+        return readConfigFile(file, false);
+      }
       return undefined;
     }
     if (configFileIdentity(file) === identity) {
@@ -582,7 +594,9 @@ function readConfigFile(file: string): Partial<MaestroConfig> | undefined {
     return parsed as Partial<MaestroConfig>;
   } catch {
     configCache.delete(file);
-    renameSync(file, `${file}.corrupt-${Date.now()}`);
+    if (!quarantineIfUnchanged(file, identity, "corrupt") && retry) {
+      return readConfigFile(file, false);
+    }
     return undefined;
   }
 }
@@ -634,7 +648,26 @@ export function saveConfig(scope: ConfigScope, cwd: string, config: MaestroConfi
   if (error) throw new Error(`Cannot save invalid effective maestro configuration: ${error}`);
   const file = configFile(scope, cwd);
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+  // Write a sibling and rename it into place: a reader never sees a
+  // half-written file (and quarantines it as corrupt), and a failed write
+  // leaves the previous settings intact.
+  const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  let mode: number | undefined;
+  try {
+    mode = statSync(file).mode & 0o777;
+  } catch {
+    // A first save uses the default mode.
+  }
+  try {
+    writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, {
+      encoding: "utf-8",
+      ...(mode === undefined ? {} : { mode }),
+    });
+    renameSync(tmp, file);
+  } catch (error) {
+    rmSync(tmp, { force: true });
+    throw error;
+  }
 }
 
 export function describeTier(tier: TierConfig): string {
