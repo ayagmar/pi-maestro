@@ -53,6 +53,7 @@
 - The brief and report text viewer pages by wrapped terminal rows and sizes its page to the terminal, like the Markdown viewer. A long single paragraph previously rendered taller than the screen and the scroll keys could not move through it.
 - `/maestro doctor` checks approved tasks for stale approval proof, as the dashboard and inspect already did. It previously reported a board with stale approved work as `complete`.
 - A task rerun after a review disagreement or reviewer failure shows its live phase (execution, review). The dashboard and status line previously stayed on `recovery` for the whole retry because an earlier attempt had failed; that attempt is still listed as recovery evidence.
+- In print (`-p`) and JSON mode, Maestro's command output and notices go to stderr, so `/maestro config show`, `costs`, `insights`, `timeline` and the other reports are no longer silently dropped. JSON stdout stays clean and RPC still receives notifications.
 
 ### Added
 

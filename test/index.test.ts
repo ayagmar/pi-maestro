@@ -3854,6 +3854,34 @@ test("replay preserves work added while the archive picker is open", async () =>
   );
 });
 
+/** Runs `run` and returns what it wrote through console.error (pi's headless stderr). */
+async function captureStderr(run: () => Promise<void>): Promise<string[]> {
+  const written: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    written.push(args.map(String).join(" "));
+  };
+  try {
+    await run();
+  } finally {
+    console.error = original;
+  }
+  return written;
+}
+
+test("headless inspection commands write their report to stderr", async () => {
+  await withBoard(setupResetBoard, async (cwd) => {
+    const runtime = loadMaestro(cwd, undefined, owner, undefined, {
+      mode: "print",
+      hasUI: false,
+    });
+    const config = await captureStderr(() => runtime.command.handler("config show", runtime.ctx));
+    assert.match(config.join("\n"), /maxReviewerLaunches: 4/);
+    const costs = await captureStderr(() => runtime.command.handler("costs", runtime.ctx));
+    assert.match(costs.join("\n"), /run: 1 attempt/);
+  });
+});
+
 test("headless reset refuses without an explicit confirmation token", async () => {
   await withBoard(setupResetBoard, async (cwd) => {
     const runtime = loadMaestro(cwd, undefined, owner, undefined, {
@@ -3866,9 +3894,9 @@ test("headless reset refuses without an explicit confirmation token", async () =
     const logBefore = readFileSync(logFile);
     const archivesBefore = listArchivedBoards(cwd);
 
-    await runtime.command.handler("reset", runtime.ctx);
+    const stderr = await captureStderr(() => runtime.command.handler("reset", runtime.ctx));
 
-    assert.match(runtime.notices.at(-1) ?? "", /reset confirm/i);
+    assert.match(stderr.at(-1) ?? "", /reset confirm/i);
     assert.deepEqual(readFileSync(boardFile), boardBefore);
     assert.deepEqual(readFileSync(logFile), logBefore);
     assert.deepEqual(listArchivedBoards(cwd), archivesBefore);
@@ -3884,7 +3912,7 @@ test("headless reset confirm archives the exact revision and clears the board", 
     });
     const before = loadBoard(cwd);
 
-    await runtime.command.handler("reset confirm", runtime.ctx);
+    const stderr = await captureStderr(() => runtime.command.handler("reset confirm", runtime.ctx));
 
     const board = loadBoard(cwd);
     assert.equal(board.tasks.length, 0);
@@ -3895,7 +3923,7 @@ test("headless reset confirm archives the exact revision and clears the board", 
     assert.equal(archived.revision, before.revision);
     assert.equal(archived.goal, before.goal);
     assert.deepEqual(archived.tasks, before.tasks);
-    assert.match(runtime.notices.at(-1) ?? "", /Board reset\. Archived at/);
+    assert.match(stderr.at(-1) ?? "", /Board reset\. Archived at/);
   });
 });
 
@@ -3979,9 +4007,11 @@ test("live-run protection takes precedence over reset confirmation", async () =>
 
       await runtime.command.handler("drive", runtime.ctx);
       await executorStarted;
-      await runtime.command.handler("reset confirm", runtime.ctx);
+      const stderr = await captureStderr(() =>
+        runtime.command.handler("reset confirm", runtime.ctx)
+      );
 
-      assert.match(runtime.notices.at(-1) ?? "", /still running.*before resetting/i);
+      assert.match(stderr.at(-1) ?? "", /still running.*before resetting/i);
       assert.equal(loadBoard(cwd).tasks.length, 1);
       assert.equal(listArchivedBoards(cwd).length, 0);
       await runtime.command.handler("abort", runtime.ctx);
