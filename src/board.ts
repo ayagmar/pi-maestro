@@ -938,6 +938,7 @@ function isAttempt(value: unknown): boolean {
     (value.detached === undefined || typeof value.detached === "boolean") &&
     (value.pid === undefined || (isNumber(value.pid) && Number.isInteger(value.pid))) &&
     (value.processStartId === undefined || typeof value.processStartId === "string") &&
+    (value.transportId === undefined || typeof value.transportId === "string") &&
     (value.controlFile === undefined || typeof value.controlFile === "string") &&
     (value.exitFile === undefined || typeof value.exitFile === "string") &&
     (value.stderrFile === undefined || typeof value.stderrFile === "string") &&

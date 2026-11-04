@@ -569,7 +569,7 @@ export function touchedFile(event: JsonEvent, cwd: string): string | undefined {
  * executor mid-run via stdin commands. Its transcript is nested beneath the
  * owner session's directory so usage scanners retain it without
  * adding the child to Pi's ordinary /resume list. Every stdout event is also
- * mirrored to stateDir/logs/<runId>.jsonl for live tailing.
+ * mirrored to stateDir/logs/<runId>.<transportId>.jsonl for live tailing.
  */
 export interface StartExecutorOptions {
   stateDir: string;
@@ -627,7 +627,12 @@ export interface StartExecutorOptions {
 }
 
 export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
-  const logFile = join(options.stateDir, LOGS_DIR, `${options.runId}.jsonl`);
+  // Run ids repeat (task numbering restarts on a new board, retries reuse
+  // review launch numbers), so every raw launch gets its own transport
+  // namespace: a reused name let a new launch read an earlier launch's
+  // terminal record, or an old supervisor write into the new launch's files.
+  const transportId = randomUUID().slice(0, 8);
+  const logFile = join(options.stateDir, LOGS_DIR, `${options.runId}.${transportId}.jsonl`);
   ensurePrivateDirectory(options.stateDir);
   ensurePrivateDirectory(dirname(logFile));
 
@@ -680,6 +685,7 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
 
   const invocation = piInvocation(args);
   if (options.detached && process.platform !== "win32") {
+    attempt.transportId = transportId;
     return startDetachedExecutor(options, attempt, invocation);
   }
   const grouped = process.platform !== "win32";
@@ -1158,6 +1164,7 @@ function startDetachedExecutor(
       eventFile: attempt.logFile,
       stderrFile,
       exitFile,
+      transportId: attempt.transportId,
       logEvents: options.logEvents ?? "compact",
       maxLogBytes: options.maxLogBytes ?? 0,
       maxStderrBytes: 16_000,
@@ -1255,6 +1262,8 @@ function readAppendedLines(file: string, state: IncrementalLogState): string[] {
 interface DetachedTerminalState extends Partial<RunOutcome> {
   version: 1;
   sessionFile?: string;
+  /** The launch that wrote this record; absent from supervisors predating it. */
+  transportId?: string;
 }
 
 function monitorDetachedExecutor(
@@ -1417,13 +1426,20 @@ function monitorDetachedExecutor(
       // polling still settles the attempt.
       return undefined;
     }
+    let value: DetachedTerminalState | undefined;
     try {
-      const value = JSON.parse(text) as DetachedTerminalState;
-      return value.version === 1 && typeof value.exitCode === "number" ? value : undefined;
+      const parsed = JSON.parse(text) as DetachedTerminalState;
+      value = parsed?.version === 1 && typeof parsed.exitCode === "number" ? parsed : undefined;
     } catch {
       const code = Number.parseInt(text, 10);
-      return Number.isFinite(code) ? { version: 1, exitCode: code } : undefined;
+      value = Number.isFinite(code) ? { version: 1, exitCode: code } : undefined;
     }
+    // A launch that knows its identity accepts only its own record; legacy
+    // attempts predate the identity and keep reading their stored file.
+    if (attempt.transportId !== undefined && value?.transportId !== attempt.transportId) {
+      return undefined;
+    }
+    return value;
   };
   const poll = () => {
     try {

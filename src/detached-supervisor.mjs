@@ -408,6 +408,7 @@ const finish = (code, signal, viaDrain = false) => {
   }
   const terminal = {
     version: 1,
+    ...(config.transportId ? { transportId: config.transportId } : {}),
     exitCode,
     usage: state.usage,
     finalReport: state.finalReport,

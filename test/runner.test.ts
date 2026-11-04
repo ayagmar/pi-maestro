@@ -903,13 +903,13 @@ test("detached event and stderr write failures still persist terminal failures",
     const root = mkdtempSync(join(tmpdir(), `maestro-detached-${surface}-write-`));
     const runId = `${surface}-write`;
     const fakePi = join(root, "fake-pi.mjs");
-    const target =
-      surface === "event"
-        ? join(root, "logs", `${runId}.jsonl`)
-        : join(root, "logs", `${runId}.jsonl.stderr`);
+    const suffix = surface === "event" ? ".jsonl" : ".jsonl.stderr";
     writeFileSync(
       fakePi,
-      `import { mkdirSync, rmSync } from "node:fs";
+      `import { mkdirSync, readdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
+const logs = ${JSON.stringify(join(root, "logs"))};
+const target = join(logs, readdirSync(logs).find((name) => name.startsWith(${JSON.stringify(`${runId}.`)}) && name.endsWith(${JSON.stringify(suffix)}) && name.length === ${runId.length + 1 + 8 + suffix.length}));
 let buffer = "";
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -918,8 +918,8 @@ process.stdin.on("data", (chunk) => {
   for (const line of lines) {
     const command = JSON.parse(line);
     if (command.type === "prompt") {
-      rmSync(${JSON.stringify(target)}, { force: true });
-      mkdirSync(${JSON.stringify(target)});
+      rmSync(target, { force: true });
+      mkdirSync(target);
       ${surface === "event" ? 'console.log(JSON.stringify({ type: "agent_start" }));' : 'process.stderr.write("cannot persist stderr");'}
     }
     if (command.type === "abort") process.exit(1);
@@ -1240,6 +1240,69 @@ process.stdin.on("data", (chunk) => {
         // Already reaped.
       }
     }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a reused detached run id never settles from an earlier launch's terminal record", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "maestro-detached-reuse-"));
+  const fakePi = join(root, "fake-pi.mjs");
+  // Reports its prompt only after a delay, so a monitor that accepts a stale
+  // terminal record settles before the real launch does.
+  writeFileSync(
+    fakePi,
+    `let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type !== "prompt") continue;
+    setTimeout(() => {
+      console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: command.message }] } }));
+      console.log(JSON.stringify({ type: "agent_settled" }));
+    }, 300);
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+  );
+  const originalScript = process.argv[1];
+  if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+  process.argv[1] = fakePi;
+  const launch = (prompt: string) =>
+    startExecutor({
+      stateDir: root,
+      // A new board restarts task numbering, so T1-attempt-1 recurs.
+      runId: "T1-attempt-1",
+      cwd: root,
+      prompt,
+      tier: { thinking: "low" },
+      detached: true,
+    });
+  try {
+    const first = launch("first board");
+    assert.equal((await first.outcome).finalReport, "first board");
+    const second = launch("second board");
+    assert.equal((await second.outcome).finalReport, "second board");
+    for (const file of ["logFile", "controlFile", "exitFile", "stderrFile"] as const) {
+      assert.notEqual(first.attempt[file], second.attempt[file]);
+    }
+    assert.match(readFileSync(first.attempt.logFile, "utf8"), /first board/);
+
+    // A reattached monitor ignores a terminal record from another launch and
+    // settles by liveness instead.
+    const foreign = reattachDetachedExecutor(
+      { ...structuredClone(second.attempt), exitFile: first.attempt.exitFile ?? "" },
+      root
+    );
+    const recovered = await foreign.outcome;
+    assert.equal(recovered.exitCode, 1);
+    assert.notEqual(recovered.finalReport, "first board");
+  } finally {
+    process.argv[1] = originalScript;
     rmSync(root, { recursive: true, force: true });
   }
 });
