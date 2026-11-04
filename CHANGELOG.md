@@ -51,6 +51,7 @@
 - The model picker in `/maestro config` follows remapped selection keys (`tui.select.*`) and its key hints show them. It previously reacted only to the arrow keys, Enter and Escape, so a remapped confirm key typed into the search field instead of picking the model.
 - The single-line editor for task titles, dependencies and commit messages takes focus, so pi places the terminal cursor and the input-method (IME) candidate window at the insertion point.
 - The brief and report text viewer pages by wrapped terminal rows and sizes its page to the terminal, like the Markdown viewer. A long single paragraph previously rendered taller than the screen and the scroll keys could not move through it.
+- `/maestro doctor` checks approved tasks for stale approval proof, as the dashboard and inspect already did. It previously reported a board with stale approved work as `complete`.
 
 ### Added
 
