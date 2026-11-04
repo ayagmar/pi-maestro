@@ -119,8 +119,9 @@ export async function handleStartCommand(
     goal,
     buildOrchestratorBriefing(
       goal,
-      describeTiersForPlanning(loadConfig(ctx.cwd)),
-      loadConfig(ctx.cwd).planGate
+      describeTiersForPlanning(config),
+      config.planGate,
+      config.useWorktrees || config.detachedExecutors === true
     )
   );
 }

@@ -436,7 +436,9 @@ export function buildSupervisorBriefing(
 export function buildOrchestratorBriefing(
   goal: string,
   tierGuidance: string,
-  planGate = false
+  planGate = false,
+  /** `useWorktrees` or detached executors: every launch runs in its own checkout. */
+  alwaysIsolated = false
 ): string {
   return [
     "Role: orchestrator. Plan the work, delegate execution to fresh-context executors, keep your own context clean. You do not implement tasks yourself.",
@@ -460,7 +462,9 @@ export function buildOrchestratorBriefing(
       "## Decision rules",
       "- `maestro_drive` action=start already reports the settled outcome; only use inspect when you did not start the drive yourself or the user asks for current state. Never read `.pi/maestro` internals, agent session/log files, or write ad-hoc inspection scripts: those transcripts are megabytes of replayed tool output and reading one destroys your context and prompt cache. Recorded sessions are for the human dashboard, not for you.",
       "- Reference file paths in briefs; paste file contents only when an executor cannot discover them itself.",
-      "- Executors run in isolated checkouts built from committed content. If a brief points at a file, make sure it is committed; uncommitted files do not exist for the executor.",
+      alwaysIsolated
+        ? "- Executors run in isolated checkouts built from committed content. If a brief points at a file, make sure it is committed; uncommitted files do not exist for the executor."
+        : "- A task that runs alone works in this checkout and sees uncommitted files. Tasks that run in parallel are isolated in checkouts built from committed content, where uncommitted files do not exist: commit any file such a brief points at.",
       "- At a provider block: switch to a configured fallback then `/maestro resume`, or ask the user if it is a quota/cost decision. Never blindly retry the same blocked provider.",
       "- At a review escalation or a task that fails twice with the same root cause: `maestro_update` its brief or tier, split it with `maestro_plan`, or cancel it. Never raise the project `maxAttempts` to force another attempt.",
       "- `maestro_update` rejects contract edits to an in-flight attempt (running or ready_for_review) unless `invalidateInFlight: true` explicitly accepts the recorded cost and discarded work; prefer letting it settle.",

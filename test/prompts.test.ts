@@ -422,6 +422,14 @@ test("orchestrator briefing embeds the goal, tier guidance, and workflow tools",
   assert.match(briefing, /in-flight attempt.*settle/);
   assert.match(briefing, /After changing a brief\/tier, call `maestro_drive` action=start/);
 
+  // With the default shared checkout a lone task sees uncommitted files.
+  assert.doesNotMatch(briefing, /Executors run in isolated checkouts/);
+  assert.match(briefing, /runs alone works in this checkout/);
+  assert.match(
+    buildOrchestratorBriefing("Goal", tierGuidance, false, true),
+    /Executors run in isolated checkouts built from committed content/
+  );
+
   const gated = buildOrchestratorBriefing("Goal", tierGuidance, true);
   assert.match(gated, /planGate is enabled/);
   assert.match(gated, /\/maestro plan/);

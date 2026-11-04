@@ -55,6 +55,7 @@
 - A task rerun after a review disagreement or reviewer failure shows its live phase (execution, review). The dashboard and status line previously stayed on `recovery` for the whole retry because an earlier attempt had failed; that attempt is still listed as recovery evidence.
 - In print (`-p`) and JSON mode, Maestro's command output and notices go to stderr, so `/maestro config show`, `costs`, `insights`, `timeline` and the other reports are no longer silently dropped. JSON stdout stays clean and RPC still receives notifications.
 - The orchestrator and supervisor briefings tell the model to call `maestro_drive` action=start after correcting a brief or tier. They told it to use `/maestro resume`, which reports "No paused autonomous drive to resume" after a reviewer failure or blocked stop, since those leave no paused drive.
+- The orchestrator briefing says executors work in isolated, committed-content checkouts only when they are: always with `useWorktrees` or detached executors, otherwise only for tasks that run in parallel. With the default settings it previously claimed every executor was isolated, so the model asked for commits a lone task did not need.
 
 ### Added
 
