@@ -46,6 +46,7 @@
 ### Fixes
 
 - The workflow preflight and cost forecast count the extra reviewer launches a cheap-first review ladder (`reviewCheapModel`) can make when a cheap reviewer is escalated, and price the cheap model at its own rates. A plan could previously skip the scale confirmation while able to launch more reviewers than it reported. Changing `reviewCheapModel` or `reviewEscalation` now asks for confirmation again.
+- Tasks created by `/maestro recipe run` and by applying discovery output inherit the project's `reviewPolicy` when they state none, as `maestro_plan` tasks already did. They previously ran with a single reviewer even when the project asked for `confirm` or `find-and-refute`.
 
 ### Added
 

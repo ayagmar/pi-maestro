@@ -79,7 +79,8 @@ export async function handleRecipeCommand(
         parseRecipeInput(trailing),
         Object.keys(config.tiers),
         Object.keys(config.verificationProfiles ?? {}),
-        config.maxPlanTasks
+        config.maxPlanTasks,
+        config.reviewPolicy
       );
       notify(
         ctx,
@@ -125,7 +126,8 @@ export async function handleRecipeCommand(
         parseRecipeInput(trailing),
         Object.keys(config.tiers),
         Object.keys(config.verificationProfiles ?? {}),
-        config.maxPlanTasks
+        config.maxPlanTasks,
+        config.reviewPolicy
       );
       const current = loadBoard(ctx.cwd);
       if (current.tasks.length > 0) {

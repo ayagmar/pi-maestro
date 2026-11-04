@@ -1406,6 +1406,7 @@ test("plan diff and recipe preview are bounded read-only inspections", async () 
 test("recipe commands list, inspect, run through the plan gate, save, and remove", async () => {
   await withBoard(
     (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, reviewPolicy: "confirm" });
       saveStoredRecipe(
         "project",
         cwd,
@@ -1438,6 +1439,8 @@ test("recipe commands list, inspect, run through the plan gate, save, and remove
       assert.match(notices.join("\n"), /safe \[project\]|\[project\].*safe/s);
       assert.equal(loadBoard(cwd).planPending, true);
       assert.equal(loadBoard(cwd).tasks[0]?.title, "Build core");
+      // The recipe states no policy, so the task takes the project's.
+      assert.equal(loadBoard(cwd).tasks[0]?.reviewPolicy, "confirm");
 
       await command.handler("recipe save snapshot project", ctx);
       assert.match(notices.at(-1) ?? "", /Saved project recipe/);
@@ -1540,6 +1543,7 @@ test("maestro_plan creates only explicit scoped no-file discovery tasks", async 
 test("discovery append requires confirmation and forces the plan gate", async () => {
   await withBoard(
     (cwd) => {
+      saveConfig("project", cwd, { ...DEFAULT_CONFIG, autoCommit: false, reviewPolicy: "confirm" });
       const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
       addDiscoveryTask(board);
       saveBoard(cwd, board);
@@ -1552,6 +1556,7 @@ test("discovery append requires confirmation and forces the plan gate", async ()
       assert.equal(board.planPending, true);
       assert.equal(board.tasks.length, 2);
       assert.equal(board.tasks[1]?.title, "Generated task");
+      assert.equal(board.tasks[1]?.reviewPolicy, "confirm");
       assert.match(notices[0] ?? "", /Discovery preview.*generated/s);
       assert.match(notices.at(-1) ?? "", /plan approval is required/);
       assert.equal(listArchivedBoards(cwd).length, 0);

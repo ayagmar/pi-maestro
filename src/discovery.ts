@@ -148,6 +148,7 @@ export function buildDiscoveryBoard(
   const created: Task[] = [];
   for (const item of output.items) {
     const verificationProfile = item.verificationProfile ?? config.defaultVerificationProfile;
+    const reviewPolicy = item.reviewPolicy ?? config.reviewPolicy;
     created.push(
       createTask(candidate, {
         title: item.title,
@@ -157,7 +158,7 @@ export function buildDiscoveryBoard(
         writePaths: item.writePaths,
         successCriteria: item.successCriteria,
         ...(verificationProfile ? { verificationProfile } : {}),
-        ...(item.reviewPolicy ? { reviewPolicy: item.reviewPolicy } : {}),
+        ...(reviewPolicy ? { reviewPolicy } : {}),
         ...(item.commitMessage ? { commitMessage: item.commitMessage } : {}),
       })
     );
