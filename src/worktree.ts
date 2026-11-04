@@ -891,6 +891,28 @@ function orphanHasRecoverableWork(mainCwd: string, worktreePath: string, branch:
   }
 }
 
+/**
+ * A task's latest checkout is in use while its attempt runs (here, detached,
+ * or in another session) or while any session holds its dispatch claim: a
+ * reviewer or verifier reads a ready_for_review checkout under a review claim.
+ */
+function checkoutInUse(task: Task, liveTaskIds: ReadonlySet<string>): boolean {
+  return liveTaskIds.has(task.id) || task.status === "running" || task.dispatchClaim !== undefined;
+}
+
+/** Checkouts that cleanup must not park or remove; see checkoutInUse. */
+export function inUseCheckoutPaths(
+  board: Board,
+  liveTaskIds: ReadonlySet<string> = new Set()
+): Set<string> {
+  const paths = new Set<string>();
+  for (const task of board.tasks) {
+    const worktreePath = task.attempts.at(-1)?.worktreePath;
+    if (worktreePath && checkoutInUse(task, liveTaskIds)) paths.add(resolve(worktreePath));
+  }
+  return paths;
+}
+
 /** Inspect managed worktrees without changing the filesystem or git state. */
 export function inspectManagedWorktrees(
   mainCwd: string,
@@ -911,9 +933,12 @@ export function inspectManagedWorktrees(
       const isLatest = attempt === latestAttempt;
       let state: ManagedWorktreeState = "stale";
       let reason = `recorded by settled or superseded attempt ${task.id} #${attempt.index}`;
-      if (isLatest && (liveTaskIds.has(task.id) || task.status === "running")) {
+      if (isLatest && checkoutInUse(task, liveTaskIds)) {
         state = "active";
-        reason = `${task.id} is running`;
+        reason =
+          task.status === "running" || liveTaskIds.has(task.id)
+            ? `${task.id} is running`
+            : `${task.id} is held by a ${task.dispatchClaim?.kind ?? "dispatch"} claim`;
       } else if (isLatest && task.status === "changes_requested" && hasMergeConflictNotes(task)) {
         state = "retained-conflict";
         reason = `${task.id} is retained after a merge conflict`;
@@ -1008,7 +1033,9 @@ export function inspectManagedWorktrees(
 export function parkInactiveWorktrees(
   mainCwd: string,
   board: Board,
-  liveTaskIds: ReadonlySet<string> = new Set()
+  liveTaskIds: ReadonlySet<string> = new Set(),
+  /** Fresh board state; read again before each checkout is parked. */
+  currentBoard: () => Board = () => board
 ): WorktreeParkingResult {
   const parked: WorktreeRef[] = [];
   const removed: WorktreeRef[] = [];
@@ -1016,6 +1043,8 @@ export function parkInactiveWorktrees(
 
   for (const entry of inspectManagedWorktrees(mainCwd, board, liveTaskIds)) {
     if (entry.state === "active" || !entry.exists) continue;
+    // Another session may have claimed the task since the inspection.
+    if (inUseCheckoutPaths(currentBoard(), liveTaskIds).has(entry.ref.worktreePath)) continue;
     try {
       const result = parkWorktree(mainCwd, entry.ref);
       if (result === "parked") parked.push(entry.ref);
@@ -1069,7 +1098,9 @@ export function cleanupManagedWorktrees(
 export function sweepWorktrees(
   mainCwd: string,
   retained: WorktreeRef[],
-  known: WorktreeRef[] = []
+  known: WorktreeRef[] = [],
+  /** Checkouts in use right now (see inUseCheckoutPaths); read again before each removal. */
+  inUse: () => ReadonlySet<string> = () => new Set()
 ): void {
   const root = managedWorktreeRoot(mainCwd);
   const retainedPaths = new Set(retained.map((ref) => resolve(ref.worktreePath)));
@@ -1078,6 +1109,7 @@ export function sweepWorktrees(
     const path = resolve(ref.worktreePath);
     if (!path.startsWith(`${root}${sep}`) || retainedPaths.has(path)) continue;
     if (orphanHasRecoverableWork(mainCwd, path, ref.branch)) continue;
+    if (inUse().has(path)) continue;
     removeWorktree(mainCwd, ref);
   }
 
@@ -1091,6 +1123,7 @@ export function sweepWorktrees(
       branch: registeredBranch(mainCwd, worktreePath) ?? `maestro/${entry.name}`,
     };
     if (orphanHasRecoverableWork(mainCwd, ref.worktreePath, ref.branch)) continue;
+    if (inUse().has(resolve(worktreePath))) continue;
     removeWorktree(mainCwd, ref);
   }
   git(mainCwd, ["worktree", "prune"]);

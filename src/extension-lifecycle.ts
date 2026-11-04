@@ -22,7 +22,7 @@ import { guardTranscriptRead } from "./transcript-guard.js";
 import { type Board } from "./types.js";
 import { settleReattachedDetachedAttempt } from "./workflow-execution.js";
 import { type WorkflowRun } from "./workflow-runtime.js";
-import { parkInactiveWorktrees, sweepWorktrees } from "./worktree.js";
+import { inUseCheckoutPaths, parkInactiveWorktrees, sweepWorktrees } from "./worktree.js";
 
 export class ExtensionLifecycleState {
   private active = true;
@@ -287,7 +287,13 @@ export function registerMaestroLifecycle(
       nudgeOptions
     );
 
-    const parking = parkInactiveWorktrees(boardCwd, recovered);
+    // Running attempts (reattached here, detached, or in another session) and
+    // claimed reviews keep their checkouts; both passes re-read the board
+    // right before touching a checkout.
+    const liveTaskIds = driveController.liveTaskIds();
+    const parking = parkInactiveWorktrees(boardCwd, recovered, liveTaskIds, () =>
+      loadBoard(boardCwd)
+    );
     for (const warning of parking.warnings) {
       notify(ctx, `Could not clean idle maestro worktree: ${warning}`, "warning");
     }
@@ -308,7 +314,9 @@ export function registerMaestroLifecycle(
           : [];
       });
     try {
-      sweepWorktrees(boardCwd, retained, knownWorktrees);
+      sweepWorktrees(boardCwd, retained, knownWorktrees, () =>
+        inUseCheckoutPaths(loadBoard(boardCwd), liveTaskIds)
+      );
     } catch (error) {
       notify(ctx, `Could not clean stale maestro worktrees: ${String(error)}`, "warning");
     }
