@@ -8,7 +8,12 @@ import {
   historicalLaunchCosts,
   type ProjectedCostEstimate,
 } from "./cost-forecast-policy.js";
-import { preflightWorkflow, selectedWorkflowTasks, type WorkflowPreflight } from "./preflight.js";
+import {
+  preflightWorkflow,
+  reviewerLaunchModels,
+  selectedWorkflowTasks,
+  type WorkflowPreflight,
+} from "./preflight.js";
 import { type Board, type MaestroConfig, type TierConfig } from "./types.js";
 
 type ForecastRuntime = Pick<ExtensionContext, "model" | "modelRegistry">;
@@ -56,6 +61,10 @@ function workflowCostDemands(
   const demands: ForecastLaunchDemand[] = [];
   const tasks = selectedWorkflowTasks(board, taskIds);
   const reviewModels = resolveForecastModels("review", config.tiers.review, runtime);
+  const cheapPattern = config.reviewCheapModel?.trim();
+  const [cheapModel = {}] = cheapPattern
+    ? resolveForecastModels("review", { model: cheapPattern, thinking: "low" }, runtime)
+    : [];
 
   for (const task of tasks) {
     const executorModels = resolveForecastModels(task.tier, config.tiers[task.tier], runtime);
@@ -63,16 +72,8 @@ function workflowCostDemands(
       demands.push(demand(task.tier, "executor", config.maxAttempts, model));
     }
 
-    const logicalReviewers =
-      task.reviewPolicy === "confirm"
-        ? config.reviewRequiredApprovals
-        : task.reviewPolicy === "find-and-refute"
-          ? 2
-          : 1;
-    const rawReviewerModels = Array.from({ length: logicalReviewers }, () => reviewModels)
-      .flat()
-      .slice(0, config.maxReviewerLaunches);
-    for (const model of rawReviewerModels) {
+    for (const launch of reviewerLaunchModels(task, config)) {
+      const model = launch === "cheap" ? cheapModel : (reviewModels[launch] ?? {});
       demands.push(demand("review", "reviewer", config.maxAttempts, model));
     }
   }

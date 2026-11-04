@@ -43,6 +43,10 @@
 - Attempt and review launches record one model identity: the configured `provider/model` form wins when it names the reported bare id, so a task no longer shows `[openai-codex/gpt-5.6-sol]` while live and `[gpt-5.6-sol]` once settled, and per-model insight rows no longer split.
 - Run event logs are capped on whole lines and end with a single `maestro_log_capped` marker instead of a truncated JSON fragment followed by silence. The live pane renders the marker as a notice and keeps judging the run's status from the last real event, so a capped log no longer looks like a hung run or a finished one.
 
+### Fixes
+
+- The workflow preflight and cost forecast count the extra reviewer launches a cheap-first review ladder (`reviewCheapModel`) can make when a cheap reviewer is escalated, and price the cheap model at its own rates. A plan could previously skip the scale confirmation while able to launch more reviewers than it reported. Changing `reviewCheapModel` or `reviewEscalation` now asks for confirmation again.
+
 ### Added
 
 - Cost-cap continuation: when an attempt is stopped by `maxCostPerTask`, raising the cap above what it spent (or disabling it) and driving the task again resumes that attempt in its own checkout and session with a continuation prompt, instead of requiring a hand-written successor. Driving under the unchanged cap is still refused without billing; the failure guidance names the checkpoint branch and the exact threshold to raise.

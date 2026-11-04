@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { createTask } from "../src/board.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
+import { preflightWorkflowWithCost } from "../src/cost-forecast.js";
 import { calculateProjectedCost, type ProjectedCostEstimate } from "../src/cost-forecast-policy.js";
 import {
   assertPlanTaskLimit,
@@ -55,6 +59,49 @@ test("workflow preflight derives natural dependency waves and launch bounds", ()
     { profile: "(none)", tasks: 2 },
     { profile: "check", tasks: 1 },
   ]);
+});
+
+test("a cheap-first review ladder counts its escalation launches and prices the cheap model", () => {
+  const board = boardWithTasks(2);
+  const settings = config();
+  settings.maxAttempts = 1;
+  settings.tiers.standard = { model: "acme/executor", thinking: "low" };
+  settings.tiers.review = { model: "acme/premium", thinking: "high" };
+  settings.reviewCheapModel = "acme/cheap";
+  settings.reviewEscalation = "doubt";
+  settings.maxReviewerLaunches = 3;
+  settings.confirmationTotalLaunches = 4;
+  const models = [
+    { provider: "acme", id: "executor", cost: { input: 1, output: 0 } },
+    { provider: "acme", id: "premium", cost: { input: 10, output: 0 } },
+    { provider: "acme", id: "cheap", cost: { input: 0.5, output: 0 } },
+  ];
+  const modelRegistry = {
+    getAll: () => models,
+    getAvailable: () => models,
+    find: (provider: string, id: string) =>
+      models.find((model) => model.provider === provider && model.id === id),
+    hasConfiguredAuth: () => true,
+  } as unknown as Parameters<typeof preflightWorkflowWithCost>[3]["modelRegistry"];
+
+  // Each task: one executor, then a cheap reviewer that may doubt and escalate.
+  const preflight = preflightWorkflowWithCost(
+    mkdtempSync(join(tmpdir(), "maestro-preflight-")),
+    board,
+    settings,
+    { model: undefined, modelRegistry },
+    undefined
+  );
+  assert.equal(preflight.reviewerLaunchUpperBound, 4);
+  assert.equal(preflight.totalLaunchUpperBound, 6);
+  assert.equal(preflight.requiresConfirmation, true);
+  // 20k input tokens per launch: $0.01 cheap + $0.20 premium per task.
+  assert.ok(Math.abs(preflight.projectedCost.byKind.reviewer - 0.42) < 1e-9);
+
+  // Turning the ladder off changes what the human confirmed.
+  const off = preflightWorkflow(board, { ...settings, reviewEscalation: "off" });
+  assert.equal(off.reviewerLaunchUpperBound, 2);
+  assert.notEqual(off.signature, preflight.signature);
 });
 
 test("workflow preflight size guidance and confirmation thresholds are deterministic", () => {
