@@ -141,12 +141,12 @@ const onUpdate = () => {};
 const trackRun = () => () => {};
 
 /** The next board save fails at the filesystem, as a full disk or a lost mount would. */
-function failNextBoardSave(): () => void {
+function failNextBoardSave(count = 1): () => void {
   const realRename = fs.renameSync;
-  let armed = true;
+  let remaining = count;
   const rename = mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
-    if (armed && basename(String(to)) === "board.json") {
-      armed = false;
+    if (remaining > 0 && basename(String(to)) === "board.json") {
+      remaining -= 1;
       throw new Error("disk full");
     }
     realRename(from, to);
@@ -1622,6 +1622,54 @@ test("a dispatch claim whose release failed is released on a later renewal tick"
 
     mock.timers.tick(10_000);
     assert.equal(findTask(loadBoard(cwd), task.id)?.dispatchClaim, undefined);
+  } finally {
+    restore();
+    mock.timers.reset();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a task keeps its claim until its failed settlement is recorded", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-settle-retry-"));
+  let restore = () => {};
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const settling = executor({ usage: { input: 10, output: 5, cost: 1.25, turns: 2 } });
+
+    mock.timers.enable({ apis: ["setInterval"] });
+    await assert.rejects(
+      executeTask({
+        cwd,
+        board,
+        task,
+        tier,
+        config,
+        startExecutor: (options) => {
+          const handle = settling(options);
+          return {
+            ...handle,
+            outcome: handle.outcome.then((outcome) => {
+              // The final write, its recovery, and the release all fail.
+              restore = failNextBoardSave(3);
+              return outcome;
+            }),
+          };
+        },
+        onUpdate,
+        trackRun,
+      }),
+      /disk full/
+    );
+    restore();
+    // Storage is back; the renewal tick must record the attempt, not only drop the claim.
+    mock.timers.tick(10_000);
+
+    const settled = findTask(loadBoard(cwd), task.id);
+    assert.equal(settled?.status, "failed");
+    assert.equal(settled?.dispatchClaim, undefined);
+    assert.ok(settled?.attempts.at(-1)?.endedAt);
+    assert.equal(settled?.attempts.at(-1)?.usage.cost, 1.25);
   } finally {
     restore();
     mock.timers.reset();
