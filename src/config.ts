@@ -1,12 +1,13 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir, type ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { PROJECT_CONFIG_FILE, THINKING_LEVELS, USER_CONFIG_FILE } from "./constants.js";
+import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
+import { configFileValidator, describeInvalid } from "./schemas.js";
 import { type MaestroConfig, type TierConfig } from "./types.js";
 
 export type ConfigScope = "user" | "project";
 
-export { THINKING_LEVELS };
+export { THINKING_LEVELS } from "./constants.js";
 export const REVIEW_TOOLS = "read,grep,find,ls";
 
 /**
@@ -259,262 +260,19 @@ export function configFile(scope: ConfigScope, cwd: string): string {
   return join(cwd, PROJECT_CONFIG_FILE);
 }
 
-const CONFIG_KEYS = new Set([
-  "maxParallel",
-  "planGate",
-  "livePanes",
-  "useWorktrees",
-  "detachedExecutors",
-  "autoCommit",
-  "pushOnIntegration",
-  "maxAttempts",
-  "maxPlanTasks",
-  "maxDiscoveryGeneratedTasks",
-  "maxTotalLaunchesPerRun",
-  "maxRoundsPerRun",
-  "confirmationPlanTasks",
-  "confirmationTotalLaunches",
-  "reviewPolicy",
-  "reviewRequiredApprovals",
-  "maxReviewerLaunches",
-  "maxCostPerTask",
-  "maxCostPerReview",
-  "reviewCheapModel",
-  "reviewEscalation",
-  "maxRunCost",
-  "reviewRejectionLimit",
-  "retryContext",
-  "statusWaitSeconds",
-  "decisionNudgeMinutes",
-  "logEvents",
-  "maxLogBytesPerRun",
-  "providerQuotaWaitMinutes",
-  "watchdogIdleSeconds",
-  "watchdogWarningTurns",
-  "watchdogTerminationTurns",
-  "handoffContextRatio",
-  "cleanupCompletedTasks",
-  "verificationProfiles",
-  "defaultVerificationProfile",
-  "tiers",
-]);
-
 export function validateConfig(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "must be a JSON object";
-  const config = value as Record<string, unknown>;
-  const unknown = Object.keys(config).find((key) => !CONFIG_KEYS.has(key));
-  if (unknown) return `unknown field ${unknown}`;
-  const booleanKeys = [
-    "planGate",
-    "livePanes",
-    "useWorktrees",
-    "detachedExecutors",
-    "autoCommit",
-    "pushOnIntegration",
-    "cleanupCompletedTasks",
+  if (!configFileValidator.check(value)) return describeInvalid(configFileValidator, value);
+  const limits: Array<[keyof typeof value, keyof typeof value]> = [
+    ["reviewRequiredApprovals", "maxReviewerLaunches"],
+    ["maxDiscoveryGeneratedTasks", "maxPlanTasks"],
+    ["maxReviewerLaunches", "maxTotalLaunchesPerRun"],
+    ["confirmationPlanTasks", "maxPlanTasks"],
+    ["confirmationTotalLaunches", "maxTotalLaunchesPerRun"],
   ];
-  for (const key of booleanKeys) {
-    if (config[key] !== undefined && typeof config[key] !== "boolean")
-      return `${key} must be boolean`;
-  }
-  if (
-    config.reviewPolicy !== undefined &&
-    !["single", "confirm", "find-and-refute"].includes(config.reviewPolicy as string)
-  ) {
-    return "reviewPolicy must be single, confirm, or find-and-refute";
-  }
-  if (
-    config.retryContext !== undefined &&
-    !["resume", "fresh"].includes(config.retryContext as string)
-  ) {
-    return "retryContext must be resume or fresh";
-  }
-  if (
-    config.reviewEscalation !== undefined &&
-    !["off", "doubt", "risk", "always"].includes(config.reviewEscalation as string)
-  ) {
-    return "reviewEscalation must be off, doubt, risk, or always";
-  }
-  if (
-    config.reviewCheapModel !== undefined &&
-    (typeof config.reviewCheapModel !== "string" || config.reviewCheapModel.trim() === "")
-  ) {
-    return "reviewCheapModel must be a non-empty model pattern";
-  }
-  const ranges: Record<string, [number, number]> = {
-    maxParallel: [1, 64],
-    maxAttempts: [1, 100],
-    maxPlanTasks: [1, 512],
-    maxDiscoveryGeneratedTasks: [1, 128],
-    maxTotalLaunchesPerRun: [1, 4_096],
-    maxRoundsPerRun: [1, 1_000],
-    confirmationPlanTasks: [1, 512],
-    confirmationTotalLaunches: [1, 4_096],
-    reviewRequiredApprovals: [2, 8],
-    maxReviewerLaunches: [1, 16],
-    maxCostPerTask: [0, 1_000_000],
-    maxCostPerReview: [0, 1_000_000],
-    maxRunCost: [0, 1_000_000],
-    reviewRejectionLimit: [1, 10],
-    statusWaitSeconds: [0, 240],
-    decisionNudgeMinutes: [0, 240],
-    maxLogBytesPerRun: [0, 1_000_000_000],
-    providerQuotaWaitMinutes: [0, 1_440],
-    watchdogIdleSeconds: [0, 86_400],
-    watchdogWarningTurns: [0, 10_000],
-    watchdogTerminationTurns: [0, 10_000],
-    handoffContextRatio: [0, 1],
-  };
-  for (const [key, [minimum, maximum]] of Object.entries(ranges)) {
-    const candidate = config[key];
-    if (candidate === undefined) continue;
-    if (
-      typeof candidate !== "number" ||
-      !Number.isFinite(candidate) ||
-      candidate < minimum ||
-      candidate > maximum
-    ) {
-      return `${key} must be a finite number from ${minimum} to ${maximum}`;
-    }
-  }
-  for (const key of [
-    "maxParallel",
-    "maxAttempts",
-    "maxPlanTasks",
-    "maxDiscoveryGeneratedTasks",
-    "maxTotalLaunchesPerRun",
-    "maxRoundsPerRun",
-    "confirmationPlanTasks",
-    "confirmationTotalLaunches",
-    "reviewRequiredApprovals",
-    "maxReviewerLaunches",
-    "reviewRejectionLimit",
-  ]) {
-    if (config[key] !== undefined && !Number.isInteger(config[key])) {
-      return `${key} must be an integer`;
-    }
-  }
-  const requiredApprovals = config.reviewRequiredApprovals;
-  const maximumLaunches = config.maxReviewerLaunches;
-  if (
-    typeof requiredApprovals === "number" &&
-    typeof maximumLaunches === "number" &&
-    requiredApprovals > maximumLaunches
-  ) {
-    return `reviewRequiredApprovals (${requiredApprovals}) cannot exceed maxReviewerLaunches (${maximumLaunches})`;
-  }
-  if (
-    typeof config.maxDiscoveryGeneratedTasks === "number" &&
-    typeof config.maxPlanTasks === "number" &&
-    config.maxDiscoveryGeneratedTasks > config.maxPlanTasks
-  ) {
-    return `maxDiscoveryGeneratedTasks (${config.maxDiscoveryGeneratedTasks}) cannot exceed maxPlanTasks (${config.maxPlanTasks})`;
-  }
-  if (
-    typeof config.maxReviewerLaunches === "number" &&
-    typeof config.maxTotalLaunchesPerRun === "number" &&
-    config.maxReviewerLaunches > config.maxTotalLaunchesPerRun
-  ) {
-    return `maxReviewerLaunches (${config.maxReviewerLaunches}) cannot exceed maxTotalLaunchesPerRun (${config.maxTotalLaunchesPerRun})`;
-  }
-  if (
-    typeof config.confirmationPlanTasks === "number" &&
-    typeof config.maxPlanTasks === "number" &&
-    config.confirmationPlanTasks > config.maxPlanTasks
-  ) {
-    return `confirmationPlanTasks (${config.confirmationPlanTasks}) cannot exceed maxPlanTasks (${config.maxPlanTasks})`;
-  }
-  if (
-    typeof config.confirmationTotalLaunches === "number" &&
-    typeof config.maxTotalLaunchesPerRun === "number" &&
-    config.confirmationTotalLaunches > config.maxTotalLaunchesPerRun
-  ) {
-    return `confirmationTotalLaunches (${config.confirmationTotalLaunches}) cannot exceed maxTotalLaunchesPerRun (${config.maxTotalLaunchesPerRun})`;
-  }
-  if (
-    config.logEvents !== undefined &&
-    config.logEvents !== "compact" &&
-    config.logEvents !== "full"
-  ) {
-    return "logEvents must be compact or full";
-  }
-  if (
-    config.defaultVerificationProfile !== undefined &&
-    typeof config.defaultVerificationProfile !== "string"
-  ) {
-    return "defaultVerificationProfile must be a string";
-  }
-  if (config.verificationProfiles !== undefined) {
-    if (
-      !config.verificationProfiles ||
-      typeof config.verificationProfiles !== "object" ||
-      Array.isArray(config.verificationProfiles)
-    ) {
-      return "verificationProfiles must be an object";
-    }
-    const profiles = Object.entries(config.verificationProfiles as Record<string, unknown>);
-    if (profiles.length > 32) return "verificationProfiles cannot contain more than 32 profiles";
-    for (const [name, raw] of profiles) {
-      if (!name.trim() || name.length > 64)
-        return "verification profile names must be 1-64 characters";
-      if (!raw || typeof raw !== "object" || Array.isArray(raw))
-        return `verification profile ${name} must be an object`;
-      const profile = raw as Record<string, unknown>;
-      if (
-        typeof profile.command !== "string" ||
-        profile.command.length === 0 ||
-        profile.command.length > 1000
-      )
-        return `verification profile ${name} has an invalid command`;
-      if (
-        typeof profile.timeoutSeconds !== "number" ||
-        !Number.isFinite(profile.timeoutSeconds) ||
-        profile.timeoutSeconds <= 0 ||
-        profile.timeoutSeconds > 3600
-      )
-        return `verification profile ${name} has an invalid timeoutSeconds`;
-    }
-  }
-  if (config.tiers !== undefined) {
-    if (!config.tiers || typeof config.tiers !== "object" || Array.isArray(config.tiers))
-      return "tiers must be an object";
-    for (const [name, rawTier] of Object.entries(config.tiers as Record<string, unknown>)) {
-      if (!name.trim()) return "tier names cannot be empty";
-      if (!rawTier || typeof rawTier !== "object" || Array.isArray(rawTier))
-        return `tier ${name} must be an object`;
-      const tier = rawTier as Record<string, unknown>;
-      if (
-        typeof tier.thinking !== "string" ||
-        !(THINKING_LEVELS as readonly string[]).includes(tier.thinking)
-      )
-        return `tier ${name} thinking must be one of: ${THINKING_LEVELS.join(", ")}`;
-      if (tier.model !== undefined && typeof tier.model !== "string")
-        return `tier ${name} model must be a string`;
-      if (tier.tools !== undefined && typeof tier.tools !== "string")
-        return `tier ${name} tools must be a string`;
-      if (
-        tier.fallbacks !== undefined &&
-        (!Array.isArray(tier.fallbacks) ||
-          !tier.fallbacks.every((item) => typeof item === "string"))
-      )
-        return `tier ${name} fallbacks must be strings`;
-      const watchdogRanges: Record<string, [number, number]> = {
-        watchdogIdleSeconds: [0, 86_400],
-        watchdogWarningTurns: [0, 10_000],
-        watchdogTerminationTurns: [0, 10_000],
-      };
-      for (const [key, [minimum, maximum]] of Object.entries(watchdogRanges)) {
-        const candidate = tier[key];
-        if (candidate === undefined) continue;
-        if (
-          typeof candidate !== "number" ||
-          !Number.isFinite(candidate) ||
-          candidate < minimum ||
-          candidate > maximum
-        ) {
-          return `tier ${name} ${key} must be a finite number from ${minimum} to ${maximum}`;
-        }
-      }
+  for (const [key, limit] of limits) {
+    const [candidate, maximum] = [value[key], value[limit]];
+    if (typeof candidate === "number" && typeof maximum === "number" && candidate > maximum) {
+      return `${key} (${candidate}) cannot exceed ${limit} (${maximum})`;
     }
   }
   return undefined;

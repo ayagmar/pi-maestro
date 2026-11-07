@@ -336,10 +336,10 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
   assert.match(validateConfig({ reviewCheapModel: 7 }) ?? "", /reviewCheapModel/);
   assert.equal(validateConfig({ reviewCheapModel: "anthropic/claude-haiku-4-5" }), undefined);
   assert.match(validateConfig({ cleanupCompletedTasks: "yes" }) ?? "", /boolean/);
-  assert.match(validateConfig({ livePanes: "yes" }) ?? "", /livePanes must be boolean/);
+  assert.match(validateConfig({ livePanes: "yes" }) ?? "", /\/livePanes: expected boolean/);
   assert.match(
     validateConfig({ detachedExecutors: "yes" }) ?? "",
-    /detachedExecutors must be boolean/
+    /\/detachedExecutors: expected boolean/
   );
   assert.match(validateConfig({ reviewRequiredApprovals: 1 }) ?? "", /reviewRequiredApprovals/);
   assert.match(validateConfig({ maxReviewerLaunches: 2.5 }) ?? "", /integer/);
@@ -359,7 +359,10 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
     validateConfig({ maxPlanTasks: 8, confirmationPlanTasks: 9 }) ?? "",
     /confirmationPlanTasks \(9\) cannot exceed maxPlanTasks \(8\)/
   );
-  assert.match(validateConfig({ tiers: { "": { thinking: "low" } } }) ?? "", /tier names/);
+  assert.match(
+    validateConfig({ tiers: { "": { thinking: "low" } } }) ?? "",
+    /\/tiers\/: invalid property name/
+  );
   assert.match(
     validateConfig({ tiers: { bad: { thinking: "extreme", fallbacks: [3] } } }) ?? "",
     /thinking/
@@ -379,17 +382,17 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
   );
   assert.match(
     validateConfig({ tiers: { bad: { thinking: "low", watchdogIdleSeconds: -1 } } }) ?? "",
-    /tier bad watchdogIdleSeconds/
+    /\/tiers\/bad\/watchdogIdleSeconds/
   );
   assert.match(
     validateConfig({ tiers: { bad: { thinking: "low", watchdogWarningTurns: "many" } } }) ?? "",
-    /tier bad watchdogWarningTurns/
+    /\/tiers\/bad\/watchdogWarningTurns/
   );
   assert.match(
     validateConfig({
       tiers: { bad: { thinking: "low", watchdogTerminationTurns: Number.POSITIVE_INFINITY } },
     }) ?? "",
-    /tier bad watchdogTerminationTurns/
+    /\/tiers\/bad\/watchdogTerminationTurns/
   );
 });
 
@@ -591,7 +594,7 @@ test("the thinking ladder matches pi and accepts its highest level", () => {
   );
   assert.match(
     validateConfig({ ...DEFAULT_CONFIG, tiers: { standard: { thinking: "ultra" } } }) ?? "",
-    /thinking must be one of/
+    /\/tiers\/standard\/thinking: expected one of/
   );
 });
 
