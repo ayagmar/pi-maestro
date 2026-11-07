@@ -3,9 +3,12 @@
  * (https://ayagmar.github.io/pi-maestro/). Every internal link goes through
  * `url()` so the base is configured in one place: astro.config.mjs.
  */
-const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const base = (import.meta as ImportMeta & { env: { BASE_URL: string } }).env.BASE_URL.replace(
+  /\/$/,
+  ""
+);
 
 /** A root-relative site path ("/docs/") with the deployment base prefixed. */
-export function url(path) {
+export function url(path: string): string {
   return `${base}${path}`;
 }

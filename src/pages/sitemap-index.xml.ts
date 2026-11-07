@@ -1,5 +1,5 @@
 import { docs } from "../data/docs.js";
-import { url } from "../data/site.mjs";
+import { url } from "../data/site.js";
 
 const pages = ["/", "/docs/", ...docs.map((doc) => `/docs/${doc.slug}/`)];
 

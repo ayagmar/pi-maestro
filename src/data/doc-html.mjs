@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { url } from "./site.mjs";
+import { url } from "./site.js";
 
 const REPOSITORY = "https://github.com/ayagmar/pi-maestro";
 const ROOT_PAGES = new Set(["CHANGELOG", "CONTRIBUTING", "SECURITY"]);

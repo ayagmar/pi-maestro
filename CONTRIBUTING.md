@@ -74,7 +74,7 @@ User documentation lives in `docs/` and the root `README.md`, `SECURITY.md`, `CO
 - a command: `docs/commands.md`
 - a stop or failure kind: `docs/operations.md`
 
-Preview the site with `pnpm run dev` and build it with `pnpm run build`; `pnpm run site:check` then checks that every internal link in `dist/` resolves under the `/pi-maestro/` base path. Internal links in `.astro` files go through `url()` from `src/data/site.mjs`. The Pages workflow deploys `master` to <https://ayagmar.github.io/pi-maestro/>. The README's install command, the getting-started page, and the landing page must show the same command; a test checks it.
+Preview the site with `pnpm run dev` and build it with `pnpm run build`; `pnpm run site:check` then checks that every internal link in `dist/` resolves under the `/pi-maestro/` base path. Internal links in `.astro` files go through `url()` from `src/data/site.ts`. The Pages workflow deploys `master` to <https://ayagmar.github.io/pi-maestro/>. The README's install command, the getting-started page, and the landing page must show the same command; a test checks it.
 
 ## Releasing
 
