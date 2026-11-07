@@ -19,8 +19,8 @@ export interface TaskBrowserActions {
   isLive(taskId: string): boolean;
   requestRetry(ctx: ExtensionCommandContext, taskId: string): Promise<void>;
   manuallyApprove(ctx: ExtensionCommandContext, taskId: string): void;
-  showReport(cwd: string, taskId: string): void;
-  showReview(cwd: string, taskId: string): void;
+  showReport(ctx: ExtensionCommandContext, taskId: string): void;
+  showReview(ctx: ExtensionCommandContext, taskId: string): void;
   openExecutor(ctx: ExtensionCommandContext, taskId: string): Promise<void>;
   openReviewer(ctx: ExtensionCommandContext, taskId: string): Promise<void>;
   onStatusChanged(ctx: ExtensionCommandContext, taskId: string, status: TaskStatus): void;
@@ -112,11 +112,11 @@ async function showTaskActions(
   if (!action) return;
 
   if (action === "report") {
-    actions.showReport(ctx.cwd, task.id);
+    actions.showReport(ctx, task.id);
     return;
   }
   if (action === "review") {
-    actions.showReview(ctx.cwd, task.id);
+    actions.showReview(ctx, task.id);
     return;
   }
   if (action === "open") {

@@ -10,7 +10,7 @@ First release of Pi Maestro: an orchestrator and fresh-context executor workflow
 - Key hints in Maestro's list pickers and text input come from the keybindings pi injects, so remapped keys work and show correctly. The plan, brief, workflow, and model-picker viewers scroll and close with pi's selection keybindings, and they skip PgUp/PgDn hints in pi's fullscreen mode, where pi's own viewport takes those keys.
 - Inline pickers and the single-line editor pass pi's `blocked` status to `ctx.ui.custom`, so terminals that show pi's program status report Maestro as waiting for you.
 - A task report or review verdict opened from the dashboard is a custom session entry with its own renderer, so it never enters the model's context. Orchestrator kickoff and decision messages still reach the model.
-- In `pi --mode rpc`, `/maestro plan`, `/maestro workflows`, and the plan task editor use pi's stock select and editor dialogs, and the viewers send their text as a notification.
+- In `pi --mode rpc`, `/maestro plan`, `/maestro workflows`, and the plan task editor use pi's stock select and editor dialogs, and the viewers and the task report and review cards send their text as a notification.
 - In print (`-p`) and JSON mode, command output and notices go to stderr, so JSON stdout stays clean and `/maestro config show`, `costs`, `insights`, and `timeline` print their reports.
 - The live agent pane marks a launch finished on `agent_settled` and applies `context_edit` entries as they arrive. The agent selector truncates every row to the terminal width.
 - Executors launched from a standalone (Bun-compiled) pi binary re-run that binary directly, as pi's own subagent example does.

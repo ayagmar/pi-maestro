@@ -31,8 +31,8 @@ export interface DashboardControllerDependencies {
   refreshUI(ctx: ExtensionContext): void;
   requestRetry(ctx: ExtensionContext, taskId: string): Promise<void>;
   showTaskBrowser(ctx: ExtensionCommandContext): Promise<void>;
-  showTaskReport(cwd: string, taskId: string): void;
-  showTaskReview(cwd: string, taskId: string): void;
+  showTaskReport(ctx: ExtensionContext, taskId: string): void;
+  showTaskReview(ctx: ExtensionContext, taskId: string): void;
 }
 
 export async function showDashboard(
@@ -166,11 +166,11 @@ export async function showDashboard(
     return;
   }
   if (selection.action === "view_report") {
-    dependencies.showTaskReport(ctx.cwd, selection.taskId);
+    dependencies.showTaskReport(ctx, selection.taskId);
     return;
   }
   if (selection.action === "view_review") {
-    dependencies.showTaskReview(ctx.cwd, selection.taskId);
+    dependencies.showTaskReview(ctx, selection.taskId);
     return;
   }
   if (!isCommandContext(ctx)) {
