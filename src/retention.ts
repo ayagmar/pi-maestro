@@ -145,9 +145,10 @@ export interface LogCleanupResult {
  * A detached launch keeps its control, exit, and stderr files next to its
  * event log. They only matter while that run is live, so they go with it;
  * left behind, every detached launch added three files the logs directory
- * never shed.
+ * never shed. The supervisor deletes its own config when it starts, so that
+ * file is here only for a launch that died before then.
  */
-const DETACHED_COMPANION_SUFFIXES = [".control", ".exit", ".stderr"] as const;
+const DETACHED_COMPANION_SUFFIXES = [".control", ".exit", ".stderr", ".supervisor.json"] as const;
 
 function removeDetachedCompanions(logFile: string, warnings: string[]): void {
   for (const suffix of DETACHED_COMPANION_SUFFIXES) {
