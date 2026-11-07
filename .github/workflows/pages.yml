@@ -16,6 +16,8 @@ concurrency:
 
 jobs:
   build:
+    # Manual runs use the selected ref; only master reaches production.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
