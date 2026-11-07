@@ -520,28 +520,31 @@ export async function executeTask(options: {
         status === "failed" || outcome.aborted ? run.attempt.failureReason?.message : undefined;
       return snapshot(updated ?? task, note);
     } finally {
-      if (!settled) {
-        // An unexpected error (Git baseline, board write) escaped before the
-        // final record; fail the reserved attempt rather than leave it running.
-        try {
-          updateTask(cwd, task.id, (fresh) => {
-            if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
-            const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
-            if (attempt && attempt.endedAt === undefined) {
-              const message = "attempt settlement failed unexpectedly";
-              attempt.endedAt = Date.now();
-              attempt.exitCode = 1;
-              attempt.errorMessage = message;
-              attempt.failureReason = { kind: "executor_failure", message, retryable: true };
-              if (settledUsage) attempt.usage = settledUsage;
-            }
-            forceStatus(fresh, "failed");
-          });
-        } catch {
-          // The startup sweep recovers a running task left without a claim.
-        }
+      // An unexpected error (Git baseline, board write) escaped before the
+      // final record; fail the reserved attempt rather than leave it running.
+      // The claim is released only once this write lands, so a board that is
+      // briefly unwritable keeps the task owned and the write is retried.
+      const recover = settled
+        ? undefined
+        : () =>
+            updateTask(cwd, task.id, (fresh) => {
+              if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
+              const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
+              if (attempt && attempt.endedAt === undefined) {
+                const message = "attempt settlement failed unexpectedly";
+                attempt.endedAt = Date.now();
+                attempt.exitCode = 1;
+                attempt.errorMessage = message;
+                attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+                if (settledUsage) attempt.usage = settledUsage;
+              }
+              forceStatus(fresh, "failed");
+            });
+      try {
+        lifecycle.release(recover);
+      } catch {
+        // The renewal tick retries the recovery write and the release.
       }
-      lifecycle.release();
     }
   }
 
@@ -554,7 +557,7 @@ export function settleReattachedDetachedAttempt(
   claimId: string,
   attempt: Attempt,
   outcome: RunOutcome
-): Task | undefined {
+): Task | undefined /* undefined when the claim was no longer this session's */ {
   attempt.usage = { ...outcome.usage };
   attempt.finalReport = outcome.finalReport;
   attempt.exitCode = outcome.exitCode;
@@ -610,14 +613,16 @@ export function settleReattachedDetachedAttempt(
       // Display diff remains best-effort; the worktree is the authoritative candidate.
     }
   }
+  let recorded = false;
   const updated = updateTask(cwd, taskId, (task) => {
     if (task.dispatchClaim?.id !== claimId) return;
     transition(task, status);
     const index = task.attempts.findIndex((candidate) => candidate.index === attempt.index);
     if (index >= 0) task.attempts[index] = attempt;
+    recorded = true;
   });
   releaseTaskDispatch(cwd, taskId, claimId);
-  return updated;
+  return recorded ? updated : undefined;
 }
 
 function attributionFailureMessage(error: unknown): string {

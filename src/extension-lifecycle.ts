@@ -1,5 +1,5 @@
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { dispatchOwnerIsLive, loadBoard, sweepDispatchState } from "./board.js";
+import { adoptDetachedDispatch, loadBoard, sweepDispatchState } from "./board.js";
 import { loadConfig, setProjectConfigTrust } from "./config.js";
 import { COMMAND, MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import {
@@ -173,8 +173,11 @@ export function registerMaestroLifecycle(
         continue;
       }
       // Another live session is still settling this attempt and owns its
-      // drive; a later startup reattaches once that process is gone.
-      if (dispatchOwnerIsLive(claim)) continue;
+      // drive; a later startup reattaches once that process is gone. Adopting
+      // the claim makes this session that owner, so a third session started
+      // meanwhile leaves the attempt alone too.
+      if (!adoptDetachedDispatch(boardCwd, task.id, claim.id)) continue;
+      const driveId = recovered.activeDrive?.id;
       let live: WorkflowRun | undefined;
       const handle = reattachDetachedExecutor(
         attempt,
@@ -204,10 +207,23 @@ export function registerMaestroLifecycle(
       driveController.registerLiveRun(live);
       void handle.outcome
         .then((outcome) => {
-          settleReattachedDetachedAttempt(boardCwd, task.id, claim.id, handle.attempt, outcome);
+          const settled = settleReattachedDetachedAttempt(
+            boardCwd,
+            task.id,
+            claim.id,
+            handle.attempt,
+            outcome
+          );
           if (live) driveController.removeLiveRun(live);
           const detachedBoard = loadBoard(boardCwd);
-          if (driveController.liveRunCount() === 0 && detachedBoard.activeDrive) {
+          // Only the session that recorded the outcome ends the drive it
+          // reattached under; a drive started since then is not its to end.
+          if (
+            settled &&
+            driveController.liveRunCount() === 0 &&
+            detachedBoard.activeDrive &&
+            detachedBoard.activeDrive.id === driveId
+          ) {
             const summary = unexpectedDriveSummary(
               boardCwd,
               detachedBoard.activeDrive.taskIds,

@@ -1173,6 +1173,57 @@ test("a second session leaves a live session's detached executor and drive alone
   }
 });
 
+test("a session that takes over a dead session's detached executor never ends a newer drive", async () => {
+  if (process.platform === "win32") return;
+  const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await new Promise((resolve) => dead.once("exit", resolve));
+  await withBoard(
+    (cwd) => {
+      assert.ok(dead.pid);
+      const logFile = join(cwd, "detached.jsonl");
+      writeFileSync(logFile, "");
+      const board: Board = {
+        version: 1,
+        nextTaskNumber: 1,
+        tasks: [],
+        activeDrive: { id: "drive-a", ownerSession: "/tmp/session-a.jsonl", startedAt: 1 },
+      };
+      const task = createTask(board, { title: "Busy", brief: "work", tier: "standard" });
+      forceStatus(task, "running");
+      task.dispatchClaim = {
+        id: "claim-a",
+        kind: "execute",
+        claimedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+        ownerPid: dead.pid,
+      };
+      task.attempts.push({
+        ...executorAttempt(),
+        index: 1,
+        logFile,
+        exitFile: `${logFile}.exit`,
+        controlFile: `${logFile}.control`,
+        detached: true,
+      });
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const second = loadMaestro(cwd, undefined, "/tmp/session-b.jsonl");
+      second.events.get("session_start")?.({ reason: "startup" }, second.ctx);
+      assert.ok(second.notices.some((notice) => notice.includes("reattached")));
+
+      // A new drive starts before the detached executor finishes.
+      const board = loadBoard(cwd);
+      board.activeDrive = { id: "drive-b", ownerSession: "/tmp/session-b.jsonl", startedAt: 2 };
+      saveBoard(cwd, board);
+      writeFileSync(join(cwd, "detached.jsonl.exit"), JSON.stringify({ version: 1, exitCode: 0 }));
+      await waitFor(() => loadBoard(cwd).tasks[0]?.status !== "running", "reattached settlement");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(loadBoard(cwd).activeDrive?.id, "drive-b");
+    }
+  );
+});
+
 test("task-id argument completion includes board tasks", async () => {
   await withBoard(
     (cwd) => {

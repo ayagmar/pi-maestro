@@ -947,6 +947,27 @@ export function claimTaskDispatch(
   };
 }
 
+/**
+ * Takes over a detached executor's claim for this process when its previous
+ * owner is gone. The claim id stays, so the detached supervisor's records and
+ * any settlement fenced on it still match; only the owner moves. Returns
+ * false when another live process already owns it (or adopted it first).
+ */
+export function adoptDetachedDispatch(cwd: string, taskId: string, claimId: string): boolean {
+  let adopted = false;
+  updateTask(cwd, taskId, (task) => {
+    const claim = task.dispatchClaim;
+    if (claim?.id !== claimId || dispatchOwnerIsLive(claim)) return;
+    const ownerStart = processStartId(process.pid);
+    claim.ownerPid = process.pid;
+    if (ownerStart) claim.ownerStart = ownerStart;
+    else delete claim.ownerStart;
+    claim.expiresAt = Date.now() + DETACHED_DISPATCH_LEASE_MS;
+    adopted = true;
+  });
+  return adopted;
+}
+
 export function releaseTaskDispatch(cwd: string, taskId: string, claimId: string): boolean {
   let released = false;
   updateTask(cwd, taskId, (task) => {

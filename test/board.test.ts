@@ -17,6 +17,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { captureApprovedProvenance, completionFreshness } from "../src/artifact-policy.js";
 import {
+  adoptDetachedDispatch,
   applyPlanTaskEdits,
   approvePlan,
   archiveBoard,
@@ -1662,6 +1663,49 @@ test("a contender that observed a stale board lock cannot remove the lock acquir
       []
     );
   } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a detached claim adopted by one live session is not adopted again by another", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-adopt-claim-"));
+  // The session that reattached first, as a separate live process.
+  const adopter = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+    stdio: "ignore",
+  });
+  try {
+    assert.ok(adopter.pid);
+    const board = emptyBoard();
+    const task = createTask(board, { title: "Busy", brief: "work", tier: "standard" });
+    forceStatus(task, "running");
+    task.dispatchClaim = {
+      id: "claim-a",
+      kind: "execute",
+      claimedAt: Date.now(),
+      ownerPid: 2 ** 22 + 7,
+    };
+    saveBoard(cwd, board);
+
+    // The original owner is gone, so this session takes the claim over, keeping its id.
+    assert.equal(adoptDetachedDispatch(cwd, task.id, "claim-a"), true);
+    let claim = findTask(loadBoard(cwd), task.id)?.dispatchClaim;
+    assert.equal(claim?.id, "claim-a");
+    assert.equal(claim?.ownerPid, process.pid);
+
+    // Once another live session holds it, nobody else may adopt it.
+    const updated = loadBoard(cwd);
+    const held = findTask(updated, task.id);
+    assert.ok(held?.dispatchClaim);
+    held.dispatchClaim.ownerPid = adopter.pid;
+    const adopterStart = processStartId(adopter.pid);
+    if (adopterStart) held.dispatchClaim.ownerStart = adopterStart;
+    else delete held.dispatchClaim.ownerStart;
+    saveBoard(cwd, updated);
+    assert.equal(adoptDetachedDispatch(cwd, task.id, "claim-a"), false);
+    claim = findTask(loadBoard(cwd), task.id)?.dispatchClaim;
+    assert.equal(claim?.ownerPid, adopter.pid);
+  } finally {
+    adopter.kill("SIGKILL");
     rmSync(cwd, { recursive: true, force: true });
   }
 });
