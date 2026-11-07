@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "nextTaskNumber": 1,
+  "tasks": [],
+  "activeDecision": {
+    "id": "decision-1",
+    "ownerSession": "/tmp/maestro-owner.jsonl",
+    "kind": "blocked",
+    "taskIds": [],
+    "evidence": "Owner action is required",
+    "allowedInterventions": ["handoff"],
+    "createdAt": 1794060729844,
+    "deliveryClaim": {
+      "id": "abandoned",
+      "claimedAt": 1794060698844
+    }
+  },
+  "revision": 1
+}

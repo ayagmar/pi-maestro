@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Detached",
+      "brief": "work",
+      "tier": "standard",
+      "status": "running",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 1,
+          "logFile": "/tmp/pi-maestro-test-1Mifoy/tmp/maestro-detached-sweep-test-d7DpQM/detached.jsonl",
+          "controlFile": "/tmp/pi-maestro-test-1Mifoy/tmp/maestro-detached-sweep-test-d7DpQM/detached.control",
+          "detached": true,
+          "pid": 999999999,
+          "processStartId": "dead",
+          "thinking": "low",
+          "startedAt": 1,
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cost": 0,
+            "turns": 0
+          },
+          "touchedFiles": []
+        }
+      ],
+      "createdAt": 1794060729265,
+      "updatedAt": 1794060729265,
+      "dispatchClaim": {
+        "id": "detached-claim",
+        "kind": "execute",
+        "claimedAt": 1,
+        "expiresAt": 2
+      }
+    }
+  ],
+  "revision": 1
+}

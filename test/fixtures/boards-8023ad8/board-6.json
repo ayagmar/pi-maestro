@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "nextTaskNumber": 1,
+  "pausedDrive": {
+    "ownerSession": "/tmp/maestro-owner.jsonl",
+    "taskIds": ["T1"],
+    "reason": "paused"
+  },
+  "tasks": [],
+  "revision": 1
+}

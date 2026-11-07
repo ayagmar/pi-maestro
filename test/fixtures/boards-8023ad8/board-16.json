@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Test task",
+      "brief": "Do the work",
+      "tier": "standard",
+      "status": "ready_for_review",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 1,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060733918,
+          "usage": {
+            "input": 10,
+            "output": 5,
+            "cost": 0.04,
+            "turns": 2
+          },
+          "touchedFiles": ["src/initial.ts"],
+          "finalReport": "Initial implementation",
+          "model": "provider-a/model-a",
+          "provider": "provider-a",
+          "executionFingerprint": "df15acd75fb7eaa3d5ed63eb5064a27b04f153ac4da2235feed8814d1b01f32f"
+        }
+      ],
+      "createdAt": 1794060733918,
+      "updatedAt": 1794060733918
+    }
+  ],
+  "revision": 1
+}

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "A",
+      "brief": "do a",
+      "tier": "complex",
+      "status": "todo",
+      "dependsOn": [],
+      "attempts": [],
+      "createdAt": 1794060729254,
+      "updatedAt": 1794060729254
+    }
+  ],
+  "planPending": true,
+  "revision": 1
+}
