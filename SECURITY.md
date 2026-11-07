@@ -8,7 +8,7 @@ Pi Maestro requires pi 1.5 or newer and Node.js 22.19 or newer. It is tested aga
 
 ## Reporting a vulnerability
 
-Do not put vulnerability details in a public issue. Use GitHub's **Report a vulnerability** button in the repository Security tab, which creates a private security advisory. If the button is not there, open an issue that says only that you have a security report and asks for a private channel, then wait for the maintainer to reply. A private report should include:
+Do not put vulnerability details in a public issue. Report it privately with the **Report a vulnerability** button in the repository's [Security tab](https://github.com/ayagmar/pi-maestro/security/advisories/new), which creates a private security advisory. A report should include:
 
 - the affected Pi Maestro and Node.js versions;
 - the smallest reproducible configuration or board state;
