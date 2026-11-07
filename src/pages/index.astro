@@ -1,4 +1,5 @@
 ---
+import { url } from "../data/site.mjs";
 import BaseLayout from "../layouts/BaseLayout.astro";
 
 const tasks = [
@@ -20,8 +21,8 @@ const tasks = [
           Pi Maestro is an extension for pi. The model in your session splits a goal into tasks with success criteria. Each task runs in its own pi process on a cheaper model, and a separate read-only reviewer has to approve it before it counts.
         </p>
         <div class="hero-actions">
-          <a class="button button-primary" href="/docs/getting-started/">Install Pi Maestro</a>
-          <a class="button button-quiet" href="/docs/">Read the docs</a>
+          <a class="button button-primary" href={url("/docs/getting-started/")}>Install Pi Maestro</a>
+          <a class="button button-quiet" href={url("/docs/")}>Read the docs</a>
         </div>
         <div class="install-command code-block">
           <button class="copy-button" type="button" data-copy="pi install npm:@ayagmar/pi-maestro" aria-label="Copy install command">Copy</button>
@@ -87,7 +88,7 @@ const tasks = [
       <div>
         <h2>Spend and attempts are capped</h2>
         <p>By default one attempt is cut off at $5, and no new batch starts once the board's spend reaches $25. A task gets three attempts, and a drive runs at most 20 rounds. When a limit trips, the drive stops with a named reason and the safe next step.</p>
-        <p><a class="text-link" href="/docs/operations/">What each stop means</a></p>
+        <p><a class="text-link" href={url("/docs/operations/")}>What each stop means</a></p>
       </div>
     </div>
   </section>
@@ -97,12 +98,12 @@ const tasks = [
       <div>
         <h2>Everything is inspectable</h2>
         <p>The board, a status history, raw event logs, executor and reviewer sessions, and checkpoint branches stay on disk. <code>/maestro board</code> walks eight phases from discovery to completion. <code>/maestro timeline</code>, <code>costs</code>, and <code>reconcile</code> read that evidence without calling a model.</p>
-        <p><a class="text-link" href="/docs/commands/">Command reference</a></p>
+        <p><a class="text-link" href={url("/docs/commands/")}>Command reference</a></p>
       </div>
       <div>
         <h2>What it does not do</h2>
         <p>Maestro is not a sandbox. Executors edit files with your account's permissions, and verification commands are arbitrary local code that only your user config can define. Reviewers are read-only by default, and manual approval skips them. An untrusted project cannot change budgets, models, or tool lists.</p>
-        <p><a class="text-link" href="/docs/security/">Security and trust boundaries</a></p>
+        <p><a class="text-link" href={url("/docs/security/")}>Security and trust boundaries</a></p>
       </div>
     </div>
   </section>

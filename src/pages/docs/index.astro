@@ -1,4 +1,5 @@
 ---
+import { url } from "../../data/site.mjs";
 import { docs } from "../../data/docs";
 import BaseLayout from "../../layouts/BaseLayout.astro";
 
@@ -8,14 +9,14 @@ const groups = [...new Set(docs.map((doc) => doc.group))];
   <div class="shell docs-index">
     <header class="docs-index-hero">
       <h1>Documentation</h1>
-      <p>New here? Read <a href="/docs/getting-started/">Getting started</a>, then <a href="/docs/how-it-works/">How it works</a>. When a drive stops, <a href="/docs/operations/">Operations and recovery</a> names the safe next step.</p>
+      <p>New here? Read <a href={url("/docs/getting-started/")}>Getting started</a>, then <a href={url("/docs/how-it-works/")}>How it works</a>. When a drive stops, <a href={url("/docs/operations/")}>Operations and recovery</a> names the safe next step.</p>
     </header>
     {groups.map((group) => (
       <section class="docs-section" aria-labelledby={`group-${group.toLowerCase().replaceAll(" ", "-")}`}>
         <h2 id={`group-${group.toLowerCase().replaceAll(" ", "-")}`}>{group}</h2>
         <ul class="docs-list">
           {docs.filter((doc) => doc.group === group).map((doc) => (
-            <li><a href={`/docs/${doc.slug}/`}><strong>{doc.title}</strong><span>{doc.description}</span></a></li>
+            <li><a href={url(`/docs/${doc.slug}/`)}><strong>{doc.title}</strong><span>{doc.description}</span></a></li>
           ))}
         </ul>
       </section>

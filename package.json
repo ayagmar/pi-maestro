@@ -15,7 +15,7 @@
     "type": "git",
     "url": "git+https://github.com/ayagmar/pi-maestro.git"
   },
-  "homepage": "https://github.com/ayagmar/pi-maestro#readme",
+  "homepage": "https://ayagmar.github.io/pi-maestro/",
   "bugs": {
     "url": "https://github.com/ayagmar/pi-maestro/issues"
   },
@@ -53,6 +53,7 @@
     "release:dry": "release-it --ci --dry-run",
     "dev": "astro dev",
     "build": "astro build",
+    "site:check": "node ./scripts/check-site-links.mjs dist",
     "preview": "astro preview"
   },
   "dependencies": {

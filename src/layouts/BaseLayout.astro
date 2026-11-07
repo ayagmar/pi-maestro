@@ -1,5 +1,6 @@
 ---
 import "../styles/global.css";
+import { url } from "../data/site.mjs";
 
 interface Props {
   title: string;
@@ -9,8 +10,9 @@ interface Props {
 
 const { title, description, isDocs = false } = Astro.props;
 const currentPath = Astro.url.pathname;
-const canonicalUrl = new URL(currentPath, Astro.site ?? "https://pi-maestro.dev").toString();
-const pageTitle = currentPath === "/" ? title : `${title} | Pi Maestro`;
+const canonicalUrl = new URL(currentPath, Astro.site).toString();
+const isHome = currentPath === url("/");
+const pageTitle = isHome ? title : `${title} | Pi Maestro`;
 const repository = "https://github.com/ayagmar/pi-maestro";
 ---
 <!doctype html>
@@ -21,7 +23,7 @@ const repository = "https://github.com/ayagmar/pi-maestro";
     <meta name="theme-color" content="#182531" />
     <meta name="description" content={description} />
     <link rel="canonical" href={canonicalUrl} />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href={url("/favicon.svg")} type="image/svg+xml" />
     <meta property="og:title" content={pageTitle} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
@@ -32,27 +34,27 @@ const repository = "https://github.com/ayagmar/pi-maestro";
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="site-header">
       <div class="shell header-inner">
-        <a class="brand-lockup" href="/" aria-label="Pi Maestro home">
+        <a class="brand-lockup" href={url("/")} aria-label="Pi Maestro home">
           <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
           <span class="brand-name">pi maestro</span>
         </a>
         <nav class="desktop-nav" aria-label="Primary">
-          <a href="/" aria-current={currentPath === "/" ? "page" : undefined}>Overview</a>
-          <a href="/docs/" aria-current={isDocs ? "true" : undefined}>Docs</a>
+          <a href={url("/")} aria-current={isHome ? "page" : undefined}>Overview</a>
+          <a href={url("/docs/")} aria-current={isDocs ? "true" : undefined}>Docs</a>
           <a href={repository} rel="noreferrer">GitHub</a>
         </nav>
         <div class="header-actions">
           <button class="search-trigger" type="button" data-search-open aria-haspopup="dialog">
             <span class="search-icon" aria-hidden="true">⌕</span><span class="search-label">Search</span><kbd aria-hidden="true">Ctrl K</kbd>
           </button>
-          <a class="header-install" href="/docs/getting-started/">Install</a>
+          <a class="header-install" href={url("/docs/getting-started/")}>Install</a>
           <details class="mobile-menu">
             <summary aria-label="Menu"><span class="menu-bar"></span><span class="menu-bar"></span></summary>
             <nav aria-label="Mobile">
-              <a class="menu-link" href="/">Overview</a>
-              <a class="menu-link" href="/docs/">Docs</a>
+              <a class="menu-link" href={url("/")}>Overview</a>
+              <a class="menu-link" href={url("/docs/")}>Docs</a>
               <a class="menu-link" href={repository} rel="noreferrer">GitHub</a>
-              <a class="menu-link" href="/docs/getting-started/">Install</a>
+              <a class="menu-link" href={url("/docs/getting-started/")}>Install</a>
             </nav>
           </details>
         </div>
@@ -64,14 +66,14 @@ const repository = "https://github.com/ayagmar/pi-maestro";
     <footer class="site-footer">
       <div class="shell footer-grid">
         <div>
-          <a class="brand-lockup footer-brand" href="/" aria-label="Pi Maestro home">
+          <a class="brand-lockup footer-brand" href={url("/")} aria-label="Pi Maestro home">
             <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
             <span class="brand-name">pi maestro</span>
           </a>
           <p class="footer-note">An orchestrator for Pi, backed by fresh-context executors and independent review.</p>
         </div>
-        <div class="footer-links"><strong>Docs</strong><a href="/docs/getting-started/">Getting started</a><a href="/docs/how-it-works/">How it works</a><a href="/docs/operations/">Operations</a></div>
-        <div class="footer-links"><strong>Project</strong><a href={repository} rel="noreferrer">GitHub</a><a href="/docs/security/">Security</a><a href="/docs/changelog/">Changelog</a></div>
+        <div class="footer-links"><strong>Docs</strong><a href={url("/docs/getting-started/")}>Getting started</a><a href={url("/docs/how-it-works/")}>How it works</a><a href={url("/docs/operations/")}>Operations</a></div>
+        <div class="footer-links"><strong>Project</strong><a href={repository} rel="noreferrer">GitHub</a><a href={url("/docs/security/")}>Security</a><a href={url("/docs/changelog/")}>Changelog</a></div>
       </div>
       <div class="shell footer-bottom"><span>MIT licensed</span><span>Node.js 22.19+ · Pi 1.5+</span></div>
     </footer>
@@ -83,7 +85,7 @@ const repository = "https://github.com/ayagmar/pi-maestro";
         <p class="search-status" role="status" data-search-status></p>
       </div>
     </dialog>
-    <script is:inline>
+    <script is:inline define:vars={{ searchIndexUrl: url("/search-index.json"), docsBase: url("/docs/") }}>
       (() => {
         const dialog = document.querySelector("[data-search-dialog]");
         const input = document.querySelector("[data-search-input]");
@@ -96,7 +98,7 @@ const repository = "https://github.com/ayagmar/pi-maestro";
         const load = async () => {
           if (entries) return entries;
           try {
-            entries = await (await fetch("/search-index.json")).json();
+            entries = await (await fetch(searchIndexUrl)).json();
           } catch {
             entries = [];
             status.textContent = "Search could not load. Browse the documentation index instead.";
@@ -122,7 +124,7 @@ const repository = "https://github.com/ayagmar/pi-maestro";
               link.id = `search-result-${index}`;
               link.setAttribute("role", "option");
               link.setAttribute("aria-selected", String(index === active));
-              link.href = `/docs/${entry.slug}/${entry.anchor ? `#${entry.anchor}` : ""}`;
+              link.href = `${docsBase}${entry.slug}/${entry.anchor ? `#${entry.anchor}` : ""}`;
               const title = document.createElement("strong");
               title.textContent = entry.heading ? `${entry.page}: ${entry.heading}` : entry.page;
               const detail = document.createElement("small");

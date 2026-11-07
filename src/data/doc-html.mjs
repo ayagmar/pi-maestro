@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { url } from "./site.mjs";
 
 const REPOSITORY = "https://github.com/ayagmar/pi-maestro";
 const ROOT_PAGES = new Set(["CHANGELOG", "CONTRIBUTING", "SECURITY"]);
@@ -10,9 +11,9 @@ const ROOT_PAGES = new Set(["CHANGELOG", "CONTRIBUTING", "SECURITY"]);
  */
 function siteHref(repositoryPath) {
   const page = /^docs\/([\w-]+)\.md$/.exec(repositoryPath)?.[1];
-  if (page) return `/docs/${page}/`;
+  if (page) return url(`/docs/${page}/`);
   const root = /^([A-Z]+)\.md$/.exec(repositoryPath)?.[1];
-  if (root && ROOT_PAGES.has(root)) return `/docs/${root.toLowerCase()}/`;
+  if (root && ROOT_PAGES.has(root)) return url(`/docs/${root.toLowerCase()}/`);
   const route = /\.\w+$/.test(repositoryPath) ? "blob" : "tree";
   return `${REPOSITORY}/${route}/master/${repositoryPath.replace(/\/$/, "")}`;
 }

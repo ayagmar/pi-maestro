@@ -169,7 +169,7 @@ test("declared package shape contains runtime and required documentation", () =>
   assert.equal(pkg.publishConfig?.access, "public");
   assert.equal(pkg.main, "./src/index.ts");
   assert.equal(pkg.repository.url, "git+https://github.com/ayagmar/pi-maestro.git");
-  assert.equal(pkg.homepage, "https://github.com/ayagmar/pi-maestro#readme");
+  assert.equal(pkg.homepage, "https://ayagmar.github.io/pi-maestro/");
   assert.equal(pkg.bugs.url, "https://github.com/ayagmar/pi-maestro/issues");
   assert.doesNotMatch(pkg.pi?.image ?? "", /placehold\.co/i);
   for (const entry of [

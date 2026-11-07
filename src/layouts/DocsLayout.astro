@@ -1,5 +1,6 @@
 ---
 import { docs, getDoc } from "../data/docs";
+import { url } from "../data/site.mjs";
 import BaseLayout from "./BaseLayout.astro";
 
 interface Props {
@@ -12,7 +13,7 @@ const groups = [...new Set(docs.map((item) => item.group))];
 const position = docs.findIndex((item) => item.slug === slug);
 const previous = docs[position - 1];
 const next = docs[position + 1];
-const href = (item: { slug: string }) => `/docs/${item.slug}/`;
+const href = (item: { slug: string }) => url(`/docs/${item.slug}/`);
 ---
 <BaseLayout title={doc.title} description={doc.description} isDocs>
   <div class="docs-shell shell">

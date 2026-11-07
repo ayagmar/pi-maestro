@@ -1,4 +1,5 @@
 ---
+import { url } from "../data/site.mjs";
 import BaseLayout from "../layouts/BaseLayout.astro";
 ---
 <BaseLayout title="Page not found" description="The requested Pi Maestro page does not exist.">
@@ -7,8 +8,8 @@ import BaseLayout from "../layouts/BaseLayout.astro";
       <h1>Page not found</h1>
       <p>This address is not part of the site. The documentation index lists every page.</p>
       <div class="hero-actions">
-        <a class="button button-primary" href="/docs/">Open the docs</a>
-        <a class="button button-secondary" href="/">Back to the overview</a>
+        <a class="button button-primary" href={url("/docs/")}>Open the docs</a>
+        <a class="button button-secondary" href={url("/")}>Back to the overview</a>
       </div>
     </div>
   </section>

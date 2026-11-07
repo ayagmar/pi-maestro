@@ -122,6 +122,8 @@ Defaults cap an attempt at $5 and a drive at $25 (`maxCostPerTask`, `maxRunCost`
 
 ## Guides
 
+The same guides are published at <https://ayagmar.github.io/pi-maestro/>.
+
 - [Getting started](docs/getting-started.md): install, first goal, plan approval, and handoff
 - [How it works](docs/how-it-works.md): roles, lifecycle, review, failures, and isolation
 - [Command reference](docs/commands.md): every command and dashboard key
