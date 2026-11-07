@@ -1,17 +1,12 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir, type ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
+import { PROJECT_CONFIG_FILE, THINKING_LEVELS, USER_CONFIG_FILE } from "./constants.js";
 import { type MaestroConfig, type TierConfig } from "./types.js";
 
 export type ConfigScope = "user" | "project";
 
-/**
- * Mirrors pi's own ladder (`pi --thinking`). `max` exists upstream and is the
- * level a reviewer on genuinely hard work wants; omitting it silently capped
- * maestro at xhigh with no way to ask for more.
- */
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export { THINKING_LEVELS };
 export const REVIEW_TOOLS = "read,grep,find,ls";
 
 /**
