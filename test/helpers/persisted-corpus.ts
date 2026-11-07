@@ -906,6 +906,20 @@ export const CORPUS_FORMATS: CorpusFormat[] = [
   },
 ];
 
+/**
+ * The one recorded difference. The old guard compared `String(value)`, so a
+ * one-item array passed as its only member, though readers never treated it as
+ * one. Every writer in the project's history stores a plain string, so only a
+ * hand-edited board can hold this.
+ */
+export const TIGHTENED_BOARD_CASES = [
+  "full: activeDecision.allowedInterventions.0 = singleton-handoff",
+  "full: activeDecision.allowedInterventions.1 = singleton-handoff",
+  "full: activeDecision.allowedInterventions.2 = singleton-handoff",
+  "full: activeDecision.resolution.intervention = singleton-handoff",
+  "full: activeDecision.resolution.intervention = nested-resume",
+];
+
 export interface FormatResult {
   corpusSha256: string;
   outputsSha256: string;
@@ -925,7 +939,9 @@ export function evaluateFormat(format: CorpusFormat): FormatResult {
       const decision = format.read(value, index, scratch);
       decisions += decision.accepted ? "1" : "0";
       labels.push(label);
-      if (decision.output !== undefined) outputs.update(`${index}:${decision.output}\n`);
+      if (decision.output !== undefined && !TIGHTENED_BOARD_CASES.includes(label)) {
+        outputs.update(`${index}:${decision.output}\n`);
+      }
     }
   } finally {
     rmSync(scratch, { recursive: true, force: true });

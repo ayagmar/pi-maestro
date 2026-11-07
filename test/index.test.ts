@@ -1064,7 +1064,7 @@ test("a stale ctx during quarantine notify does not crash the command and re-sta
         originalNotify(message, level);
       };
       await assert.doesNotReject(command.handler("costs", ctx));
-      assert.match(consumeQuarantineNotice() ?? "", /board\.json\.corrupt-/);
+      assert.match(consumeQuarantineNotice()?.file ?? "", /board\.json\.corrupt-/);
     }
   );
 });

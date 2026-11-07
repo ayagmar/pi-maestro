@@ -5,7 +5,11 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { consumeQuarantineNotice, loadBoard } from "../src/board.js";
-import { CORPUS_FORMATS, evaluateFormat } from "./helpers/persisted-corpus.js";
+import {
+  CORPUS_FORMATS,
+  evaluateFormat,
+  TIGHTENED_BOARD_CASES,
+} from "./helpers/persisted-corpus.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 
@@ -44,7 +48,11 @@ for (const format of CORPUS_FORMATS) {
         ? []
         : [`${expected.decisions[index] === "1" ? "now rejects" : "now accepts"}: ${label}`]
     );
-    assert.deepEqual(differences, []);
+    const intended = format.name === "board" ? TIGHTENED_BOARD_CASES : [];
+    assert.deepEqual(
+      differences,
+      intended.map((label) => `now rejects: ${label}`)
+    );
     assert.equal(actual.outputsSha256, expected.outputsSha256, "an accepted file changed meaning");
   });
 }
@@ -69,3 +77,43 @@ for (const name of readdirSync(releasedBoards)) {
     }
   });
 }
+
+test("a quarantined board names the field that made it unreadable", () => {
+  const board = JSON.parse(
+    readFileSync(join(releasedBoards, readdirSync(releasedBoards)[0] as string), "utf-8")
+  ) as { tasks: unknown };
+  const usage = { input: 1, output: 1, cost: "free", turns: 1 };
+  const attempt = {
+    index: 1,
+    logFile: "a",
+    thinking: "low",
+    startedAt: 1,
+    touchedFiles: [],
+    usage,
+  };
+  board.tasks = [
+    {
+      id: "T1",
+      title: "t",
+      brief: "b",
+      tier: "standard",
+      status: "todo",
+      dependsOn: [],
+      attempts: [attempt],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  ];
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-quarantine-reason-"));
+  try {
+    mkdirSync(join(cwd, ".pi", "maestro"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "maestro", "board.json"), JSON.stringify(board));
+    loadBoard(cwd);
+    assert.match(
+      consumeQuarantineNotice()?.reason ?? "",
+      /^\/tasks\/0\/attempts\/0\/usage\/cost: /
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
