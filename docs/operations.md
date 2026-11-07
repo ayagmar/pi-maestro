@@ -5,27 +5,36 @@ Maestro preserves board state, attempts, logs, sessions, and checkpoint branches
 | State or failure | Safe action | Preserved evidence |
 |---|---|---|
 | `plan_gate` | Open `/maestro plan`, edit, then approve or reject. | Rejection archives the plan. |
-| `provider_blocked` / `provider_failure` | Transient network drops retry twice on their own (15 s, 60 s). An exhausted Codex usage window is waited out until its published `reset_at` (read from the account usage endpoint); providers without a reset clock are probed with 2/4/8/15-minute backoff. Both are bounded by `providerQuotaWaitMinutes`, and a weekly limit beyond it stops the drive with the reset time. When it does stop, fix credentials or configure a fallback, then `/maestro resume` from any session — this stop is mechanical and carries no owner guard. An attempt the provider cut off mid-work resumes its own session and checkout. | Failed launches, usage, provider reason, interrupted session and checkpoint branch. |
+| `provider_blocked` / `provider_failure` | Transient network drops retry twice on their own (15 s, 60 s). An exhausted Codex usage window is waited out until its published `reset_at` (read from the account usage endpoint); providers without a reset clock are probed with 2/4/8/15-minute backoff. Both are bounded by `providerQuotaWaitMinutes`, and a weekly limit beyond it stops the drive with the reset time. When it does stop, fix credentials or configure a fallback, then `/maestro resume` from any session. This stop is mechanical and carries no owner guard. An attempt the provider cut off mid-work resumes its own session and checkout. | Failed launches, usage, provider reason, interrupted session and checkpoint branch. |
 | `executor_failure` / `reviewer_failure` | Inspect the referenced session/log, correct the task or environment, then retry deliberately. When the drive says `artifact gate failed before any reviewer ran`, no reviewer was involved: fix the printed gate cause (no attributable changes, inputs changed mid-flight, trusted verification failed) and drive again without touching the review policy. | Process outcome, redacted reason, and usage. |
 | `review_disagreement` | Inspect both reports and deliberately change the task review policy before resuming. | Both roles, verdicts, criterion evidence, model/provider, usage, and sessions. |
 | `attempt_cap` | Create a narrow successor with `supersedesTaskId`; Maestro atomically cancels the predecessor and rewires dependents, then drive the successor scope. Do not raise the cap. | Capped predecessor and every attempt. |
-| `escalation_required` / `reviewer_rejection` | Refine criteria/brief/tier (resets the rejection counters, then `/maestro resume`), or split with `supersedesTaskId` and drive the successor scope — a paused drive scope rewires to the successor automatically. The decision carries reviewer findings plus bounded executor evidence (report, touched files, spend). | Findings, executor report, and review launches. |
+| `escalation_required` / `reviewer_rejection` | Refine criteria/brief/tier (resets the rejection counters, then `/maestro resume`), or split with `supersedesTaskId` and drive the successor scope (a paused drive's scope rewires to the successor automatically). The decision carries reviewer findings plus bounded executor evidence (report, touched files, spend). | Findings, executor report, and review launches. |
 | `stalled` | Inspect the session/log; steer, abort, or refine before retrying. | Watchdog failure reason and log. |
 | `cost_cap` | Raise `maxCostPerTask` above what the cut-off attempt spent (or set it to 0), then drive the task again: the same attempt resumes in its own checkout and session from the checkpoint, so nothing is redone. Retrying under the unchanged cap is refused without billing. A successor via `supersedesTaskId` is only needed when the task itself should be split. | Checkpoint branch, attempt session, usage. |
-| `budget_blocked` | Inspect `/maestro costs`, then raise the budget deliberately with `/maestro config budget <usd>` or archive with `/maestro reset`. The budget counts the board's lifetime spend — sunk cost of cancelled and superseded tasks included — so cancelling work never frees budget; the warning reports the sunk share separately. | Usage and prompt accounting. |
+| `budget_blocked` | Inspect `/maestro costs`, then raise the budget deliberately with `/maestro config budget <usd>` or archive with `/maestro reset`. The budget counts the board's lifetime spend, sunk cost of cancelled and superseded tasks included, so cancelling work never frees budget; the warning reports the sunk share separately. | Usage and prompt accounting. |
 | `launch_limit` | Inspect retained launches, narrow the scope, or explicitly start another bounded drive. | Every executor and reviewer launch attempted by the drive. |
 | `stale_completion` | Inspect the component reason, then `/maestro retry <taskId>` or create a successor. Changing tier models, thinking levels, or reviewer tools does not make approvals stale; contract, verification-profile, dependency-artifact, and artifact changes do. | Legacy approval, prior artifact, provenance, attempts, and dependency identities. |
 | `user_abort` / `aborted` | Resume or explicitly retry only after checking partial work. | Attempt metadata and a checkpoint branch; the idle checkout is removed. |
 | Merge conflict | Retry or inspect the reported recovery branch; Maestro restores its checkout only while work resumes. | Checkpoint branch and conflict notes. |
 | Candidate verification failure | Fix in the task checkout and retry review. | Verification log and immutable pre-check identity. |
 | Integrated verification failure | Inspect the recorded commit and retained checkout; no automatic rollback is claimed. | Integrated commit, branch, checkout, and verification log. |
-| `paused` | The owning session uses `/maestro resume`; another session must not take ownership. | Paused scope and owner. |
-| Stale dispatch claim | Run `/maestro doctor`; startup recovery clears only expired safe claims. | Orphan attempts are finalized, not deleted. |
+| `paused` | A deliberate `/maestro pause` keeps its owner-session guard: the owning session runs `/maestro resume`. | Paused scope and owner. |
+| Stale dispatch claim | Run `/maestro doctor`. A claim whose owner process is still alive is never taken over, even after its lease lapses. Startup fails a `running` task that has no claim, so it can be retried, and clears only claims whose owner is gone. | Orphan attempts are finalized, not deleted. |
+| Pi exited or reloaded mid-drive | Live executors are aborted on exit (detached executors keep running and are reattached on start). A reload retires the old drive: it launches nothing more, a running trusted verification is cancelled, and promotion is refused. The next session start reconciles the orphaned drive into one `error` decision. Retry the task with `maestro_drive` `start` and `taskIds`, or `/maestro drive`. | Board, attempts, checkpoint branches, and logs. |
+| `waiting` | Nothing to do. The drive is asleep for a provider quota window or a transient retry. The status line shows the reason and the time it resumes, and the dashboard names the deferred tasks. | The active drive records `waiting` with the reason, resume time, and task ids. |
+| Scale confirmation required | `maestro_drive` `start` is refused when the plan crosses `confirmationPlanTasks` or `confirmationTotalLaunches`. The open decision is marked as awaiting you, reminders stop, and the status line reads `awaiting your /maestro drive confirmation`. Run `/maestro drive` yourself. | The refused decision. |
 | Orphan worktree | `/maestro doctor cleanup`, inspect, then `/maestro doctor cleanup confirm`. | Dirty or branch-ahead worktrees are classified recoverable and preserved. |
 | Manual acceptance | Use dashboard acceptance only when intentionally bypassing review. | `approvalKind: manual` remains visible to reconciliation. |
 | `completed` | Review the completion message or `/maestro timeline`; completed-board cleanup archives before clearing. | Archived board and logs under retention policy. |
 | `no_progress` | Inspect each pending task's dispatch-decline note, correct the named condition, then resume. | The decision and `maestro_drive` inspect output preserve per-task decline notes; no-op iterations consume no round budget. |
 | `round_limit`, `blocked`, or `error` | Inspect the decision evidence and blockers, correct one owner-scoped issue, then resume. | Durable decision delivery and resolution. |
+
+## Who can resume
+
+Mechanical stops can be resumed from any session once the cause is fixed: `budget_blocked`, `aborted`, `launch_limit`, `round_limit`, `provider_blocked`, and `error`. Judgment decisions keep an owner-session guard: `escalation_required`, `review_disagreement`, `stale_completion`, `reviewer_failure`, and `attempt_cap`. A settled `escalation_required` stop can also be resumed or released with `/maestro abort` from any session, so a dead session's parked drive does not force `/maestro reset`, which archives the whole board. A `completed` decision left unresolved by a closed session is resolved automatically when a new drive reserves the board.
+
+A decision delivered to the orchestrator wakes it with one model turn. If that turn dies and the decision stays unresolved with no board activity and no live launches for `decisionNudgeMinutes`, the owner session is nudged again, up to three times. Any board write or launch resets the quiet interval, and a reload re-arms the watchdog.
 
 ## Routine controls
 
@@ -49,15 +58,14 @@ Maestro preserves board state, attempts, logs, sessions, and checkpoint branches
 
 ## Review cost
 
-Review, not prompt size, is where an expensive drive's money goes: a measured 6-task drive spent
-$4.1728 of $4.4070 (94.7%) on reviewers while its executors cost $0.2341, and both reviews it paid
-for were rejections. Three controls bound that:
+Review, not prompt size, is usually where an expensive drive's money goes. Reviewers re-derive the
+evidence independently, and a rejected review is paid for in full. Three controls bound that:
 
 - The review prompt states the attempt's Git-attributed changed paths and per-file line counts, so
   a reviewer inspects the change instead of rediscovering it with repository-wide searches.
 - Plan approval warns when projected reviewer spend is at least twice the projected executor spend,
   names the two levers (`reviewPolicy`, review-tier model), and reports the effective per-launch
-  reviewer cap — `maxCostPerReview: 0` inherits `maxCostPerTask`, which is easy to misread as "no
+  reviewer cap. `maxCostPerReview: 0` inherits `maxCostPerTask`, which is easy to misread as "no
   cap".
 - `reviewCheapModel` runs the first reviewer of each attempt on a cheap model at `thinking: low`,
   and `reviewEscalation` (default `risk`) sends it to the review tier when the cheap verdict is
@@ -115,4 +123,4 @@ already appended owner message is acknowledged without duplication.
 
 Idle Maestro checkouts are checkpointed on their task branch and removed automatically. They are restored at the recorded path only while execution, review, or manual inspection resumes. Never delete a recovery branch merely to make status green. An empty changed-path list never means “stage everything.”
 
-Multi-review policies require one bounded `CRITERION N: PASS|FAIL — evidence` line per success criterion. A task that states no criteria (an explicit investigation, or a legacy task) has nothing to enumerate, so its verdict line alone is authoritative. Findings are identified by criterion reference, or by the finding text with Markdown emphasis and punctuation normalized away, so the same defect reworded between attempts is still recognized as unresolved and can escalate. Provider, process, artifact, merge, commit, and verification failures are operational failures: they do not count as reviewer disagreement or increment rejection escalation. Raw fallback launches remain attached to the same logical reviewer index, and launch caps prevent indefinite review retries.
+Multi-review policies require one bounded `CRITERION N: PASS|FAIL, then the evidence` line per success criterion. A task that states no criteria (an explicit investigation, or a legacy task) has nothing to enumerate, so its verdict line alone is authoritative. Findings are identified by criterion reference, or by the finding text with Markdown emphasis and punctuation normalized away, so the same defect reworded between attempts is still recognized as unresolved and can escalate. Provider, process, artifact, merge, commit, and verification failures are operational failures: they do not count as reviewer disagreement or increment rejection escalation. Raw fallback launches remain attached to the same logical reviewer index, and launch caps prevent indefinite review retries.
