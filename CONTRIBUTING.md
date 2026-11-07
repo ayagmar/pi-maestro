@@ -50,8 +50,8 @@ Bug fixes should add a behavioral regression test. Registration assertions do no
   process, Git, or the filesystem rather than a scheduling decision; several production bugs lived
   precisely in that gap while every fake-executor suite stayed green.
 - **`test/boundaries.test.ts`** asserts capability boundaries only: which modules may spawn
-  processes or execute Git, the three-tool model surface in source, and that the package adds no
-  runtime dependencies or framework directories. It deliberately does not assert where
+  processes or execute Git, the three-tool model surface in source, and that the only runtime dependency is
+  `@earendil-works/pi-schema` and that no framework directories ship. It deliberately does not assert where
   ordinary functions live. Those checks pass on completely broken code (gutting a function while
   keeping its name left them all green) and only tax refactors.
 - **`test/package.test.ts`** checks the packed tarball: it ships the runtime and public docs but no
