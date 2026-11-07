@@ -1,67 +1,125 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
+
+const tasks = [
+  { id: "T1", title: "Map the session boundary", status: "approved", cost: "$0.31" },
+  { id: "T2", title: "Port the adapter", status: "changes_requested", cost: "$0.74" },
+  { id: "T3", title: "Update the call sites", status: "running", cost: "$0.19" },
+  { id: "T4", title: "Add replay tests", status: "todo", cost: "$0.00" },
+];
 ---
-<BaseLayout title="Orchestrate the work. Keep the proof." description="Pi Maestro adds an orchestrator/advisor layer to Pi: fresh-context executors, independent review, and visible evidence.">
+<BaseLayout
+  title="Pi Maestro: orchestrated, reviewed work for Pi"
+  description="Pi Maestro is a Pi extension. Your model plans a goal into tasks, fresh-context executors do them, and an independent reviewer approves each result."
+>
   <section class="hero">
     <div class="shell hero-grid">
       <div class="hero-copy">
-        <span class="mono-label">The control room for Pi</span>
-        <h1>Orchestrate the work. Keep the proof.</h1>
-        <p class="hero-lede">Pi Maestro turns a goal into bounded tasks, sends each one to a fresh-context executor, and brings the result back for independent review before approval.</p>
+        <h1>Plan once. Execute in fresh contexts. Approve after review.</h1>
+        <p class="hero-lede">
+          Pi Maestro is an extension for pi. The model in your session splits a goal into tasks with success criteria. Each task runs in its own pi process on a cheaper model, and a separate read-only reviewer has to approve it before it counts.
+        </p>
         <div class="hero-actions">
-          <a class="button button-primary" href="/docs/getting-started/">Install Pi Maestro <span aria-hidden="true">→</span></a>
-          <a class="button button-quiet" href="/docs/how-it-works/">See how it works <span aria-hidden="true">↗</span></a>
+          <a class="button button-primary" href="/docs/getting-started/">Install Pi Maestro</a>
+          <a class="button button-quiet" href="/docs/">Read the docs</a>
         </div>
-        <p class="hero-note">Works inside your existing Pi session · no new control plane</p>
-      </div>
-      <div class="workflow-stage" aria-label="Illustrated Maestro project board showing tasks in running, review, and approved states">
-        <div class="stage-chrome"><span class="stage-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>.pi/maestro/board.json</span><span>LIVE</span></div>
-        <div class="stage-goal"><span class="stage-label">Current goal</span><p>migrate the auth module to the new session API</p></div>
-        <div class="stage-task-list">
-          <div class="stage-task"><span class="stage-status">T1</span><span><strong>Map the existing session boundary</strong><small>executor · 4 turns</small></span><span class="stage-status">RUNNING</span></div>
-          <div class="stage-task"><span class="stage-status">T2</span><span><strong>Port the adapter and tests</strong><small>executor · 8 turns</small></span><span class="stage-status review">REVIEW</span></div>
-          <div class="stage-task"><span class="stage-status">T3</span><span><strong>Verify the integration contract</strong><small>reviewer · fresh context</small></span><span class="stage-status approved">APPROVED</span></div>
+        <div class="install-command code-block">
+          <button class="copy-button" type="button" data-copy="pi install npm:@ayagmar/pi-maestro" aria-label="Copy install command">Copy</button>
+          <pre><code>pi install npm:@ayagmar/pi-maestro</code></pre>
         </div>
-        <div class="stage-bottom"><span>⚡ maestro 2/3 · 1 running</span><strong>review required</strong></div>
+        <p class="hero-note">Requires pi 1.5 or newer and Node.js 22.19 or newer. MIT licensed.</p>
       </div>
-    </div>
-  </section>
-
-  <section class="section section-tight">
-    <div class="shell">
-      <div class="section-intro">
-        <div><div class="signal-rule"></div><span class="mono-label">What changes</span></div>
-        <div><h2>Delegation without the fog.</h2><p>Pi stays intentionally small. Maestro adds a concrete orchestration pattern without turning your session into a black box.</p></div>
-      </div>
-      <div class="roles-grid">
-        <article class="role"><span class="role-mark" aria-hidden="true">AD</span><h3>Advisor</h3><p>Your current model decomposes the goal, writes self-contained briefs, and makes the judgment calls that need context.</p></article>
-        <article class="role"><span class="role-mark" aria-hidden="true">EX</span><h3>Executors</h3><p>Cheap, fresh-context Pi processes work in parallel within explicit write scopes and task budgets.</p></article>
-        <article class="role"><span class="role-mark" aria-hidden="true">RV</span><h3>Reviewers</h3><p>An independent read-only reviewer checks criteria and evidence before work can become approved.</p></article>
-      </div>
-    </div>
-  </section>
-
-  <section class="section section-dark">
-    <div class="shell">
-      <div class="section-intro"><div><div class="signal-rule"></div><span class="mono-label">One loop, eight phases</span></div><div><h2>The board remembers what the chat forgets.</h2><p>Every decision is persisted beside the repository. The dashboard projects discovery, plan approval, execution, review, integration, verification, recovery, and completion from evidence already on disk.</p></div></div>
-      <div class="evidence-strip"><p>Routine progress stays out of the orchestrator's context. Decision points come back as short, bounded evidence.</p><div class="evidence-list"><span>board.json</span><span>history.jsonl</span><span>event logs</span><span>Pi sessions</span><span>checkpoint branches</span></div></div>
+      <figure class="board-example">
+        <figcaption>Example board mid-run. States are the ones the dashboard shows.</figcaption>
+        <table>
+          <caption class="sr-only">Four tasks on a Maestro board with their status and spend</caption>
+          <thead class="board-head"><tr><th scope="col">Task</th><th scope="col">Title</th><th scope="col">Status</th><th scope="col">Spend</th></tr></thead>
+          <tbody>
+            {tasks.map((task) => (
+              <tr>
+                <th class="task-id" scope="row">{task.id}</th>
+                <td>{task.title}</td>
+                <td><span class={`status status-${task.status}`}>{task.status}</span></td>
+                <td>{task.cost}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p class="board-footer"><code>⚡ maestro running · execution · ▰▰▱▱▱▱▱▱▱▱ 1/4 (25%) · 1 running · $1.24</code></p>
+      </figure>
     </div>
   </section>
 
   <section class="section">
-    <div class="shell flow-layout">
-      <div class="flow-copy"><div class="signal-rule"></div><span class="mono-label">The handoff</span><h2>Fresh context is a feature.</h2><p>Planning can be noisy. Execution should not inherit every dead end. Each task brief carries its goal, constraints, criteria, verification, and approved dependency reports—nothing else.</p><p><a href="/docs/architecture/">Read the ownership model →</a></p></div>
-      <div class="flow-list">
-        <article class="flow-step"><span class="flow-index">01</span><div><h3>Plan</h3><p>Define the task contract: scope, criteria, dependencies, tier, and commit message.</p></div><span class="flow-arrow" aria-hidden="true">↘</span></article>
-        <article class="flow-step"><span class="flow-index">02</span><div><h3>Dispatch</h3><p>Start independent RPC child sessions with model fallbacks and per-attempt cost limits.</p></div><span class="flow-arrow" aria-hidden="true">↘</span></article>
-        <article class="flow-step"><span class="flow-index">03</span><div><h3>Review</h3><p>Give the completed candidate and bounded evidence to a fresh, read-only reviewer.</p></div><span class="flow-arrow" aria-hidden="true">↘</span></article>
-        <article class="flow-step"><span class="flow-index">04</span><div><h3>Approve or recover</h3><p>Integrate only after artifact checks and trusted verification. Preserve recovery evidence when it stops.</p></div><span class="flow-arrow" aria-hidden="true">→</span></article>
+    <div class="shell">
+      <div class="section-intro">
+        <h2>From goal to approved work</h2>
+        <p>Run <code>/maestro start &lt;goal&gt;</code>. Everything after that is recorded on a board in <code>.pi/maestro/</code>, so a restart loses nothing.</p>
+      </div>
+      <ol class="flow">
+        <li>
+          <h3>Plan</h3>
+          <p>Each task gets a self-contained brief, 1 to 12 success criteria, bounded write paths, dependencies, and a tier. With <code>planGate</code> on, nothing runs until you approve the plan.</p>
+        </li>
+        <li>
+          <h3>Execute</h3>
+          <p>Tasks whose dependencies are approved run in parallel, three at a time by default, as separate <code>pi --mode rpc</code> processes. Each uses the model and fallbacks of its tier and sees only its brief and the reports of approved dependencies.</p>
+        </li>
+        <li>
+          <h3>Review</h3>
+          <p>A reviewer with a fresh context and <code>read,grep,find,ls</code> checks every criterion and ends with <code>VERDICT: APPROVE</code> or <code>VERDICT: REQUEST_CHANGES</code>. A rejection sends the findings into the next attempt.</p>
+        </li>
+        <li>
+          <h3>Integrate</h3>
+          <p>Artifact checks and any trusted verification command run before the work lands as one conventional commit per task.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="section section-dark">
+    <div class="shell split">
+      <div>
+        <h2>The orchestrator stays small</h2>
+        <p>The expensive model plans, picks tiers, and decides what to do when a drive stops. It never reads raw executor output. A single <code>maestro_drive</code> call spans the whole run and returns one bounded outcome, so the orchestrator spends one turn on a drive instead of polling it.</p>
+        <p>The model has three tools: <code>maestro_plan</code>, <code>maestro_update</code>, and <code>maestro_drive</code>. Approval, pause, abort, and recovery are commands only you can run.</p>
+      </div>
+      <div>
+        <h2>Spend and attempts are capped</h2>
+        <p>By default one attempt is cut off at $5, and no new batch starts once the board's spend reaches $25. A task gets three attempts, and a drive runs at most 20 rounds. When a limit trips, the drive stops with a named reason and the safe next step.</p>
+        <p><a class="text-link" href="/docs/operations/">What each stop means</a></p>
       </div>
     </div>
   </section>
 
-  <section class="install-band section-tight">
-    <div class="shell install-layout"><div><h2>Start with the command you already know.</h2><p>Install the extension, open the control center, and let the current Pi session make the first plan.</p></div><div class="install-command code-block"><button class="copy-button" type="button" data-copy="pi install npm:@ayagmar/pi-maestro">Copy</button><pre><code><span class="code-prefix">$</span> pi install npm:@ayagmar/pi-maestro
-<span class="code-prefix">$</span> /maestro start add tests for the board recovery path</code></pre></div></div>
+  <section class="section">
+    <div class="shell split">
+      <div>
+        <h2>Everything is inspectable</h2>
+        <p>The board, a status history, raw event logs, executor and reviewer sessions, and checkpoint branches stay on disk. <code>/maestro board</code> walks eight phases from discovery to completion. <code>/maestro timeline</code>, <code>costs</code>, and <code>reconcile</code> read that evidence without calling a model.</p>
+        <p><a class="text-link" href="/docs/commands/">Command reference</a></p>
+      </div>
+      <div>
+        <h2>What it does not do</h2>
+        <p>Maestro is not a sandbox. Executors edit files with your account's permissions, and verification commands are arbitrary local code that only your user config can define. Reviewers are read-only by default, and manual approval skips them. An untrusted project cannot change budgets, models, or tool lists.</p>
+        <p><a class="text-link" href="/docs/security/">Security and trust boundaries</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section install-band">
+    <div class="shell install-layout">
+      <div>
+        <h2>Install and run a first goal</h2>
+        <p>Check the environment with <code>/maestro doctor</code>. The default preset uses your pi model, so no configuration is needed.</p>
+      </div>
+      <div class="code-block">
+        <button class="copy-button" type="button" data-copy="pi install npm:@ayagmar/pi-maestro" aria-label="Copy install command">Copy</button>
+        <pre><code>pi install npm:@ayagmar/pi-maestro
+/maestro doctor
+/maestro start add tests for the board recovery path
+/maestro drive</code></pre>
+      </div>
+    </div>
   </section>
 </BaseLayout>

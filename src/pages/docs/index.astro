@@ -1,12 +1,24 @@
 ---
 import { docs } from "../../data/docs";
 import BaseLayout from "../../layouts/BaseLayout.astro";
+
+const groups = [...new Set(docs.map((doc) => doc.group))];
 ---
-<BaseLayout title="Documentation" description="Install, operate, understand, and extend Pi Maestro." isDocs>
+<BaseLayout title="Documentation" description="Install, operate, understand, and contribute to Pi Maestro." isDocs>
   <div class="shell docs-index">
-    <header class="docs-index-hero"><div><span class="mono-label">Pi Maestro / Documentation</span><h1>Run the system with confidence.</h1></div><div class="docs-index-aside"><strong>New here?</strong><p>Start with the installation guide, then read how the advisor, executors, and reviewers share responsibility.</p><a class="text-link" href="/docs/getting-started/">Open getting started →</a></div></header>
-    <div class="docs-grid">
-      {docs.map((doc) => <a class="docs-card" href={`/docs/${doc.slug}/`}><div><span class="mono-label">{doc.group}</span><h2>{doc.title}</h2><p>{doc.description}</p></div><div class="docs-card-foot"><span>Read guide</span><span aria-hidden="true">↗</span></div></a>)}
-    </div>
+    <header class="docs-index-hero">
+      <h1>Documentation</h1>
+      <p>New here? Read <a href="/docs/getting-started/">Getting started</a>, then <a href="/docs/how-it-works/">How it works</a>. When a drive stops, <a href="/docs/operations/">Operations and recovery</a> names the safe next step.</p>
+    </header>
+    {groups.map((group) => (
+      <section class="docs-section" aria-labelledby={`group-${group.toLowerCase().replaceAll(" ", "-")}`}>
+        <h2 id={`group-${group.toLowerCase().replaceAll(" ", "-")}`}>{group}</h2>
+        <ul class="docs-list">
+          {docs.filter((doc) => doc.group === group).map((doc) => (
+            <li><a href={`/docs/${doc.slug}/`}><strong>{doc.title}</strong><span>{doc.description}</span></a></li>
+          ))}
+        </ul>
+      </section>
+    ))}
   </div>
 </BaseLayout>
