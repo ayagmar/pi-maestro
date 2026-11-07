@@ -319,6 +319,6 @@ test("recipe save and expansion preserve strict discovery contracts", () => {
     const first = unsafe.tasks[0];
     assert.ok(first);
     first.discovery = { allowedWritePaths: ["src/**"], shell: "touch owned" };
-    assert.throws(() => parseRecipe(JSON.stringify(unsafe)), /discovery contract is invalid/);
+    assert.throws(() => parseRecipe(JSON.stringify(unsafe)), /\/discovery\//);
   });
 });

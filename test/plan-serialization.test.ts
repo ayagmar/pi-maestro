@@ -49,7 +49,7 @@ test("plan export/import is versioned and excludes run evidence", () => {
 });
 
 test("plan import rejects malformed, cyclic, and unknown-profile plans", () => {
-  assert.throws(() => importPlan("{}", ["standard"], []), /kind or version/);
+  assert.throws(() => importPlan("{}", ["standard"], []), /\/kind: missing/);
   const cyclic = JSON.stringify({
     kind: "pi-maestro-plan",
     version: 1,
@@ -114,7 +114,10 @@ test("plan export and import preserve strict discovery contracts", () => {
   const first = malformed.tasks[0];
   assert.ok(first);
   first.discovery = { allowedWritePaths: ["src/**"], command: "touch owned" };
-  assert.throws(() => importPlan(JSON.stringify(malformed), ["standard"], []), /malformed/);
+  assert.throws(
+    () => importPlan(JSON.stringify(malformed), ["standard"], []),
+    /malformed at \/tasks\/0\/discovery\/command: unknown field/
+  );
 });
 
 test("plan comparison is pure and reports contracts, fingerprints, waves, and concurrency", () => {

@@ -17,6 +17,7 @@
 - The plan, brief and workflow viewers no longer advertise PgUp/PgDn in pi's fullscreen mode (the pi 1.0 default), where pi's own viewport takes those keys; the arrow keys page the viewer. Their key-hint line is also cut to the terminal width.
 - Outside the TUI (`pi --mode rpc`), `/maestro plan`, `/maestro workflows` and the plan task editor use pi's stock select and editor dialogs, which RPC forwards to the client, and the viewers send their text as a notification. Previously these menus were custom TUI components, which RPC does not render, so the commands silently did nothing.
 - Executors launched from a standalone (Bun-compiled) pi binary re-run that binary directly. The virtual `/$bunfs/root/…` entry script is no longer passed on as an extra argument, which pi would have read as a prompt. This matches the invocation in pi's own subagent example.
+- Invalid boards, config files, recipes, plan exports and discovery output now report the field at fault as a JSON Pointer path, such as `/tasks/0/attempts/0/usage/cost: expected number, got string`. The board quarantine notice includes that reason. Which files load is unchanged, except that a hand-edited board holding a one-item array where an intervention name belongs (`["handoff"]`) is now quarantined.
 
 ### Robustness
 

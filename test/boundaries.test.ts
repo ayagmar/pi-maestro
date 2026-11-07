@@ -152,11 +152,11 @@ test("the model surface remains exactly three named tools", () => {
   assert.equal((tools.match(/\.registerTool\s*</g) ?? []).length, 3);
 });
 
-test("package shape adds no runtime dependency, database, analytics, plugin, or policy framework", () => {
+test("package shape adds only pi-schema at runtime, and no database, analytics, plugin, or policy framework", () => {
   const pkg = JSON.parse(readFileSync(join(rootDirectory, "package.json"), "utf-8")) as {
     dependencies?: Record<string, string>;
   };
-  assert.deepEqual(pkg.dependencies ?? {}, {});
+  assert.deepEqual(Object.keys(pkg.dependencies ?? {}), ["@earendil-works/pi-schema"]);
   const forbiddenDependency = /sqlite|prisma|typeorm|sequelize|analytics|telemetry|plugin|policy/i;
   assert.deepEqual(
     Object.keys(pkg.dependencies ?? {}).filter((name) => forbiddenDependency.test(name)),

@@ -55,6 +55,9 @@
     "build": "astro build",
     "preview": "astro preview"
   },
+  "dependencies": {
+    "@earendil-works/pi-schema": "^1.5.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

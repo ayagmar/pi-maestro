@@ -68,7 +68,7 @@ test("discovery output is strict, bounded, and rejects executable fields", () =>
   emptyProfile.verificationProfile = "";
   assert.throws(
     () => parseDiscoveryOutput(output({ items: [emptyProfile] })),
-    /verificationProfile is invalid/
+    /\/items\/0\/verificationProfile/
   );
   assert.throws(
     () => parseDiscoveryOutput(`${" ".repeat(MAX_DISCOVERY_REPORT_BYTES)}xx`),

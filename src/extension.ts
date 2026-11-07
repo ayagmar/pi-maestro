@@ -149,7 +149,7 @@ export default function maestro(
     try {
       notify(
         ctx,
-        `Board was corrupt and quarantined to ${quarantined}. Restore an archive with /maestro replay.`,
+        `Board was corrupt and quarantined to ${quarantined.file} (${quarantined.reason}). Restore an archive with /maestro replay.`,
         "warning"
       );
     } catch {

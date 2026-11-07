@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Test task",
+      "brief": "Do the work",
+      "tier": "standard",
+      "status": "approved",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 0,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060730598,
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cost": 0,
+            "turns": 0
+          },
+          "touchedFiles": ["file.txt"],
+          "finalReport": "done",
+          "diff": "+after",
+          "executionFingerprint": "6ddb888650c8f14feb633adbc01613da1d8c81afa2f5c4cebff536f5b52858ee",
+          "reviewLaunches": [
+            {
+              "id": "T1-review-1-1-1",
+              "reviewerIndex": 1,
+              "role": "single",
+              "startedAt": 1794060730637,
+              "usage": {
+                "input": 0,
+                "output": 0,
+                "cost": 0,
+                "turns": 0
+              },
+              "promptCharacters": 1859,
+              "promptApproximateTokens": 465,
+              "promptSections": [
+                {
+                  "name": "role",
+                  "characters": 210,
+                  "omitted": false
+                },
+                {
+                  "name": "Task T1: Test task",
+                  "characters": 34,
+                  "omitted": false
+                },
+                {
+                  "name": "Executor report",
+                  "characters": 23,
+                  "omitted": false
+                },
+                {
+                  "name": "Authoritative artifact",
+                  "characters": 160,
+                  "omitted": false
+                },
+                {
+                  "name": "Files changed",
+                  "characters": 251,
+                  "omitted": false
+                },
+                {
+                  "name": "Bounded display diff",
+                  "characters": 30,
+                  "omitted": false
+                },
+                {
+                  "name": "Success criteria",
+                  "characters": 285,
+                  "omitted": false
+                },
+                {
+                  "name": "Stop rule",
+                  "characters": 306,
+                  "omitted": false
+                },
+                {
+                  "name": "Verdict",
+                  "characters": 544,
+                  "omitted": false
+                }
+              ],
+              "logFile": "stub.jsonl",
+              "exitCode": 0,
+              "finalReport": "VERDICT: APPROVE",
+              "verdict": "approve"
+            }
+          ],
+          "reviewUsage": {
+            "input": 0,
+            "output": 0,
+            "cost": 0,
+            "turns": 0
+          },
+          "reviewReport": "VERDICT: APPROVE",
+          "reviewConvergence": {
+            "policy": "single",
+            "status": "approved",
+            "requiredApprovals": 1,
+            "actualApprovals": 1,
+            "reviewerCount": 1,
+            "summary": "VERDICT: APPROVE",
+            "decidedAt": 1794060730638
+          }
+        }
+      ],
+      "createdAt": 1794060730598,
+      "updatedAt": 1794060731227,
+      "writePaths": ["file.txt"],
+      "verificationProfile": "required",
+      "provenance": {
+        "candidateTree": "1fc386c80591a26f8fc25696513b6f11fc3320d5",
+        "capturedAt": 1794060730606,
+        "integratedCommit": "8b113a68903aeba59c80c5956dec7b0314282243",
+        "integratedTree": "1fc386c80591a26f8fc25696513b6f11fc3320d5",
+        "reviewedAt": 1794060731227,
+        "verifiedAt": 1794060731227,
+        "verificationProfile": "required"
+      },
+      "approvalKind": "reviewed",
+      "verificationSummary": "required passed candidate verification and post-integration verification",
+      "integratedCommit": "8b113a68903aeba59c80c5956dec7b0314282243",
+      "approvedProvenance": {
+        "version": 1,
+        "executionShape": 2,
+        "fingerprint": "6ddb888650c8f14feb633adbc01613da1d8c81afa2f5c4cebff536f5b52858ee",
+        "componentHashes": {
+          "contract": "541734f819295bb4e8cac4c843d6c1396fed4fb61d09363865682f58ec76a851",
+          "execution": "ba8c7ceb5cd36e0c928188762d1093417cf8ba0b0f998d5ecbaa55d490f88b60",
+          "verification": "62cd062b1dec2628da71f8940a60c4c6eb8e92e9482cfee6c8f276c8b2b27652",
+          "dependencies": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "dependencyIdentities": [],
+        "artifact": {
+          "kind": "git-tree",
+          "identity": "1fc386c80591a26f8fc25696513b6f11fc3320d5"
+        },
+        "approvedAt": 1794060731226
+      }
+    }
+  ],
+  "revision": 10
+}

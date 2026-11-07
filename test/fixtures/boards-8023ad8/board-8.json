@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "nextTaskNumber": 1,
+  "activeDecision": {
+    "id": "decision-1",
+    "ownerSession": "/tmp/maestro-owner.jsonl",
+    "kind": "reviewer_failure",
+    "taskIds": [],
+    "evidence": "Owner action is required",
+    "allowedInterventions": ["handoff"],
+    "createdAt": 1794060729859,
+    "deliveredAt": 1794060729859,
+    "awaitingHuman": {
+      "kind": "scale_confirmation",
+      "since": 1794060729859,
+      "signature": "sig-1"
+    }
+  },
+  "tasks": [],
+  "revision": 4
+}

@@ -21,3 +21,10 @@ export const MAX_DECISION_EVIDENCE_CHARS = 12_000;
 export const MAX_DRIVE_WAIT_REASON_CHARS = 400;
 /** Discovery JSON is validated in bytes and must remain intact up to this contract limit. */
 export const MAX_DISCOVERY_REPORT_BYTES = 64_000;
+
+/**
+ * Mirrors pi's own ladder (`pi --thinking`). `max` exists upstream and is the
+ * level a reviewer on genuinely hard work wants; omitting it silently capped
+ * maestro at xhigh with no way to ask for more.
+ */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;

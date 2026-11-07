@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "nextTaskNumber": 1,
+  "tasks": [],
+  "revision": 2,
+  "activeDrive": {
+    "id": "drive-1",
+    "ownerSession": "/tmp/maestro-owner.jsonl",
+    "taskIds": ["T1"],
+    "startedAt": 1794060729846
+  }
+}

@@ -1,274 +1,62 @@
-export type TaskStatus =
-  | "todo"
-  | "running"
-  | "ready_for_review"
-  | "changes_requested"
-  | "approved"
-  | "failed"
-  | "cancelled";
+import { type Static } from "@earendil-works/pi-schema";
+import {
+  type activeDriveSchema,
+  type approvedProvenanceSchema,
+  type artifactProvenanceSchema,
+  type attemptSchema,
+  type boardSchema,
+  type configFileSchema,
+  type dispatchClaimSchema,
+  type driveDecisionSchema,
+  type driveWaitSchema,
+  type failureKindSchema,
+  type failureReasonSchema,
+  type pausedDriveReasonSchema,
+  type pausedDriveSchema,
+  type recipeInputSchema,
+  type recipeInputValueSchema,
+  type recipeTaskSchema,
+  type reviewConvergenceSchema,
+  type reviewEscalationPolicySchema,
+  type reviewFindingSchema,
+  type reviewLaunchSchema,
+  type reviewPolicySchema,
+  type taskSchema,
+  type taskStatusSchema,
+  type tierConfigSchema,
+  type usageSchema,
+  type verificationProfileSchema,
+  type workflowRecipeSchema,
+} from "./schemas.js";
 
-export interface Usage {
-  input: number;
-  output: number;
-  cost: number;
-  turns: number;
-}
-
-export type FailureKind =
-  | "provider_failure"
-  | "stalled"
-  | "executor_failure"
-  | "reviewer_rejection"
-  | "reviewer_failure"
-  | "user_abort"
-  | "cost_cap";
-
-export interface FailureReason {
-  kind: FailureKind;
-  message: string;
-  retryable: boolean;
-}
-
-export interface ReviewLaunch {
-  id?: string;
-  reviewerIndex?: number;
-  role?: "single" | "confirmer" | "finder" | "refuter";
-  verdict?: "approve" | "request_changes";
-  /**
-   * Which side of the review cost ladder this launch actually ran on:
-   * "economy" is the cheap first pass (reviewCheapModel), "premium" the review
-   * tier — including a cheap first pass that fell back to a review-tier model
-   * after its own provider failed.
-   */
-  costTier?: "economy" | "premium";
-  /** Why this launch ran on the review tier instead of the cheap first pass. */
-  escalationReason?: string;
-  criterionEvidence?: Array<{ criterion: number; passed: boolean; evidence: string }>;
-  /** Git tree of the candidate this reviewer judged. */
-  candidateTree?: string;
-  /** Task fingerprint (contract, execution, verification, dependencies) this reviewer judged. */
-  taskFingerprint?: string;
-  model?: string;
-  provider?: string;
-  sessionFile?: string;
-  /** Executor event log for this reviewer launch, when retained. */
-  logFile?: string;
-  startedAt: number;
-  endedAt?: number;
-  exitCode?: number;
-  errorMessage?: string;
-  failureReason?: FailureReason;
-  usage: Usage;
-  finalReport?: string;
-  promptCharacters?: number;
-  promptApproximateTokens?: number;
-  promptSections?: Array<{ name: string; characters: number; omitted: boolean }>;
-}
-
-export interface ReviewConvergence {
-  policy: ReviewPolicy;
-  status: "approved" | "changes_requested" | "disagreement" | "operational_failure";
-  requiredApprovals: number;
-  actualApprovals: number;
-  reviewerCount: number;
-  summary: string;
-  decidedAt: number;
-  /** What settled it, when it was not the reviewers' judgment: pre-review gates (fingerprint, artifact, verification). */
-  cause?: "gate";
-}
-
-export interface Attempt {
-  index: number;
-  /** Nested Pi session file reported by the executor via get_state. */
-  sessionFile?: string;
-  /** Pi session directory for this raw launch; also supports legacy per-attempt directories. */
-  sessionDir?: string;
-  logFile: string;
-  model?: string;
-  /** Provider parsed from the resolved model id, when available. */
-  provider?: string;
-  /** This attempt continued the rejected predecessor's session instead of starting fresh. */
-  resumed?: boolean;
-  /** Opt-in detached RPC transport metadata used for PID-safe startup recovery. */
-  detached?: boolean;
-  pid?: number;
-  processStartId?: string;
-  /** Unique per raw detached launch; its terminal record must carry the same id. */
-  transportId?: string;
-  controlFile?: string;
-  exitFile?: string;
-  stderrFile?: string;
-  thinking: string;
-  startedAt: number;
-  endedAt?: number;
-  exitCode?: number;
-  /** Provider or executor error that ended this attempt. */
-  errorMessage?: string;
-  /** Structured, redacted reason for the last failure or review rejection. */
-  failureReason?: FailureReason;
-  /** Configured task/dependency fingerprint captured when execution was claimed. */
-  executionFingerprint?: string;
-  /** Per-component fingerprint hashes captured alongside executionFingerprint, used to name which contract component went stale. */
-  executionComponentHashes?: {
-    contract: string;
-    execution: string;
-    verification: string;
-    dependencies: string;
-  };
-  /** Whether this raw executor launch consumes maxAttempts. Defaults to true for legacy boards. */
-  consumesAttempt?: boolean;
-  /** @deprecated Legacy marker for a non-consuming provider launch. */
-  providerFailure?: boolean;
-  usage: Usage;
-  finalReport?: string;
-  /** Compact deterministic accounting for the executor prompt. */
-  promptCharacters?: number;
-  promptApproximateTokens?: number;
-  promptSections?: Array<{ name: string; characters: number; omitted: boolean }>;
-  /** Bounded git diff captured after this executor completed successfully. */
-  diff?: string;
-  /** Isolated checkout used by this executor and its reviewer. */
-  worktreePath?: string;
-  /** Git branch checked out in worktreePath. */
-  branch?: string;
-  /** Full report of the last review run against this attempt. */
-  reviewReport?: string;
-  /** Reviewer findings retained on this attempt after later retries. */
-  reviewNotes?: string;
-  /** Model and provider used by the reviewer. */
-  reviewModel?: string;
-  reviewProvider?: string;
-  /** Every reviewer launch, including failed fallback models. */
-  reviewLaunches?: ReviewLaunch[];
-  reviewConvergence?: ReviewConvergence;
-  /** Superseded convergence decisions retained across explicit human review retries. */
-  reviewConvergenceHistory?: ReviewConvergence[];
-  /** Aggregate review usage, also included in the attempt's aggregate usage. */
-  reviewUsage?: Usage;
-  /** Session file of the last review run, for post-hoc inspection. */
-  reviewSessionFile?: string;
-  touchedFiles: string[];
-}
-
-export interface DispatchClaim {
-  id: string;
-  kind: "execute" | "review";
-  claimedAt: number;
-  /** Deadline after which crash recovery may atomically reclaim the dispatch. */
-  expiresAt?: number;
-  /** Owning pi process; another session never reclaims a claim whose owner is still alive. */
-  ownerPid?: number;
-  /** Kernel start identity of `ownerPid`, so a recycled PID does not keep the claim alive. */
-  ownerStart?: string;
-}
-
-export interface ReviewFinding {
-  fingerprint: string;
-  message: string;
-  status: "open" | "verified";
-  firstAttempt: number;
-  lastAttempt: number;
-}
-
-export interface ArtifactProvenance {
-  candidateTree: string;
-  capturedAt: number;
-  reviewedAt?: number;
-  integratedCommit?: string;
-  integratedTree?: string;
-  verifiedAt?: number;
-  verificationProfile?: string;
-}
-
-export interface ApprovedProvenance {
-  /**
-   * Record format. Kept at 1 on purpose: validators in Maestro builds that
-   * are still running in other pi sessions reject any other value and
-   * quarantine the whole board (a real board was quarantined 34 seconds
-   * after an upgrade this way). Shape changes go in `executionShape`, which
-   * old validators ignore as an unknown key.
-   */
-  version: 1;
-  /**
-   * How the `execution` component was hashed. Absent: the tier's
-   * model/thinking/tools were included (legacy). 2: only the tier name,
-   * review policy, and confirm count — which model produced or reviewed the
-   * artifact is provenance, not identity.
-   */
-  executionShape?: 2;
-  fingerprint: string;
-  componentHashes: {
-    contract: string;
-    execution: string;
-    verification: string;
-    dependencies: string;
-  };
-  artifact: { kind: "git-tree" | "report"; identity: string };
-  dependencyIdentities: Array<{
-    taskId: string;
-    kind: "git-tree" | "report";
-    identity: string;
-  }>;
-  approvedAt: number;
-}
+/** Persisted shapes derive from schemas.ts, so a type and its validator cannot drift. */
+export type TaskStatus = Static<typeof taskStatusSchema>;
+export type Usage = Static<typeof usageSchema>;
+export type FailureKind = Static<typeof failureKindSchema>;
+export type FailureReason = Static<typeof failureReasonSchema>;
+export type ReviewLaunch = Static<typeof reviewLaunchSchema>;
+export type ReviewConvergence = Static<typeof reviewConvergenceSchema>;
+export type Attempt = Static<typeof attemptSchema>;
+export type DispatchClaim = Static<typeof dispatchClaimSchema>;
+export type ReviewFinding = Static<typeof reviewFindingSchema>;
+export type ArtifactProvenance = Static<typeof artifactProvenanceSchema>;
+export type ApprovedProvenance = Static<typeof approvedProvenanceSchema>;
+export type Task = Static<typeof taskSchema>;
+export type PausedDriveReason = Static<typeof pausedDriveReasonSchema>;
+export type PausedDriveState = Static<typeof pausedDriveSchema>;
+export type DriveDecision = Static<typeof driveDecisionSchema>;
+export type DriveWait = Static<typeof driveWaitSchema>;
+export type ActiveDriveState = Static<typeof activeDriveSchema>;
+export type Board = Static<typeof boardSchema>;
+export type TierConfig = Static<typeof tierConfigSchema>;
+export type VerificationProfile = Static<typeof verificationProfileSchema>;
+export type RecipeInputValue = Static<typeof recipeInputValueSchema>;
+export type RecipeInput = Static<typeof recipeInputSchema>;
+export type RecipeTask = Static<typeof recipeTaskSchema>;
+export type ReviewPolicy = Static<typeof reviewPolicySchema>;
+export type WorkflowRecipe = Static<typeof workflowRecipeSchema>;
 
 export type TaskKind = "implementation" | "investigation";
-
-export interface Task {
-  id: string;
-  title: string;
-  brief: string;
-  /** Explicit no-file investigation marker; absent means implementation work. */
-  kind?: "investigation";
-  /** Conventional commit message used when auto-committing this task's approved work. */
-  commitMessage?: string;
-  /** Orchestrator hint injected into review prompts: what to verify and where to focus. */
-  reviewGuidance?: string;
-  /** Successor task that replaced this task. */
-  supersededBy?: string;
-  /** Predecessor task that this task replaced. */
-  supersedes?: string;
-  tier: string;
-  status: TaskStatus;
-  dependsOn: string[];
-  /** Declared repository-relative write scope. Optional only for legacy boards. */
-  writePaths?: string[];
-  /** Explicit bounded outcomes required for newly planned executable tasks. */
-  successCriteria?: string[];
-  /** Trusted configured verification profile selected for this task. */
-  verificationProfile?: string;
-  reviewPolicy?: ReviewPolicy;
-  /** Read-only task that may propose ordinary tasks within these repository scopes. */
-  discovery?: {
-    allowedWritePaths: string[];
-  };
-  findings?: ReviewFinding[];
-  reviewNotes?: string;
-  /** Provenance for acceptance; automated approval is recorded only after integration. */
-  approvalKind?: "reviewed" | "manual";
-  /** Legacy bounded-diff hash. Loadable for migration, but never authoritative. */
-  reviewedPatchHash?: string;
-  integratedCommit?: string;
-  verificationSummary?: string;
-  provenance?: ArtifactProvenance;
-  /** Versioned proof used to decide whether an approved completion is still reusable. */
-  approvedProvenance?: ApprovedProvenance;
-  /** Consecutive genuine reviewer rejections. */
-  reviewRejections?: number;
-  /**
-   * Consecutive rejections that repeated a finding from an earlier attempt.
-   * The autonomous drive escalates on these rather than on rejection count,
-   * so a task raising only new findings is allowed to keep converging.
-   */
-  reviewStagnantRejections?: number;
-  /** Exclusive persisted ownership of an executor or reviewer dispatch. */
-  dispatchClaim?: DispatchClaim;
-  /** Bounded diagnostic recorded when dispatch recovery skips unsafe state. */
-  dispatchNote?: string;
-  attempts: Attempt[];
-  createdAt: number;
-  updatedAt: number;
-}
 
 export type TaskGroup =
   | "blocked"
@@ -330,143 +118,7 @@ export interface BoardUsageSummary {
   providers: string[];
 }
 
-export type PausedDriveReason = "paused" | "provider_blocked" | "escalation_required";
-
-export interface PausedDriveState {
-  /** Selected task scope. Omitted when the whole board is driven. */
-  taskIds?: string[];
-  /** Session that started the drive. */
-  ownerSession?: string;
-  /**
-   * Why the drive stopped. Only a deliberate `paused` keeps the owner-session
-   * guard: the operator who paused decides when to continue. Mechanical stops
-   * (provider outage, escalation already settled) carry self-contained
-   * evidence and any session may resume them — the owning session is often
-   * closed by the time quota returns.
-   */
-  reason?: PausedDriveReason;
-}
-
-export interface DriveDecision {
-  id: string;
-  ownerSession?: string;
-  kind: string;
-  taskIds: string[];
-  evidence: string;
-  allowedInterventions: Array<"handoff" | "abort" | "steer">;
-  /**
-   * The orchestrator has corrected the board and the only remaining step is
-   * a human-only control (workflow scale confirmation via /maestro drive).
-   * While set, reminder nudges stay quiet: nagging the orchestrator about a
-   * step it cannot take made a real supervisor "resolve" the decision with a
-   * handoff just to silence the reminders.
-   */
-  awaitingHuman?: { kind: "scale_confirmation"; since: number; signature?: string };
-  createdAt: number;
-  deliveredAt?: number;
-  deliveryClaim?: {
-    id: string;
-    claimedAt: number;
-  };
-  resolution?: { intervention: "handoff" | "abort" | "steer" | "resume"; resolvedAt: number };
-}
-
-export interface DriveWait {
-  /** Epoch milliseconds when the drive resumes launching. */
-  until: number;
-  /** Why it sleeps, e.g. "openai-codex 5h window exhausted". */
-  reason: string;
-  /** Tasks whose launches are deferred by this wait. */
-  taskIds: string[];
-}
-
-export interface ActiveDriveState {
-  id: string;
-  /** Session that started the drive. Only that session may receive its terminal notification. */
-  ownerSession?: string;
-  /** Selected task scope. Omitted when the whole board is driven. */
-  taskIds?: string[];
-  startedAt: number;
-  /**
-   * Present while the drive deliberately sleeps (provider quota, transient
-   * retry). With no live executor and a failed task on the board, every
-   * projection otherwise reads "blocked · recovery" for hours while the
-   * drive is in fact healthy and merely waiting — an operator watching a
-   * real board could not tell the two apart.
-   */
-  waiting?: DriveWait;
-}
-
-export interface Board {
-  version: 1;
-  revision?: number;
-  nextTaskNumber: number;
-  /** Goal from /maestro start; lets a fresh orchestrator take over via /maestro handoff. */
-  goal?: string;
-  /** Sessions that own this board (started/adopted the run). Other sessions in the same repo don't render its status. */
-  ownerSessions?: string[];
-  /** Planned tasks cannot start until the user approves them. */
-  planPending?: boolean;
-  scaleApproval?: { signature: string; confirmedAt: number };
-  /** A safely paused autonomous drive that can be resumed from fresh board state. */
-  pausedDrive?: PausedDriveState;
-  /** Current bounded drive completion or decision awaiting owner handling. */
-  activeDecision?: DriveDecision;
-  /** Durable ownership record for a drive that has claimed it started. */
-  activeDrive?: ActiveDriveState;
-  tasks: Task[];
-}
-
-export interface TierConfig {
-  /** Model pattern like "openai/gpt-5-mini". Omit to inherit pi's default model. */
-  model?: string;
-  /** Ordered model patterns tried when the primary has a provider failure. */
-  fallbacks?: string[];
-  /** Thinking level: off, minimal, low, medium, high, xhigh, max. */
-  thinking: string;
-  /** Comma-separated tool allowlist passed to the executor. Omit for all tools. */
-  tools?: string;
-  /** Per-tier override for seconds without executor events before watchdog steering. */
-  watchdogIdleSeconds?: number;
-  /** Per-tier override for turns without meaningful progress before watchdog steering. */
-  watchdogWarningTurns?: number;
-  /** Per-tier override for additional no-progress turns before termination. */
-  watchdogTerminationTurns?: number;
-}
-
-export interface VerificationProfile {
-  command: string;
-  timeoutSeconds: number;
-}
-
 export type RecipeScope = "user" | "project";
-
-export type RecipeInputValue = string | number | boolean;
-
-export interface RecipeInput {
-  description?: string;
-  required?: boolean;
-  default?: RecipeInputValue;
-}
-
-export interface RecipeTask {
-  id: string;
-  title: string;
-  brief: string;
-  kind?: "investigation";
-  tier: string;
-  dependsOn: string[];
-  writePaths: string[];
-  successCriteria: string[];
-  verificationProfile?: string;
-  commitMessage?: string;
-  discovery?: {
-    allowedWritePaths: string[];
-  };
-  reviewPolicy?: ReviewPolicy;
-}
-
-export type ReviewPolicy = "single" | "confirm" | "find-and-refute";
 
 /**
  * When the review cost ladder leaves the cheap first-pass model behind.
@@ -478,16 +130,7 @@ export type ReviewPolicy = "single" | "confirm" | "find-and-refute";
  * - "always": the first reviewer of an attempt is cheap, every later one is
  *   premium (a paid panel after the cheap gate agrees).
  */
-export type ReviewEscalationPolicy = "off" | "doubt" | "risk" | "always";
-
-export interface WorkflowRecipe {
-  kind: "pi-maestro-recipe";
-  version: 1;
-  name: string;
-  description?: string;
-  inputs?: Record<string, RecipeInput>;
-  tasks: RecipeTask[];
-}
+export type ReviewEscalationPolicy = Static<typeof reviewEscalationPolicySchema>;
 
 export interface ResolvedRecipe {
   recipe: WorkflowRecipe;
@@ -495,94 +138,30 @@ export interface ResolvedRecipe {
   file: string;
 }
 
-export interface MaestroConfig {
-  maxParallel: number;
-  /** Require explicit user approval after planning before executors can start. */
-  planGate: boolean;
-  /** Automatically open the passive live-session pane when agents launch. */
-  livePanes: boolean;
-  /** Isolate tasks in per-task git worktrees when a batch dispatches in parallel. */
-  useWorktrees: boolean;
-  /** Run executor RPC processes in an opt-in detached transport that survives supervisor exit. */
-  detachedExecutors?: boolean;
-  /** Hard attempt cap per task; exceeded tasks need an explicit maestro-run or a brief rewrite. */
-  maxAttempts: number;
-  maxPlanTasks: number;
-  maxDiscoveryGeneratedTasks: number;
-  maxTotalLaunchesPerRun: number;
-  /**
-   * Scheduling rounds (loop passes that launched something) one drive may
-   * run before it stops with `round_limit`. A clean sequential task costs one
-   * round; every rejection retry, quota-interrupted launch, or reviewer
-   * re-run costs another, so an unattended overnight drive on a real board
-   * could exhaust the old fixed 20 with work still runnable.
-   */
-  maxRoundsPerRun?: number;
-  confirmationPlanTasks: number;
-  confirmationTotalLaunches: number;
-  /** Review policy new tasks inherit when a plan does not state one. */
-  reviewPolicy: ReviewPolicy;
-  /** Independent approvals required by the confirm review policy. */
-  reviewRequiredApprovals: number;
-  /** Raw reviewer process cap, including provider fallbacks. */
-  maxReviewerLaunches: number;
-  /** Abort an executor once its attempt cost (USD) exceeds this. 0 disables the cap. */
-  maxCostPerTask: number;
-  /** Abort one reviewer launch once its cost (USD) exceeds this. 0 inherits maxCostPerTask. */
-  maxCostPerReview?: number;
-  /**
-   * Cheap first-pass reviewer model for the review cost ladder. Unset keeps
-   * every reviewer on the review tier model.
-   */
-  reviewCheapModel?: string;
-  /** What escalates a reviewer from reviewCheapModel to the review tier model. */
-  reviewEscalation?: ReviewEscalationPolicy;
-  /** Stop starting executor batches once active (non-cancelled) board cost (USD) exceeds this. 0 disables the cap. */
-  maxRunCost: number;
-  /** Consecutive genuine reviewer rejections before a task escalates instead of retrying. */
-  reviewRejectionLimit?: number;
-  /**
-   * Context strategy for review-rejection retries. "resume" continues the
-   * rejected attempt's own session (the model keeps everything it already
-   * read, and providers bill the history at cached rates); "fresh" starts
-   * every attempt with a clean context. Provider fallbacks, human retries,
-   * and discovery tasks always start fresh.
-   */
-  retryContext?: "resume" | "fresh";
-  /** How long the human status command waits (seconds) for running executors before returning progress. 0 disables waiting. */
-  statusWaitSeconds: number;
-  /** Minutes a delivered decision may sit unresolved with no board activity before the owner session is re-nudged. 0 disables. */
-  decisionNudgeMinutes?: number;
-  /** Event detail mirrored to per-run JSONL logs. */
-  logEvents?: "compact" | "full";
-  /** Maximum bytes mirrored per run. 0 disables the limit. */
-  maxLogBytesPerRun?: number;
-  /**
-   * Minutes a drive may wait for a provider whose quota or usage window is
-   * exhausted before it stops with `provider_blocked`. Providers that publish
-   * a reset clock (Codex) are waited for exactly; others are probed with
-   * 2/4/8/15-minute backoff. 0 stops at the first quota failure. The default
-   * covers a full 5-hour subscription window; a weekly limit stops the drive
-   * with its reset time.
-   */
-  providerQuotaWaitMinutes?: number;
-  /** Seconds without any executor event before watchdog steering. */
-  watchdogIdleSeconds?: number;
-  /** Turns without meaningful progress before one automatic steer. */
-  watchdogWarningTurns?: number;
-  /** Additional no-progress turns after steering before the attempt is stalled. */
-  watchdogTerminationTurns?: number;
-  /** Context usage ratio that queues a safe supervisor handoff; 0 disables it. */
-  handoffContextRatio?: number;
-  /** Clear completed tasks from the live board after every selected task is approved. */
-  cleanupCompletedTasks?: boolean;
-  /** Commit each task's work on approval (one conventional commit per task). */
-  autoCommit: boolean;
-  /** Push the main branch after each approved integration (remote backup of landed work). */
-  pushOnIntegration?: boolean;
-  /** Trusted user/project commands; model task text is never executed. */
-  verificationProfiles?: Record<string, VerificationProfile>;
-  defaultVerificationProfile?: string;
-  /** Named tiers. "review" is used for adversarial review runs. */
-  tiers: Record<string, TierConfig>;
-}
+type ConfigFile = Static<typeof configFileSchema>;
+
+/** A resolved config: a config file whose core settings always have a value. */
+export type MaestroConfig = ConfigFile &
+  Required<
+    Pick<
+      ConfigFile,
+      | "maxParallel"
+      | "planGate"
+      | "livePanes"
+      | "useWorktrees"
+      | "maxAttempts"
+      | "maxPlanTasks"
+      | "maxDiscoveryGeneratedTasks"
+      | "maxTotalLaunchesPerRun"
+      | "confirmationPlanTasks"
+      | "confirmationTotalLaunches"
+      | "reviewPolicy"
+      | "reviewRequiredApprovals"
+      | "maxReviewerLaunches"
+      | "maxCostPerTask"
+      | "maxRunCost"
+      | "statusWaitSeconds"
+      | "autoCommit"
+      | "tiers"
+    >
+  >;

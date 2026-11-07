@@ -1547,7 +1547,7 @@ test("loadBoard archives a corrupt board before returning an empty board", () =>
 
     assert.deepEqual(loadBoard(cwd), emptyBoard());
     assert.equal(existsSync(file), false);
-    assert.match(consumeQuarantineNotice() ?? "", /board\.json\.corrupt-/);
+    assert.match(consumeQuarantineNotice()?.file ?? "", /board\.json\.corrupt-/);
     assert.equal(consumeQuarantineNotice(), undefined);
 
     const archives = readdirSync(directory).filter((name) =>
