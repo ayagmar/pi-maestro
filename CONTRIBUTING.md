@@ -90,7 +90,7 @@ Preview locally with `pnpm run release:dry`.
 
 release-it writes each release under the `# Changelog` header as `## X.Y.Z (date)` (`## [X.Y.Z](compare-url) (date)` once a previous tag exists), grouped under `### ⚠ BREAKING CHANGES`, `### Features`, and `### Bug Fixes`. Pi reads those version headings, in the form `## [1.2.0]` or `## 1.2.0 - date`, and after an update shows entries newer than the version the user last saw. Keep every release under a heading pi can parse. A heading without a version number, such as `## Unreleased`, is skipped.
 
-The `## 0.1.0` section of `CHANGELOG.md` is written by hand and describes the first release by theme. release-it does not generate it. With no tag yet, release-it counts from the `0.1.0` in `package.json`: `auto` gives `1.0.0` because the history contains `feat!` commits, and `minor` gives `0.2.0`. Either way it adds a generated section above the hand-written one that lists every commit so far, so read the dry run before the first release and decide whether to keep that list.
+The `## 0.1.0` section of `CHANGELOG.md` is written by hand and describes the first release by theme. Release it with `first_release: true` (`gh workflow run release.yml -f first_release=true -f bootstrap=true`): the workflow tags the `0.1.0` already in `package.json`, uses that section as the GitHub release notes, and publishes, without running release-it. Every later release uses release-it as above, which counts from the `v0.1.0` tag and adds a generated section above the hand-written one.
 
 ### First publish
 
