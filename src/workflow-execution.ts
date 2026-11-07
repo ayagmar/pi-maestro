@@ -202,6 +202,7 @@ export async function executeTask(options: {
     // releasing it earlier left a crash or attribution failure with a running
     // task that nothing owned and nothing could recover.
     let settled = false;
+    let settledUsage: Attempt["usage"] | undefined;
     try {
       updateTask(cwd, task.id, (fresh) => {
         if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
@@ -332,7 +333,6 @@ export async function executeTask(options: {
         const message = redactFailureMessage(
           error instanceof Error ? error.message : String(error)
         );
-        settled = true;
         const failed = updateTask(cwd, task.id, (fresh) => {
           if (fresh.dispatchClaim?.id !== dispatch.claimId) return;
           const attempt = fresh.attempts.find((candidate) => candidate.index === attemptIndex);
@@ -348,6 +348,7 @@ export async function executeTask(options: {
           }
           forceStatus(fresh, "failed");
         });
+        settled = true;
         return snapshot(failed ?? task, message);
       }
       run.attempt.index = attemptIndex;
@@ -409,6 +410,7 @@ export async function executeTask(options: {
         run.attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
       run.attempt.exitCode = outcome.exitCode;
       run.attempt.usage = { ...outcome.usage };
+      settledUsage = run.attempt.usage;
       const priorWorktreeFiles =
         worktree && task.attempts.at(-1)?.branch === worktree.branch
           ? (task.attempts.at(-1)?.touchedFiles ?? [])
@@ -491,7 +493,6 @@ export async function executeTask(options: {
       }
 
       let claimLost = false;
-      settled = true;
       updated = updateTask(cwd, task.id, (fresh) => {
         const reserved = fresh.attempts.findIndex((attempt) => attempt.index === attemptIndex);
         // A replacement owner may have recovered this dispatch; its state wins.
@@ -502,6 +503,7 @@ export async function executeTask(options: {
         transition(fresh, status);
         fresh.attempts[reserved] = run.attempt;
       });
+      settled = true;
       if (claimLost) {
         return snapshot(
           updated ?? task,
@@ -527,6 +529,7 @@ export async function executeTask(options: {
               attempt.exitCode = 1;
               attempt.errorMessage = message;
               attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+              if (settledUsage) attempt.usage = settledUsage;
             }
             forceStatus(fresh, "failed");
           });

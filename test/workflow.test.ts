@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test from "node:test";
+import { basename, join } from "node:path";
+import test, { mock } from "node:test";
 import { captureApprovedProvenance, taskFingerprint } from "../src/artifact-policy.js";
 import {
   createTask,
@@ -37,6 +45,7 @@ import {
   snapshot,
   taskCommitMessage,
 } from "../src/workflow.js";
+import { claimDispatchLifecycle } from "../src/workflow-dispatch.js";
 import {
   reviewEvidence,
   reviewerLaunchPlan,
@@ -129,6 +138,24 @@ function recordExecutionFingerprint(
 
 const onUpdate = () => {};
 const trackRun = () => () => {};
+
+/** The next board save fails at the filesystem, as a full disk or a lost mount would. */
+function failNextBoardSave(): () => void {
+  const realRename = fs.renameSync;
+  let armed = true;
+  const rename = mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+    if (armed && basename(String(to)) === "board.json") {
+      armed = false;
+      throw new Error("disk full");
+    }
+    realRename(from, to);
+  });
+  syncBuiltinESMExports();
+  return () => {
+    rename.mock.restore();
+    syncBuiltinESMExports();
+  };
+}
 
 test("artifact gates reject empty work, test deletion, config narrowing, and conflict markers", () => {
   const { task } = boardWithTask("ready_for_review");
@@ -1399,6 +1426,75 @@ test("formatDriveSummary reports outcomes, attempts, meaningful cost, and identi
   assert.match(summary, /models: openai\/gpt-5, anthropic\/claude/);
   assert.match(summary, /providers: openai, anthropic/);
   assert.match(summary, /dependency unavailable$/);
+});
+
+test("a failed final attempt write still fails the task and keeps the attempt's spend", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-final-write-"));
+  let restore = () => {};
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const settling = executor({
+      usage: { input: 10, output: 5, cost: 1.25, turns: 2 },
+    });
+
+    await assert.rejects(
+      executeTask({
+        cwd,
+        board,
+        task,
+        tier,
+        config,
+        startExecutor: (options) => {
+          const handle = settling(options);
+          return {
+            ...handle,
+            outcome: handle.outcome.then((outcome) => {
+              restore = failNextBoardSave();
+              return outcome;
+            }),
+          };
+        },
+        onUpdate,
+        trackRun,
+      }),
+      /disk full/
+    );
+    restore();
+
+    const settled = findTask(loadBoard(cwd), task.id);
+    assert.equal(settled?.status, "failed");
+    assert.equal(settled?.dispatchClaim, undefined);
+    assert.equal(settled?.attempts.at(-1)?.failureReason?.kind, "executor_failure");
+    assert.equal(settled?.attempts.at(-1)?.usage.cost, 1.25);
+  } finally {
+    restore();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a dispatch claim whose release failed is released on a later renewal tick", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-release-retry-"));
+  mock.timers.enable({ apis: ["setInterval"] });
+  let restore = () => {};
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const lifecycle = claimDispatchLifecycle(cwd, task.id, "execute", () => true);
+    assert.ok(lifecycle.dispatch?.claimed);
+
+    restore = failNextBoardSave();
+    assert.throws(() => lifecycle.release?.(), /disk full/);
+    restore();
+    assert.ok(findTask(loadBoard(cwd), task.id)?.dispatchClaim);
+
+    mock.timers.tick(10_000);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.dispatchClaim, undefined);
+  } finally {
+    restore();
+    mock.timers.reset();
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("drive completes an all-cancelled selection without launching work", async () => {
