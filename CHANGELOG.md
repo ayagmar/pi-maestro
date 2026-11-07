@@ -1,240 +1,90 @@
 # Changelog
 
-## Pi 1.5 migration notes (hand-written, precede the first generated release)
+## 0.1.0
+
+First release of Pi Maestro: an orchestrator and fresh-context executor workflow for pi, with independent review and a board that records everything.
 
 ### Compatibility
 
-- **Breaking:** Pi Maestro now requires pi 1.5 or newer. The package is developed and tested against pi 1.5.0; earlier pi releases are no longer supported.
-- Key hints in Maestro's text input and list pickers come from the keybindings pi injects into custom components, so remapped keys show correctly. pi's exported `keyHint()` can resolve to a package copy that does not see the user's keybindings.
-- The plan, brief and workflow viewers scroll and close with pi's selection keybindings (`tui.select.up`/`down`/`pageUp`/`pageDown`/`confirm`/`cancel`) and their hints name the user's keys; the list pickers' navigation hint does too. They previously reacted only to the literal arrow, page, Enter and Escape keys.
-- Maestro's inline list pickers and single-line editor pass pi 1.5's `blocked` status to `ctx.ui.custom`, so terminals that show pi's program status report it as waiting for the user instead of working.
-- A task report or review verdict opened from the dashboard or `/maestro board` is added to the session as a custom entry with its own renderer (`pi.appendEntry` and `pi.registerEntryRenderer`), so it no longer enters the model's context. Orchestrator kickoff and decision messages still reach the model.
-- An executor whose prompt pi reports as `handled` (an extension command or input handler in the executor consumed it, so no agent run started) now fails at once with that reason. Previously the executor sat idle until the watchdog killed it.
-- The live agent pane marks a launch finished on `agent_settled` instead of `agent_end`, so a launch pi is about to retry or continue no longer shows as done.
-- The agent selector widget truncates every row to the terminal width. A long task title on a narrow terminal produced a row wider than the screen, which pi's regular (main-screen) TUI mode rejects by crashing.
-- The live agent pane applies `context_edit` session entries as they arrive. An executor transcript that edited or hid an earlier message kept showing the old content until the pane reloaded the session.
-- `/maestro back` keeps its return target when the session switch is cancelled (by maestro's own active-work guard, another extension, or the user). Previously the cancelled attempt replaced the target with the current session, so the way back was lost.
-- The plan, brief and workflow viewers no longer advertise PgUp/PgDn in pi's fullscreen mode (the pi 1.0 default), where pi's own viewport takes those keys; the arrow keys page the viewer. Their key-hint line is also cut to the terminal width.
-- Outside the TUI (`pi --mode rpc`), `/maestro plan`, `/maestro workflows` and the plan task editor use pi's stock select and editor dialogs, which RPC forwards to the client, and the viewers send their text as a notification. Previously these menus were custom TUI components, which RPC does not render, so the commands silently did nothing.
-- Executors launched from a standalone (Bun-compiled) pi binary re-run that binary directly. The virtual `/$bunfs/root/…` entry script is no longer passed on as an extra argument, which pi would have read as a prompt. This matches the invocation in pi's own subagent example.
-- Invalid boards, config files, recipes, plan exports and discovery output now report the field at fault as a JSON Pointer path, such as `/tasks/0/attempts/0/usage/cost: expected number, got string`. The board quarantine notice includes that reason. Which files load is unchanged, except that a hand-edited board holding a one-item array where an intervention name belongs (`["handoff"]`) is now quarantined.
+- Requires pi 1.5 or newer and Node.js 22.19 or newer. It is developed and tested against the pi `1.5.x` line.
+- Key hints in Maestro's list pickers and text input come from the keybindings pi injects, so remapped keys work and show correctly. The plan, brief, workflow, and model-picker viewers scroll and close with pi's selection keybindings, and they skip PgUp/PgDn hints in pi's fullscreen mode, where pi's own viewport takes those keys.
+- Inline pickers and the single-line editor pass pi's `blocked` status to `ctx.ui.custom`, so terminals that show pi's program status report Maestro as waiting for you.
+- A task report or review verdict opened from the dashboard is a custom session entry with its own renderer, so it never enters the model's context. Orchestrator kickoff and decision messages still reach the model.
+- In `pi --mode rpc`, `/maestro plan`, `/maestro workflows`, and the plan task editor use pi's stock select and editor dialogs, and the viewers send their text as a notification.
+- In print (`-p`) and JSON mode, command output and notices go to stderr, so JSON stdout stays clean and `/maestro config show`, `costs`, `insights`, and `timeline` print their reports.
+- The live agent pane marks a launch finished on `agent_settled` and applies `context_edit` entries as they arrive. The agent selector truncates every row to the terminal width.
+- Executors launched from a standalone (Bun-compiled) pi binary re-run that binary directly, as pi's own subagent example does.
+- Invalid boards, config files, recipes, plan exports, and discovery output report the field at fault as a JSON Pointer path, such as `/tasks/0/attempts/0/usage/cost: expected number, got string`, and the board quarantine notice includes that reason. Files are validated with `@earendil-works/pi-schema`, pi's own JSON Schema validator.
 
-### Robustness
+### Planning and driving
 
-- The run budget (`maxRunCost`) is shared across a drive's launches instead of copied to each. Every raw executor or reviewer launch is capped at a fair share of what is left after settled spend and the caps of launches still running, so three parallel executors with $3 left can spend $3 in total rather than $9, and the second reviewer of a confirm panel sees what the first one spent. A launch is not started once that share falls below one cent.
-- Every executor and reviewer launch writes its event log and detached control, exit and stderr files under its own name (`<run id>.<8 hex>.jsonl`), and a detached launch accepts only a terminal record carrying its launch id. Previously a new board restarted task numbering, so the next `T1-attempt-1` detached launch read the previous board's leftover exit record, settled at once with that task's report and spend, and left its real executor running untracked. Log retention recognizes the new names, and logs from earlier versions are still read and cleaned.
-- An attached executor or reviewer settles at most two seconds after pi exits, then kills its process group. Previously Maestro waited for every stdio pipe to close, so a tool-spawned descendant that inherited pi's output and outlived it held the outcome, the task claim and the drive pending forever; the detached transport already drained this way.
-- A launch that pi settles with `aborted: true` (an extension inside the executor or reviewer cancelled the run, pi 1.1 and later) is recorded as cancelled on both transports, even when pi exits 0. Previously it counted as a successful launch, so a reviewer's earlier `APPROVE` could be used after the child cancelled. Maestro's own cost-cap and stall stops keep their classification.
-- An executor stdout line that is valid JSON but not an RPC event (`null`, `[]`, a string, or an event whose usage, content or error has the wrong type) is skipped and recorded as at most three `maestro_malformed_event` diagnostics per launch. Previously `null` threw inside the supervising pi process on the attached transport and killed the detached supervisor without a terminal record, and a string cost was concatenated into the spend total.
-- A session is resumed only inside the checkout it recorded. pi refuses to resume a session whose working directory is gone, and an interrupted attempt whose clean worktree had been pruned made the next launch fail with `Stored session working directory does not exist` instead of doing the work. When the retained checkout is unavailable the attempt now starts fresh.
-
-- When `maestro_drive start` is refused because the human-only workflow scale confirmation is required, the open decision is marked `awaitingHuman`: reminder nudges stop, the tool tells the orchestrator nothing further is needed, and the status line reads `awaiting your /maestro drive confirmation`. Previously the reminders kept nagging about a step the orchestrator could not take, and a real supervisor "resolved" the decision with a handoff just to silence them. The reminder text now says explicitly that `intervene` is never a silencer.
-
-- `maxRoundsPerRun` (default 20, 1–1000) replaces the fixed 20-round drive limit. One round is a loop pass that launched something; a clean sequential task costs one, every rejection retry, quota-interrupted launch or reviewer re-run costs another, so a long unattended drive could stop with `round_limit` while work was still runnable. The stop message now names the setting.
-
-- A drive that sleeps for provider quota or a transient retry now says so everywhere. The active drive records `waiting {until, reason, taskIds}`; the status line shows `⚡ maestro waiting · ⏳ openai-codex 5h window exhausted · resumes 01:44 (in 1h 59m)`, the heartbeat pulse opens with `Drive waiting`, and the dashboard evidence names the deferred tasks. Previously a sleeping drive had no live executor and one provider-failed task, so every projection read `blocked · recovery` for hours while the drive was healthy — an operator watching a real board could not tell a wait from a stall.
-
-- Provider failures are classified three ways. Transient drops (`WebSocket error`, connection reset, `socket hang up`, 5xx) retry twice with 15 s and 60 s delays. An exhausted quota or usage window (`usage limit has been reached`, `429`, `rate limit`) is waited out for up to `providerQuotaWaitMinutes` (default 360, 0 disables). Only credential, billing, and unknown-model failures stop at once. A real drive was stopped three times in one evening by a subscription window and each stop needed a human to type resume.
-- Codex quota waits are exact, not guessed. On a Codex quota failure Maestro reads the account's usage endpoint (`chatgpt.com/backend-api/wham/usage`, the same source as the pi-sub-bar status line, authenticated with pi's stored OAuth token), finds the exhausted window's `reset_at`, and sleeps until that moment plus a 45-second grace — one wait, no probe launches. A weekly window exhausted beyond the wait budget stops the drive immediately with its reset time instead of burning probes. Providers without a published reset clock fall back to 2/4/8/15-minute probes.
-- An attempt the provider cut off after real work resumes its own session and checkout with a continuation prompt instead of starting a fresh attempt; the interrupted attempt still never consumes `maxAttempts`. Two interrupted attempts on one task had thrown away $8.64 of context before a third began from scratch.
-- Paused drives record why they stopped. Only a deliberate `/maestro pause` keeps its owner-session guard; `provider_blocked` and settled `escalation_required` stops can be resumed or released (`/maestro abort`) from any session. Previously a dead session's parked drive could only be cleared with `/maestro reset`, which archives the whole board.
-- Handoff transfers the paused drive and the open decision to the fresh supervisor session. Before, the new session was told to "resume it from that session" — the one it had just left.
-- Two sessions reclaiming the same dead session's board lock can no longer delete the lock the faster one had just taken. The slower session used to unlink the live lock, after which both could write the board at once and lose each other's updates.
-- A dispatch claim whose owning pi process is still alive is no longer taken over when its 30-second lease lapses. A slow Git command or commit hook that blocked the owner's event loop let another session fail a still-running executor or drop a review claim. Claims now record the owner's PID and start identity; claims from older boards keep plain lease expiry.
-- An executor keeps its task claim until its attempt is saved. If attributing its changes failed (for example, the checkout's Git metadata was gone) or pi crashed in between, the task stayed `running` with no owner and could be neither scheduled nor retried. Attribution failures now fail the attempt, an executor whose claim was replaced no longer overwrites the newer attempt, and startup fails any `running` task left without a claim so it can be retried.
-- Reloading or switching sessions during a drive stops the drive from launching anything else. Queued tasks used to start against the closed session and fail untouched, and a trusted verification already running could still finish and promote the reviewed commit. Shutdown now cancels that verification and refuses promotion; detached executors keep running as before.
-- Startup cleanup no longer removes a checkout that is in use: a running executor's clean checkout (detached, or attached in another session) and a `ready_for_review` checkout that a reviewer holds under a claim. Both used to be deleted, or checkpointed and removed, underneath the live process.
-- A `confirm` panel is cut to one reviewer only for the same candidate under the same task contract. Approvals of candidate A used to let a candidate fixed on the retained branch after a failed integration pass with a single reviewer. Reviewer launches now record the candidate tree and task fingerprint they judged.
-- An approval recorded in the older proof format no longer stays fresh after the task's review policy is strengthened (for example from `single` to `confirm`). It stays fresh when the configuration is unchanged or when the recorded review already meets the current policy, so a model switch on reviewed work still keeps it; otherwise it must be reviewed or accepted again.
-- Settings saves are atomic. Another session reading the config mid-save saw invalid JSON and moved the file aside as corrupt, so budgets and verification profiles silently fell back to defaults. A load now moves a file aside only if it is still the file it read.
-- Promotion checks that HEAD still points at the branch the candidate was prepared against. Switching branches, or detaching HEAD, at the same commit during verification used to land the reviewed work on the other branch or on a detached HEAD.
-
-### Correctness
-
-- Approval fingerprints no longer include the tier's model, thinking level, or reviewer tool set. The record keeps `version: 1` and marks the new hashing as `executionShape: 2`: a bumped version quarantined a real board 34 seconds after an upgrade, because a Maestro build still running in another pi session rejected the unknown version and moved the file aside. Which model produced or judged an artifact is provenance, not identity: the reviewed Git tree is unchanged by a configuration edit. Previously, switching executor models to dodge a provider quota marked every approved task on a real board `stale_completion` and offered re-executing $90 of integrated, reviewed work as the only remedy. Version-1 proofs remain valid as long as their contract, verification, dependency, and artifact identities still match; the next approval of a task captures a v2 proof. The task's tier name, review policy, and confirm count remain execution inputs.
-
-- Executor commits made inside an isolated task checkout are now attributed to the attempt. Touched files, the candidate artifact tree, and the review diff include commits on the task branch since it forked from the main checkout, not only uncommitted files. A task whose brief legitimately required committing and pushing (a CI bootstrap that had to run remotely before it could be verified) previously left a Git-clean checkout, failed the "no attributable Git changes" gate twice, and had to be demoted to a read-only investigation to be approved. Artifact snapshots also tolerate committed deletions instead of aborting on an unmatched pathspec.
-- Under `confirm` and `find-and-refute`, a `REQUEST_CHANGES` verdict with every criterion marked PASS is now a genuine rejection on grounds outside the enumerated criteria, not "malformed or inconsistent criterion evidence". Only approving while a criterion is FAIL is treated as a contradiction. Two confirm reviewers that had each found a real build-time misconfiguration were previously discarded as operational failures, billed, and the operator was pushed into downgrading the policy to `single`.
-- Criterion evidence parsing accepts the shapes reviewers actually write — the requested `CRITERION 1: PASS — evidence`, Markdown headings such as `### Criterion 1 — title: **PASS**` with the evidence on the following lines, and bold list items — and lets a closing summary restate a criterion without being counted as a duplicate. The malformed-evidence message now says what was expected.
-- A drive stopped by the pre-review artifact gate (no attributable changes, execution inputs changed, trusted verification failed) now says `artifact gate failed before any reviewer ran — T2: …` with the gate cause, and its recovery guidance no longer sends the operator to inspect reviewer evidence that does not exist.
-- A successor created with `supersedesTaskId` inherits the predecessor's `dependsOn` in addition to taking over its dependents. A handoff task written as `dependsOn: []` previously became runnable before the work its predecessor had to wait for.
-- Attempt and review launches record one model identity: the configured `provider/model` form wins when it names the reported bare id, so a task no longer shows `[openai-codex/gpt-5.6-sol]` while live and `[gpt-5.6-sol]` once settled, and per-model insight rows no longer split.
-- Run event logs are capped on whole lines and end with a single `maestro_log_capped` marker instead of a truncated JSON fragment followed by silence. The live pane renders the marker as a notice and keeps judging the run's status from the last real event, so a capped log no longer looks like a hung run or a finished one.
-
-### Fixes
-
-- The workflow preflight and cost forecast count the extra reviewer launches a cheap-first review ladder (`reviewCheapModel`) can make when a cheap reviewer is escalated, and price the cheap model at its own rates. A plan could previously skip the scale confirmation while able to launch more reviewers than it reported. Changing `reviewCheapModel` or `reviewEscalation` now asks for confirmation again.
-- Tasks created by `/maestro recipe run` and by applying discovery output inherit the project's `reviewPolicy` when they state none, as `maestro_plan` tasks already did. They previously ran with a single reviewer even when the project asked for `confirm` or `find-and-refute`.
-- `maestro_plan`, `maestro_update` and `maestro_drive` results show their notices under the task rows: the plan approval gate, supersession and shape warnings, the invalidated in-flight cost, and the drive's recovery guidance. The tool card previously showed only the task rows, so the user did not see the `/maestro plan` approval the model was waiting on.
-- The model picker in `/maestro config` follows remapped selection keys (`tui.select.*`), and its key hints and the settings header name the user's keys. It previously reacted only to the arrow keys, Enter and Escape, so a remapped confirm key typed into the search field instead of picking the model.
-- The single-line editor for task titles, dependencies and commit messages takes focus, so pi places the terminal cursor and the input-method (IME) candidate window at the insertion point.
-- The brief and report text viewer pages by wrapped terminal rows and sizes its page to the terminal, like the Markdown viewer. A long single paragraph previously rendered taller than the screen and the scroll keys could not move through it.
-- `/maestro doctor` checks approved tasks for stale approval proof, as the dashboard and inspect already did. It previously reported a board with stale approved work as `complete`.
-- A task rerun after a review disagreement or reviewer failure shows its live phase (execution, review). The dashboard and status line previously stayed on `recovery` for the whole retry because an earlier attempt had failed; that attempt is still listed as recovery evidence.
-- In print (`-p`) and JSON mode, Maestro's command output and notices go to stderr, so `/maestro config show`, `costs`, `insights`, `timeline` and the other reports are no longer silently dropped. JSON stdout stays clean and RPC still receives notifications.
-- The orchestrator and supervisor briefings tell the model to call `maestro_drive` action=start after correcting a brief or tier. They told it to use `/maestro resume`, which reports "No paused autonomous drive to resume" after a reviewer failure or blocked stop, since those leave no paused drive.
-- The orchestrator briefing says executors work in isolated, committed-content checkouts only when they are: always with `useWorktrees` or detached executors, otherwise only for tasks that run in parallel. With the default settings it previously claimed every executor was isolated, so the model asked for commits a lone task did not need.
-
-### Added
-
-- Cost-cap continuation: when an attempt is stopped by `maxCostPerTask`, raising the cap above what it spent (or disabling it) and driving the task again resumes that attempt in its own checkout and session with a continuation prompt, instead of requiring a hand-written successor. Driving under the unchanged cap is still refused without billing; the failure guidance names the checkpoint branch and the exact threshold to raise.
-- The agent strip labels every launch with its attempt number and outcome (`T14 run #3 ●`, `T14 review #2 ✗`, `T14 review #1 ✓`), so retries of the same task are no longer three identical tabs.
-
-- Maestro's own git commits (attempt checkpoints, reviewed integrations, and worktree merges) are created with `--no-gpg-sign`, and every git invocation runs with a timeout and `GIT_TERMINAL_PROMPT=0`. Previously a user with `commit.gpgsign = true` working away from their signing key hit gpg waiting on a pinentry prompt that could never appear; because git runs synchronously on Pi's main thread with no timeout, that blocked the entire editor indefinitely and left the session unresumable.
-- Parking a task checkout now refuses to remove it when its changes cannot be checkpointed onto the task branch, instead of force-removing the checkout and deleting the branch. A failed checkpoint previously discarded uncommitted executor work permanently.
-- Reading an agent session transcript or run log is blocked before execution. Reading the orchestrator's own session appended a copy of the conversation to the file being read, so each read grew the next one; one real run reached ~178k tokens across four reads and could no longer be resumed.
-- Isolated task checkouts are built from committed content, so uncommitted files a brief points at do not exist for the executor. A drive that isolates tasks now warns which uncommitted paths are invisible instead of letting every executor report itself blocked on a file the user can plainly see.
-- Parallel non-worktree batches now auto-isolate in per-task worktrees (with a user notice) so concurrent executors can never cross-attribute each other's file changes; single-task dispatch keeps the shared checkout, and non-Git projects keep legacy behavior.
-- Investigation runs that legitimately write a long report across turns without tool calls now count meaningful report growth as watchdog progress.
-- Legacy investigation-phrased briefs (empty writePaths without `kind: "investigation"`) now produce an explicit deprecation notice at planning; the explicit kind is the supported path.
-- Watchdog progress detection is now run-kind aware: investigation/discovery executors and reviewers progress through novel read-tool activity instead of being steered with implementation text and killed as stalled; only exact repeated actions count as no progress, and steering messages are phase-specific.
-- Non-worktree executions now attribute file changes by content against a pre-run Git baseline, so bash-side mutations (sed -i, git apply, codegen) are included in touched files, candidate trees, and review scope; pre-existing user dirt is never attributed to the executor.
-- Task contracts gained an explicit `kind: "investigation"` field replacing the brief-phrasing regex for no-file work; legacy investigation-phrased briefs remain accepted, and the kind flows through maestro_plan, maestro_update, recipes, plan export/import, and the contract fingerprint.
-- Human-retry risk tokens no longer include `updatedAt`, so unrelated board touches between confirmation and dispatch cannot invalidate a confirmed retry; acceptance and integration evidence changes still do.
-- Stale board locks now record the owner's kernel process start time on Linux, so a recycled PID can no longer keep a dead lock alive.
-- Main-tree identity checks exclude `.pi/maestro.json` and `.pi/maestro-recipes/`, so editing maestro config or recipes mid-review no longer fails promotion with a spurious "main checkout changed".
-
-### Added
-
-- Cross-session recovery for mechanical stops: budget_blocked, aborted, launch/round limits, provider blocks, and internal errors can now be resumed by any session once the cause is addressed — only judgment decisions (escalation, review disagreement, stale completion, reviewer failure, attempt cap) keep their owner-session guard. Three real recoveries previously required hand-editing persisted board state.
-- `/maestro config budget <usd>` now resolves a pending budget_blocked decision in the same step when the new budget clears current spend, and a running drive re-reads the budget at every boundary so mid-drive raises take effect without a restart. A one-time notice fires at 80% budget consumption so the wall is never a surprise.
-- Outcome toasts: `✓ T18 approved · $19.01`, `↻ T17 changes requested: …`, and `✗ failed` notifications the moment a task settles, instead of silence until the drive summary.
-- The agent selector shows each live run's lifecycle phase and a red `⚠` steered marker when the watchdog has warned it; settled reviewer rows show their verdict (`✓ approved` / `↻ changes requested`) instead of a generic "settled".
-- The drive heartbeat adds the executor/review spend split and a forward cost estimate (`est. ~$45 to finish at current avg`); `/maestro costs` warns when review spend meets or exceeds executor spend.
-- The dashboard task view shows the executor/review cost split and the full supersession lineage (`T12 → T14 → [T21]`), so a recovery-heavy board explains itself.
-- `pushOnIntegration` setting: best-effort push of the main branch after every approved integration, backing landed work up off-machine as it lands. A push failure never blocks or reverts an approval.
-- Per-task `reviewGuidance` on maestro_plan/maestro_update: an orchestrator hint injected into review prompts (which slices or properties to verify on a large artifact) — the alternative to hand-building validation-task pipelines around one oversized review. Included in the review identity contract and plan export/import.
-- Zero-turn environment failures back off briefly (2s) before retrying so a transient PATH blip cannot burn drive rounds in seconds.
-- Settings: the run-cost picker includes the current value plus $500/$1000 rungs and points at `/maestro config budget` for arbitrary amounts, and a custom config names its nearest preset and the exact fields that differ.
-
-- Progress is visible at a glance everywhere a run is watched. The status bar shows a live progress bar over still-landable work with the current phase (`⚡ maestro running · execution · ▰▰▰▱▱▱▱▱▱▱ 5/16 (31%) · 2 running · $84.21`), the drive heartbeat pulse leads with elapsed time, the same bar, tasks left, and this drive's own spend beside the board total, round updates open with `5/16 approved`, and the working message carries the fraction.
-- A "Watchdog & logging" settings section exposes the previously config-file-only knobs: idle seconds before steering, no-progress turns before steering, post-steer termination turns, the automatic-handoff context threshold, run event log detail, and the run log size cap. The run cost cap choices now extend to $300 and per-attempt to $20, matching what real multi-task boards need.
-
-- A Claude-style agent selector renders under the editor while executors run: one row per launch with a selection marker, live/settled glyphs, and right-aligned kind, elapsed time, turns, cost, and last activity. `ctrl+alt+j`/`ctrl+alt+k` move the selection without opening anything, `ctrl+alt+w` opens the centered viewer on the selected agent, and the selection stays in sync with the viewer's own `←/→` session switching.
-- Review-rejection retries resume the rejected attempt's own session by default (`retryContext: "resume"`): the follow-up prompt carries only the reviewer's findings, the model keeps everything it already read, and providers bill the replayed history at cached rates instead of the executor re-reading the repository. Provider fallbacks, human retries, and discovery tasks always start fresh, and fresh retries include the predecessor attempt's report so they start from knowledge instead of archaeology. Validated end to end against a real pi executor: the retry appends to the same transcript, the resumed request carries the conversation history plus only the findings, and usage counts only new messages.
-
-- Upgraded to the Pi 0.82.x package line (from 0.80.10), with peer ranges moved to `^0.82.1`. The real-executor integration tests pass against a 0.82.1 subprocess.
-- `max` is now selectable as a thinking level. Pi has accepted `off`…`max` for some time, but maestro stopped its ladder at `xhigh`, so the strongest reasoning setting was unreachable from a tier. Config validation had a second hardcoded copy of the ladder that would have rejected `max` outright; it now derives from `THINKING_LEVELS`, and an invalid level names the accepted values instead of saying only "invalid thinking".
-
-- `reviewPolicy` is now a project setting under Review, so a repository picks `single`, `confirm`, or `find-and-refute` once and new tasks inherit it. It was previously per-task only, settable at plan time or one task at a time in `/maestro plan`, which is how a whole board silently ended up on the most expensive policy. An explicit policy on a task still wins.
-
-### Fixed
-
-- Zero-turn process failures (spawn ENOENT, immediate crash before any model turn) no longer consume maxAttempts. A transient PATH blip burned all four of a real task's attempts on "spawn pi ENOENT" at $0 each and forced a supersession to recover; environment failures now retry without touching the cap, still bounded by drive rounds and the launch limit.
-- Programmatic handoff actually hands off now. `maestro_drive` intervene=handoff and the automatic context-pressure handoff both queued `/maestro handoff` through `sendUserMessage`, which dispatches extension commands only when `expandPromptTemplates` is true (its default is false) — so the literal text landed in the conversation, the model replied conversationally, and no session replacement ever happened. Both paths now request command dispatch explicitly.
-- Novel tool activity now counts as watchdog progress for every run kind, not just investigations and reviews. The mutation-only progress rule killed five real doc/planning implementers at exactly warning+termination turns (~$37) while they read the input documents their briefs required; doom loops still stall because repeated actions and silence still leave the watchdog armed.
-- A cost-cap failure now names the bound that actually cut the attempt off. When the run budget's remainder (not maxCostPerTask) was the binding launch cap, the failure blamed maxCostPerTask and told the operator to raise the wrong knob — a real board burned two more attempts against a $1.09 budget remainder labeled as the per-task cap.
-- A drive no longer dispatches launches whose cost cap would be a near-exhausted run budget's dregs (below 25% of the per-attempt cap, or $0.50 when that cap is off); it stops with budget_blocked before spending, matching the exceeded-budget behavior.
-- Editing a task's brief or success criteria now clears its recorded reviewer findings along with the rejection counters. Stale criterion-numbered findings from the old contract were re-injected into every retry executor prompt ("Address every point") and reviewer prompt ("Explicitly verify every prior finding"), wasting tokens on superseded feedback, and counted toward omnibus escalation — a single new rejection under the rewritten contract could falsely stop an unattended drive with escalation_required. Tier edits keep findings: the contract they describe is unchanged.
-- An acknowledged in-flight invalidation (`invalidateInFlight: true`) now also clears `reviewStagnantRejections` alongside `reviewNotes` and `reviewRejections`, so a task re-executed under a new contract no longer inherits stale stagnation evidence that made it escalate one rejection early.
-- Plan simulation no longer silently hides wave members beyond `maxParallel`; the overflow is shown as "+N more, throttled by maxParallel".
-- Removed dead code: the unused `EXTENSION_NAME`, `STATE_ENTRY_TYPE`, and `REPORT_PREVIEW_LINES` constants, the unused `MAESTRO_COMMAND_ALIASES` duplicate of the dispatcher's alias handling, the unreferenced `inspectBoardStorage` and `reserveClaimedAttempt` board helpers, the unreferenced `reportPreview` summary helper, and a git-invocation env spread that was immediately overridden.
-- Removed dead test-support code: two never-called underscore-prefixed helpers in the extension test suite and a write-only `_lastActivity` variable in the detached supervisor.
-- A stale provider-failed review launch no longer masks a fresh pre-review gate settlement: after a config change staled an executed candidate, the drive reported "provider_blocked — configure a fallback" off the old launch record while the real cause was the fingerprint gate. Gate settlements now carry a structured cause and take precedence in diagnosis.
-- Tier `fallbacks` are no longer part of the task fingerprint: a fallback list is dispatch resilience, not work identity, and including it invalidated every in-flight candidate the moment an operator added provider redundancy — exactly when re-executing everything is least affordable. Model, thinking, and tools changes still invalidate as before.
-- A watchdog kill caused by complete provider silence (not one event, not one turn after steering) is classified as a provider failure instead of a stall, so an OpenAI outage no longer consumes one of the task's real attempts — the launch falls back or retries without burning the cap. The post-steer grace period also anchors to the last event instead of the steer time, so a model that is still streaming reasoning is never killed mid-thought. Turn-producing no-progress stalls still consume attempts.
-- Reviewer notes are distilled into findings from their numbered list items only; preamble lines ("Static review confirms:"), section headers, and the VERDICT line itself no longer become findings that get re-injected into retry prompts as if they were defects.
-- Decision evidence injected into the owner conversation is character-bounded. The old bound counted lines, which a single enormous line (or a multi-task escalation with executor-report tails) never hit.
-- A write-scope overlap caused by a broad glob now names the glob: "app/src/test/**" claims every file under that tree, and a real recovery plan burned a full model turn discovering that. The no_progress remedy for tasks blocked by an accidentally cancelled dependency (an aborted drive) now names the one-step fix: reactivate it with maestro_update cancelled: false.
-- The auto-opened live agent pane can actually be dismissed now. Its footer promised "esc close" while escape only unfocused it, and the auto-open re-created it on the next update, so the pane read as unclosable. Escape now closes and suppresses it for the current drive, `ctrl+alt+w` cycles docked pane → centered focused viewer → closed instead of focusing the docked pane in place against the right edge, and the docked pane's footer shows the only hint that is actually reachable while it is unfocused.
-- Typing a goal after `/maestro plan` on a new project no longer falls through to the empty review view with "Board is empty. Plan tasks with maestro_plan" — advice addressed to the model. The command now points at `/maestro start` with the typed goal intact, and the empty-board review warning names the human entry point.
-- A terminal "completed" decision left unresolved by a closed session no longer blocks every other session from starting a drive; it is auto-resolved when a new drive reserves the board. Actionable decisions (escalations, blocks) keep their ownership guard, and the refusal now names the real blocker — which decision kind, which owning session, and the remedy — instead of the misleading "another session already owns an active or paused drive".
-- The run budget bounds the board's lifetime spend — sunk cost of cancelled and superseded tasks included — so cancelling work never frees budget, and the warning reports the sunk share separately. Every executor and reviewer launch is additionally capped at the remaining run budget, so a launch dispatched just under the cap cannot overshoot it by a full attempt, and reviewer launches honor `maxCostPerReview`. `/maestro config budget <usd>` raises an exhausted budget in one deliberate step, and the budget_blocked guidance tells the model to ask the user instead of laundering spend through cancellations.
-- Drive summaries count reviewer processes as launches, split executor from review spend, price the average billed launch over real launches, and report the per-drive delta beside board-lifetime totals — a no-op resume previously re-printed the whole board's historical spend as if it had just happened.
-- Escalation decisions carry bounded executor evidence (report, touched files, per-task spend) beside the reviewer findings, one rejection failing four or more distinct criteria escalates immediately as an omnibus-task signal instead of re-billing a full retry cycle, and the recovery guidance distinguishes brief edits (resume) from supersession (drive the successor).
-- Superseding a task rewires a paused drive's scope to the successor like dependencies, so `/maestro resume` no longer drives only the cancelled predecessor into a no-op completion; mid-run successor plans no longer re-enter the plan gate on workflow scale (drive preflight confirms scale once); write-overlap rejections against stopped work suggest `supersedesTaskId` in the same call; plans warn when one task bundles six or more criteria or eight or more write paths; a repeated identical inspect is labeled unchanged; single-task inspect includes the executor report, touched files, and structured findings; inspect evidence is character-bounded (the previous line-based bound never truncated single-line JSON); and prompts that inject only the first eight open findings disclose how many more remain.
-
-- A reviewer can no longer approve work whose own report states it is unfinished. A real task was approved while the plan document it produced read `State: BLOCKED — the clean full non-device gate failed twice`, marking it done and unblocking six dependents on a foundation its author had disclaimed. Approval is now withheld when the executor report declares BLOCKED, INCOMPLETE, NOT DONE, or FAILED as its state, and the withheld verdict says so.
-
-- A task stopped by `maxCostPerTask` is no longer retried at the same cap. The classifier marked cost-cap failures retryable, so a real board spent $12.14 on one task across three attempts, two of them killed at the identical $5 wall; the second was doomed the moment the first hit it. Recovery needs a larger cap or a smaller task, both human decisions.
-- A cost-capped task now reports the cap and its spend instead of `no dispatch was attempted`, and points at `maxCostPerTask` rather than telling the user to write a successor brief for work that was cut off mid-flight with its edits intact.
-
-- Plan rejections now explain how ids work. A real plan of seven tasks titled `Plan 012`..`Plan 018` set `dependsOn: ["T12"]`, because nothing said ids are assigned by maestro in array order rather than taken from plan or issue numbers. The `dependsOn` schema now states this, and a rejection names the ids that actually exist.
-- Overlapping `writePaths` are reported once per file with all claimants, instead of once per task pair. One shared `README.md` across seven tasks produced twenty-one near-identical lines that buried every other problem in the same message.
-- Superseding a task that is not replaceable now names the way out, which differs for `ready_for_review` and `running`.
-
-- A drive whose remaining tasks all depend on a cancelled or failed task now names the unreachable root and how to clear it. It previously reported only `no dispatch was attempted` per task, leaving the user to trace the dependency chain by hand to discover the board could never progress.
-
-### Changed
-
-- Settings are grouped by how often they are worth revisiting. "Essentials" holds the preset, concurrency, spend cap, plan gate, auto-commit, and attempt limit; "How work runs" holds isolation and cleanup; runaway guards moved to "Safety limits", which most users never need to open. The previous layout put fifteen unrelated controls in one flat "Execution and safety" list.
-- The subcommand menu offers one entry per action (25, down from 44). Nested leaves such as `plan export` are completed after their parent noun, and the `dash`/`dashboard` aliases still dispatch without competing with `board` in the list.
-- `/maestro` help leads with the four commands most runs need, then groups the rest by situation instead of presenting one flat list.
-- Presets now spread `DEFAULT_CONFIG` and state only what they change. Each previously restated all 24 settings, so adding one meant editing six presets; 132 lines of duplication removed with no behavior change.
-
-### Testing
-
-- Added `test/executor-integration.test.ts`: real `pi --mode rpc` executors driven end to end against a local scripted model server, covering the RPC transport, session writing, Git attribution, and integration commits with no provider account, no tokens, and no outbound network. It reproduces the mandatory-signing failure that froze the editor.
-- Removed 24 structural assertions that only checked which file a function lives in. Gutting a function's body while keeping its name left every one of them passing, so they taxed refactors without protecting behavior; `test/boundaries.test.ts` now asserts capability boundaries only.
-- Shared executor fakes moved to `test/helpers/executors.ts` instead of being re-declared per test.
-
-### Security
-
-- Project-local `.pi/maestro.json` is honored only for pi-trusted projects; untrusted repositories can no longer influence budgets, attempt caps, tier models, or tier tool lists.
-
-### Configuration
-
-- `maxCostPerReview` caps one reviewer launch separately from `maxCostPerTask` (0 inherits it), `reviewRejectionLimit` makes the escalation threshold configurable (integer 1–10, default 2), and `retryContext` chooses between resuming a review-rejected attempt's session and fresh-context retries. All three are validated, shown by `/maestro config`, and editable in the settings UI.
-
-- Executor and review tiers may now override idle-seconds, warning-turn, and termination-turn watchdog thresholds while omitted values inherit the global settings.
-
-### Observability
-
-- Cost reporting answers "what did the money buy?" directly: `/maestro costs` splits spend into landed (tasks that reached approval, their rejected attempts included), in flight, and sunk in cancelled work, and drive summaries state cost per approved task — or "no approvals yet" when the spend is all churn.
-- Resumed rejection retries are marked on the attempt and `/maestro insights` compares retry economics per model/tier: average executor cost of retries that resumed the rejected session versus retries that started fresh, so the `retryContext` saving is measured instead of assumed.
-
-- `/maestro insights` now renders a bounded, model-free aggregation over current and archived boards with per-model/tier attempts, first-review approval, approved-task cost, failure kinds, and reviewer rejection rates.
-- Plan approval and drive scale preflight now show a clearly labeled projected-cost estimate, preferring archived per-model-and-tier launch averages before model pricing metadata and a documented static fallback.
-
-### Performance
-
-- Hot render paths (per-executor-event UI refresh) are throttled with a leading-edge coalescing scheduler; single refreshes stay synchronous, bursts collapse to one trailing render.
-- The status bar and widgets read a zero-copy cached board view instead of cloning the board on every executor event.
-- Interactive tool handlers (maestro_plan/maestro_update and drive decision recovery) wait for the board lock asynchronously, so cross-process contention can no longer stall the TUI event loop.
-- macOS and BSD now also get PID-recycle-safe board locks via `ps` start-time identity (Linux keeps /proc).
-- Board and config reads are cached by exact file identity (inode + size + mtime ns), and board lock contention now spins at fine granularity before backing off, reducing synchronous stalls on the interactive session.
-
-### Reliability
-
-- Delivered decisions get a watchdog. A decision wakes the orchestrator with exactly one model turn — and when that turn died mid-stream (one provider "overloaded" error was enough), nothing ever re-raised it: the board sat blocked for an hour while the orchestrator looked idly AFK, and the eventual wake-up re-billed the whole context as a cold cache. If a delivered decision stays unresolved with no board activity and no live launches for `decisionNudgeMinutes` (default 5), the owner session is re-nudged with the decision evidence, up to three times; any board write or launch resets the quiet interval, and a session reload re-arms the watchdog for a decision delivered by a dead process.
-
-- Opt-in Unix detached executors now survive Pi exit through persisted JSONL control/event transport, PID+start-time recovery, long bounded dispatch leases, forced Git worktree isolation, and startup log-tail reattachment; reviewers and Windows retain attached RPC behavior.
-- Verification logs are streamed to disk as output arrives, so a hard kill of pi retains partial verification evidence.
-- Added a best-effort (non-blocking) Windows CI job for typecheck and tests.
-
-## 0.1.0
-
-### Orchestration
-
-- Added plan, run, review, update, status, and drive tools for dependency-aware task workflows.
-- Added optional plan approval and autonomous run/review/retry driving.
+- The model has three tools: `maestro_plan`, `maestro_update`, and `maestro_drive`. Approval, pause, abort, simulation, and recovery are human commands.
+- Tasks carry a self-contained brief, a tier, dependencies, 1 to 12 success criteria, bounded write paths, and an optional commit message, verification profile, review policy, and `reviewGuidance` hint. Explicit `kind: "investigation"` tasks use an empty scope. Plans warn when one task bundles six or more criteria or eight or more write paths, and overlapping `writePaths` are reported once per file with every claimant.
+- Plan rejections explain that ids are assigned in array order. `maestro_plan`, `maestro_update`, and `maestro_drive` results show their notices under the task rows: the approval gate, supersession and shape warnings, invalidated in-flight cost, and recovery guidance.
+- `planGate` holds the first plan until you approve it in `/maestro plan`, where each task can be edited. Changing the contract of a running or `ready_for_review` task through `maestro_update` needs `invalidateInFlight: true`.
+- `maestro_drive start` runs the whole run, review, and retry loop in one tool call and returns when the board settles or a decision needs the orchestrator. Progress streams into the live tool result, so the orchestrator spends one turn per drive. `maxRoundsPerRun` (default 20) bounds the loop.
+- `/maestro start` archives a non-empty board first, so each goal gets a fresh board. `/maestro handoff` continues in a fresh session from the board alone, and Maestro queues the same handoff once at `handoffContextRatio`.
+- `/maestro pause`, `resume`, and `abort` control a drive. Mechanical stops (`budget_blocked`, `aborted`, launch and round limits, provider blocks, internal errors) can be resumed from any session once the cause is fixed. Judgment decisions keep an owner-session guard. A paused drive records why it stopped.
+- A successor created with `supersedesTaskId` atomically cancels its predecessor, keeps it visible, takes over its dependents, and inherits its `dependsOn`. A paused drive's scope follows the successor.
+- Escalation follows stagnation: after `reviewRejectionLimit` rejections the drive stops only if a reviewer repeated a finding an earlier attempt was told to fix. A rejection that fails four or more distinct criteria escalates at once. Editing a brief or its criteria clears recorded findings and rejection counters.
+- A delivered decision that stays unresolved for `decisionNudgeMinutes` re-nudges the owner session up to three times. A scale-confirmation refusal marks the decision `awaitingHuman`, which stops reminders and tells the orchestrator nothing further is needed.
+- `/maestro plan export`, `import`, and `diff`, `/maestro recipe` (with `preview`), `/maestro workflows`, `/maestro discover`, and `/maestro simulate` cover plans as files, reusable recipes, bounded discovery, and read-only previews. Recipe and discovery tasks inherit the project's `reviewPolicy`. Example recipes ship in `examples/recipes/`.
+- Orchestrator and supervisor briefings tell the model to call `maestro_drive` `start` after correcting a brief or tier, and say that executors work in isolated checkouts only when they do.
 
 ### Executors
 
-- Nested fresh-context executor and reviewer transcripts under Pi's normal project session root so recursive usage accounting includes them without crowding `/resume`.
-- Added fresh-context RPC child sessions with live steering and abort support.
-- Added ordered model fallbacks, including quota-aware retries that do not consume the task attempt cap.
-- Added per-attempt and whole-run cost caps.
+- Each executor is a separate `pi --mode rpc` process with a fresh context, so a running executor can be steered mid-run or aborted cleanly. Dependent tasks receive the reports of their approved dependencies.
+- Tiers (`trivial`, `standard`, `complex`, and your own) set a model, thinking level (`off` to `max`), tools, and ordered `fallbacks`. A task that fails before any model turn, or reports quota exhaustion mid-run, advances to the next fallback without consuming `maxAttempts`.
+- Provider failures are classified. Transient drops retry twice after 15 s and 60 s. An exhausted usage window is waited out for up to `providerQuotaWaitMinutes` (default 360); on Codex the wait ends at the window's published `reset_at` plus 45 seconds, and other providers are probed with 2/4/8/15-minute backoff. Credential, billing, and unknown-model failures stop the drive at once. A drive asleep for quota shows `waiting` with the resume time everywhere.
+- An attempt the provider cut off after real work resumes its own session and checkout. A review-rejected attempt does the same by default (`retryContext: "resume"`), carrying only the reviewer's findings. Provider fallbacks, human retries, and discovery tasks start fresh.
+- Zero-turn environment failures, such as a missing executable, back off for 2 seconds and do not consume `maxAttempts`.
+- The watchdog steers once after silence or a run of no-progress turns and then classifies continued inactivity as `stalled`. Progress detection is aware of run kind: read-tool activity counts as progress for investigations and reviews, and long reports written across turns count as progress. Complete provider silence is a provider failure, not a stall. Any tier may override the thresholds.
+- `detachedExecutors` (Unix, opt-in) runs executors behind a detached supervisor with persisted event and control files, so work can outlive pi and reattach on the next start.
+- Parallel batches are isolated in per-task worktrees even with `useWorktrees` off. A drive that isolates tasks warns which uncommitted paths the executors cannot see.
+- A task checkout exists only while an executor or reviewer uses it. Idle changes are checkpointed on the task branch and the checkout is removed; review or retry restores it.
+- Attempts attribute changes by content against a pre-run Git baseline, so shell-side edits count, commits made inside the task checkout count, and pre-existing dirt never does.
+
+### Review
+
+- A reviewer with a fresh context and `read,grep,find,ls` checks every task against its criteria and ends with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`. `reviewPolicy` is `single` (default), `confirm` (independent approvals), or `find-and-refute`, set per project or per task.
+- Every reviewer launch records its model, provider, usage, the candidate tree it judged, and the task fingerprint. A `confirm` panel is cut to one reviewer for a mechanical re-review only when the candidate and contract are unchanged.
+- Under `confirm` and `find-and-refute`, a `REQUEST_CHANGES` with every criterion marked PASS is a real rejection on grounds outside the criteria. Only approving while a criterion is FAIL is a contradiction. Criterion evidence parsing accepts the shapes reviewers write, including Markdown headings and bold list items.
+- Approval is withheld when the executor's report declares its state as BLOCKED, INCOMPLETE, NOT DONE, or FAILED.
+- Findings are distilled only from numbered list items, deduplicated, and cleared when the task contract changes. Approval marks a task's findings verified.
+- `reviewCheapModel` runs the first reviewer of each attempt on a cheap model, and `reviewEscalation` decides when the review tier takes over. Preflight and the cost forecast count the extra launches and price the cheap model at its own rates.
+- A stop caused by the artifact gate (no attributable changes, inputs changed, failed verification) says no reviewer ran, with the gate cause.
+- Trusted verification profiles, defined only in user config, gate approval. Output is streamed to `.pi/maestro/verification/`.
 
 ### Git
 
-- Added one automatic commit per approved task.
-- Added optional worktree isolation for parallel tasks, with merge-then-delete cleanup after approval.
-- Made physical task checkouts ephemeral: recoverable idle work is checkpointed on its task branch and restored only for retry, review, or inspection.
+- With `autoCommit`, each approved task becomes one conventional commit from its `commitMessage`. `pushOnIntegration` optionally pushes after each integration, and a push failure never blocks an approval.
+- Maestro's own commits use `--no-gpg-sign`, and every Git call has a timeout and `GIT_TERMINAL_PROMPT=0`, so a missing signing key cannot freeze the editor.
+- Promotion checks that `HEAD` still names the branch the candidate was prepared against. Parking a checkout refuses to remove it when its changes cannot be checkpointed.
+- Approval provenance records the candidate tree, review, integration commit, and verification. Fingerprints exclude the tier's model, thinking level, tools, and fallbacks, so switching executor models does not make approved work stale. A change to the contract, verification profile, dependencies, or review policy does.
+
+### Cost and limits
+
+- `maxRunCost` bounds the board's lifetime spend, sunk cost included, and the drive shares one ledger across launches. Every launch is capped at a fair share of what is left, and none starts below one cent. Raising it with `/maestro config budget <usd>` resolves a pending `budget_blocked` decision, and a one-time notice fires at 80%.
+- `maxCostPerTask` and `maxCostPerReview` cap single launches. A capped attempt keeps its edits, and raising the cap above what it spent resumes it in place. A task stopped by a cap is not retried at the same cap.
+- `maxAttempts` counts only launches that produced real work. `maxTotalLaunchesPerRun`, `maxPlanTasks`, and the scale confirmation thresholds bound a run.
+- Plan approval and drive preflight show a labeled cost estimate and warn when projected reviewer spend is at least twice executor spend.
+- Seven presets (`inherit`, `openai-balanced`, `openai-budget`, `openai-quality`, `anthropic-balanced`, `anthropic-budget`, `anthropic-quality`) set tier models, and the settings editor groups settings by how often they matter.
 
 ### Observability
 
-- Added a phase-first live dashboard with steering templates, status filters, task and launch drill-down, and explicit current/attention/evidence phase states.
-- Persisted review verdicts, task status history, and descriptive numbered attempt and review session names.
-- Added board archiving and replay.
+- `/maestro board` is a phase-first dashboard (discovery, plan approval, execution, review, integration, verification, recovery, complete) that drills into tasks and launches, with steering templates, filters, and `?` for keys. `/maestro agents` is a session-style viewer for live and completed launches, and the agent selector labels every launch with its attempt number and outcome.
+- The footer shows a progress bar, phase, running count, and spend. The drive heartbeat adds elapsed time, tasks left, the executor and review spend split, and a forward estimate. Toasts report each task as it settles.
+- `/maestro costs` splits spend into landed, in flight, and sunk work, ranks tasks by cost, and warns when review spend meets executor spend. Drive summaries state cost per approved task. `/maestro insights` reports approval, cost, failure, and rejection rates per model and tier, including retry economics.
+- `/maestro timeline`, `history`, and `reconcile` are model-free. `/maestro doctor` reports config, authenticated models, Git, managed worktrees, and stale approval proof.
+- Run event logs are capped on whole lines and end with one `maestro_log_capped` marker.
 
-### Configuration
+### Reliability
 
-- Added built-in presets and an interactive settings UI.
-- Added user and project configuration scopes, including primary and fallback model selection.
-
-### Compatibility and release safety
-
-- Added Node.js 22 and 24 CI coverage and bounded compatibility with the Pi `0.80.x` package line.
-- Added packed-artifact content and extension-registration smoke testing.
-- Added a security policy and automated dependency update configuration.
+- Claims record the owner's PID and start identity and stay held until the attempt, review, integration, and verification are saved. A claim whose owner is alive is never taken over, and startup fails any `running` task left without a claim.
+- Board locks use PID plus process start time, and two sessions reclaiming a dead lock cannot delete each other's. Board and config writes are atomic. A corrupt board is moved aside as `board.json.corrupt-<timestamp>`, and a config file that is corrupt or invalid as `maestro.json.corrupt-<timestamp>` or `maestro.json.invalid-<timestamp>`, only if it is still the file that was read.
+- Every launch uses its own event log and transport files, and a detached launch accepts only a terminal record carrying its launch id. An attached launch settles two seconds after pi exits and kills its process group. A launch pi settles with `aborted: true` is recorded as cancelled. Malformed executor output is skipped with at most three diagnostics per launch.
+- A reload or shutdown retires the drive: it launches nothing more, a running verification is cancelled, and promotion is refused. Startup cleanup never removes a checkout in use.
+- A session is resumed only inside the checkout it recorded. An executor whose prompt pi reports as `handled` fails at once.
+- Reading an agent transcript or run log with the model's read tools is blocked, because it can grow the orchestrator's own session on every read.
+- Executor sessions live under pi's per-project session directory at `.maestro/<launch>/`, so usage tools count them while `/resume` stays short. `/maestro back` keeps its return target when a session switch is cancelled.
+- Project-local `.pi/maestro.json` is honored only for projects pi trusts.
