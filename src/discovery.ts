@@ -1,3 +1,4 @@
+import { type Static } from "@earendil-works/pi-schema";
 import {
   createTask,
   findTask,
@@ -8,6 +9,12 @@ import {
 } from "./board.js";
 import { MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import { assertPlanTaskLimit } from "./preflight.js";
+import {
+  describeInvalid,
+  type discoveryItemSchema,
+  type discoveryOutputSchema,
+  discoveryOutputValidator,
+} from "./schemas.js";
 import { type Board, type MaestroConfig, type Task } from "./types.js";
 
 export const DISCOVERY_TOOLS = "read,grep,find,ls";
@@ -15,24 +22,8 @@ export { MAX_DISCOVERY_REPORT_BYTES };
 export const MAX_DISCOVERY_ITEMS = 32;
 const MAX_DISCOVERY_PREVIEW = 4_000;
 
-interface DiscoveryItem {
-  key: string;
-  title: string;
-  brief: string;
-  tier: string;
-  writePaths: string[];
-  successCriteria: string[];
-  dependsOn: string[];
-  verificationProfile?: string;
-  reviewPolicy?: "single" | "confirm" | "find-and-refute";
-  commitMessage?: string;
-}
-
-export interface DiscoveryOutput {
-  kind: "pi-maestro-discovery";
-  version: 1;
-  items: DiscoveryItem[];
-}
+type DiscoveryItem = Static<typeof discoveryItemSchema>;
+export type DiscoveryOutput = Static<typeof discoveryOutputSchema>;
 
 export function completedDiscoveryReport(task: Task | undefined): string {
   if (!task?.discovery || task.writePaths?.length !== 0) {
@@ -50,21 +41,6 @@ export function completedDiscoveryReport(task: Task | undefined): string {
   }
   return attempt.finalReport;
 }
-
-const OUTPUT_KEYS = new Set(["kind", "version", "items"]);
-const ITEM_KEYS = new Set([
-  "key",
-  "title",
-  "brief",
-  "tier",
-  "writePaths",
-  "successCriteria",
-  "dependsOn",
-  "verificationProfile",
-  "reviewPolicy",
-  "commitMessage",
-]);
-const ITEM_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
 export function discoveryInstructions(allowedWritePaths: string[]): string {
   return [
@@ -89,13 +65,9 @@ export function parseDiscoveryOutput(
   } catch {
     throw new Error("Discovery output must be one valid JSON object.");
   }
-  if (!isRecord(value)) throw new Error("Discovery output must be a JSON object.");
-  rejectUnknownFields(value, OUTPUT_KEYS, "discovery output");
-  if (value.kind !== "pi-maestro-discovery" || value.version !== 1) {
-    throw new Error("Unsupported discovery output kind or version.");
-  }
-  if (!Array.isArray(value.items) || value.items.length < 1) {
-    throw new Error("Discovery output must contain at least one item.");
+  if (!discoveryOutputValidator.check(value)) {
+    const problem = describeInvalid(discoveryOutputValidator, value);
+    throw new Error(`Discovery output is invalid at ${problem}`);
   }
   if (value.items.length > maxItems) {
     throw new Error(`Discovery output cannot contain more than ${maxItems} items.`);
@@ -194,53 +166,15 @@ export function formatDiscoveryPreview(
   return `${preview.slice(0, MAX_DISCOVERY_PREVIEW - suffix.length)}${suffix}`;
 }
 
-function parseItem(value: unknown): DiscoveryItem {
-  if (!isRecord(value)) throw new Error("Discovery output contains a malformed item.");
-  rejectUnknownFields(value, ITEM_KEYS, "discovery item");
-  for (const key of ["key", "title", "brief", "tier"] as const) {
-    const maximum = key === "brief" ? 20_000 : 500;
-    if (typeof value[key] !== "string" || !value[key].trim() || value[key].length > maximum) {
-      throw new Error(`Discovery item ${key} is invalid.`);
-    }
-  }
-  if (!ITEM_KEY.test(value.key as string)) throw new Error("Discovery item key is invalid.");
-  for (const key of ["writePaths", "successCriteria", "dependsOn"] as const) {
-    if (!Array.isArray(value[key]) || !value[key].every((item) => typeof item === "string")) {
-      throw new Error(`Discovery item ${key} must be an array of strings.`);
-    }
-  }
-  if (
-    value.verificationProfile !== undefined &&
-    (typeof value.verificationProfile !== "string" ||
-      !value.verificationProfile.trim() ||
-      value.verificationProfile.length > 64)
-  ) {
-    throw new Error("Discovery item verificationProfile is invalid.");
-  }
-  if (
-    value.commitMessage !== undefined &&
-    (typeof value.commitMessage !== "string" ||
-      !value.commitMessage.trim() ||
-      value.commitMessage.length > 500)
-  ) {
-    throw new Error("Discovery item commitMessage is invalid.");
-  }
-  if (
-    value.reviewPolicy !== undefined &&
-    value.reviewPolicy !== "single" &&
-    value.reviewPolicy !== "confirm" &&
-    value.reviewPolicy !== "find-and-refute"
-  ) {
-    throw new Error("Discovery item reviewPolicy is invalid.");
-  }
+function parseItem(value: DiscoveryItem): DiscoveryItem {
   return {
-    key: (value.key as string).trim(),
-    title: (value.title as string).trim(),
-    brief: (value.brief as string).trim(),
-    tier: (value.tier as string).trim(),
-    writePaths: normalizeWritePaths(value.writePaths as string[]),
-    successCriteria: [...new Set(normalizeSuccessCriteria(value.successCriteria as string[]))],
-    dependsOn: normalizeDependencies(value.dependsOn as string[]),
+    key: value.key.trim(),
+    title: value.title.trim(),
+    brief: value.brief.trim(),
+    tier: value.tier.trim(),
+    writePaths: normalizeWritePaths(value.writePaths),
+    successCriteria: [...new Set(normalizeSuccessCriteria(value.successCriteria))],
+    dependsOn: normalizeDependencies(value.dependsOn),
     ...(value.verificationProfile ? { verificationProfile: value.verificationProfile.trim() } : {}),
     ...(value.reviewPolicy ? { reviewPolicy: value.reviewPolicy } : {}),
     ...(value.commitMessage ? { commitMessage: value.commitMessage.trim() } : {}),
@@ -275,17 +209,4 @@ function normalizeDependencies(values: string[]): string[] {
   if (normalized.some((value) => !value))
     throw new Error("Discovery dependencies cannot be empty.");
   return [...new Set(normalized.map((value) => value.toUpperCase()))].sort();
-}
-
-function rejectUnknownFields(
-  value: Record<string, unknown>,
-  allowed: Set<string>,
-  label: string
-): void {
-  const unknown = Object.keys(value).find((key) => !allowed.has(key));
-  if (unknown) throw new Error(`${label} contains unknown field "${unknown}".`);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
