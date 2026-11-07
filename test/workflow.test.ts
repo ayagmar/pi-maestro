@@ -1311,6 +1311,81 @@ test("failed trusted candidate verification blocks reviewer launch", async () =>
   }
 });
 
+for (const interruptedRun of [1, 2]) {
+  const stage = interruptedRun === 1 ? "candidate" : "post-integration";
+  test(`shutdown during ${stage} verification leaves the task ready for review`, {
+    timeout: 20_000,
+  }, async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "maestro-interrupted-verification-"));
+    const control = mkdtempSync(join(tmpdir(), "maestro-interrupted-control-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+    try {
+      git("init", "-q");
+      git("config", "user.email", "test@example.com");
+      git("config", "user.name", "Test");
+      writeFileSync(join(cwd, "file.txt"), "before\n");
+      git("add", "file.txt");
+      git("commit", "-q", "-m", "initial");
+      const head = git("rev-parse", "HEAD");
+
+      const { board, task } = boardWithTask("ready_for_review");
+      task.writePaths = ["file.txt"];
+      task.verificationProfile = "required";
+      const completed = attempt("done");
+      completed.touchedFiles = ["file.txt"];
+      completed.diff = "+after";
+      task.attempts.push(completed);
+      writeFileSync(join(cwd, "file.txt"), "after\n");
+
+      const marker = join(control, "verifying");
+      const script = join(cwd, "verify.cjs");
+      writeFileSync(
+        script,
+        `const fs = require("node:fs");\nconst countFile = ${JSON.stringify(join(control, "count"))};\nconst count = Number(fs.existsSync(countFile) ? fs.readFileSync(countFile, "utf8") : 0) + 1;\nfs.writeFileSync(countFile, String(count));\nif (count === ${interruptedRun}) { fs.writeFileSync(${JSON.stringify(marker)}, "started"); setTimeout(() => {}, 30_000); }\n`
+      );
+      const verificationProfiles = {
+        required: { command: `${process.execPath} ${script}`, timeoutSeconds: 60 },
+      };
+      saveConfig("project", cwd, { ...config, autoCommit: true, verificationProfiles });
+      recordExecutionFingerprint(cwd, board, task, { ...loadConfig(cwd), verificationProfiles });
+      saveBoard(cwd, board);
+
+      const shutdown = new AbortController();
+      const review = reviewTask({
+        cwd,
+        task,
+        tier,
+        autoCommit: true,
+        verificationProfiles,
+        signal: shutdown.signal,
+        startExecutor: executor({
+          finalReport: "VERDICT: APPROVE",
+          usage: { input: 1, output: 1, cost: 0.5, turns: 1 },
+        }),
+        onUpdate,
+        trackRun,
+      });
+      while (!existsSync(marker)) await new Promise((resolve) => setTimeout(resolve, 10));
+      shutdown.abort();
+      const result = await review;
+
+      const settled = findTask(loadBoard(cwd), task.id);
+      assert.equal(result.status, "ready_for_review");
+      assert.equal(settled?.status, "ready_for_review");
+      assert.equal(settled?.dispatchClaim, undefined);
+      assert.equal(settled?.reviewNotes, undefined);
+      assert.equal(settled?.attempts.at(-1)?.reviewConvergence, undefined);
+      assert.equal(settled?.attempts.at(-1)?.failureReason, undefined);
+      // Reviewers that already ran stay billed; nothing reached the branch.
+      assert.equal(settled?.attempts.at(-1)?.usage.cost, interruptedRun === 1 ? 0 : 0.5);
+      assert.equal(git("rev-parse", "HEAD"), head);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(control, { recursive: true, force: true });
+    }
+  });
+}
+
 test("review ownership remains claimed through post-integration verification", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-ownership-"));
   const control = mkdtempSync(join(tmpdir(), "maestro-review-control-"));

@@ -44,7 +44,7 @@ Board boundary (src/board.ts)       runner.ts / worktree.ts
 
 **One ledger per drive.** Every raw executor or reviewer launch is capped at a share of the run budget that is left after settled spend and the caps of launches still running. See [Budgets and caps](configuration.md#budgets-and-caps).
 
-**Retired drives.** Shutdown and reload retire the drives the session started. A retired drive launches nothing further, a trusted verification that is already running is cancelled, and promotion is refused. Detached executors keep running. Startup cleanup never removes a checkout that a live executor, a detached executor, or a reviewer holding a claim is using.
+**Retired drives.** Shutdown and reload retire the drives the session started. A retired drive launches nothing further, a trusted verification that is already running is cancelled, and promotion is refused. A task stopped this way stays ready for review with no convergence written. Detached executors keep running. Startup cleanup never removes a checkout that a live executor, a detached executor, or a reviewer holding a claim is using.
 
 **Branch-checked integration.** Promotion into the user's checkout first confirms that `HEAD` still names the branch the candidate was prepared against, so switching branches or detaching `HEAD` during verification cannot land reviewed work elsewhere. The main-tree identity check ignores `.pi/maestro.json` and `.pi/maestro-recipes/`, so editing Maestro's own configuration mid-review does not fail promotion.
 

@@ -63,6 +63,8 @@ import {
  */
 export const CHEAP_REVIEW_THINKING = "low";
 
+const REVIEW_INTERRUPTED_NOTE = "review interrupted; task stays ready for review";
+
 /** Reviewer usage is billed against the task for honest per-task cost. */
 function addReviewUsage(attempt: Attempt, launches: ReviewLaunch[]): void {
   const previous = attempt.reviewUsage ?? { input: 0, output: 0, cost: 0, turns: 0 };
@@ -297,6 +299,11 @@ export async function reviewTask(options: {
         timeoutSeconds: configuredProfile.timeoutSeconds,
         ...(signal ? { signal } : {}),
       });
+    }
+    // A stopped drive says nothing about the candidate: leave it ready for
+    // review so the next drive verifies it again, with no false failure on record.
+    if (signal?.aborted) {
+      return snapshot(findTask(loadBoard(cwd), task.id) ?? task, REVIEW_INTERRUPTED_NOTE);
     }
     const gateFindings = latestAttempt ? (artifactFindings(task, latestAttempt) ?? []) : [];
     const currentExecutionFingerprint = taskFingerprint(loadBoard(cwd), task, runtimeConfig());
@@ -811,6 +818,11 @@ export async function reviewTask(options: {
         reviewIdentityMatches,
         runtimeConfig,
       });
+      // Only an integration that landed nothing can be interrupted; a commit
+      // that reached the branch still has to settle as approved.
+      if (signal?.aborted && integration.mechanicalFailure && !integration.integratedCommit) {
+        return snapshot(billSettledReviewers() ?? task, REVIEW_INTERRUPTED_NOTE);
+      }
       mergeConflict = integration.mergeConflict;
       integratedCommit = integration.integratedCommit;
       integratedTree = integration.integratedTree;
