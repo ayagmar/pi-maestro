@@ -53,6 +53,22 @@ type LogStream = Writable & { end(callback?: () => void): unknown };
 export type RunFailureCause = "provider" | "process" | "user_abort" | "cost_cap" | "stalled";
 
 /**
+ * A zombie has exited but still answers signals until its parent reaps it,
+ * which in a container without an init process may be never. Linux only;
+ * elsewhere the answer is false and callers keep their liveness check.
+ */
+export function processIsZombie(pid: number): boolean {
+  if (process.platform !== "linux") return false;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    // Field 3 (state) follows the "(comm) " prefix; comm may itself hold ")".
+    return stat[stat.lastIndexOf(")") + 2] === "Z";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Kernel-reported process start identity, so a recycled PID cannot masquerade
  * as a live owner of on-disk state (board locks). Linux reads /proc; macOS
  * and BSDs ask ps for the start time. Unsupported platforms return undefined
