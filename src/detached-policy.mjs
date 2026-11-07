@@ -86,6 +86,13 @@ export function eventShapeError(value) {
   return undefined;
 }
 
+/**
+ * Failure text for a run pi settled as aborted when Maestro never asked for
+ * it. `aborted` stays reserved for Maestro's own cancels: a cancelled task
+ * counts as settled, so this cancel would finish and archive unfinished work.
+ */
+export const CHILD_CANCEL_ERROR = "run cancelled inside the executor";
+
 export const HANDLED_PROMPT_ERROR =
   "the executor's prompt was consumed by an extension command or input handler; no agent run started";
 

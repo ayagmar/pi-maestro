@@ -28,6 +28,7 @@ export declare const MALFORMED_EVENT: string;
 export declare const MAX_MALFORMED_DIAGNOSTICS: number;
 export declare function malformedEventDiagnostic(reason: string): string;
 export declare function eventShapeError(value: unknown): string | undefined;
+export declare const CHILD_CANCEL_ERROR: string;
 export declare const HANDLED_PROMPT_ERROR: string;
 export declare function promptHandledWithoutRun(event: PolicyEvent): boolean;
 export declare function billedUsage(event: PolicyEvent): BilledUsage | undefined;
