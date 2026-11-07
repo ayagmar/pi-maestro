@@ -1,5 +1,5 @@
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadBoard, sweepDispatchState } from "./board.js";
+import { dispatchOwnerIsLive, loadBoard, sweepDispatchState } from "./board.js";
 import { loadConfig, setProjectConfigTrust } from "./config.js";
 import { COMMAND, MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import {
@@ -172,6 +172,9 @@ export function registerMaestroLifecycle(
       ) {
         continue;
       }
+      // Another live session is still settling this attempt and owns its
+      // drive; a later startup reattaches once that process is gone.
+      if (dispatchOwnerIsLive(claim)) continue;
       let live: WorkflowRun | undefined;
       const handle = reattachDetachedExecutor(
         attempt,

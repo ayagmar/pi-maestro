@@ -980,7 +980,7 @@ function dispatchClaimExpired(claim: DispatchClaim): boolean {
  * held by this process belong to the current or a previous (reloaded)
  * extension instance; those keep plain lease semantics.
  */
-function dispatchOwnerIsLive(claim: DispatchClaim): boolean {
+export function dispatchOwnerIsLive(claim: DispatchClaim): boolean {
   const pid = claim.ownerPid;
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
     return false;

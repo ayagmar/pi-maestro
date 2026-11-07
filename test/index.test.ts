@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -1111,6 +1111,66 @@ test("multi-word static and dynamic argument completions are combined", async ()
       assert.ok(opening.some((item) => item.value === "board"));
     }
   );
+});
+
+test("a second session leaves a live session's detached executor and drive alone", async () => {
+  if (process.platform === "win32") return;
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+    stdio: "ignore",
+  });
+  try {
+    await withBoard(
+      (cwd) => {
+        assert.ok(other.pid);
+        const logFile = join(cwd, "detached.jsonl");
+        writeFileSync(logFile, "");
+        writeFileSync(`${logFile}.exit`, JSON.stringify({ version: 1, exitCode: 0 }));
+        const board: Board = {
+          version: 1,
+          nextTaskNumber: 1,
+          tasks: [],
+          activeDrive: { id: "drive-a", ownerSession: "/tmp/session-a.jsonl", startedAt: 1 },
+        };
+        const task = createTask(board, { title: "Busy", brief: "work", tier: "standard" });
+        forceStatus(task, "running");
+        task.dispatchClaim = {
+          id: "claim-a",
+          kind: "execute",
+          claimedAt: Date.now(),
+          expiresAt: Date.now() + 60_000,
+          ownerPid: other.pid,
+        };
+        task.attempts.push({
+          ...executorAttempt(),
+          index: 1,
+          logFile,
+          exitFile: `${logFile}.exit`,
+          controlFile: `${logFile}.control`,
+          detached: true,
+        });
+        saveBoard(cwd, board);
+      },
+      async (cwd) => {
+        const second = loadMaestro(cwd, undefined, "/tmp/session-b.jsonl");
+        second.events.get("session_start")?.({ reason: "startup" }, second.ctx);
+        assert.equal(
+          second.notices.some((notice) => notice.includes("reattached")),
+          false
+        );
+
+        const exited = new Promise((resolve) => other.once("exit", resolve));
+        other.kill("SIGKILL");
+        await exited;
+        // Once the owner is gone, the next session takes the attempt over.
+        const third = loadMaestro(cwd, undefined, "/tmp/session-c.jsonl");
+        third.events.get("session_start")?.({ reason: "startup" }, third.ctx);
+        assert.ok(third.notices.some((notice) => notice.includes("reattached")));
+        await waitFor(() => loadBoard(cwd).tasks[0]?.status !== "running", "reattached settlement");
+      }
+    );
+  } finally {
+    other.kill("SIGKILL");
+  }
 });
 
 test("task-id argument completion includes board tasks", async () => {
