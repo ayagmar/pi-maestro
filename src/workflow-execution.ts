@@ -46,6 +46,7 @@ import { claimDispatchLifecycle } from "./workflow-dispatch.js";
 import {
   consumesMaxAttempt,
   costCapLifted,
+  cutByRunBudget,
   endedUnretryably,
   lastReport,
   resumesInterruptedSession,
@@ -471,7 +472,10 @@ export async function executeTask(options: {
         outcome.usage.turns === 0 &&
         outcome.failureCause === "process" &&
         run.attempt.touchedFiles.length === 0;
-      run.attempt.consumesAttempt = !providerFailure && !environmentFailure;
+      run.attempt.consumesAttempt =
+        !providerFailure &&
+        !environmentFailure &&
+        !cutByRunBudget(run.attempt, classifiedFailure, config);
       if (environmentFailure && environmentFailureBackoffMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, environmentFailureBackoffMs));
       }
@@ -562,6 +566,7 @@ export function settleReattachedDetachedAttempt(
   if (outcome.errorMessage) attempt.errorMessage = redactFailureMessage(outcome.errorMessage);
   const failureReason = classifyFailure(outcome);
   if (failureReason) attempt.failureReason = failureReason;
+  if (cutByRunBudget(attempt, failureReason, loadConfig(cwd))) attempt.consumesAttempt = false;
   let attributionError: string | undefined;
   try {
     if (

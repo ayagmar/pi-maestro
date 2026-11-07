@@ -46,6 +46,7 @@ import {
   taskCommitMessage,
 } from "../src/workflow.js";
 import { claimDispatchLifecycle } from "../src/workflow-dispatch.js";
+import { settleReattachedDetachedAttempt } from "../src/workflow-execution.js";
 import {
   reviewEvidence,
   reviewerLaunchPlan,
@@ -5599,6 +5600,110 @@ test("launch cost caps combine the per-role cap with the remaining run budget", 
     // After the executor spent $1, the reviewer cap is min($2.5, $2 remaining).
     const reviewCap = [...capsByRun.entries()].find(([runId]) => runId.includes("-review-"))?.[1];
     assert.equal(reviewCap, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a fair-share budget cut retries the task without using up an attempt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-fair-share-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    createTask(board, { title: "Big", brief: "Do the work", tier: "standard" });
+    createTask(board, { title: "Small", brief: "Do the work", tier: "standard" });
+    saveBoard(cwd, board);
+    const cheap = { input: 1, output: 1, cost: 0.05, turns: 1 };
+    let bigLaunches = 0;
+
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async () => undefined,
+      cwd,
+      config: { ...config, maxParallel: 2, maxAttempts: 1, maxCostPerTask: 5, maxRunCost: 4 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        if (options.runId.includes("-review-")) {
+          return executor({ usage: cheap, finalReport: "VERDICT: APPROVE" })(options);
+        }
+        if (options.runId.startsWith("T1-")) bigLaunches += 1;
+        if (!options.runId.startsWith("T1-") || bigLaunches > 1) {
+          return executor({ usage: cheap })(options);
+        }
+        const cap = options.maxCost ?? 0;
+        return executor({
+          exitCode: 1,
+          usage: { input: 1, output: 1, cost: cap, turns: 1 },
+          errorMessage: `cost cap exceeded: $${cap} > $${cap} (remaining run budget (maxRunCost))`,
+          failureCause: "cost_cap",
+        })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    const big = findTask(loadBoard(cwd), "T1");
+    assert.equal(big?.status, "approved");
+    assert.equal(big?.attempts.length, 2);
+    assert.equal(big?.attempts[0]?.failureReason?.kind, "cost_cap");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a reattached launch cut at its budget share keeps its attempt", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-fair-share-reattach-"));
+  try {
+    const { board, task } = boardWithTask("running");
+    const running = attempt();
+    task.attempts.push(running);
+    task.dispatchClaim = { id: "claim", kind: "execute", claimedAt: Date.now() };
+    saveBoard(cwd, board);
+
+    settleReattachedDetachedAttempt(cwd, task.id, "claim", running, {
+      exitCode: 1,
+      usage: { input: 1, output: 1, cost: 0.5, turns: 1 },
+      finalReport: "",
+      touchedFiles: [],
+      aborted: false,
+      errorMessage: "cost cap exceeded: $0.5 > $0.5 (remaining run budget (maxRunCost))",
+      failureCause: "cost_cap",
+    });
+
+    const settled = findTask(loadBoard(cwd), task.id);
+    assert.equal(settled?.status, "failed");
+    assert.equal(settled?.attempts.at(-1)?.consumesAttempt, false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a per-task cost cap still uses up the attempt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-task-cap-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config: { ...config, maxCostPerTask: 2 },
+      startExecutor: executor({
+        exitCode: 1,
+        usage: { input: 1, output: 1, cost: 2.01, turns: 1 },
+        errorMessage: "cost cap exceeded: $2.01 > $2 (maxCostPerTask)",
+        failureCause: "cost_cap",
+      }),
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.consumesAttempt, true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
