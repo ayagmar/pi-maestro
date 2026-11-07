@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Test task",
+      "brief": "Do the work",
+      "tier": "standard",
+      "status": "ready_for_review",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 0,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060730565,
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cost": 0,
+            "turns": 0
+          },
+          "touchedFiles": ["src/file.ts"],
+          "finalReport": "done",
+          "diff": "+change",
+          "reviewConvergence": {
+            "policy": "single",
+            "status": "operational_failure",
+            "requiredApprovals": 1,
+            "actualApprovals": 0,
+            "reviewerCount": 0,
+            "summary": "Execution has no versioned input fingerprint; use explicit manual acceptance for migration.\nVerification required failed (exit 2): ",
+            "decidedAt": 1794060730589,
+            "cause": "gate"
+          },
+          "failureReason": {
+            "kind": "reviewer_failure",
+            "message": "Execution has no versioned input fingerprint; use explicit manual acceptance for migration.\nVerification required failed (exit 2): ",
+            "retryable": true
+          }
+        }
+      ],
+      "createdAt": 1794060730565,
+      "updatedAt": 1794060730590,
+      "writePaths": ["src/file.ts"],
+      "verificationProfile": "required",
+      "reviewNotes": "Execution has no versioned input fingerprint; use explicit manual acceptance for migration.\nVerification required failed (exit 2): "
+    }
+  ],
+  "revision": 4
+}

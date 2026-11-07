@@ -6,6 +6,7 @@ import {
   type Board,
   type MaestroConfig,
   type Task,
+  type TierConfig,
 } from "./types.js";
 
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -172,6 +173,22 @@ function freshness(
   // identities are still exact; judge it by those and let the next approval
   // capture a proof in the current shape.
   const legacyExecutionShape = approved.executionShape !== EXECUTION_SHAPE;
+  // Skipping the legacy execution digest must not also skip the review policy
+  // it covered: a task strengthened from single to confirm review after
+  // approval would otherwise satisfy dependents without the stronger review.
+  if (
+    legacyExecutionShape &&
+    legacyExecutionDigest(task, config) !== approved.componentHashes.execution &&
+    !reviewEvidenceMeetsPolicy(task, config)
+  ) {
+    const result: CompletionFreshness = {
+      state: "legacy",
+      reason:
+        "approved under an older proof format whose review policy cannot be confirmed against the current one; review or accept it again",
+    };
+    cache.set(task.id, result);
+    return result;
+  }
   const priorities: Array<keyof ApprovedProvenance["componentHashes"]> = legacyExecutionShape
     ? ["contract", "verification", "dependencies"]
     : ["contract", "execution", "verification", "dependencies"];
@@ -203,6 +220,44 @@ function freshness(
   };
   cache.set(task.id, result);
   return result;
+}
+
+/**
+ * The execution digest as proofs without `executionShape` computed it, with
+ * the current configuration. Equal to the stored digest only when neither the
+ * tier configuration nor the review policy changed since approval.
+ */
+function legacyExecutionDigest(task: Task, config: MaestroConfig): string {
+  const tierIdentity = (tier: TierConfig | undefined) =>
+    tier
+      ? { model: tier.model ?? null, thinking: tier.thinking, tools: tier.tools ?? null }
+      : undefined;
+  return digest(
+    canonical({
+      tier: task.tier,
+      taskTier: tierIdentity(config.tiers[task.tier]),
+      reviewTier: tierIdentity(config.tiers.review),
+      reviewPolicy: task.reviewPolicy ?? "single",
+      confirmApprovals: task.reviewPolicy === "confirm" ? config.reviewRequiredApprovals : null,
+    })
+  );
+}
+
+/** Whether the approved attempt's recorded review satisfies the task's current review policy. */
+function reviewEvidenceMeetsPolicy(task: Task, config: MaestroConfig): boolean {
+  const attempt = task.attempts.at(-1);
+  const convergence = attempt?.reviewConvergence;
+  if (convergence?.status !== "approved") return false;
+  const policy = task.reviewPolicy ?? "single";
+  if (policy === "single") return true;
+  if (convergence.policy !== policy) return false;
+  if (policy === "find-and-refute") return true;
+  const approvers = new Set(
+    (attempt?.reviewLaunches ?? [])
+      .filter((launch) => launch.verdict === "approve")
+      .map((launch) => launch.reviewerIndex)
+  );
+  return approvers.size >= config.reviewRequiredApprovals;
 }
 
 export function captureApprovedProvenance(

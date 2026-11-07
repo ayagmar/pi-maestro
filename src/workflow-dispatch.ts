@@ -12,11 +12,36 @@ export function claimDispatchLifecycle(
   if (!dispatch?.claimed) return { dispatch };
 
   let leaseMs: number | undefined;
+  let releasing = false;
+  let closed = false;
+  let pendingSettlement: (() => void) | undefined;
+  /**
+   * Gives up the claim. With `settle`, that board write runs first and the
+   * claim is kept until it succeeds: a task must never lose its owner while
+   * its attempt is still unrecorded. A failed write or release is retried on
+   * the renewal tick.
+   */
+  const release = (settle?: () => void) => {
+    if (closed) return;
+    releasing = true;
+    if (settle) pendingSettlement = settle;
+    if (pendingSettlement) {
+      pendingSettlement();
+      pendingSettlement = undefined;
+    }
+    releaseTaskDispatch(cwd, taskId, dispatch.claimId);
+    closed = true;
+    clearInterval(renewal);
+  };
   const renewal = setInterval(() => {
-    renewTaskDispatch(cwd, taskId, dispatch.claimId, leaseMs);
+    try {
+      if (releasing) release();
+      else renewTaskDispatch(cwd, taskId, dispatch.claimId, leaseMs);
+    } catch {
+      // A contended or failing board write is retried on the next tick.
+    }
   }, 10_000);
   renewal.unref();
-  let closed = false;
 
   return {
     dispatch,
@@ -24,11 +49,6 @@ export function claimDispatchLifecycle(
       leaseMs = durationMs;
       renewTaskDispatch(cwd, taskId, dispatch.claimId, durationMs);
     },
-    release: () => {
-      if (closed) return;
-      closed = true;
-      clearInterval(renewal);
-      releaseTaskDispatch(cwd, taskId, dispatch.claimId);
-    },
+    release,
   };
 }

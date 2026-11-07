@@ -246,3 +246,37 @@ test("recovery membership includes durable unresolved and retained references", 
   assert.deepEqual(recovery?.taskIds, [finding.id, retained.id, scoped.id]);
   assert.equal(projectRunPhases(board).find((phase) => phase.current)?.id, "recovery");
 });
+
+test("a rerun after a review disagreement is in execution, not recovery", () => {
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const task = createTask(board, { title: "Retry", brief: "work", tier: "standard" });
+  const attempt = (index: number) => ({
+    index,
+    logFile: `attempt-${index}.log`,
+    thinking: "low",
+    startedAt: index,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+  });
+  task.attempts.push({
+    ...attempt(1),
+    reviewConvergence: {
+      policy: "find-and-refute",
+      status: "disagreement",
+      requiredApprovals: 2,
+      actualApprovals: 1,
+      reviewerCount: 2,
+      summary: "finder and refuter disagreed",
+      decidedAt: 2,
+    },
+  });
+  // Until the task runs again, the disagreement is the current condition.
+  assert.equal(projectRunPhases(board).find((phase) => phase.current)?.id, "recovery");
+
+  task.attempts.push(attempt(2));
+  task.status = "running";
+  const phases = projectRunPhases(board, new Map([[task.id, "execute"]]));
+  assert.equal(phases.find((phase) => phase.current)?.id, "execution");
+  assert.ok(phases.find((phase) => phase.id === "recovery")?.taskIds.includes(task.id));
+  assert.equal(projectStatus(board, [task.id], DEFAULT_CONFIG).phase, "execution");
+});

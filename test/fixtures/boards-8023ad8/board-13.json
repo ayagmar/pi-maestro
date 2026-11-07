@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Proof",
+      "brief": "proof",
+      "tier": "standard",
+      "status": "todo",
+      "dependsOn": [],
+      "attempts": [],
+      "createdAt": 1794060729266,
+      "updatedAt": 1794060729266,
+      "approvedProvenance": {
+        "version": 1,
+        "executionShape": 2,
+        "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "componentHashes": {
+          "contract": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "execution": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "verification": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "dependencies": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "artifact": {
+          "kind": "git-tree",
+          "identity": "ffffffffffffffffffffffffffffffffffffffff"
+        },
+        "dependencyIdentities": [
+          {
+            "taskId": "T0",
+            "kind": "report",
+            "identity": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ],
+        "approvedAt": 1
+      }
+    }
+  ],
+  "revision": 1
+}

@@ -1,14 +1,14 @@
+import { type ModelCost, type ModelCostTier } from "@earendil-works/pi-ai";
 import { type Board } from "./types.js";
 
 export const FORECAST_INPUT_TOKENS_PER_LAUNCH = 20_000;
 export const FORECAST_OUTPUT_TOKENS_PER_LAUNCH = 4_000;
 export const FORECAST_STATIC_COST_PER_LAUNCH = 0.1;
 
-export interface ForecastModelCost {
-  input: number;
-  output: number;
-  tiers?: Array<{ inputTokensAbove: number; input: number; output: number }>;
-}
+/** The catalog rates a forecast reads; pi-ai's `ModelCost` satisfies it. */
+export type ForecastModelCost = Pick<ModelCost, "input" | "output"> & {
+  tiers?: ReadonlyArray<Pick<ModelCostTier, "inputTokensAbove" | "input" | "output">> | undefined;
+};
 
 export interface ForecastLaunchDemand {
   tier: string;

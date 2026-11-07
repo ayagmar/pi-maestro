@@ -10,35 +10,28 @@ import {
 } from "./board.js";
 import { loadConfig } from "./config.js";
 import {
+  describeInvalid,
+  RECIPE_INPUT_NAME,
+  RECIPE_NAME,
+  recipeInputValueValidator,
+  recipeTaskValidator,
+  workflowRecipeValidator,
+} from "./schemas.js";
+import {
   type Board,
   type RecipeInput,
   type RecipeInputValue,
   type RecipeScope,
   type RecipeTask,
   type ResolvedRecipe,
+  type ReviewPolicy,
   type WorkflowRecipe,
 } from "./types.js";
 
 export const RECIPE_VERSION = 1;
 
-const RECIPE_KEYS = new Set(["kind", "version", "name", "description", "inputs", "tasks"]);
-const INPUT_KEYS = new Set(["description", "required", "default"]);
-const TASK_KEYS = new Set([
-  "id",
-  "title",
-  "brief",
-  "kind",
-  "tier",
-  "dependsOn",
-  "writePaths",
-  "successCriteria",
-  "verificationProfile",
-  "reviewPolicy",
-  "commitMessage",
-  "discovery",
-]);
-const INPUT_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
-const RECIPE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const INPUT_NAME = new RegExp(RECIPE_INPUT_NAME);
+const RECIPE_NAME_PATTERN = new RegExp(RECIPE_NAME);
 const PLACEHOLDER = /\{\{\s*input\.([A-Za-z][A-Za-z0-9_-]{0,63})\s*\}\}/g;
 
 export function parseRecipe(text: string): WorkflowRecipe {
@@ -48,33 +41,12 @@ export function parseRecipe(text: string): WorkflowRecipe {
   } catch {
     throw new Error("Recipe is not valid JSON.");
   }
-  if (!isRecord(value)) throw new Error("Recipe must be a JSON object.");
-  rejectUnknownFields(value, RECIPE_KEYS, "recipe");
-  if (value.kind !== "pi-maestro-recipe" || value.version !== RECIPE_VERSION) {
-    throw new Error("Unsupported recipe kind or version.");
+  if (!workflowRecipeValidator.check(value)) {
+    throw new Error(`Recipe is invalid at ${describeInvalid(workflowRecipeValidator, value)}`);
   }
-  if (typeof value.name !== "string" || !RECIPE_NAME.test(value.name)) {
-    throw new Error("Recipe has an invalid name.");
-  }
-  if (value.description !== undefined && !isBoundedString(value.description, 1, 500)) {
-    throw new Error("Recipe description must contain 1-500 characters.");
-  }
-  const inputs = parseInputs(value.inputs);
-  if (!Array.isArray(value.tasks) || value.tasks.length < 1 || value.tasks.length > 100) {
-    throw new Error("Recipe tasks must contain 1-100 tasks.");
-  }
-  const tasks = value.tasks.map(parseTask);
-  const ids = tasks.map((task) => task.id.trim().toUpperCase());
+  const ids = value.tasks.map((task) => task.id.trim().toUpperCase());
   if (new Set(ids).size !== ids.length) throw new Error("Recipe task ids must be unique.");
-
-  return {
-    kind: "pi-maestro-recipe",
-    version: RECIPE_VERSION,
-    name: value.name,
-    ...(typeof value.description === "string" ? { description: value.description } : {}),
-    ...(inputs ? { inputs } : {}),
-    tasks,
-  };
+  return value;
 }
 
 export interface RecipeListing {
@@ -127,7 +99,7 @@ export function saveRecipeFromBoard(
   name: string,
   board: Board
 ): string {
-  if (!RECIPE_NAME.test(name)) throw new Error("Recipe has an invalid name.");
+  if (!RECIPE_NAME_PATTERN.test(name)) throw new Error("Recipe has an invalid name.");
   if (board.tasks.length === 0) throw new Error("Cannot save an empty board as a recipe.");
 
   const tasks = board.tasks.map((task): RecipeTask => {
@@ -163,7 +135,8 @@ export function saveRecipeFromBoard(
     {},
     Object.keys(config.tiers),
     Object.keys(config.verificationProfiles ?? {}),
-    config.maxPlanTasks
+    config.maxPlanTasks,
+    config.reviewPolicy
   );
   return saveStoredRecipe(scope, cwd, name, text, userDirectory(scope));
 }
@@ -183,7 +156,7 @@ export function parseRecipeInput(text: string | undefined): Record<string, Recip
   if (!isRecord(value)) throw new Error("Recipe input must be a JSON object.");
   const result: Record<string, RecipeInputValue> = {};
   for (const [name, input] of Object.entries(value)) {
-    if (!INPUT_NAME.test(name) || !isInputValue(input)) {
+    if (!INPUT_NAME.test(name) || !recipeInputValueValidator.check(input)) {
       throw new Error(`Recipe input "${name}" must be a string, finite number, or boolean.`);
     }
     result[name] = input;
@@ -196,7 +169,9 @@ export function expandRecipe(
   suppliedInput: Record<string, RecipeInputValue>,
   availableTiers: Iterable<string>,
   availableVerificationProfiles: Iterable<string>,
-  maxPlanTasks = 64
+  maxPlanTasks: number,
+  /** The project's `reviewPolicy`, for tasks whose recipe states none. */
+  defaultReviewPolicy: ReviewPolicy | undefined
 ): Board {
   const input = resolveInput(recipe.inputs ?? {}, suppliedInput);
   if (recipe.tasks.length > maxPlanTasks) {
@@ -205,7 +180,7 @@ export function expandRecipe(
     );
   }
   const profiles = new Set(availableVerificationProfiles);
-  const expandedTasks = recipe.tasks.map((task) => parseTask(expandTask(task, input)));
+  const expandedTasks = recipe.tasks.map((task) => parseExpandedTask(expandTask(task, input)));
   const originalIds = expandedTasks.map((task) => task.id.trim().toUpperCase());
   const declaredIds = new Set(originalIds);
   if (declaredIds.size !== originalIds.length) {
@@ -231,6 +206,7 @@ export function expandRecipe(
 
   const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
   for (const task of expandedTasks) {
+    const reviewPolicy = task.reviewPolicy ?? defaultReviewPolicy;
     createTask(board, {
       title: task.title,
       brief: task.brief,
@@ -240,7 +216,7 @@ export function expandRecipe(
       writePaths: task.writePaths,
       ...(task.successCriteria.length > 0 ? { successCriteria: task.successCriteria } : {}),
       ...(task.verificationProfile ? { verificationProfile: task.verificationProfile } : {}),
-      ...(task.reviewPolicy ? { reviewPolicy: task.reviewPolicy } : {}),
+      ...(reviewPolicy ? { reviewPolicy } : {}),
       ...(task.commitMessage ? { commitMessage: task.commitMessage } : {}),
       ...(task.discovery
         ? { discovery: { allowedWritePaths: task.discovery.allowedWritePaths } }
@@ -278,77 +254,11 @@ function parseStoredRecipe(
   return { recipe, scope: stored.scope, file: stored.file };
 }
 
-function parseInputs(value: unknown): Record<string, RecipeInput> | undefined {
-  if (value === undefined) return undefined;
-  if (!isRecord(value)) throw new Error("Recipe inputs must be an object.");
-  if (Object.keys(value).length > 32) throw new Error("Recipe cannot declare more than 32 inputs.");
-  const inputs: Record<string, RecipeInput> = {};
-  for (const [name, raw] of Object.entries(value)) {
-    if (!INPUT_NAME.test(name) || !isRecord(raw))
-      throw new Error(`Recipe input "${name}" is malformed.`);
-    rejectUnknownFields(raw, INPUT_KEYS, `recipe input "${name}"`);
-    if (raw.description !== undefined && !isBoundedString(raw.description, 1, 300)) {
-      throw new Error(`Recipe input "${name}" has an invalid description.`);
-    }
-    if (raw.required !== undefined && typeof raw.required !== "boolean") {
-      throw new Error(`Recipe input "${name}" required must be boolean.`);
-    }
-    if (raw.default !== undefined && !isInputValue(raw.default)) {
-      throw new Error(`Recipe input "${name}" has an invalid default.`);
-    }
-    inputs[name] = {
-      ...(typeof raw.description === "string" ? { description: raw.description } : {}),
-      ...(typeof raw.required === "boolean" ? { required: raw.required } : {}),
-      ...(raw.default !== undefined ? { default: raw.default as RecipeInputValue } : {}),
-    };
-  }
-  return inputs;
-}
-
-function parseTask(value: unknown): RecipeTask {
-  if (!isRecord(value)) throw new Error("Recipe contains a malformed task.");
-  rejectUnknownFields(value, TASK_KEYS, "recipe task");
-  for (const key of ["dependsOn", "writePaths", "successCriteria"] as const) {
-    if (!Array.isArray(value[key]) || !value[key].every((item) => typeof item === "string")) {
-      throw new Error(`Recipe task ${key} must be an array of strings.`);
-    }
-  }
-  for (const key of ["id", "title", "brief", "tier"] as const) {
-    if (!isBoundedString(value[key], 1, key === "brief" ? 20_000 : 500)) {
-      throw new Error(`Recipe task ${key} is invalid.`);
-    }
-  }
-  if (
-    value.verificationProfile !== undefined &&
-    !isBoundedString(value.verificationProfile, 1, 64)
-  ) {
-    throw new Error("Recipe task verificationProfile is invalid.");
-  }
-  if (value.commitMessage !== undefined && !isBoundedString(value.commitMessage, 1, 500)) {
-    throw new Error("Recipe task commitMessage is invalid.");
-  }
-  if (
-    value.reviewPolicy !== undefined &&
-    value.reviewPolicy !== "single" &&
-    value.reviewPolicy !== "confirm" &&
-    value.reviewPolicy !== "find-and-refute"
-  ) {
-    throw new Error("Recipe task reviewPolicy is invalid.");
-  }
-  if (value.kind !== undefined && value.kind !== "investigation") {
-    throw new Error("Recipe task kind is invalid.");
-  }
-  if (
-    value.discovery !== undefined &&
-    (!isRecord(value.discovery) ||
-      Object.keys(value.discovery).some((key) => key !== "allowedWritePaths") ||
-      !Array.isArray(value.discovery.allowedWritePaths) ||
-      value.discovery.allowedWritePaths.length < 1 ||
-      !value.discovery.allowedWritePaths.every((path) => typeof path === "string"))
-  ) {
-    throw new Error("Recipe task discovery contract is invalid.");
-  }
-  return value as unknown as RecipeTask;
+function parseExpandedTask(expanded: RecipeTask): RecipeTask {
+  const task: unknown = expanded;
+  if (recipeTaskValidator.check(task)) return task;
+  const problem = describeInvalid(recipeTaskValidator, task);
+  throw new Error(`Recipe task "${expanded.id}" is invalid after expansion at ${problem}`);
 }
 
 function resolveInput(
@@ -400,27 +310,6 @@ function expandTask(task: RecipeTask, input: Record<string, RecipeInputValue>): 
 
 function userDirectory(scope: RecipeScope): string | undefined {
   return scope === "user" ? getAgentDir() : undefined;
-}
-
-function rejectUnknownFields(
-  value: Record<string, unknown>,
-  allowed: Set<string>,
-  label: string
-): void {
-  const unknown = Object.keys(value).find((key) => !allowed.has(key));
-  if (unknown) throw new Error(`${label} contains unknown field "${unknown}".`);
-}
-
-function isBoundedString(value: unknown, minimum: number, maximum: number): value is string {
-  return typeof value === "string" && value.trim().length >= minimum && value.length <= maximum;
-}
-
-function isInputValue(value: unknown): value is RecipeInputValue {
-  return (
-    typeof value === "string" ||
-    typeof value === "boolean" ||
-    (typeof value === "number" && Number.isFinite(value))
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

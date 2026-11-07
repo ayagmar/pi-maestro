@@ -1,6 +1,16 @@
 ---
+import { url } from "../data/site.js";
 import BaseLayout from "../layouts/BaseLayout.astro";
 ---
-<BaseLayout title="Page not found" description="The requested Pi Maestro page could not be found.">
-  <section class="section"><div class="shell"><span class="mono-label">404 / No evidence</span><h1>That page isn't on the board.</h1><p class="hero-lede" style="color: var(--muted)">The route may have moved, or the task was never created.</p><a class="button button-primary" href="/">Return to overview →</a></div></section>
+<BaseLayout title="Page not found" description="The requested Pi Maestro page does not exist.">
+  <section class="section">
+    <div class="shell not-found">
+      <h1>Page not found</h1>
+      <p>This address is not part of the site. The documentation index lists every page.</p>
+      <div class="hero-actions">
+        <a class="button button-primary" href={url("/docs/")}>Open the docs</a>
+        <a class="button button-secondary" href={url("/")}>Back to the overview</a>
+      </div>
+    </div>
+  </section>
 </BaseLayout>

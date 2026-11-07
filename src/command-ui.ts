@@ -1,10 +1,31 @@
 import {
   type ExtensionCommandContext,
   getSelectListTheme,
-  keyHint,
+  type KeybindingsManager,
   rawKeyHint,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Input, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+
+type KeybindingId = Parameters<KeybindingsManager["getKeys"]>[0];
+
+/**
+ * Formats a configured keybinding with the manager pi injects into
+ * `ctx.ui.custom`. pi's exported `keyHint` reads the keybindings of whichever
+ * pi-coding-agent copy the import resolves to, which can be the extension's
+ * own and renders `app.*` ids without keys.
+ */
+export function hint(
+  theme: Theme,
+  keybindings: KeybindingsManager,
+  ids: KeybindingId | readonly KeybindingId[],
+  description: string
+): string {
+  const keys = (typeof ids === "string" ? [ids] : ids)
+    .flatMap((id) => keybindings.getKeys(id))
+    .join("/");
+  return keys ? rawKeyHint(keys, description) : theme.fg("muted", description);
+}
 
 /**
  * ctx.ui.custom renders only in the TUI; in RPC mode it resolves undefined
@@ -14,6 +35,14 @@ import { Container, Input, type SelectItem, SelectList, Text } from "@earendil-w
  */
 function usesStockDialogs(ctx: ExtensionCommandContext): boolean {
   return ctx.mode !== "tui";
+}
+
+/**
+ * Inline pickers and editors wait for the user's answer. Saying so lets
+ * terminals that show pi's program status report it as blocked, not working.
+ */
+function waitingFor(title: string) {
+  return { blocked: { kind: "question" as const, message: title } };
 }
 
 /**
@@ -33,10 +62,10 @@ export async function editText(
     if (next === undefined) return null;
     return multiline ? next : next.replace(/\s*\r?\n\s*/g, " ").trim();
   }
-  return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+  return await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
     const heading = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
-    const hint = new Text(
-      `${keyHint("tui.input.submit", "save")}  ${keyHint("tui.select.cancel", "cancel")}`,
+    const footer = new Text(
+      `${hint(theme, keybindings, "tui.input.submit", "save")}  ${hint(theme, keybindings, "tui.select.cancel", "cancel")}`,
       1,
       0
     );
@@ -46,22 +75,29 @@ export async function editText(
     field.onEscape = () => done(null);
 
     return {
+      // Focusable: pi places the hardware (IME) cursor at the field's marker.
+      get focused() {
+        return field.focused;
+      },
+      set focused(value: boolean) {
+        field.focused = value;
+      },
       render: (width: number) => [
         ...heading.render(width),
         ...field.render(width),
-        ...hint.render(width),
+        ...footer.render(width),
       ],
       invalidate: () => {
         heading.invalidate();
         field.invalidate();
-        hint.invalidate();
+        footer.invalidate();
       },
       handleInput: (data: string) => {
         field.handleInput(data);
         tui.requestRender();
       },
     };
-  });
+  }, waitingFor(title));
 }
 
 export async function pickFromList(
@@ -80,7 +116,7 @@ export async function pickFromList(
   }
   // pi's stock select dialog has no per-item descriptions, which most Maestro
   // menus rely on, so the TUI renders its own list with pi's list theme.
-  return await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
+  return await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
     const container = new Container();
     container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
     const list = new SelectList(items, Math.min(items.length, 12), getSelectListTheme());
@@ -89,7 +125,7 @@ export async function pickFromList(
     container.addChild(list);
     container.addChild(
       new Text(
-        `${rawKeyHint("↑↓", "navigate")}  ${keyHint("tui.select.confirm", "select")}  ${keyHint("tui.select.cancel", "close")}`,
+        `${hint(theme, keybindings, ["tui.select.up", "tui.select.down"], "navigate")}  ${hint(theme, keybindings, "tui.select.confirm", "select")}  ${hint(theme, keybindings, "tui.select.cancel", "close")}`,
         1,
         0
       )
@@ -102,5 +138,5 @@ export async function pickFromList(
         tui.requestRender();
       },
     };
-  });
+  }, waitingFor(title));
 }

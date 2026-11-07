@@ -362,6 +362,8 @@ test("supervisor briefing renders structured task blocks in stable field order",
   assert.match(briefing, /Migrate auth/);
   assert.match(briefing, /maestro_drive/);
   assert.match(briefing, /Do not re-plan/);
+  // reviewer_failure and blocked stops leave no paused drive to resume.
+  assert.match(briefing, /After changing a brief\/tier, call `maestro_drive` action=start/);
   assert.match(briefing, /you do not implement tasks yourself/);
   assert.match(briefing, /tier guidance here/);
 });
@@ -418,6 +420,15 @@ test("orchestrator briefing embeds the goal, tier guidance, and workflow tools",
   assert.match(briefing, /You do not implement tasks yourself/);
   assert.match(briefing, /fails twice with the same root cause/);
   assert.match(briefing, /in-flight attempt.*settle/);
+  assert.match(briefing, /After changing a brief\/tier, call `maestro_drive` action=start/);
+
+  // With the default shared checkout a lone task sees uncommitted files.
+  assert.doesNotMatch(briefing, /Executors run in isolated checkouts/);
+  assert.match(briefing, /runs alone works in this checkout/);
+  assert.match(
+    buildOrchestratorBriefing("Goal", tierGuidance, false, true),
+    /Executors run in isolated checkouts built from committed content/
+  );
 
   const gated = buildOrchestratorBriefing("Goal", tierGuidance, true);
   assert.match(gated, /planGate is enabled/);

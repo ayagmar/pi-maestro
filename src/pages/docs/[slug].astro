@@ -1,0 +1,28 @@
+---
+import { transformDocHtml } from "../../data/doc-html.mjs";
+import { docs } from "../../data/docs";
+import DocsLayout from "../../layouts/DocsLayout.astro";
+
+export function getStaticPaths() {
+  const sources = import.meta.glob(["/docs/*.md", "/CHANGELOG.md", "/CONTRIBUTING.md", "/SECURITY.md"], {
+    eager: true,
+  });
+  return docs.map((doc) => {
+    const source = sources[`/${doc.file}`];
+    if (!source) throw new Error(`Missing documentation source ${doc.file}`);
+    return { params: { slug: doc.slug }, props: { source, file: doc.file } };
+  });
+}
+
+const { slug } = Astro.params;
+const { source, file } = Astro.props;
+const { compiledContent, getHeadings } = source as {
+  compiledContent: () => Promise<string>;
+  getHeadings: () => { depth: number; slug: string; text: string }[];
+};
+const html = transformDocHtml(await compiledContent(), file);
+const headings = getHeadings().filter((heading) => heading.depth === 2);
+---
+<DocsLayout slug={slug!} headings={headings}>
+  <article class="prose" set:html={html} />
+</DocsLayout>

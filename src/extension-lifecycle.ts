@@ -1,5 +1,5 @@
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadBoard, sweepDispatchState } from "./board.js";
+import { adoptDetachedDispatch, loadBoard, sweepDispatchState } from "./board.js";
 import { loadConfig, setProjectConfigTrust } from "./config.js";
 import { COMMAND, MAX_DISCOVERY_REPORT_BYTES } from "./constants.js";
 import {
@@ -22,7 +22,7 @@ import { guardTranscriptRead } from "./transcript-guard.js";
 import { type Board } from "./types.js";
 import { settleReattachedDetachedAttempt } from "./workflow-execution.js";
 import { type WorkflowRun } from "./workflow-runtime.js";
-import { parkInactiveWorktrees, sweepWorktrees } from "./worktree.js";
+import { inUseCheckoutPaths, parkInactiveWorktrees, sweepWorktrees } from "./worktree.js";
 
 export class ExtensionLifecycleState {
   private active = true;
@@ -135,6 +135,7 @@ export function registerMaestroLifecycle(
     // lists; honor it only for projects the user told pi to trust.
     setProjectConfigTrust(ctx.isProjectTrusted());
     state.start();
+    driveController.activate();
     dependencies.closeLivePane();
     dependencies.clearSuppressedPane();
     driveController.clearLiveRuns();
@@ -171,6 +172,12 @@ export function registerMaestroLifecycle(
       ) {
         continue;
       }
+      // Another live session is still settling this attempt and owns its
+      // drive; a later startup reattaches once that process is gone. Adopting
+      // the claim makes this session that owner, so a third session started
+      // meanwhile leaves the attempt alone too.
+      if (!adoptDetachedDispatch(boardCwd, task.id, claim.id)) continue;
+      const driveId = recovered.activeDrive?.id;
       let live: WorkflowRun | undefined;
       const handle = reattachDetachedExecutor(
         attempt,
@@ -200,10 +207,23 @@ export function registerMaestroLifecycle(
       driveController.registerLiveRun(live);
       void handle.outcome
         .then((outcome) => {
-          settleReattachedDetachedAttempt(boardCwd, task.id, claim.id, handle.attempt, outcome);
+          const settled = settleReattachedDetachedAttempt(
+            boardCwd,
+            task.id,
+            claim.id,
+            handle.attempt,
+            outcome
+          );
           if (live) driveController.removeLiveRun(live);
           const detachedBoard = loadBoard(boardCwd);
-          if (driveController.liveRunCount() === 0 && detachedBoard.activeDrive) {
+          // Only the session that recorded the outcome ends the drive it
+          // reattached under; a drive started since then is not its to end.
+          if (
+            settled &&
+            driveController.liveRunCount() === 0 &&
+            detachedBoard.activeDrive &&
+            detachedBoard.activeDrive.id === driveId
+          ) {
             const summary = unexpectedDriveSummary(
               boardCwd,
               detachedBoard.activeDrive.taskIds,
@@ -286,7 +306,13 @@ export function registerMaestroLifecycle(
       nudgeOptions
     );
 
-    const parking = parkInactiveWorktrees(boardCwd, recovered);
+    // Running attempts (reattached here, detached, or in another session) and
+    // claimed reviews keep their checkouts; both passes re-read the board
+    // right before touching a checkout.
+    const liveTaskIds = driveController.liveTaskIds();
+    const parking = parkInactiveWorktrees(boardCwd, recovered, liveTaskIds, () =>
+      loadBoard(boardCwd)
+    );
     for (const warning of parking.warnings) {
       notify(ctx, `Could not clean idle maestro worktree: ${warning}`, "warning");
     }
@@ -307,7 +333,9 @@ export function registerMaestroLifecycle(
           : [];
       });
     try {
-      sweepWorktrees(boardCwd, retained, knownWorktrees);
+      sweepWorktrees(boardCwd, retained, knownWorktrees, () =>
+        inUseCheckoutPaths(loadBoard(boardCwd), liveTaskIds)
+      );
     } catch (error) {
       notify(ctx, `Could not clean stale maestro worktrees: ${String(error)}`, "warning");
     }

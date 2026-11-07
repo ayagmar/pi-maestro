@@ -17,23 +17,23 @@ import {
   remainingRunBudget,
   runBudgetWarning,
 } from "./format.js";
-import { mapWithConcurrencyLimit } from "./runner.js";
+import { FAIR_SHARE_CAP_SOURCE, mapWithConcurrencyLimit } from "./runner.js";
 import { type DriveWait, type MaestroConfig, type Task, type TierConfig } from "./types.js";
 import {
   calculateSchedulingWave,
   consumesMaxAttempt,
+  continuesInterruptedAttempt,
   DRIVE_ROUND_LIMIT,
   type DriveStopReason,
   type DriveSummary,
-  continuesInterruptedAttempt,
   snapshot,
   type TaskSnapshot,
 } from "./workflow-policy.js";
 import {
   escalatedTask,
   escalationReason,
-  noProgressReason,
   newProviderRetryState,
+  noProgressReason,
   planProviderRetry,
   providerBlockedReason,
   providerBlockedTask,
@@ -61,6 +61,9 @@ import {
   uncommittedPathsInvisibleToWorktrees,
   type WorktreeRef,
 } from "./worktree.js";
+
+/** A launch share of the run budget below this counts as no budget left. */
+const MIN_LAUNCH_ALLOWANCE_USD = 0.01;
 
 export { executeTask } from "./workflow-execution.js";
 export {
@@ -116,6 +119,11 @@ export function preflightTaskTiers(
   return resolvedTiers;
 }
 
+const RETIRED_STOP: DriveStopReason = {
+  code: "aborted",
+  message: "drive stopped because the extension runtime shut down",
+};
+
 export async function driveBoard(options: {
   cwd: string;
   config: MaestroConfig;
@@ -144,6 +152,12 @@ export async function driveBoard(options: {
   humanRetryOwnerSession?: string;
   /** Cheap-first-pass review ladder, resolved from config by the caller. */
   reviewEscalation?: ReviewEscalation;
+  /**
+   * Aborted when the owning runtime shuts down. Unlike `signal`, it does not
+   * cancel running executors (detached ones are meant to survive); it stops
+   * queued launches, cancels verification, and refuses promotion.
+   */
+  retired?: AbortSignal;
 }): Promise<DriveSummary> {
   const {
     cwd,
@@ -160,6 +174,7 @@ export async function driveBoard(options: {
     humanRetryTaskId,
     humanRetryExpectedRiskToken,
     humanRetryOwnerSession,
+    retired,
   } = options;
   // Task ids are matched case-insensitively (see findTask), so normalize both
   // the requested ids and each task id before comparing. Comparing raw ids here
@@ -213,13 +228,83 @@ export async function driveBoard(options: {
   const liveMaxRunCost = options.liveMaxRunCost ?? ((): number => config.maxRunCost);
   let budgetNearlyConsumedWarned = false;
   const humanRetryId = humanRetryTaskId?.trim().toUpperCase();
+  // One spend ledger per drive. A board snapshot of the remaining budget,
+  // handed to every concurrent executor and to each reviewer of a panel, let
+  // each of them spend the same remainder. Every raw launch instead gets a
+  // fair share of the budget left after real settled spend and the caps
+  // already reserved by launches still running.
+  let settledLaunchSpend = 0;
+  let reservedLaunchCaps = 0;
+  let inflightLaunches = 0;
+  let launchSlots = 1;
+  const launchBudgetShare = (): number | undefined => {
+    const maxRunCost = liveMaxRunCost();
+    if (maxRunCost <= 0) return undefined;
+    const spent = Math.max(
+      boardUsage(loadBoard(cwd).tasks).cost,
+      boardCostAtStart + settledLaunchSpend
+    );
+    const available = Math.max(0, maxRunCost - spent - reservedLaunchCaps);
+    return available / freeLaunchSlots();
+  };
+  const freeLaunchSlots = (): number => Math.max(1, launchSlots - inflightLaunches);
+  const budgetAllowsLaunch = (): boolean => {
+    const share = launchBudgetShare();
+    return share === undefined || share >= MIN_LAUNCH_ALLOWANCE_USD;
+  };
   const boundedStartExecutor: StartExecutor = (startOptions) => {
     if (rawLaunches >= config.maxTotalLaunchesPerRun) {
       throw new Error(`workflow raw launch limit reached (${config.maxTotalLaunchesPerRun})`);
     }
+    const share = launchBudgetShare();
+    if (share === undefined) {
+      rawLaunches += 1;
+      return startExecutor(startOptions);
+    }
+    if (share < MIN_LAUNCH_ALLOWANCE_USD) {
+      throw new Error(
+        "remaining run budget is already spent or reserved by running launches; raise it with /maestro config budget <usd>"
+      );
+    }
+    const requested =
+      startOptions.maxCost !== undefined && startOptions.maxCost > 0
+        ? startOptions.maxCost
+        : undefined;
+    const launchOptions =
+      requested === undefined || share < requested
+        ? {
+            ...startOptions,
+            maxCost: share,
+            maxCostSource:
+              freeLaunchSlots() > 1 ? FAIR_SHARE_CAP_SOURCE : "remaining run budget (maxRunCost)",
+          }
+        : startOptions;
     rawLaunches += 1;
-    return startExecutor(startOptions);
+    const handle = startExecutor(launchOptions);
+    const reserved = launchOptions.maxCost ?? share;
+    reservedLaunchCaps += reserved;
+    inflightLaunches += 1;
+    const settle = (spent: number) => {
+      reservedLaunchCaps -= reserved;
+      inflightLaunches -= 1;
+      settledLaunchSpend += spent;
+    };
+    return {
+      ...handle,
+      outcome: handle.outcome.then(
+        (outcome) => {
+          settle(outcome.usage.cost);
+          return outcome;
+        },
+        (error: unknown) => {
+          settle(handle.attempt.usage.cost);
+          throw error;
+        }
+      ),
+    };
   };
+  const canStartExecutor = () =>
+    rawLaunches < config.maxTotalLaunchesPerRun && !retired?.aborted && budgetAllowsLaunch();
 
   const selectedTasks = (): Task[] => loadBoard(cwd).tasks.filter(isSelected);
   // Task totals in the summary are board-lifetime; the per-drive delta keeps
@@ -251,6 +336,7 @@ export async function driveBoard(options: {
       if (signal?.aborted) {
         return finish({ code: "aborted", message: "drive aborted by user" });
       }
+      if (retired?.aborted) return finish(RETIRED_STOP);
 
       const board = loadBoard(cwd);
       const validationError = planValidationMessage(validatePlan(board, Object.keys(config.tiers)));
@@ -473,10 +559,14 @@ export async function driveBoard(options: {
         // must stop at the budget, not sail past it: the run cap is otherwise
         // only enforced between rounds, after the money is spent.
         const executeBudget = remainingRunBudget(loadBoard(cwd).tasks, liveMaxRunCost());
+        launchSlots = Math.min(config.maxParallel, dispatchable.length);
         const executeResults = await mapWithConcurrencyLimit(
           dispatchable,
           config.maxParallel,
-          (task) => {
+          async (task) => {
+            // A queued task must not be claimed after shutdown: its launch
+            // would run against a stale runtime and fail untouched work.
+            if (retired?.aborted) return snapshot(task, RETIRED_STOP.message);
             const tier = resolvedTiers.get(task.tier);
             if (!tier) throw new Error(`No resolved tier for "${task.tier}"`);
             const executeOptions: Parameters<typeof executeTask>[0] = {
@@ -486,7 +576,7 @@ export async function driveBoard(options: {
               tier,
               config,
               startExecutor: boundedStartExecutor,
-              canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+              canStartExecutor,
               humanRetry: task.id.toUpperCase() === humanRetryId,
               onUpdate,
               trackRun,
@@ -527,6 +617,7 @@ export async function driveBoard(options: {
       if (signal?.aborted) {
         return finish({ code: "aborted", message: "drive aborted by user" });
       }
+      if (retired?.aborted) return finish(RETIRED_STOP);
       if (shouldPause?.()) {
         return finish({
           code: "paused",
@@ -624,16 +715,18 @@ export async function driveBoard(options: {
           (reviewCostCap.usd <= 0 || reviewBudget < reviewCostCap.usd)
             ? "remaining run budget (maxRunCost)"
             : reviewCapSource;
+        launchSlots = Math.min(config.maxParallel, reviewDispatchable.length);
         const reviewResults = await mapWithConcurrencyLimit(
           reviewDispatchable,
           config.maxParallel,
-          (task) => {
+          async (task) => {
+            if (retired?.aborted) return snapshot(task, RETIRED_STOP.message);
             const reviewOptions: Parameters<typeof reviewTask>[0] = {
               cwd,
               task,
               tier: reviewTier,
               startExecutor: boundedStartExecutor,
-              canStartExecutor: () => rawLaunches < config.maxTotalLaunchesPerRun,
+              canStartExecutor,
               autoCommit: config.autoCommit,
               reviewRequiredApprovals: config.reviewRequiredApprovals ?? 2,
               maxReviewerLaunches: config.maxReviewerLaunches ?? 4,
@@ -660,7 +753,11 @@ export async function driveBoard(options: {
             if (options.reviewEscalation) reviewOptions.reviewEscalation = options.reviewEscalation;
             if (options.onRetentionWarning)
               reviewOptions.onRetentionWarning = options.onRetentionWarning;
-            if (signal) reviewOptions.signal = signal;
+            // Reviewers and verification are attached children, so shutdown
+            // cancels them along with any promotion still pending.
+            const reviewSignal =
+              signal && retired ? AbortSignal.any([signal, retired]) : (signal ?? retired);
+            if (reviewSignal) reviewOptions.signal = reviewSignal;
             return reviewTask(reviewOptions);
           }
         );
@@ -671,6 +768,7 @@ export async function driveBoard(options: {
       if (signal?.aborted) {
         return finish({ code: "aborted", message: "drive aborted by user" });
       }
+      if (retired?.aborted) return finish(RETIRED_STOP);
 
       const freshTasks = selectedTasks();
       const freshBoardAfterRound = loadBoard(cwd);

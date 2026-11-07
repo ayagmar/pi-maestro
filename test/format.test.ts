@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  boardCostSplit,
   boardUsage,
-  remainingRunBudget,
   boardUsageSummary,
   describeProgressDelta,
   formatBoardProgress,
@@ -11,8 +11,8 @@ import {
   formatUsage,
   launchBudgetShortfall,
   padText,
-  boardCostSplit,
   progressBar,
+  remainingRunBudget,
   runBudgetWarning,
   taskLine,
   taskUsage,

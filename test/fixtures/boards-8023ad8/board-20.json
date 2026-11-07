@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Ladder",
+      "brief": "work",
+      "tier": "standard",
+      "status": "todo",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 1,
+          "logFile": "executor.log",
+          "thinking": "high",
+          "startedAt": 1,
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cost": 0.01,
+            "turns": 3
+          },
+          "touchedFiles": [],
+          "reviewLaunches": [
+            {
+              "id": "T1-review-1-1-1",
+              "reviewerIndex": 1,
+              "role": "confirmer",
+              "startedAt": 1,
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cost": 0.001,
+                "turns": 1
+              },
+              "costTier": "economy",
+              "verdict": "request_changes"
+            },
+            {
+              "id": "T1-review-1-1-2",
+              "reviewerIndex": 1,
+              "role": "confirmer",
+              "startedAt": 2,
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cost": 0.05,
+                "turns": 1
+              },
+              "costTier": "premium",
+              "escalationReason": "cheap first pass was inconclusive: reviewer did not approve",
+              "verdict": "approve"
+            }
+          ]
+        }
+      ],
+      "createdAt": 1794060729263,
+      "updatedAt": 1794060729263
+    }
+  ],
+  "revision": 1
+}

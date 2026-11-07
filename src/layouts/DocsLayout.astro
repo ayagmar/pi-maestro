@@ -1,30 +1,69 @@
 ---
-import BaseLayout from "./BaseLayout.astro";
 import { docs, getDoc } from "../data/docs";
+import { url } from "../data/site.js";
+import BaseLayout from "./BaseLayout.astro";
 
-interface Props { slug: string; title?: string; description?: string; }
-const { slug, title, description } = Astro.props;
+interface Props {
+  slug: string;
+  headings?: { slug: string; text: string }[];
+}
+const { slug, headings = [] } = Astro.props;
 const doc = getDoc(slug);
 const groups = [...new Set(docs.map((item) => item.group))];
-const path = Astro.url.pathname;
+const position = docs.findIndex((item) => item.slug === slug);
+const previous = docs[position - 1];
+const next = docs[position + 1];
+const href = (item: { slug: string }) => url(`/docs/${item.slug}/`);
 ---
-<BaseLayout title={title ?? doc.title} description={description ?? doc.description} eyebrow="Documentation" isDocs>
+<BaseLayout title={doc.title} description={doc.description} isDocs>
   <div class="docs-shell shell">
-    <aside class="docs-sidebar" aria-label="Documentation navigation">
-      <div class="docs-sidebar-top"><span class="mono-label">PI MAESTRO / DOCS</span><p>Operational notes for building, running, and trusting reviewed execution.</p></div>
-      <nav>
-        {groups.map((group) => <div class="docs-nav-group"><h2>{group}</h2>{docs.filter((item) => item.group === group).map((item) => <a class:list={{ active: item.slug === slug }} href={`/docs/${item.slug}/`}><span>{item.title}</span>{item.slug === slug && <span aria-hidden="true">→</span>}</a>)}</div>)}
+    <aside class="docs-sidebar" aria-label="Documentation">
+      <nav aria-label="Documentation pages">
+        {groups.map((group) => (
+          <div class="docs-nav-group">
+            <h2>{group}</h2>
+            {docs
+              .filter((item) => item.group === group)
+              .map((item) => (
+                <a href={href(item)} aria-current={item.slug === slug ? "page" : undefined}>
+                  {item.title}
+                </a>
+              ))}
+          </div>
+        ))}
       </nav>
-      <a class="docs-sidebar-github" href="https://github.com/ayagmar/pi-maestro" rel="noreferrer"><span class="github-dot" aria-hidden="true"></span> View source on GitHub ↗</a>
+      <a class="docs-sidebar-github" href={`https://github.com/ayagmar/pi-maestro/blob/master/${doc.file}`} rel="noreferrer">
+        Edit this page on GitHub
+      </a>
     </aside>
     <section class="docs-content">
-      <div class="docs-mobile-bar"><span class="mono-label">DOCS</span><label for="docs-select" class="sr-only">Choose a documentation page</label><select id="docs-select" onchange="if (this.value) window.location.href=this.value">{docs.map((item) => <option value={`/docs/${item.slug}/`} selected={item.slug === slug}>{item.title}</option>)}</select></div>
-      <div class="breadcrumb"><a href="/docs/">Docs</a><span>/</span><span>{doc.group}</span></div>
-      <header class="docs-hero"><span class="mono-label">{doc.group}</span><h1>{doc.title}</h1><p>{doc.description}</p></header>
+      <details class="docs-mobile-nav">
+        <summary>Documentation pages</summary>
+        <nav aria-label="Documentation pages">
+          {docs.map((item) => (
+            <a class="menu-link" href={href(item)} aria-current={item.slug === slug ? "page" : undefined}>{item.title}</a>
+          ))}
+        </nav>
+      </details>
+      <header class="docs-hero">
+        <p class="docs-group">{doc.group}</p>
+        <h1>{doc.title}</h1>
+        <p>{doc.description}</p>
+      </header>
+      {headings.length > 2 && (
+        <nav class="docs-toc" aria-label="On this page">
+          <h2>On this page</h2>
+          <ul>
+            {headings.map((heading) => (
+              <li><a href={`#${heading.slug}`}>{heading.text}</a></li>
+            ))}
+          </ul>
+        </nav>
+      )}
       <slot />
-      <nav class="docs-next" aria-label="Related documentation">
-        {docs[docs.findIndex((item) => item.slug === slug) - 1] && <a href={`/docs/${docs[docs.findIndex((item) => item.slug === slug) - 1]!.slug}/`}><span>← Previous</span><strong>{docs[docs.findIndex((item) => item.slug === slug) - 1]!.title}</strong></a>}
-        {docs[docs.findIndex((item) => item.slug === slug) + 1] && <a class="next" href={`/docs/${docs[docs.findIndex((item) => item.slug === slug) + 1]!.slug}/`}><span>Next →</span><strong>{docs[docs.findIndex((item) => item.slug === slug) + 1]!.title}</strong></a>}
+      <nav class="docs-next" aria-label="Previous and next pages">
+        {previous && <a href={href(previous)}><span>Previous</span><strong>{previous.title}</strong></a>}
+        {next && <a class="next" href={href(next)}><span>Next</span><strong>{next.title}</strong></a>}
       </nav>
     </section>
   </div>

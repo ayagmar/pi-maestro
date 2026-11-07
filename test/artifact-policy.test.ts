@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   captureApprovedProvenance,
@@ -73,6 +74,79 @@ test("switching tier models, thinking, or reviewer tools never changes a fingerp
   );
 });
 
+function approveBySingleReviewer(task: Task): void {
+  const attempt = task.attempts.at(-1);
+  assert.ok(attempt);
+  attempt.reviewLaunches = [
+    {
+      reviewerIndex: 1,
+      role: "single",
+      verdict: "approve",
+      startedAt: 1,
+      usage: { input: 0, output: 0, cost: 0, turns: 1 },
+    },
+  ];
+  attempt.reviewConvergence = {
+    policy: "single",
+    status: "approved",
+    requiredApprovals: 1,
+    actualApprovals: 1,
+    reviewerCount: 1,
+    summary: "approved",
+    decidedAt: 1,
+  };
+}
+
+/** The execution digest the previous release stored, before executionShape 2. */
+function previousReleaseExecutionDigest(task: Task, config: MaestroConfig): string {
+  const tier = (value: MaestroConfig["tiers"][string] | undefined) =>
+    value
+      ? { model: value.model ?? null, thinking: value.thinking, tools: value.tools ?? null }
+      : undefined;
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        tier: task.tier,
+        taskTier: tier(config.tiers[task.tier]),
+        reviewTier: tier(config.tiers.review),
+        reviewPolicy: task.reviewPolicy ?? "single",
+        confirmApprovals: task.reviewPolicy === "confirm" ? config.reviewRequiredApprovals : null,
+      })
+    )
+    .digest("hex");
+}
+
+test("a legacy proof does not stay fresh after its review policy is strengthened", () => {
+  const { board, task, config } = fixture();
+  forceStatus(task, "approved");
+  const proof = captureApprovedProvenance(board, task, config);
+  assert.ok(proof);
+  const { executionShape: _shape, ...current } = proof;
+  // Approved by one reviewer under the single policy, by the previous release.
+  task.approvedProvenance = {
+    ...current,
+    fingerprint: "f".repeat(64),
+    componentHashes: {
+      ...proof.componentHashes,
+      execution: previousReleaseExecutionDigest(task, config),
+    },
+  };
+  approveBySingleReviewer(task);
+  assert.equal(completionFreshness(board, task, config).state, "fresh");
+
+  task.reviewPolicy = "confirm";
+  assert.equal(completionFreshness(board, task, config).state, "legacy");
+
+  // Without any review evidence (a manual acceptance), an unchanged
+  // configuration still proves the proof's execution inputs exactly.
+  task.reviewPolicy = "single";
+  const attempt = task.attempts.at(-1);
+  assert.ok(attempt);
+  delete attempt.reviewConvergence;
+  delete attempt.reviewLaunches;
+  assert.equal(completionFreshness(board, task, config).state, "fresh");
+});
+
 test("legacy-shape proofs stay fresh across a model switch and go stale on a contract change", () => {
   const { board, task, config } = fixture();
   forceStatus(task, "approved");
@@ -91,6 +165,7 @@ test("legacy-shape proofs stay fresh across a model switch and go stale on a con
     fingerprint: "f".repeat(64),
     componentHashes: { ...proof.componentHashes, execution: "e".repeat(64) },
   };
+  approveBySingleReviewer(task);
   assert.equal(completionFreshness(board, task, config).state, "fresh");
   config.tiers.standard = { thinking: "low", model: "cheaper/model" };
   assert.equal(completionFreshness(board, task, config).state, "fresh");

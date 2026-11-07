@@ -14,14 +14,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { completionFreshness } from "./artifact-policy.js";
-import {
-  MAX_DECISION_EVIDENCE_CHARS,
-  MAX_DISCOVERY_REPORT_BYTES,
-  MAX_DRIVE_TASK_IDS,
-  MAX_DRIVE_WAIT_REASON_CHARS,
-  MAX_PERSISTED_REPORT_CHARS,
-  STATE_DIR,
-} from "./constants.js";
+import { MAX_DISCOVERY_REPORT_BYTES, MAX_PERSISTED_REPORT_CHARS, STATE_DIR } from "./constants.js";
 import {
   appendPrivateFile,
   ensurePrivateDirectory,
@@ -32,11 +25,14 @@ import {
   boundedReport,
   boundedReportBytes,
   detachedAttemptIsLive,
+  processIsZombie,
   processStartId,
 } from "./runner.js";
+import { boardValidator, describeInvalid } from "./schemas.js";
 import {
   type Attempt,
   type Board,
+  type DispatchClaim,
   type FailureKind,
   type MaestroConfig,
   type PlanTaskEdits,
@@ -51,7 +47,13 @@ export const BOARD_FILE = "board.json";
 const HISTORY_FILE = "history.jsonl";
 const RECIPE_DIRECTORY = "maestro-recipes";
 const BOARD_LOCK_STALE_MS = 30_000;
-let quarantineNotice: string | undefined;
+export interface QuarantineNotice {
+  file: string;
+  /** What made the board unreadable, located by JSON Pointer for a shape problem. */
+  reason: string;
+}
+
+let quarantineNotice: QuarantineNotice | undefined;
 const BOARD_LOCK_RETRIES = 500;
 const MAX_PLAN_VALIDATION_OVERLAPS = 100;
 const MAX_PLAN_VALIDATION_PROBLEMS = 50;
@@ -183,15 +185,18 @@ export function loadBoard(cwd: string): Board {
   const contents = readFileSync(file, "utf-8");
   try {
     const value: unknown = JSON.parse(contents);
-    if (!isBoard(value)) throw new Error("board has an invalid structure");
+    if (!isBoard(value)) throw new Error(boardProblem(value));
     // Re-stat after the read: cache only when the identity did not move mid-read.
     if (fileIdentity(file) === identity) {
       boardCache.set(file, { identity, board: structuredClone(value) });
     }
     return value;
-  } catch {
+  } catch (error) {
     boardCache.delete(file);
-    quarantineNotice = quarantineCorruptBoard(file);
+    quarantineNotice = {
+      file: quarantineCorruptBoard(file),
+      reason: error instanceof Error ? error.message : String(error),
+    };
     return structuredClone(EMPTY_BOARD);
   }
 }
@@ -220,14 +225,14 @@ export function listCorruptBoardFiles(cwd: string): string[] {
   return readdirSync(directory).filter((name) => name.startsWith(`${BOARD_FILE}.corrupt-`));
 }
 
-export function consumeQuarantineNotice(): string | undefined {
+export function consumeQuarantineNotice(): QuarantineNotice | undefined {
   const notice = quarantineNotice;
   quarantineNotice = undefined;
   return notice;
 }
 
-export function restoreQuarantineNotice(path: string): void {
-  quarantineNotice = path;
+export function restoreQuarantineNotice(notice: QuarantineNotice): void {
+  quarantineNotice = notice;
 }
 
 export function saveBoard(cwd: string, board: Board): void {
@@ -433,11 +438,21 @@ async function acquireBoardLockAsync(cwd: string): Promise<BoardLock> {
   throw new Error("Timed out waiting for maestro board lock");
 }
 
-interface StaleLockOwner {
-  identity: string;
+/**
+ * Identity of a lock file observed as stale. Reclamation compares the file it
+ * claims against this observation, not against another post-observation stat:
+ * a contender that observed the same dead owner may resume after a faster
+ * contender already reclaimed it and acquired a fresh lock at the same path.
+ */
+export interface StaleLockOwner {
+  dev: number;
+  ino: number;
+  mtimeMs: number;
+  token: string;
 }
 
-function staleLockOwner(file: string): StaleLockOwner | undefined {
+/** Exported for the reclamation race test; normal callers go through the board lock. */
+export function staleLockOwner(file: string): StaleLockOwner | undefined {
   try {
     const stat = statSync(file);
     if (Date.now() - stat.mtimeMs <= BOARD_LOCK_STALE_MS) return undefined;
@@ -458,19 +473,30 @@ function staleLockOwner(file: string): StaleLockOwner | undefined {
       }
     }
     const token = typeof owner.token === "string" ? owner.token : "invalid";
-    return { identity: `${stat.dev}-${stat.ino}-${token}` };
+    return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, token };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return undefined;
     // Old malformed lock files are reclaimable, but their inode still provides
     // the identity used by the ownership-safe hard-link protocol below.
     const stat = statSync(file);
-    return { identity: `${stat.dev}-${stat.ino}-invalid` };
+    return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, token: "invalid" };
   }
 }
 
-function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
-  const claimed = `${file}.stale-${owner.identity}`;
+function lockTokenOf(file: string): string {
+  try {
+    const owner = JSON.parse(readFileSync(file, "utf-8")) as { token?: unknown };
+    return typeof owner.token === "string" ? owner.token : "invalid";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+    return "invalid";
+  }
+}
+
+/** Exported for the reclamation race test; normal callers go through the board lock. */
+export function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
+  const claimed = `${file}.stale-${owner.dev}-${owner.ino}-${owner.token}`;
   try {
     // linkSync is the ownership claim: exactly one contender can create this
     // name. Losers never unlink board.lock and therefore cannot remove the
@@ -484,9 +510,19 @@ function reclaimStaleLock(file: string, owner: StaleLockOwner): boolean {
 
   let reclaimed = false;
   try {
-    const current = statSync(file);
+    // The claimed link must still be the very file observed as stale. A
+    // contender that finished reclaiming already removed its claim name, so
+    // this link may point at a replacement owner's fresh lock instead.
     const stale = statSync(claimed);
-    if (current.dev === stale.dev && current.ino === stale.ino) {
+    const current = statSync(file);
+    if (
+      stale.dev === owner.dev &&
+      stale.ino === owner.ino &&
+      stale.mtimeMs === owner.mtimeMs &&
+      lockTokenOf(claimed) === owner.token &&
+      current.dev === stale.dev &&
+      current.ino === stale.ino
+    ) {
       unlinkSync(file);
       reclaimed = true;
     }
@@ -660,436 +696,26 @@ function readArchivedBoard(file: string): Board | undefined {
 }
 
 function isBoard(value: unknown): value is Board {
-  if (!isRecord(value)) return false;
-  if (value.version !== 1 || !isNumber(value.nextTaskNumber) || !Array.isArray(value.tasks)) {
-    return false;
+  return boardProblem(value) === undefined;
+}
+
+/** Why a parsed file is not a board: its shape, or a discovery scope that is not repository-relative. */
+function boardProblem(value: unknown): string | undefined {
+  if (!boardValidator.check(value)) return describeInvalid(boardValidator, value);
+  for (const [index, task] of value.tasks.entries()) {
+    if (!task.discovery) continue;
+    try {
+      normalizeWritePaths(task.discovery.allowedWritePaths);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return `/tasks/${index}/discovery/allowedWritePaths: ${message}`;
+    }
   }
-  if (value.revision !== undefined && !isNumber(value.revision)) return false;
-  if (value.goal !== undefined && typeof value.goal !== "string") return false;
-  if (value.planPending !== undefined && typeof value.planPending !== "boolean") return false;
-  if (
-    value.scaleApproval !== undefined &&
-    (!isRecord(value.scaleApproval) ||
-      typeof value.scaleApproval.signature !== "string" ||
-      !isNumber(value.scaleApproval.confirmedAt))
-  ) {
-    return false;
-  }
-  if (value.activeDecision !== undefined && !isDriveDecision(value.activeDecision)) return false;
-  if (value.activeDrive !== undefined && !isActiveDrive(value.activeDrive)) return false;
-  if (value.pausedDrive !== undefined && !isPausedDrive(value.pausedDrive)) return false;
-  if (
-    value.ownerSessions !== undefined &&
-    (!Array.isArray(value.ownerSessions) ||
-      !value.ownerSessions.every((session) => typeof session === "string"))
-  ) {
-    return false;
-  }
-  return value.tasks.every(isTask);
-}
-
-function isPausedDrive(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  return (
-    (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
-    (value.reason === undefined ||
-      value.reason === "paused" ||
-      value.reason === "provider_blocked" ||
-      value.reason === "escalation_required") &&
-    (value.taskIds === undefined ||
-      (Array.isArray(value.taskIds) &&
-        value.taskIds.length <= MAX_DRIVE_TASK_IDS &&
-        value.taskIds.every((id) => typeof id === "string")))
-  );
-}
-
-function isActiveDrive(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  return (
-    typeof value.id === "string" &&
-    (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
-    (value.taskIds === undefined ||
-      (Array.isArray(value.taskIds) &&
-        value.taskIds.length <= MAX_DRIVE_TASK_IDS &&
-        value.taskIds.every((id) => typeof id === "string"))) &&
-    isNumber(value.startedAt) &&
-    (value.waiting === undefined || isDriveWait(value.waiting))
-  );
-}
-
-function isDriveWait(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  return (
-    isNumber(value.until) &&
-    typeof value.reason === "string" &&
-    value.reason.length <= MAX_DRIVE_WAIT_REASON_CHARS &&
-    Array.isArray(value.taskIds) &&
-    value.taskIds.length <= MAX_DRIVE_TASK_IDS &&
-    value.taskIds.every((id) => typeof id === "string")
-  );
-}
-
-function isDriveDecision(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const interventions = ["handoff", "abort", "steer"];
-  const resolutions = [...interventions, "resume"];
-  return (
-    typeof value.id === "string" &&
-    (value.ownerSession === undefined || typeof value.ownerSession === "string") &&
-    typeof value.kind === "string" &&
-    Array.isArray(value.taskIds) &&
-    value.taskIds.length <= MAX_DRIVE_TASK_IDS &&
-    value.taskIds.every((id) => typeof id === "string") &&
-    typeof value.evidence === "string" &&
-    // Room for truncateCharacters' "… (N more characters)" marker.
-    value.evidence.length <= MAX_DECISION_EVIDENCE_CHARS + 64 &&
-    Array.isArray(value.allowedInterventions) &&
-    value.allowedInterventions.every((item) => interventions.includes(String(item))) &&
-    isNumber(value.createdAt) &&
-    (value.deliveredAt === undefined || isNumber(value.deliveredAt)) &&
-    (value.awaitingHuman === undefined ||
-      (isRecord(value.awaitingHuman) &&
-        value.awaitingHuman.kind === "scale_confirmation" &&
-        isNumber(value.awaitingHuman.since) &&
-        (value.awaitingHuman.signature === undefined ||
-          typeof value.awaitingHuman.signature === "string"))) &&
-    (value.deliveryClaim === undefined ||
-      (isRecord(value.deliveryClaim) &&
-        typeof value.deliveryClaim.id === "string" &&
-        isNumber(value.deliveryClaim.claimedAt))) &&
-    (value.resolution === undefined ||
-      (isRecord(value.resolution) &&
-        resolutions.includes(String(value.resolution.intervention)) &&
-        isNumber(value.resolution.resolvedAt)))
-  );
-}
-
-function isTask(value: unknown): value is Task {
-  if (!isRecord(value)) return false;
-  const statuses: TaskStatus[] = [
-    "todo",
-    "running",
-    "ready_for_review",
-    "approved",
-    "changes_requested",
-    "failed",
-    "cancelled",
-  ];
-  return (
-    typeof value.id === "string" &&
-    typeof value.title === "string" &&
-    typeof value.brief === "string" &&
-    (value.kind === undefined || value.kind === "investigation") &&
-    typeof value.tier === "string" &&
-    statuses.includes(value.status as TaskStatus) &&
-    Array.isArray(value.dependsOn) &&
-    value.dependsOn.every((dependency) => typeof dependency === "string") &&
-    (value.writePaths === undefined ||
-      (Array.isArray(value.writePaths) &&
-        value.writePaths.every((path) => typeof path === "string"))) &&
-    (value.successCriteria === undefined ||
-      (Array.isArray(value.successCriteria) &&
-        value.successCriteria.every((criterion) => typeof criterion === "string"))) &&
-    (value.verificationProfile === undefined || typeof value.verificationProfile === "string") &&
-    (value.reviewPolicy === undefined ||
-      value.reviewPolicy === "single" ||
-      value.reviewPolicy === "confirm" ||
-      value.reviewPolicy === "find-and-refute") &&
-    (value.discovery === undefined || isDiscoveryContract(value.discovery)) &&
-    (value.findings === undefined ||
-      (Array.isArray(value.findings) && value.findings.every(isReviewFinding))) &&
-    Array.isArray(value.attempts) &&
-    value.attempts.every(isAttempt) &&
-    isNumber(value.createdAt) &&
-    isNumber(value.updatedAt) &&
-    (value.commitMessage === undefined || typeof value.commitMessage === "string") &&
-    (value.reviewGuidance === undefined || typeof value.reviewGuidance === "string") &&
-    (value.supersededBy === undefined || typeof value.supersededBy === "string") &&
-    (value.supersedes === undefined || typeof value.supersedes === "string") &&
-    (value.reviewNotes === undefined || typeof value.reviewNotes === "string") &&
-    (value.approvalKind === undefined ||
-      value.approvalKind === "reviewed" ||
-      value.approvalKind === "manual") &&
-    (value.reviewedPatchHash === undefined || typeof value.reviewedPatchHash === "string") &&
-    (value.integratedCommit === undefined || typeof value.integratedCommit === "string") &&
-    (value.verificationSummary === undefined || typeof value.verificationSummary === "string") &&
-    (value.provenance === undefined || isArtifactProvenance(value.provenance)) &&
-    (value.approvedProvenance === undefined || isApprovedProvenance(value.approvedProvenance)) &&
-    (value.reviewRejections === undefined || isNumber(value.reviewRejections)) &&
-    (value.reviewStagnantRejections === undefined || isNumber(value.reviewStagnantRejections)) &&
-    (value.dispatchNote === undefined || typeof value.dispatchNote === "string") &&
-    (value.dispatchClaim === undefined || isDispatchClaim(value.dispatchClaim))
-  );
-}
-
-function isApprovedProvenance(value: unknown): boolean {
-  if (!isRecord(value) || value.version !== 1 || !isRecord(value.componentHashes)) return false;
-  if (value.executionShape !== undefined && value.executionShape !== 2) return false;
-  const digest = (candidate: unknown) =>
-    typeof candidate === "string" && /^[a-f0-9]{64}$/.test(candidate);
-  if (
-    !digest(value.fingerprint) ||
-    !digest(value.componentHashes.contract) ||
-    !digest(value.componentHashes.execution) ||
-    !digest(value.componentHashes.verification) ||
-    !digest(value.componentHashes.dependencies) ||
-    !isRecord(value.artifact) ||
-    (value.artifact.kind !== "git-tree" && value.artifact.kind !== "report") ||
-    typeof value.artifact.identity !== "string" ||
-    !(value.artifact.kind === "git-tree"
-      ? /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(value.artifact.identity)
-      : /^[a-f0-9]{64}$/.test(value.artifact.identity)) ||
-    !isNumber(value.approvedAt) ||
-    !Array.isArray(value.dependencyIdentities) ||
-    value.dependencyIdentities.length > 512
-  ) {
-    return false;
-  }
-  return value.dependencyIdentities.every(
-    (dependency) =>
-      isRecord(dependency) &&
-      typeof dependency.taskId === "string" &&
-      dependency.taskId.length > 0 &&
-      dependency.taskId.length <= 64 &&
-      (dependency.kind === "git-tree" || dependency.kind === "report") &&
-      typeof dependency.identity === "string" &&
-      (dependency.kind === "git-tree"
-        ? /^[a-f0-9]{40}$|^[a-f0-9]{64}$/.test(dependency.identity)
-        : /^[a-f0-9]{64}$/.test(dependency.identity))
-  );
-}
-
-function isDiscoveryContract(value: unknown): boolean {
-  if (
-    !isRecord(value) ||
-    !Array.isArray(value.allowedWritePaths) ||
-    value.allowedWritePaths.length < 1 ||
-    value.allowedWritePaths.length > 64 ||
-    !value.allowedWritePaths.every((path) => typeof path === "string")
-  ) {
-    return false;
-  }
-  try {
-    return normalizeWritePaths(value.allowedWritePaths as string[]).length > 0;
-  } catch {
-    return false;
-  }
-}
-
-function isArtifactProvenance(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.candidateTree === "string" &&
-    isNumber(value.capturedAt) &&
-    (value.reviewedAt === undefined || isNumber(value.reviewedAt)) &&
-    (value.integratedCommit === undefined || typeof value.integratedCommit === "string") &&
-    (value.integratedTree === undefined || typeof value.integratedTree === "string") &&
-    (value.verifiedAt === undefined || isNumber(value.verifiedAt)) &&
-    (value.verificationProfile === undefined || typeof value.verificationProfile === "string")
-  );
-}
-
-function isReviewFinding(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.fingerprint === "string" &&
-    typeof value.message === "string" &&
-    (value.status === "open" || value.status === "verified") &&
-    isNumber(value.firstAttempt) &&
-    isNumber(value.lastAttempt)
-  );
-}
-
-function isDispatchClaim(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    (value.kind === "execute" || value.kind === "review") &&
-    isNumber(value.claimedAt) &&
-    (value.expiresAt === undefined || isNumber(value.expiresAt))
-  );
-}
-
-function isValidExecutionComponentHashes(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!isRecord(value)) return false;
-  return (["contract", "execution", "verification", "dependencies"] as const).every(
-    (key) => typeof value[key] === "string" && /^[a-f0-9]{64}$/.test(value[key] as string)
-  );
-}
-
-function isAttempt(value: unknown): boolean {
-  if (!isRecord(value) || !isRecord(value.usage)) return false;
-  return (
-    isNumber(value.index) &&
-    typeof value.logFile === "string" &&
-    typeof value.thinking === "string" &&
-    isNumber(value.startedAt) &&
-    isNumber(value.usage.input) &&
-    isNumber(value.usage.output) &&
-    isNumber(value.usage.cost) &&
-    isNumber(value.usage.turns) &&
-    Array.isArray(value.touchedFiles) &&
-    value.touchedFiles.every((file) => typeof file === "string") &&
-    (value.sessionFile === undefined || typeof value.sessionFile === "string") &&
-    (value.sessionDir === undefined || typeof value.sessionDir === "string") &&
-    (value.model === undefined || typeof value.model === "string") &&
-    (value.provider === undefined || typeof value.provider === "string") &&
-    (value.detached === undefined || typeof value.detached === "boolean") &&
-    (value.pid === undefined || (isNumber(value.pid) && Number.isInteger(value.pid))) &&
-    (value.processStartId === undefined || typeof value.processStartId === "string") &&
-    (value.controlFile === undefined || typeof value.controlFile === "string") &&
-    (value.exitFile === undefined || typeof value.exitFile === "string") &&
-    (value.stderrFile === undefined || typeof value.stderrFile === "string") &&
-    (value.endedAt === undefined || isNumber(value.endedAt)) &&
-    (value.exitCode === undefined || isNumber(value.exitCode)) &&
-    (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
-    (value.failureReason === undefined || isFailureReason(value.failureReason)) &&
-    (value.executionFingerprint === undefined ||
-      (typeof value.executionFingerprint === "string" &&
-        /^[a-f0-9]{64}$/.test(value.executionFingerprint))) &&
-    isValidExecutionComponentHashes(value.executionComponentHashes) &&
-    (value.consumesAttempt === undefined || typeof value.consumesAttempt === "boolean") &&
-    (value.providerFailure === undefined || typeof value.providerFailure === "boolean") &&
-    (value.finalReport === undefined || typeof value.finalReport === "string") &&
-    (value.promptCharacters === undefined || isNumber(value.promptCharacters)) &&
-    (value.promptApproximateTokens === undefined || isNumber(value.promptApproximateTokens)) &&
-    (value.promptSections === undefined || isPromptSections(value.promptSections)) &&
-    (value.diff === undefined || typeof value.diff === "string") &&
-    (value.worktreePath === undefined || typeof value.worktreePath === "string") &&
-    (value.branch === undefined || typeof value.branch === "string") &&
-    (value.reviewReport === undefined || typeof value.reviewReport === "string") &&
-    (value.reviewNotes === undefined || typeof value.reviewNotes === "string") &&
-    (value.reviewModel === undefined || typeof value.reviewModel === "string") &&
-    (value.reviewProvider === undefined || typeof value.reviewProvider === "string") &&
-    (value.reviewLaunches === undefined ||
-      (Array.isArray(value.reviewLaunches) && value.reviewLaunches.every(isReviewLaunch))) &&
-    (value.reviewConvergence === undefined || isReviewConvergence(value.reviewConvergence)) &&
-    (value.reviewConvergenceHistory === undefined ||
-      (Array.isArray(value.reviewConvergenceHistory) &&
-        value.reviewConvergenceHistory.every(isReviewConvergence))) &&
-    (value.reviewUsage === undefined || isUsage(value.reviewUsage)) &&
-    (value.reviewSessionFile === undefined || typeof value.reviewSessionFile === "string")
-  );
-}
-
-function isReviewLaunch(value: unknown): boolean {
-  if (!isRecord(value) || !isUsage(value.usage)) return false;
-  return (
-    isNumber(value.startedAt) &&
-    (value.id === undefined || typeof value.id === "string") &&
-    (value.reviewerIndex === undefined ||
-      (isNumber(value.reviewerIndex) &&
-        Number.isInteger(value.reviewerIndex) &&
-        value.reviewerIndex > 0)) &&
-    (value.role === undefined ||
-      value.role === "single" ||
-      value.role === "confirmer" ||
-      value.role === "finder" ||
-      value.role === "refuter") &&
-    (value.verdict === undefined ||
-      value.verdict === "approve" ||
-      value.verdict === "request_changes") &&
-    (value.costTier === undefined ||
-      value.costTier === "economy" ||
-      value.costTier === "premium") &&
-    (value.escalationReason === undefined || typeof value.escalationReason === "string") &&
-    (value.criterionEvidence === undefined ||
-      (Array.isArray(value.criterionEvidence) &&
-        value.criterionEvidence.every(
-          (entry) =>
-            isRecord(entry) &&
-            isNumber(entry.criterion) &&
-            Number.isInteger(entry.criterion) &&
-            entry.criterion > 0 &&
-            typeof entry.passed === "boolean" &&
-            typeof entry.evidence === "string" &&
-            entry.evidence.length <= 500
-        ))) &&
-    (value.model === undefined || typeof value.model === "string") &&
-    (value.provider === undefined || typeof value.provider === "string") &&
-    (value.sessionFile === undefined || typeof value.sessionFile === "string") &&
-    (value.logFile === undefined || typeof value.logFile === "string") &&
-    (value.endedAt === undefined || isNumber(value.endedAt)) &&
-    (value.exitCode === undefined || isNumber(value.exitCode)) &&
-    (value.errorMessage === undefined || typeof value.errorMessage === "string") &&
-    (value.failureReason === undefined || isFailureReason(value.failureReason)) &&
-    (value.finalReport === undefined || typeof value.finalReport === "string") &&
-    (value.promptCharacters === undefined || isNumber(value.promptCharacters)) &&
-    (value.promptApproximateTokens === undefined || isNumber(value.promptApproximateTokens)) &&
-    (value.promptSections === undefined || isPromptSections(value.promptSections))
-  );
-}
-
-function isReviewConvergence(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  return (
-    (value.policy === "single" ||
-      value.policy === "confirm" ||
-      value.policy === "find-and-refute") &&
-    (value.status === "approved" ||
-      value.status === "changes_requested" ||
-      value.status === "disagreement" ||
-      value.status === "operational_failure") &&
-    isNumber(value.requiredApprovals) &&
-    Number.isInteger(value.requiredApprovals) &&
-    isNumber(value.actualApprovals) &&
-    Number.isInteger(value.actualApprovals) &&
-    isNumber(value.reviewerCount) &&
-    Number.isInteger(value.reviewerCount) &&
-    typeof value.summary === "string" &&
-    value.summary.length <= 2_000 &&
-    isNumber(value.decidedAt)
-  );
-}
-
-function isPromptSections(value: unknown): boolean {
-  return (
-    Array.isArray(value) &&
-    value.every(
-      (section) =>
-        isRecord(section) &&
-        typeof section.name === "string" &&
-        isNumber(section.characters) &&
-        typeof section.omitted === "boolean"
-    )
-  );
-}
-
-function isFailureReason(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const kinds = [
-    "provider_failure",
-    "stalled",
-    "executor_failure",
-    "reviewer_rejection",
-    "reviewer_failure",
-    "user_abort",
-    "cost_cap",
-  ];
-  return (
-    kinds.includes(value.kind as string) &&
-    typeof value.message === "string" &&
-    typeof value.retryable === "boolean"
-  );
-}
-
-function isUsage(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    isNumber(value.input) &&
-    isNumber(value.output) &&
-    isNumber(value.cost) &&
-    isNumber(value.turns)
-  );
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
 }
 
 function quarantineCorruptBoard(file: string): string {
@@ -1229,8 +855,10 @@ function updateTaskUnlocked(
 
 export function assertTaskNotDispatched(task: Task): void {
   if (!task.dispatchClaim) return;
+  const { kind, ownerPid } = task.dispatchClaim;
+  const owner = ownerPid === undefined ? "" : ` in process ${ownerPid}`;
   throw new Error(
-    `${task.id} is owned by an active ${task.dispatchClaim.kind} dispatch. Wait for it to finish or abort it first.`
+    `${task.id} is owned by an active ${kind} dispatch${owner}. Wait for it to finish or abort it first.`
   );
 }
 
@@ -1254,10 +882,12 @@ export function claimTaskDispatch(
   let attemptIndex: number | undefined;
   const task = updateTask(cwd, taskId, (fresh, board) => {
     if (fresh.dispatchClaim) {
-      const expiresAt =
-        fresh.dispatchClaim.expiresAt ?? fresh.dispatchClaim.claimedAt + DISPATCH_LEASE_MS;
-      if (expiresAt > Date.now()) {
+      if (!dispatchClaimExpired(fresh.dispatchClaim)) {
         note = `${fresh.id} dispatch declined; held by ${fresh.dispatchClaim.id} (${fresh.dispatchClaim.kind})`;
+        return;
+      }
+      if (dispatchOwnerIsLive(fresh.dispatchClaim)) {
+        note = `${fresh.id} dispatch declined; held by ${fresh.dispatchClaim.id} (${fresh.dispatchClaim.kind}) in live process ${fresh.dispatchClaim.ownerPid}`;
         return;
       }
       const detachedAttempt = fresh.attempts.at(-1);
@@ -1273,7 +903,15 @@ export function claimTaskDispatch(
       return;
     }
     const now = Date.now();
-    fresh.dispatchClaim = { id: claimId, kind, claimedAt: now, expiresAt: now + DISPATCH_LEASE_MS };
+    const ownerStart = processStartId(process.pid);
+    fresh.dispatchClaim = {
+      id: claimId,
+      kind,
+      claimedAt: now,
+      expiresAt: now + DISPATCH_LEASE_MS,
+      ownerPid: process.pid,
+      ...(ownerStart ? { ownerStart } : {}),
+    };
     delete fresh.dispatchNote;
     claimed = true;
     if (kind === "execute") {
@@ -1309,6 +947,27 @@ export function claimTaskDispatch(
   };
 }
 
+/**
+ * Takes over a detached executor's claim for this process when its previous
+ * owner is gone. The claim id stays, so the detached supervisor's records and
+ * any settlement fenced on it still match; only the owner moves. Returns
+ * false when another live process already owns it (or adopted it first).
+ */
+export function adoptDetachedDispatch(cwd: string, taskId: string, claimId: string): boolean {
+  let adopted = false;
+  updateTask(cwd, taskId, (task) => {
+    const claim = task.dispatchClaim;
+    if (claim?.id !== claimId || dispatchOwnerIsLive(claim)) return;
+    const ownerStart = processStartId(process.pid);
+    claim.ownerPid = process.pid;
+    if (ownerStart) claim.ownerStart = ownerStart;
+    else delete claim.ownerStart;
+    claim.expiresAt = Date.now() + DETACHED_DISPATCH_LEASE_MS;
+    adopted = true;
+  });
+  return adopted;
+}
+
 export function releaseTaskDispatch(cwd: string, taskId: string, claimId: string): boolean {
   let released = false;
   updateTask(cwd, taskId, (task) => {
@@ -1334,19 +993,51 @@ export function renewTaskDispatch(
   return renewed;
 }
 
+function dispatchClaimExpired(claim: DispatchClaim): boolean {
+  return (claim.expiresAt ?? claim.claimedAt + DISPATCH_LEASE_MS) <= Date.now();
+}
+
+/**
+ * A lease is a crash detector, not an ownership transfer. A synchronous Git
+ * command or hook can block the owner's event loop past the lease, so another
+ * session must not take over work whose owning process is still alive. Claims
+ * held by this process belong to the current or a previous (reloaded)
+ * extension instance; those keep plain lease semantics.
+ */
+export function dispatchOwnerIsLive(claim: DispatchClaim): boolean {
+  const pid = claim.ownerPid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+    return false;
+  }
+  const current = typeof claim.ownerStart === "string" ? processStartId(pid) : undefined;
+  if (current !== undefined && current !== claim.ownerStart) return false;
+  if (processIsZombie(pid)) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // Another user's process proves nothing about a PID that may be recycled,
+    // so it holds the claim only when its start identity confirmed the match.
+    return (error as NodeJS.ErrnoException).code === "EPERM" && current !== undefined;
+  }
+}
+
+function failOrphanedRun(task: Task, message: string): void {
+  const attempt = task.attempts.at(-1);
+  if (attempt && attempt.endedAt === undefined) {
+    attempt.endedAt = Date.now();
+    attempt.exitCode = 1;
+    attempt.errorMessage = message;
+    attempt.failureReason = { kind: "executor_failure", message, retryable: true };
+  }
+  forceStatus(task, "failed");
+}
+
 function recoverExpiredClaim(task: Task): void {
   const claim = task.dispatchClaim;
   if (!claim) return;
   if (claim.kind === "execute" && task.status === "running") {
-    const attempt = task.attempts.at(-1);
-    if (attempt && attempt.endedAt === undefined) {
-      const message = "orphan attempt recovered after expired dispatch lease";
-      attempt.endedAt = Date.now();
-      attempt.exitCode = 1;
-      attempt.errorMessage = message;
-      attempt.failureReason = { kind: "executor_failure", message, retryable: true };
-    }
-    forceStatus(task, "failed");
+    failOrphanedRun(task, "orphan attempt recovered after expired dispatch lease");
   }
   delete task.dispatchClaim;
 }
@@ -1375,16 +1066,24 @@ export function sweepDispatchState(cwd: string): string[] {
           ).length;
     const claimExpired =
       stale.dispatchClaim !== undefined &&
-      (stale.dispatchClaim.expiresAt ?? stale.dispatchClaim.claimedAt + DISPATCH_LEASE_MS) <=
-        Date.now();
-    if (!claimExpired && orphanCount === 0) continue;
+      dispatchClaimExpired(stale.dispatchClaim) &&
+      !dispatchOwnerIsLive(stale.dispatchClaim);
+    // Executors hold their claim until the final attempt record is written,
+    // so a running task without one was abandoned mid-settlement (a crash, or
+    // a build that released the claim before finalizing).
+    const unclaimedRun = stale.status === "running" && stale.dispatchClaim === undefined;
+    if (!claimExpired && orphanCount === 0 && !unclaimedRun) continue;
     updateTask(cwd, stale.id, (task) => {
       const parts: string[] = [];
-      const claimExpired =
-        task.dispatchClaim !== undefined &&
-        (task.dispatchClaim.expiresAt ?? task.dispatchClaim.claimedAt + DISPATCH_LEASE_MS) <=
-          Date.now();
-      if (task.dispatchClaim && claimExpired) {
+      if (task.status === "running" && task.dispatchClaim === undefined) {
+        parts.push("recovered running task with no dispatch claim");
+        failOrphanedRun(task, "orphan attempt recovered: running task had no dispatch owner");
+      }
+      if (
+        task.dispatchClaim &&
+        dispatchClaimExpired(task.dispatchClaim) &&
+        !dispatchOwnerIsLive(task.dispatchClaim)
+      ) {
         parts.push(`cleared stale ${task.dispatchClaim.kind} claim ${task.dispatchClaim.id}`);
         recoverExpiredClaim(task);
       }

@@ -1,0 +1,249 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Test task",
+      "brief": "Do the work",
+      "tier": "standard",
+      "status": "approved",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 1,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060734625,
+          "usage": {
+            "input": 10,
+            "output": 5,
+            "cost": 4.7,
+            "turns": 9
+          },
+          "touchedFiles": ["work.txt"],
+          "sessionFile": "/tmp/pi-maestro-test-1Mifoy/tmp/maestro-provider-interrupt-resume-acTb81/attempt-1.jsonl",
+          "executionFingerprint": "7bb94c1a3fadd4751739c33532ddf762f449de03690f4b62ae3facf33c2db474",
+          "executionComponentHashes": {
+            "contract": "ccf685c3b6abdf592c9cbd0e690e14f025f39b1fcce729add3b55ced759183eb",
+            "execution": "ba8c7ceb5cd36e0c928188762d1093417cf8ba0b0f998d5ecbaa55d490f88b60",
+            "verification": "2e389d8a63c49bfdd88104b2dead15bd4f7f86f3fb5160641713731afc83d319",
+            "dependencies": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "promptCharacters": 1045,
+          "promptApproximateTokens": 262,
+          "promptSections": [
+            {
+              "name": "role",
+              "characters": 74,
+              "omitted": false
+            },
+            {
+              "name": "Task T1: Test task",
+              "characters": 34,
+              "omitted": false
+            },
+            {
+              "name": "Success criteria",
+              "characters": 363,
+              "omitted": false
+            },
+            {
+              "name": "Autonomy",
+              "characters": 257,
+              "omitted": false
+            },
+            {
+              "name": "Stop rule",
+              "characters": 171,
+              "omitted": false
+            },
+            {
+              "name": "Report",
+              "characters": 136,
+              "omitted": false
+            }
+          ],
+          "worktreePath": "/tmp/pi-maestro-test-1Mifoy/tmp/maestro-provider-interrupt-resume-acTb81/.pi/maestro/worktrees/t1-attempt-1",
+          "branch": "maestro/t1-attempt-1",
+          "finalReport": "executor report",
+          "errorMessage": "WebSocket error",
+          "exitCode": 1,
+          "consumesAttempt": false,
+          "providerFailure": true,
+          "failureReason": {
+            "kind": "provider_failure",
+            "message": "WebSocket error",
+            "retryable": true
+          }
+        },
+        {
+          "index": 2,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060734635,
+          "usage": {
+            "input": 2,
+            "output": 2,
+            "cost": 0.2,
+            "turns": 2
+          },
+          "touchedFiles": ["work.txt"],
+          "sessionFile": "/tmp/pi-maestro-test-1Mifoy/tmp/maestro-provider-interrupt-resume-acTb81/attempt-1.jsonl",
+          "resumed": true,
+          "executionFingerprint": "7bb94c1a3fadd4751739c33532ddf762f449de03690f4b62ae3facf33c2db474",
+          "executionComponentHashes": {
+            "contract": "ccf685c3b6abdf592c9cbd0e690e14f025f39b1fcce729add3b55ced759183eb",
+            "execution": "ba8c7ceb5cd36e0c928188762d1093417cf8ba0b0f998d5ecbaa55d490f88b60",
+            "verification": "2e389d8a63c49bfdd88104b2dead15bd4f7f86f3fb5160641713731afc83d319",
+            "dependencies": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+          },
+          "promptCharacters": 758,
+          "promptApproximateTokens": 190,
+          "promptSections": [
+            {
+              "name": "role",
+              "characters": 462,
+              "omitted": false
+            },
+            {
+              "name": "Stop rule",
+              "characters": 113,
+              "omitted": false
+            },
+            {
+              "name": "Report",
+              "characters": 179,
+              "omitted": false
+            }
+          ],
+          "worktreePath": "/tmp/pi-maestro-test-1Mifoy/tmp/maestro-provider-interrupt-resume-acTb81/.pi/maestro/worktrees/t1-attempt-1",
+          "branch": "maestro/t1-attempt-1",
+          "finalReport": "## Report\ndone",
+          "exitCode": 0,
+          "consumesAttempt": true,
+          "reviewLaunches": [
+            {
+              "id": "T1-review-2-1-1",
+              "reviewerIndex": 1,
+              "role": "single",
+              "startedAt": 1794060734667,
+              "usage": {
+                "input": 1,
+                "output": 1,
+                "cost": 0,
+                "turns": 1
+              },
+              "promptCharacters": 1837,
+              "promptApproximateTokens": 460,
+              "promptSections": [
+                {
+                  "name": "role",
+                  "characters": 210,
+                  "omitted": false
+                },
+                {
+                  "name": "Task T1: Test task",
+                  "characters": 34,
+                  "omitted": false
+                },
+                {
+                  "name": "Executor report",
+                  "characters": 18,
+                  "omitted": false
+                },
+                {
+                  "name": "Report",
+                  "characters": 14,
+                  "omitted": false
+                },
+                {
+                  "name": "Authoritative artifact",
+                  "characters": 160,
+                  "omitted": false
+                },
+                {
+                  "name": "Files changed",
+                  "characters": 251,
+                  "omitted": false
+                },
+                {
+                  "name": "Success criteria",
+                  "characters": 285,
+                  "omitted": false
+                },
+                {
+                  "name": "Stop rule",
+                  "characters": 306,
+                  "omitted": false
+                },
+                {
+                  "name": "Verdict",
+                  "characters": 544,
+                  "omitted": false
+                }
+              ],
+              "logFile": "stub.jsonl",
+              "exitCode": 0,
+              "finalReport": "Looks correct.\nVERDICT: APPROVE",
+              "verdict": "approve"
+            }
+          ],
+          "reviewUsage": {
+            "input": 1,
+            "output": 1,
+            "cost": 0,
+            "turns": 1
+          },
+          "reviewReport": "Looks correct.\nVERDICT: APPROVE",
+          "reviewConvergence": {
+            "policy": "single",
+            "status": "approved",
+            "requiredApprovals": 1,
+            "actualApprovals": 1,
+            "reviewerCount": 1,
+            "summary": "Looks correct.\nVERDICT: APPROVE",
+            "decidedAt": 1794060734668
+          }
+        }
+      ],
+      "createdAt": 1794060734616,
+      "updatedAt": 1794060734735,
+      "writePaths": ["work.txt"],
+      "dispatchClaim": {
+        "id": "3531795-1794060734646-c85ykqwuq75",
+        "kind": "review",
+        "claimedAt": 1794060734646,
+        "expiresAt": 1794060764646
+      },
+      "provenance": {
+        "candidateTree": "843305912d2a39e86bf8c5589eb9ff7ad75b33ea",
+        "capturedAt": 1794060734653,
+        "integratedCommit": "dcd5b41a1ce0152b669c79276e8e85bff2424a67",
+        "integratedTree": "843305912d2a39e86bf8c5589eb9ff7ad75b33ea",
+        "reviewedAt": 1794060734735
+      },
+      "approvalKind": "reviewed",
+      "verificationSummary": "reviewer approved the integrated artifact",
+      "integratedCommit": "dcd5b41a1ce0152b669c79276e8e85bff2424a67",
+      "approvedProvenance": {
+        "version": 1,
+        "executionShape": 2,
+        "fingerprint": "7bb94c1a3fadd4751739c33532ddf762f449de03690f4b62ae3facf33c2db474",
+        "componentHashes": {
+          "contract": "ccf685c3b6abdf592c9cbd0e690e14f025f39b1fcce729add3b55ced759183eb",
+          "execution": "ba8c7ceb5cd36e0c928188762d1093417cf8ba0b0f998d5ecbaa55d490f88b60",
+          "verification": "2e389d8a63c49bfdd88104b2dead15bd4f7f86f3fb5160641713731afc83d319",
+          "dependencies": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "dependencyIdentities": [],
+        "artifact": {
+          "kind": "git-tree",
+          "identity": "843305912d2a39e86bf8c5589eb9ff7ad75b33ea"
+        },
+        "approvedAt": 1794060734735
+      }
+    }
+  ],
+  "revision": 18
+}

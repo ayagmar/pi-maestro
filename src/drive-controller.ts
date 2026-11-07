@@ -41,8 +41,8 @@ import {
   type TierConfig,
 } from "./types.js";
 import { driveBoard, preflightTaskTiers } from "./workflow.js";
-import { type ReviewEscalation } from "./workflow-review-policy.js";
 import { type DriveSummary, formatDriveSummary } from "./workflow-policy.js";
+import { type ReviewEscalation } from "./workflow-review-policy.js";
 import { type WorkflowRun } from "./workflow-runtime.js";
 
 export interface LiveRun {
@@ -65,6 +65,8 @@ export interface ActiveDriveControl {
   taskIds?: string[];
   pauseRequested: boolean;
   abortController: AbortController;
+  /** Aborted when the runtime that started this drive shuts down. */
+  retired: AbortSignal;
 }
 
 export interface BackgroundDrive {
@@ -110,6 +112,8 @@ export class DriveRuntimeController {
   private active: ActiveDriveControl | undefined;
   private background: BackgroundDrive | undefined;
   private readonly liveRuns = new Set<LiveRun>();
+  /** Aborted at runtime shutdown; drives started before it stay retired. */
+  private retirement = new AbortController();
 
   hasActive(): boolean {
     return this.active !== undefined;
@@ -211,6 +215,7 @@ export class DriveRuntimeController {
     settleDecisionWithoutWaking = false
   ): BackgroundDrive {
     if (this.hasActive()) throw new Error("An autonomous drive is already active.");
+    if (this.retirement.signal.aborted) throw new Error("The Maestro runtime has shut down.");
     validateDriveStart(ctx, taskIds);
 
     const operation: BackgroundDrive = { promise: Promise.resolve() };
@@ -222,6 +227,7 @@ export class DriveRuntimeController {
       cwd: ctx.cwd,
       pauseRequested: false,
       abortController: new AbortController(),
+      retired: this.retirement.signal,
     };
     if (ownerSession) control.ownerSession = ownerSession;
     if (taskIds) control.taskIds = taskIds;
@@ -294,6 +300,9 @@ export class DriveRuntimeController {
     )
       .then((summary) => {
         operation.summary = summary;
+        // Shutdown already recorded this drive's outcome, or deliberately left
+        // it for the next session to settle with a surviving detached executor.
+        if (control.retired.aborted) return;
         const message = formatDrivePulse(summary).slice(0, 4000);
         const persisted = persistDriveDecision(ctx.cwd, ownerSession, summary, message, driveId);
         if (persisted && summary.stoppedBecause.code === "completed") {
@@ -321,6 +330,7 @@ export class DriveRuntimeController {
       })
       .catch((error) => {
         operation.error = error instanceof Error ? error.message : String(error);
+        if (control.retired.aborted) return;
         try {
           const summary = unexpectedDriveSummary(ctx.cwd, taskIds, operation.error);
           const persisted = persistDriveDecision(
@@ -490,6 +500,7 @@ export class DriveRuntimeController {
       combinedSignal,
       reportProgress,
       () => control.pauseRequested,
+      control.retired,
       humanRetryTaskId,
       humanRetryExpectedRiskToken,
       humanRetryOwnerSession
@@ -515,6 +526,7 @@ export class DriveRuntimeController {
     signal: AbortSignal | undefined,
     reportProgress: (message: string) => void,
     shouldPause?: () => boolean,
+    retired?: AbortSignal,
     humanRetryTaskId?: string,
     humanRetryExpectedRiskToken?: string,
     humanRetryOwnerSession?: string
@@ -647,6 +659,7 @@ export class DriveRuntimeController {
       driveOptions.humanRetryExpectedRiskToken = humanRetryExpectedRiskToken;
     }
     if (humanRetryOwnerSession) driveOptions.humanRetryOwnerSession = humanRetryOwnerSession;
+    if (retired) driveOptions.retired = retired;
     return driveBoard(driveOptions);
   }
 
@@ -687,9 +700,17 @@ export class DriveRuntimeController {
     };
   }
 
+  /** A new session start may dispatch again; drives retired earlier stay retired. */
+  activate(): void {
+    if (this.retirement.signal.aborted) this.retirement = new AbortController();
+  }
+
   shutdown(): void {
-    // Detached executor transports intentionally outlive the owning Pi
-    // runtime. Regular children are still stopped immediately.
+    // Retiring the drive stops queued launches, verification, and promotion
+    // without aborting the drive signal, which would also stop detached
+    // executor transports that intentionally outlive the owning Pi runtime.
+    // Regular children are still stopped immediately.
+    this.retirement.abort();
     for (const run of this.liveRuns) {
       if (!run.handle.survivesShutdown) run.handle.abort();
     }

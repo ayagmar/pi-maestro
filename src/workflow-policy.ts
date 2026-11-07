@@ -192,6 +192,20 @@ export function costCapLifted(
 }
 
 /**
+ * A launch cost cap that fired while maxCostPerTask was not the limit: the cut
+ * came from this launch's share of the run budget, which says nothing about
+ * the task, so it does not count against maxAttempts. Rounds and the launch
+ * cap still bound the retries.
+ */
+export function cutByRunBudget(
+  attempt: Pick<Attempt, "usage">,
+  failure: Attempt["failureReason"],
+  config: Pick<MaestroConfig, "maxCostPerTask">
+): boolean {
+  return failure?.kind === "cost_cap" && costCapLifted(attempt, config);
+}
+
+/**
  * An attempt that was cut off from outside — by the per-attempt cost cap or
  * by the provider dropping the connection or its quota — keeps its checkout:
  * the edits are there and a fresh checkout from HEAD would discard them.

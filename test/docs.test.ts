@@ -130,9 +130,9 @@ test("documentation explains nested agent sessions and resume navigation", () =>
   const readme = read("README.md");
   const operations = read("docs/operations.md");
   const architecture = read("docs/architecture.md");
-  const siteOperations = read("src/pages/docs/operations.astro");
 
-  for (const content of [readme, operations, siteOperations]) {
+  // The docs site renders docs/operations.md, so it cannot drift from it.
+  for (const content of [readme, operations]) {
     assert.match(content, /\.maestro.*launch/is);
     assert.match(content, /\/maestro back/is);
     assert.match(content, /usage.*recurs|recurs.*usage/is);
@@ -169,7 +169,7 @@ test("declared package shape contains runtime and required documentation", () =>
   assert.equal(pkg.publishConfig?.access, "public");
   assert.equal(pkg.main, "./src/index.ts");
   assert.equal(pkg.repository.url, "git+https://github.com/ayagmar/pi-maestro.git");
-  assert.equal(pkg.homepage, "https://github.com/ayagmar/pi-maestro#readme");
+  assert.equal(pkg.homepage, "https://ayagmar.github.io/pi-maestro/");
   assert.equal(pkg.bugs.url, "https://github.com/ayagmar/pi-maestro/issues");
   assert.doesNotMatch(pkg.pi?.image ?? "", /placehold\.co/i);
   for (const entry of [
@@ -221,16 +221,39 @@ test("supported pi line in user docs matches the pi devDependency", () => {
   }
 });
 
-test("README and docs site lead with the same npm install command", () => {
+test("README, getting started, and the landing page lead with the same npm install command", () => {
   const install = "pi install npm:@ayagmar/pi-maestro";
-  for (const doc of [
-    "README.md",
-    "src/pages/index.astro",
-    "src/pages/docs/getting-started.astro",
-  ]) {
+  for (const doc of ["README.md", "docs/getting-started.md", "src/pages/index.astro"]) {
     assert.ok(read(doc).includes(install), `${doc} must show ${install}`);
   }
-  for (const doc of ["src/pages/index.astro", "src/pages/docs/getting-started.astro"]) {
-    assert.ok(read(doc).includes(`data-copy="${install}"`), `${doc} must copy ${install}`);
+  assert.ok(
+    read("src/pages/index.astro").includes(`data-copy="${install}"`),
+    "the landing page must copy the install command"
+  );
+});
+
+test("every markdown guide is a docs site page and the site keeps no copy of it", () => {
+  const site = read("src/data/docs.ts");
+  for (const guide of [
+    "getting-started",
+    "how-it-works",
+    "commands",
+    "configuration",
+    "operations",
+    "architecture",
+  ]) {
+    assert.ok(site.includes(`file: "docs/${guide}.md"`), `docs/${guide}.md must be a site page`);
+    assert.equal(
+      existsSync(join(root, `src/pages/docs/${guide}.astro`)),
+      false,
+      `${guide} must be rendered from markdown, not duplicated in an .astro page`
+    );
+  }
+  for (const [slug, file] of [
+    ["security", "SECURITY.md"],
+    ["contributing", "CONTRIBUTING.md"],
+    ["changelog", "CHANGELOG.md"],
+  ]) {
+    assert.match(site, new RegExp(`slug: "${slug}"[\\s\\S]*?file: "${file}"`));
   }
 });

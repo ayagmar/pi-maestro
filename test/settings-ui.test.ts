@@ -3,13 +3,19 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import {
   type ExtensionCommandContext,
   initTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER } from "@earendil-works/pi-tui";
-import { DEFAULT_CONFIG, saveConfig, validateEffectiveConfig } from "../src/config.js";
+import {
+  CURSOR_MARKER,
+  KeybindingsManager,
+  setKeybindings,
+  TUI_KEYBINDINGS,
+} from "@earendil-works/pi-tui";
+import { DEFAULT_CONFIG, loadConfig, saveConfig, validateEffectiveConfig } from "../src/config.js";
 import {
   applySettingsChange,
   buildModelChoices,
@@ -21,6 +27,7 @@ import {
 } from "../src/settings-ui.js";
 
 initTheme();
+const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
 
 function registryWithModels(
   models: Array<{ provider: string; id: string }>
@@ -153,7 +160,7 @@ test("settings model search owns focus only while its picker is active", async (
     ui: {
       notify: () => {},
       custom: async (factory: (...args: unknown[]) => unknown) => {
-        const component = factory({ requestRender: () => {} }, theme, {}, () => {}) as {
+        const component = factory({ requestRender: () => {} }, theme, keybindings, () => {}) as {
           focused: boolean;
           render(width: number): string[];
           handleInput(data: string): void;
@@ -189,6 +196,57 @@ test("settings model search owns focus only while its picker is active", async (
   }
 });
 
+test("the model picker selects with a remapped confirm key", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-settings-remap-"));
+  // pi installs the user's keybindings globally and injects the same manager.
+  const remapped = new KeybindingsManager(TUI_KEYBINDINGS, {
+    "tui.select.confirm": "ctrl+g",
+    "tui.select.cancel": "ctrl+q",
+  });
+  setKeybindings(remapped);
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+  const context = {
+    cwd,
+    modelRegistry: registryWithModels([{ provider: "openai", id: "gpt-test" }]),
+    ui: {
+      notify: () => {},
+      custom: async (factory: (...args: unknown[]) => unknown) => {
+        const component = factory({ requestRender: () => {} }, theme, remapped, () => {}) as {
+          focused: boolean;
+          render(width: number): string[];
+          handleInput(data: string): void;
+        };
+        component.focused = true;
+        const menu = component.render(100).join("\n").split("\n");
+        const tierRow = menu.findIndex((line) => line.includes("Tier model settings"));
+        const firstRow = menu.findIndex((line) => line.includes("Essentials"));
+        for (let step = 0; step < tierRow - firstRow; step += 1) component.handleInput("\x1b[B");
+        component.handleInput("\x07");
+        component.handleInput("\x07");
+        const picker = stripVTControlCharacters(component.render(100).join("\n"));
+        assert.match(picker, /ctrl\+g select/);
+        assert.match(picker, /ctrl\+q back/);
+        assert.match(picker, /ctrl\+q returns to a section/);
+        // "(pi default)" is current; move to the authenticated model and pick it.
+        component.handleInput("\x1b[B");
+        component.handleInput("\x07");
+      },
+    },
+  } as unknown as ExtensionCommandContext;
+
+  try {
+    await showSettings(context, "project");
+    const models = Object.values(loadConfig(cwd).tiers).map((tier) => tier.model);
+    assert.ok(models.includes("openai/gpt-test"), `no tier took the model: ${models.join(", ")}`);
+  } finally {
+    setKeybindings(keybindings);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("section summaries keep their full text after a setting changes", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-settings-summary-"));
   const theme = {
@@ -201,7 +259,7 @@ test("section summaries keep their full text after a setting changes", async () 
     ui: {
       notify: () => {},
       custom: async (factory: (...args: unknown[]) => unknown) => {
-        const component = factory({ requestRender: () => {} }, theme, {}, () => {}) as {
+        const component = factory({ requestRender: () => {} }, theme, keybindings, () => {}) as {
           focused: boolean;
           render(width: number): string[];
           handleInput(data: string): void;

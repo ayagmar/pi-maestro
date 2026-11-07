@@ -5,9 +5,9 @@ import {
   blockedReason,
   findTask,
   groupTasks,
+  type HumanRetryEligibility,
   supersessionChain,
   taskGroup,
-  type HumanRetryEligibility,
 } from "./board.js";
 import {
   DEFAULT_DASHBOARD_BODY_HEIGHT,

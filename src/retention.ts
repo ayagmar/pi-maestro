@@ -30,7 +30,9 @@ interface LogIdentity {
 }
 
 function logIdentity(name: string): LogIdentity | undefined {
-  const match = /^(.+)-(?:attempt|review)-(\d+)(?:-launch-\d+|-\d+-\d+)?\.jsonl$/.exec(name);
+  // Launches since transport namespacing add `.<8 hex>` before `.jsonl`.
+  const match =
+    /^(.+)-(?:attempt|review)-(\d+)(?:-launch-\d+|-\d+-\d+)?(?:\.[0-9a-f]{8})?\.jsonl$/.exec(name);
   if (!match?.[1] || !match[2]) return undefined;
   return { taskId: match[1], attempt: Number(match[2]) };
 }
@@ -59,7 +61,7 @@ function referencedBoardLogs(cwd: string, board: Board): Map<string, ReferencedL
           return;
         }
         if (launch.id) {
-          // The runner creates this file before the launch's logFile update.
+          // Launches predating transport namespacing logged to `<launch id>.jsonl`.
           add(`${launch.id}.jsonl`, task.id, attempt.index);
           return;
         }
@@ -143,9 +145,10 @@ export interface LogCleanupResult {
  * A detached launch keeps its control, exit, and stderr files next to its
  * event log. They only matter while that run is live, so they go with it;
  * left behind, every detached launch added three files the logs directory
- * never shed.
+ * never shed. The supervisor deletes its own config when it starts, so that
+ * file is here only for a launch that died before then.
  */
-const DETACHED_COMPANION_SUFFIXES = [".control", ".exit", ".stderr"] as const;
+const DETACHED_COMPANION_SUFFIXES = [".control", ".exit", ".stderr", ".supervisor.json"] as const;
 
 function removeDetachedCompanions(logFile: string, warnings: string[]): void {
   for (const suffix of DETACHED_COMPANION_SUFFIXES) {

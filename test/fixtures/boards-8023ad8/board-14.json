@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "ownerSessions": ["/tmp/maestro-owner.jsonl"],
+  "activeDecision": {
+    "id": "decision-1",
+    "ownerSession": "/tmp/maestro-owner.jsonl",
+    "kind": "completed",
+    "taskIds": [],
+    "evidence": "Owner action is required",
+    "allowedInterventions": [],
+    "createdAt": 1794060729852
+  },
+  "activeDrive": {
+    "id": "drive-1",
+    "ownerSession": "/tmp/maestro-owner.jsonl",
+    "startedAt": 1794060729852
+  },
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Complete",
+      "brief": "Already complete",
+      "tier": "standard",
+      "status": "approved",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 1,
+          "logFile": "completed.jsonl",
+          "thinking": "medium",
+          "startedAt": 1,
+          "endedAt": 2,
+          "usage": {
+            "input": 1,
+            "output": 1,
+            "cost": 0,
+            "turns": 1
+          },
+          "finalReport": "Completed with durable evidence",
+          "touchedFiles": []
+        }
+      ],
+      "createdAt": 1794060729852,
+      "updatedAt": 1794060729852,
+      "approvedProvenance": {
+        "version": 1,
+        "executionShape": 2,
+        "fingerprint": "8bbd6effda5390560d16535ab5e27c3a5046e9894176808b60b5a8a3a468cfb4",
+        "componentHashes": {
+          "contract": "e0da33b14b824e2abbb67e67a74c70a49b3d05a32ea80f980527ceb90dfeed2a",
+          "execution": "ba8c7ceb5cd36e0c928188762d1093417cf8ba0b0f998d5ecbaa55d490f88b60",
+          "verification": "2e389d8a63c49bfdd88104b2dead15bd4f7f86f3fb5160641713731afc83d319",
+          "dependencies": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+        },
+        "dependencyIdentities": [],
+        "artifact": {
+          "kind": "report",
+          "identity": "44f978f9816382914aea222206370dc4c28bd1b98cbd2c5672dab1ebb856b366"
+        },
+        "approvedAt": 1794060729852
+      }
+    }
+  ],
+  "revision": 1
+}

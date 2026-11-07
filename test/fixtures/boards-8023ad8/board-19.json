@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Test task",
+      "brief": "Do the work",
+      "tier": "standard",
+      "status": "ready_for_review",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 0,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060733934,
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cost": 0,
+            "turns": 0
+          },
+          "touchedFiles": ["widget.txt"],
+          "finalReport": "Executor completed the task",
+          "executionFingerprint": "c871de8424cc1db516f99ec2efda1080a8e126cff7e228654c3e0780d38f915b"
+        }
+      ],
+      "createdAt": 1794060733934,
+      "updatedAt": 1794060733934,
+      "commitMessage": "fix: adjust the widget",
+      "writePaths": ["widget.txt"],
+      "successCriteria": ["The widget is adjusted"]
+    }
+  ],
+  "revision": 1
+}

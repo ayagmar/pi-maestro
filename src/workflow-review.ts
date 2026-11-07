@@ -22,6 +22,7 @@ import {
   runVerification,
 } from "./runner.js";
 import {
+  type Attempt,
   type MaestroConfig,
   type ReviewLaunch,
   type Task,
@@ -37,8 +38,8 @@ import {
   effectiveRequiredApprovals,
   findingFingerprint,
   policyReviewPrompt,
-  reviewEvidence,
   type ReviewEscalation,
+  reviewEvidence,
   reviewerLaunchPlan,
   riskyChangePaths,
   selfReportedBlocker,
@@ -61,6 +62,25 @@ import {
  * review tier with its configured thinking instead.
  */
 export const CHEAP_REVIEW_THINKING = "low";
+
+const REVIEW_INTERRUPTED_NOTE = "review interrupted; task stays ready for review";
+
+/** Reviewer usage is billed against the task for honest per-task cost. */
+function addReviewUsage(attempt: Attempt, launches: ReviewLaunch[]): void {
+  const previous = attempt.reviewUsage ?? { input: 0, output: 0, cost: 0, turns: 0 };
+  const reviewUsage = { ...previous };
+  for (const { usage } of launches) {
+    attempt.usage.input += usage.input;
+    attempt.usage.output += usage.output;
+    attempt.usage.cost += usage.cost;
+    attempt.usage.turns += usage.turns;
+    reviewUsage.input += usage.input;
+    reviewUsage.output += usage.output;
+    reviewUsage.cost += usage.cost;
+    reviewUsage.turns += usage.turns;
+  }
+  attempt.reviewUsage = reviewUsage;
+}
 
 export async function reviewTask(options: {
   cwd: string;
@@ -280,6 +300,11 @@ export async function reviewTask(options: {
         ...(signal ? { signal } : {}),
       });
     }
+    // A stopped drive says nothing about the candidate: leave it ready for
+    // review so the next drive verifies it again, with no false failure on record.
+    if (signal?.aborted) {
+      return snapshot(findTask(loadBoard(cwd), task.id) ?? task, REVIEW_INTERRUPTED_NOTE);
+    }
     const gateFindings = latestAttempt ? (artifactFindings(task, latestAttempt) ?? []) : [];
     const currentExecutionFingerprint = taskFingerprint(loadBoard(cwd), task, runtimeConfig());
     if (
@@ -334,7 +359,10 @@ export async function reviewTask(options: {
           attempt.reviewConvergence = convergenceRecord(
             reviewPolicy,
             "operational_failure",
-            effectiveRequiredApprovals(fresh, reviewPolicy, reviewRequiredApprovals),
+            effectiveRequiredApprovals(fresh, reviewPolicy, reviewRequiredApprovals, {
+              candidateTree,
+              taskFingerprint: currentExecutionFingerprint?.fingerprint,
+            }),
             0,
             0,
             notes,
@@ -415,6 +443,10 @@ export async function reviewTask(options: {
               }
             : {}),
           ...(plan.reason ? { escalationReason: plan.reason } : {}),
+          ...(candidateTree ? { candidateTree } : {}),
+          ...(currentExecutionFingerprint
+            ? { taskFingerprint: currentExecutionFingerprint.fingerprint }
+            : {}),
           startedAt: Date.now(),
           usage: { input: 0, output: 0, cost: 0, turns: 0 },
           promptCharacters: promptContext.characters,
@@ -651,12 +683,26 @@ export async function reviewTask(options: {
       return "verdict" in escalated || "launchLimit" in escalated ? escalated : first;
     };
 
+    /**
+     * Bills launches for a review that stops before its final record. With no
+     * launches it writes nothing: a reviewUsage on an attempt without
+     * reviewLaunches reads as a legacy review.
+     */
+    const billSettledReviewers = (): Task | undefined =>
+      reviewLaunches.length === 0
+        ? findTask(loadBoard(cwd), task.id)
+        : updateTask(cwd, task.id, (fresh) => {
+            const attempt = fresh.attempts.at(-1);
+            if (attempt && reviewIdentityMatches(fresh)) addReviewUsage(attempt, reviewLaunches);
+          });
+
     // Re-review of work an intact panel already approved costs one reviewer,
     // not a fresh panel. Contested work keeps the full policy.
     const requiredApprovals = effectiveRequiredApprovals(
       dispatch.task,
       reviewPolicy,
-      reviewRequiredApprovals
+      reviewRequiredApprovals,
+      { candidateTree, taskFingerprint: currentExecutionFingerprint?.fingerprint }
     );
     const logicalResults: Array<{ verdict: { approved: boolean; notes: string }; report: string }> =
       [];
@@ -694,10 +740,7 @@ export async function reviewTask(options: {
     }
 
     if (launchLimitReached) {
-      return snapshot(
-        findTask(loadBoard(cwd), task.id) ?? task,
-        "workflow raw launch limit reached"
-      );
+      return snapshot(billSettledReviewers() ?? task, "workflow raw launch limit reached");
     }
 
     const approvals = logicalResults.filter((result) => result.verdict.approved).length;
@@ -775,6 +818,11 @@ export async function reviewTask(options: {
         reviewIdentityMatches,
         runtimeConfig,
       });
+      // Only an integration that landed nothing can be interrupted; a commit
+      // that reached the branch still has to settle as approved.
+      if (signal?.aborted && integration.mechanicalFailure && !integration.integratedCommit) {
+        return snapshot(billSettledReviewers() ?? task, REVIEW_INTERRUPTED_NOTE);
+      }
       mergeConflict = integration.mergeConflict;
       integratedCommit = integration.integratedCommit;
       integratedTree = integration.integratedTree;
@@ -840,34 +888,9 @@ export async function reviewTask(options: {
         settlementProvenance = liveProvenance;
       }
       finalMutationApplied = true;
-      // Reviewer usage is billed against the task for honest per-task cost.
       const attempt = fresh.attempts.at(-1);
       if (attempt) {
-        const reviewUsage = reviewLaunches.reduce(
-          (total, launch) => ({
-            input: total.input + launch.usage.input,
-            output: total.output + launch.usage.output,
-            cost: total.cost + launch.usage.cost,
-            turns: total.turns + launch.usage.turns,
-          }),
-          { input: 0, output: 0, cost: 0, turns: 0 }
-        );
-        attempt.usage.input += reviewUsage.input;
-        attempt.usage.output += reviewUsage.output;
-        attempt.usage.cost += reviewUsage.cost;
-        attempt.usage.turns += reviewUsage.turns;
-        const previousReviewUsage = attempt.reviewUsage ?? {
-          input: 0,
-          output: 0,
-          cost: 0,
-          turns: 0,
-        };
-        attempt.reviewUsage = {
-          input: previousReviewUsage.input + reviewUsage.input,
-          output: previousReviewUsage.output + reviewUsage.output,
-          cost: previousReviewUsage.cost + reviewUsage.cost,
-          turns: previousReviewUsage.turns + reviewUsage.turns,
-        };
+        addReviewUsage(attempt, reviewLaunches);
         const latestLaunch = reviewLaunches.at(-1);
         if (latestLaunch?.model !== undefined) attempt.reviewModel = latestLaunch.model;
         if (latestLaunch?.provider !== undefined) attempt.reviewProvider = latestLaunch.provider;

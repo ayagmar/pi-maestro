@@ -23,6 +23,10 @@ on:
         description: Dry run (no commit, tag, push, GitHub release or publish)
         type: boolean
         default: false
+      first_release:
+        description: First release only — tag the version already in package.json and use its hand-written CHANGELOG section, without release-it
+        type: boolean
+        default: false
       publish_only:
         description: Skip release-it and only publish the version already tagged at HEAD (recovery)
         type: boolean
@@ -50,6 +54,7 @@ jobs:
       INCREMENT: ${{ inputs.increment }}
       DRY_RUN: ${{ inputs.dry_run }}
       PUBLISH_ONLY: ${{ inputs.publish_only }}
+      FIRST_RELEASE: ${{ inputs.first_release }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -84,8 +89,35 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # The first version is already in package.json and its notes are written by
+      # hand, so release-it has nothing to bump or generate. Tag it and publish the
+      # notes from CHANGELOG.md as they are.
+      - name: Tag and GitHub release for the first version
+        if: inputs.first_release && inputs.publish_only == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null || [ -n "$(git tag --list 'v*')" ]; then
+            echo "::error::a release tag already exists; first_release is only for the first version"
+            exit 1
+          fi
+          awk -v v="$version" '/^## /{if(found)exit; if($2==v)found=1; next} found' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no '## $version' section"
+            exit 1
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Would tag v$version and create its GitHub release with these notes:"
+            cat release-notes.md
+            exit 0
+          fi
+          git tag -a "v$version" -m "Release v$version"
+          git push origin "v$version"
+          gh release create "v$version" --title "v$version" --notes-file release-notes.md --verify-tag
+
       - name: Version, changelog, tag and GitHub release
-        if: inputs.publish_only == false
+        if: inputs.publish_only == false && inputs.first_release == false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

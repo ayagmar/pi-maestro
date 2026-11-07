@@ -1,32 +1,13 @@
 import { createHash } from "node:crypto";
+import { type Static } from "@earendil-works/pi-schema";
 import { createTask, normalizeTaskContract, planValidationMessage, validatePlan } from "./board.js";
 import { preflightWorkflow, type WorkflowPreflight } from "./preflight.js";
+import { describeInvalid, type exportedPlanSchema, exportedPlanValidator } from "./schemas.js";
 import { type Board, type MaestroConfig, type Task } from "./types.js";
 
 export const PLAN_EXPORT_VERSION = 1;
 
-interface ExportedPlanTask {
-  id: string;
-  title: string;
-  brief: string;
-  kind?: "investigation";
-  tier: string;
-  dependsOn: string[];
-  writePaths: string[];
-  successCriteria: string[];
-  verificationProfile?: string;
-  reviewPolicy?: "single" | "confirm" | "find-and-refute";
-  commitMessage?: string;
-  reviewGuidance?: string;
-  cancelled?: boolean;
-  discovery?: { allowedWritePaths: string[] };
-}
-
-interface ExportedPlan {
-  kind: "pi-maestro-plan";
-  version: 1;
-  tasks: ExportedPlanTask[];
-}
+type ExportedPlan = Static<typeof exportedPlanSchema>;
 
 export interface PlanTaskChange {
   id: string;
@@ -81,10 +62,9 @@ export function importPlan(
   } catch {
     throw new Error("Plan import is not valid JSON.");
   }
-  if (!isRecord(value) || value.kind !== "pi-maestro-plan" || value.version !== 1) {
-    throw new Error("Unsupported plan export kind or version.");
+  if (!exportedPlanValidator.check(value)) {
+    throw new Error(`Plan export is malformed at ${describeInvalid(exportedPlanValidator, value)}`);
   }
-  if (!Array.isArray(value.tasks)) throw new Error("Plan export tasks must be an array.");
   if (value.tasks.length > maxPlanTasks) {
     throw new Error(
       `Plan has ${value.tasks.length} tasks; configured maxPlanTasks is ${maxPlanTasks}.`
@@ -95,7 +75,9 @@ export function importPlan(
   const board: Board = { version: 1, nextTaskNumber: 1, planPending: true, tasks: [] };
   const originalIds: string[] = [];
   for (const raw of value.tasks) {
-    if (!isExportedTask(raw)) throw new Error("Plan export contains a malformed task.");
+    if (raw.discovery && raw.writePaths.length !== 0) {
+      throw new Error(`Plan discovery task ${raw.id} must use writePaths: [].`);
+    }
     if (raw.verificationProfile && !profiles.has(raw.verificationProfile)) {
       throw new Error(`Unknown verification profile: ${raw.verificationProfile}`);
     }
@@ -300,40 +282,4 @@ function profileSummary(preflight: WorkflowPreflight): string {
 
 function naturalCompare(left: string, right: string): number {
   return left.localeCompare(right, "en", { numeric: true, sensitivity: "base" });
-}
-
-function isExportedTask(value: unknown): value is ExportedPlanTask {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.title === "string" &&
-    typeof value.brief === "string" &&
-    (value.kind === undefined || value.kind === "investigation") &&
-    typeof value.tier === "string" &&
-    Array.isArray(value.dependsOn) &&
-    value.dependsOn.every((item) => typeof item === "string") &&
-    Array.isArray(value.writePaths) &&
-    value.writePaths.every((item) => typeof item === "string") &&
-    Array.isArray(value.successCriteria) &&
-    value.successCriteria.every((item) => typeof item === "string") &&
-    (value.verificationProfile === undefined || typeof value.verificationProfile === "string") &&
-    (value.reviewPolicy === undefined ||
-      value.reviewPolicy === "single" ||
-      value.reviewPolicy === "confirm" ||
-      value.reviewPolicy === "find-and-refute") &&
-    (value.commitMessage === undefined || typeof value.commitMessage === "string") &&
-    (value.reviewGuidance === undefined || typeof value.reviewGuidance === "string") &&
-    (value.cancelled === undefined || typeof value.cancelled === "boolean") &&
-    (value.discovery === undefined ||
-      (isRecord(value.discovery) &&
-        Object.keys(value.discovery).length === 1 &&
-        Array.isArray(value.discovery.allowedWritePaths) &&
-        value.discovery.allowedWritePaths.length > 0 &&
-        value.discovery.allowedWritePaths.every((path) => typeof path === "string") &&
-        value.writePaths.length === 0))
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

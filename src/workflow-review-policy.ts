@@ -38,17 +38,31 @@ type CriterionEvidence = NonNullable<ReviewLaunch["criterionEvidence"]>;
 export function effectiveRequiredApprovals(
   task: Task,
   policy: ReviewPolicy,
-  configuredApprovals: number
+  configuredApprovals: number,
+  /**
+   * What is about to be reviewed. Earlier approvals count only when they
+   * judged this exact candidate tree under this exact task fingerprint: a
+   * candidate fixed on the retained branch, or a changed review/verification
+   * contract, needs the configured panel again.
+   */
+  reviewed?: { candidateTree: string | undefined; taskFingerprint: string | undefined }
 ): number {
   if (policy !== "confirm") return policy === "find-and-refute" ? 2 : 1;
   const attempt = task.attempts.at(-1);
   const launches = attempt?.reviewLaunches ?? [];
-  if (launches.length === 0) return configuredApprovals;
+  if (launches.length === 0 || !reviewed?.taskFingerprint) return configuredApprovals;
   // Any genuine rejection on this attempt means the work is contested; the
   // full panel is exactly what that case needs.
   if (launches.some((launch) => launch.verdict === "request_changes")) return configuredApprovals;
   const approvals = new Set(
-    launches.filter((launch) => launch.verdict === "approve").map((launch) => launch.reviewerIndex)
+    launches
+      .filter(
+        (launch) =>
+          launch.verdict === "approve" &&
+          launch.taskFingerprint === reviewed.taskFingerprint &&
+          launch.candidateTree === reviewed.candidateTree
+      )
+      .map((launch) => launch.reviewerIndex)
   ).size;
   if (approvals < configuredApprovals) return configuredApprovals;
   return 1;

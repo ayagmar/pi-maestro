@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Streaming",
+      "brief": "work",
+      "tier": "standard",
+      "status": "ready_for_review",
+      "dependsOn": [],
+      "attempts": [],
+      "createdAt": 1794060729853,
+      "updatedAt": 1794060729853
+    }
+  ],
+  "revision": 3,
+  "activeDrive": {
+    "id": "drive-heartbeat",
+    "startedAt": 1,
+    "waiting": {
+      "until": 1794066129854,
+      "reason": "openai-codex 5h window exhausted; waiting until it resets at 01:44",
+      "taskIds": ["T1"]
+    }
+  }
+}

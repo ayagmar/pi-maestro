@@ -35,5 +35,8 @@ jobs:
       - name: Check
         run: pnpm run check
 
+      - name: Site builds with working links
+        run: pnpm run build && pnpm run site:check
+
       - name: Package contents
         run: npm pack --dry-run

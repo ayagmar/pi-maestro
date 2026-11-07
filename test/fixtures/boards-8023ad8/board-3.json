@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "nextTaskNumber": 1,
+  "activeDecision": {
+    "id": "decision-1",
+    "ownerSession": "/tmp/dead-session.jsonl",
+    "kind": "completed",
+    "taskIds": [],
+    "evidence": "Owner action is required",
+    "allowedInterventions": ["handoff"],
+    "createdAt": 1794060729855,
+    "deliveredAt": 1794060729855,
+    "resolution": {
+      "intervention": "resume",
+      "resolvedAt": 1794060729855
+    }
+  },
+  "tasks": [],
+  "revision": 2,
+  "activeDrive": {
+    "id": "drive-new",
+    "ownerSession": "/tmp/maestro-owner.jsonl",
+    "startedAt": 1794060729855
+  }
+}

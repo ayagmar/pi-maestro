@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -335,10 +338,10 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
   assert.match(validateConfig({ reviewCheapModel: 7 }) ?? "", /reviewCheapModel/);
   assert.equal(validateConfig({ reviewCheapModel: "anthropic/claude-haiku-4-5" }), undefined);
   assert.match(validateConfig({ cleanupCompletedTasks: "yes" }) ?? "", /boolean/);
-  assert.match(validateConfig({ livePanes: "yes" }) ?? "", /livePanes must be boolean/);
+  assert.match(validateConfig({ livePanes: "yes" }) ?? "", /\/livePanes: expected boolean/);
   assert.match(
     validateConfig({ detachedExecutors: "yes" }) ?? "",
-    /detachedExecutors must be boolean/
+    /\/detachedExecutors: expected boolean/
   );
   assert.match(validateConfig({ reviewRequiredApprovals: 1 }) ?? "", /reviewRequiredApprovals/);
   assert.match(validateConfig({ maxReviewerLaunches: 2.5 }) ?? "", /integer/);
@@ -358,7 +361,10 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
     validateConfig({ maxPlanTasks: 8, confirmationPlanTasks: 9 }) ?? "",
     /confirmationPlanTasks \(9\) cannot exceed maxPlanTasks \(8\)/
   );
-  assert.match(validateConfig({ tiers: { "": { thinking: "low" } } }) ?? "", /tier names/);
+  assert.match(
+    validateConfig({ tiers: { "": { thinking: "low" } } }) ?? "",
+    /\/tiers\/: invalid property name/
+  );
   assert.match(
     validateConfig({ tiers: { bad: { thinking: "extreme", fallbacks: [3] } } }) ?? "",
     /thinking/
@@ -378,17 +384,17 @@ test("validateConfig rejects malformed fields and accepts explicit zero partials
   );
   assert.match(
     validateConfig({ tiers: { bad: { thinking: "low", watchdogIdleSeconds: -1 } } }) ?? "",
-    /tier bad watchdogIdleSeconds/
+    /\/tiers\/bad\/watchdogIdleSeconds/
   );
   assert.match(
     validateConfig({ tiers: { bad: { thinking: "low", watchdogWarningTurns: "many" } } }) ?? "",
-    /tier bad watchdogWarningTurns/
+    /\/tiers\/bad\/watchdogWarningTurns/
   );
   assert.match(
     validateConfig({
       tiers: { bad: { thinking: "low", watchdogTerminationTurns: Number.POSITIVE_INFINITY } },
     }) ?? "",
-    /tier bad watchdogTerminationTurns/
+    /\/tiers\/bad\/watchdogTerminationTurns/
   );
 });
 
@@ -448,6 +454,28 @@ test("saveConfig writes the scope file", () => {
     assert.deepEqual(written, DEFAULT_CONFIG);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("saveConfig writes through a symlinked config file", () => {
+  if (process.platform === "win32") return;
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-link-"));
+  const dotfiles = mkdtempSync(join(tmpdir(), "maestro-config-dotfiles-"));
+  try {
+    const target = join(dotfiles, "maestro.json");
+    writeFileSync(target, "{}\n");
+    mkdirSync(join(cwd, ".pi"));
+    const link = join(cwd, ".pi", "maestro.json");
+    symlinkSync(target, link);
+
+    saveConfig("project", cwd, DEFAULT_CONFIG);
+
+    assert.equal(lstatSync(link).isSymbolicLink(), true);
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf-8")), DEFAULT_CONFIG);
+    assert.deepEqual(readdirSync(dotfiles), ["maestro.json"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dotfiles, { recursive: true, force: true });
   }
 });
 
@@ -590,6 +618,48 @@ test("the thinking ladder matches pi and accepts its highest level", () => {
   );
   assert.match(
     validateConfig({ ...DEFAULT_CONFIG, tiers: { standard: { thinking: "ultra" } } }) ?? "",
-    /thinking must be one of/
+    /\/tiers\/standard\/thinking: expected one of/
   );
+});
+
+test("a session reading the config while another saves it never sees a half-written file", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-concurrent-save-"));
+  try {
+    const config = { ...DEFAULT_CONFIG, maxRunCost: 12 };
+    saveConfig("project", cwd, config);
+    // A second pi session saving settings repeatedly in another process.
+    const configModule = new URL("../src/config.ts", import.meta.url).href;
+    const writer = spawn(
+      process.execPath,
+      [
+        "--import=tsx",
+        "--input-type=module",
+        "-e",
+        `const { saveConfig, DEFAULT_CONFIG } = await import(${JSON.stringify(configModule)});
+         const end = Date.now() + 1500;
+         let cost = 12;
+         while (Date.now() < end) saveConfig("project", ${JSON.stringify(cwd)}, { ...DEFAULT_CONFIG, maxRunCost: cost++ });`,
+      ],
+      { stdio: "ignore" }
+    );
+    const exited = new Promise((resolve) => writer.once("exit", resolve));
+    let reads = 0;
+    let running = true;
+    void exited.then(() => {
+      running = false;
+    });
+    while (running) {
+      assert.ok(loadConfig(cwd).maxRunCost >= 12, "a torn read fell back to defaults");
+      reads += 1;
+      if (reads % 50 === 0) await new Promise((resolve) => setImmediate(resolve));
+    }
+    const directory = join(cwd, ".pi");
+    assert.deepEqual(
+      readdirSync(directory).filter((name) => /\.(corrupt|invalid|tmp)-/.test(name)),
+      []
+    );
+    assert.ok(existsSync(join(directory, "maestro.json")));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

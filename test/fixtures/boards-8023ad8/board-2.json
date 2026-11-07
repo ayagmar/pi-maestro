@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Test task",
+      "brief": "Do the work",
+      "tier": "standard",
+      "status": "changes_requested",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 0,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060730489,
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cost": 0.01,
+            "turns": 1
+          },
+          "touchedFiles": [],
+          "finalReport": "executor completed the work",
+          "executionFingerprint": "f56fe70fd7582b7d66469c6db0523da4c2f29a991fd2722b11d944a4eebec238",
+          "reviewLaunches": [
+            {
+              "id": "T1-review-1-1-1",
+              "reviewerIndex": 1,
+              "role": "single",
+              "costTier": "economy",
+              "startedAt": 1794060730490,
+              "usage": {
+                "input": 1,
+                "output": 2,
+                "cost": 0.01,
+                "turns": 1
+              },
+              "promptCharacters": 1477,
+              "promptApproximateTokens": 370,
+              "promptSections": [
+                {
+                  "name": "role",
+                  "characters": 210,
+                  "omitted": false
+                },
+                {
+                  "name": "Task T1: Test task",
+                  "characters": 34,
+                  "omitted": false
+                },
+                {
+                  "name": "Success criteria",
+                  "characters": 40,
+                  "omitted": false
+                },
+                {
+                  "name": "Executor report",
+                  "characters": 46,
+                  "omitted": false
+                },
+                {
+                  "name": "Success criteria",
+                  "characters": 285,
+                  "omitted": false
+                },
+                {
+                  "name": "Stop rule",
+                  "characters": 306,
+                  "omitted": false
+                },
+                {
+                  "name": "Verdict",
+                  "characters": 544,
+                  "omitted": false
+                }
+              ],
+              "logFile": "stub.jsonl",
+              "exitCode": 0,
+              "model": "cheap/reviewer",
+              "provider": "cheap",
+              "finalReport": "All good.\nVERDICT: REQUEST_CHANGES\n1. broken",
+              "verdict": "request_changes"
+            }
+          ],
+          "reviewUsage": {
+            "input": 1,
+            "output": 2,
+            "cost": 0.01,
+            "turns": 1
+          },
+          "reviewModel": "cheap/reviewer",
+          "reviewProvider": "cheap",
+          "reviewReport": "All good.\nVERDICT: REQUEST_CHANGES\n1. broken",
+          "reviewConvergence": {
+            "policy": "single",
+            "status": "changes_requested",
+            "requiredApprovals": 1,
+            "actualApprovals": 0,
+            "reviewerCount": 1,
+            "summary": "1. broken",
+            "decidedAt": 1794060730490
+          },
+          "reviewNotes": "1. broken",
+          "failureReason": {
+            "kind": "reviewer_rejection",
+            "message": "1. broken",
+            "retryable": true
+          }
+        }
+      ],
+      "createdAt": 1794060730489,
+      "updatedAt": 1794060730491,
+      "reviewPolicy": "single",
+      "successCriteria": ["observable result"],
+      "reviewNotes": "1. broken",
+      "findings": [
+        {
+          "fingerprint": "f526795c9539",
+          "message": "broken",
+          "status": "open",
+          "firstAttempt": 0,
+          "lastAttempt": 0
+        }
+      ],
+      "reviewRejections": 1,
+      "reviewStagnantRejections": 0
+    }
+  ],
+  "revision": 8
+}

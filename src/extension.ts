@@ -3,6 +3,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
   getMarkdownTheme,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
@@ -34,8 +35,8 @@ import { notify } from "./handoff.js";
 import { LivePaneController } from "./live-pane-controller.js";
 import { manuallyApproveTask } from "./manual-approval.js";
 import { showPlanReview } from "./plan-review-controller.js";
-import { createRenderThrottle } from "./render-scheduler.js";
 import { type QuotaStatusResolver } from "./provider-quota.js";
+import { createRenderThrottle } from "./render-scheduler.js";
 import { startExecutor as defaultStartExecutor } from "./runner.js";
 import { SessionNavigator } from "./session-navigator.js";
 import { formatClock, formatRelative, projectStatus } from "./status.js";
@@ -56,6 +57,25 @@ import { showWorkflowBrowser } from "./workflow-browser.js";
 
 export { formatPlanReviewMarkdown } from "./plan-review.js";
 export { scrollableTextOffset } from "./scrollable-viewer.js";
+
+/**
+ * Report and review cards the human opens from the dashboard or board. They
+ * are session entries, not messages, so browsing them never enters the
+ * model's context; orchestrator kickoff and decisions stay messages.
+ */
+const REPORT_ENTRY_TYPE = "maestro-report";
+
+interface ReportCard {
+  markdown: string;
+}
+
+function maestroCard(theme: Theme, markdown: string): Container | Text {
+  if (!markdown) return new Text(theme.fg("accent", "⚡ maestro"), 0, 0);
+  const container = new Container();
+  container.addChild(new Text(theme.fg("accent", "⚡ maestro"), 0, 0));
+  container.addChild(new Markdown(markdown, 0, 0, getMarkdownTheme()));
+  return container;
+}
 
 export interface MaestroDependencies {
   startExecutor: typeof defaultStartExecutor;
@@ -129,7 +149,7 @@ export default function maestro(
     try {
       notify(
         ctx,
-        `Board was corrupt and quarantined to ${quarantined}. Restore an archive with /maestro replay.`,
+        `Board was corrupt and quarantined to ${quarantined.file} (${quarantined.reason}). Restore an archive with /maestro replay.`,
         "warning"
       );
     } catch {
@@ -471,26 +491,25 @@ export default function maestro(
     });
   }
 
-  function showTaskReport(cwd: string, taskId: string): void {
-    const task = findTask(loadBoard(cwd), taskId);
-    if (!task) return;
-    const report = lastReport(task) ?? "(no report yet)";
-    pi.sendMessage({
-      customType: MESSAGE_TYPE,
-      content: `## ${task.id} ${task.title} — last report\n\n${report}`,
-      display: true,
-    });
+  // pi renders custom entries only in the TUI; an RPC client would get a raw
+  // event it may not handle, so everything else receives a notification.
+  function showReportCard(ctx: ExtensionContext, markdown: string): void {
+    if (ctx.mode === "tui") pi.appendEntry<ReportCard>(REPORT_ENTRY_TYPE, { markdown });
+    else notify(ctx, markdown);
   }
 
-  function showTaskReview(cwd: string, taskId: string): void {
-    const task = findTask(loadBoard(cwd), taskId);
+  function showTaskReport(ctx: ExtensionContext, taskId: string): void {
+    const task = findTask(loadBoard(ctx.cwd), taskId);
+    if (!task) return;
+    const report = lastReport(task) ?? "(no report yet)";
+    showReportCard(ctx, `## ${task.id} ${task.title} — last report\n\n${report}`);
+  }
+
+  function showTaskReview(ctx: ExtensionContext, taskId: string): void {
+    const task = findTask(loadBoard(ctx.cwd), taskId);
     if (!task) return;
     const review = task.attempts.at(-1)?.reviewReport ?? "(no review yet)";
-    pi.sendMessage({
-      customType: MESSAGE_TYPE,
-      content: `## ${task.id} ${task.title} — review verdict\n\n${review}`,
-      display: true,
-    });
+    showReportCard(ctx, `## ${task.id} ${task.title} — review verdict\n\n${review}`);
   }
 
   async function showMaestroHome(ctx: ExtensionCommandContext): Promise<string | null> {
@@ -557,14 +576,12 @@ export default function maestro(
 
   // ------------------------------------------------------------ rendering
 
-  pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, theme) => {
-    const content = typeof message.content === "string" ? message.content : "";
-    if (!content) return new Text(theme.fg("accent", "⚡ maestro"), 0, 0);
-    const container = new Container();
-    container.addChild(new Text(theme.fg("accent", "⚡ maestro"), 0, 0));
-    container.addChild(new Markdown(content, 0, 0, getMarkdownTheme()));
-    return container;
-  });
+  pi.registerMessageRenderer(MESSAGE_TYPE, (message, _options, theme) =>
+    maestroCard(theme, typeof message.content === "string" ? message.content : "")
+  );
+  pi.registerEntryRenderer<ReportCard>(REPORT_ENTRY_TYPE, (entry, _options, theme) =>
+    maestroCard(theme, entry.data?.markdown ?? "")
+  );
 
   registerMaestroLifecycle(pi, {
     state: lifecycleState,

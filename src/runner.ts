@@ -27,9 +27,14 @@ import {
   billedUsage,
   boundedBytes,
   boundedText,
+  CHILD_CANCEL_ERROR,
   compactEvent,
+  EXIT_SETTLE_DRAIN_MS,
+  eventShapeError,
   extractText,
   HANDLED_PROMPT_ERROR,
+  MAX_MALFORMED_DIAGNOSTICS,
+  malformedEventDiagnostic,
   promptHandledWithoutRun,
   WATCHDOG_STEER_MESSAGES,
 } from "./detached-policy.mjs";
@@ -46,6 +51,22 @@ const VERIFICATION_KILL_GRACE_MS = 250;
 type LogStream = Writable & { end(callback?: () => void): unknown };
 
 export type RunFailureCause = "provider" | "process" | "user_abort" | "cost_cap" | "stalled";
+
+/**
+ * A zombie has exited but still answers signals until its parent reaps it,
+ * which in a container without an init process may be never. Linux only;
+ * elsewhere the answer is false and callers keep their liveness check.
+ */
+export function processIsZombie(pid: number): boolean {
+  if (process.platform !== "linux") return false;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    // Field 3 (state) follows the "(comm) " prefix; comm may itself hold ")".
+    return stat[stat.lastIndexOf(")") + 2] === "Z";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Kernel-reported process start identity, so a recycled PID cannot masquerade
@@ -125,6 +146,9 @@ function signalProcessTree(
     // The process tree already exited.
   }
 }
+
+/** The cost-cap source of a launch capped at its share of a run budget split across parallel launches. */
+export const FAIR_SHARE_CAP_SOURCE = "fair share of the remaining run budget (maxRunCost)";
 
 export interface VerificationResult {
   ok: boolean;
@@ -293,6 +317,13 @@ export function classifyFailure(
     // remainder rather than maxCostPerTask, the remedy is the budget: a real
     // board was told to raise maxCostPerTask while $1.09 of run budget was the
     // actual wall, and burned two more attempts against it.
+    if (message.includes(FAIR_SHARE_CAP_SOURCE)) {
+      return {
+        kind: "cost_cap",
+        message: `${message}. Parallel launches split the remaining run budget, and this one used its share; the drive retries it without using up an attempt.`,
+        retryable: true,
+      };
+    }
     const budgetBound = message.includes("remaining run budget");
     return {
       kind: "cost_cap",
@@ -474,6 +505,8 @@ export interface JsonEvent {
   /** RPC response payload: get_state carries sessionFile, prompt carries disposition. */
   data?: { sessionFile?: string; disposition?: string };
   toolName?: string;
+  /** agent_settled (pi >= 1.1): the run ended by cancellation inside the child. */
+  aborted?: boolean;
   args?: Record<string, unknown> | null;
   message?: {
     role?: string;
@@ -563,7 +596,7 @@ export function touchedFile(event: JsonEvent, cwd: string): string | undefined {
  * executor mid-run via stdin commands. Its transcript is nested beneath the
  * owner session's directory so usage scanners retain it without
  * adding the child to Pi's ordinary /resume list. Every stdout event is also
- * mirrored to stateDir/logs/<runId>.jsonl for live tailing.
+ * mirrored to stateDir/logs/<runId>.<transportId>.jsonl for live tailing.
  */
 export interface StartExecutorOptions {
   stateDir: string;
@@ -621,7 +654,12 @@ export interface StartExecutorOptions {
 }
 
 export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
-  const logFile = join(options.stateDir, LOGS_DIR, `${options.runId}.jsonl`);
+  // Run ids repeat (task numbering restarts on a new board, retries reuse
+  // review launch numbers), so every raw launch gets its own transport
+  // namespace: a reused name let a new launch read an earlier launch's
+  // terminal record, or an old supervisor write into the new launch's files.
+  const transportId = randomUUID().slice(0, 8);
+  const logFile = join(options.stateDir, LOGS_DIR, `${options.runId}.${transportId}.jsonl`);
   ensurePrivateDirectory(options.stateDir);
   ensurePrivateDirectory(dirname(logFile));
 
@@ -674,6 +712,7 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
 
   const invocation = piInvocation(args);
   if (options.detached && process.platform !== "win32") {
+    attempt.transportId = transportId;
     return startDetachedExecutor(options, attempt, invocation);
   }
   const grouped = process.platform !== "win32";
@@ -693,6 +732,7 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
 
   const kill = (signal: NodeJS.Signals) => signalProcessTree(proc, signal, grouped);
   let abortCause: "user_abort" | "cost_cap" | "stalled" | undefined;
+  let childAborted = false;
   const send = (command: Record<string, unknown>) => {
     if (proc.stdin.writable && !proc.stdin.writableEnded && !proc.stdin.destroyed) {
       proc.stdin.write(`${JSON.stringify(command)}\n`);
@@ -826,15 +866,26 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       options.signal?.removeEventListener("abort", abort);
     };
 
+    let malformedRecords = 0;
     const processLine = (line: string) => {
       if (!line.trim()) return;
-      let event: JsonEvent;
+      let parsed: unknown;
       try {
-        event = JSON.parse(line) as JsonEvent;
+        parsed = JSON.parse(line);
       } catch {
         if (options.logEvents !== "compact") persistLogLine(line);
         return;
       }
+      const shapeError = eventShapeError(parsed);
+      if (shapeError) {
+        if (options.logEvents !== "compact") persistLogLine(line);
+        malformedRecords += 1;
+        if (malformedRecords <= MAX_MALFORMED_DIAGNOSTICS) {
+          persistLogLine(malformedEventDiagnostic(shapeError));
+        }
+        return;
+      }
+      const event = parsed as JsonEvent;
       if (options.logEvents !== "compact" || compactEvent(event)) persistLogLine(line);
       lastEventAt = Date.now();
 
@@ -952,6 +1003,7 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       }
 
       if (event.type === "agent_settled") {
+        if (event.aborted === true) childAborted = true;
         // No retry, compaction, or queued continuation remains. Closing stdin
         // now triggers RPC shutdown and session flush.
         if (!proc.stdin.writableEnded) proc.stdin.end();
@@ -983,6 +1035,7 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
     };
 
     proc.stdout.on("data", (data: Buffer) => {
+      if (settled) return;
       buffer += stdoutDecoder.write(data);
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
@@ -993,14 +1046,24 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       stderr = `${stderr}${data.toString()}`.slice(-16_000);
     });
 
-    proc.on("close", (code, signal) => {
+    let drainTimer: NodeJS.Timeout | undefined;
+    const settle = (code: number | null, signal: NodeJS.Signals | null, viaDrain: boolean) => {
       if (settled) return;
       settled = true;
       cleanup();
+      if (drainTimer) clearTimeout(drainTimer);
       buffer += stdoutDecoder.end();
       if (buffer.trim()) processLine(buffer);
       result.exitCode = code ?? 1;
-      if ((abortCause || logWriteError) && process.platform !== "win32") kill("SIGKILL");
+      // The root's exit does not prove its process group is gone: a drained
+      // settle means a descendant still holds the pipes.
+      if ((viaDrain || abortCause || logWriteError) && process.platform !== "win32") {
+        kill("SIGKILL");
+      }
+      if (viaDrain) {
+        proc.stdout.destroy();
+        proc.stderr.destroy();
+      }
       if (code === null && !result.errorMessage && !abortCause) {
         result.errorMessage = `executor terminated by ${signal ?? "an unknown signal"}`;
         result.failureCause = "process";
@@ -1019,7 +1082,19 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       attempt.finalReport = result.finalReport;
       // A cost-cap abort carries an errorMessage and must land as a failure
       // (retryable, visible reason), not as a user cancellation.
+      // An extension inside the child can cancel the run (ctx.abort()) after a
+      // successful message; pi then settles with aborted and may exit 0. Nobody
+      // asked Maestro to stop, so that is a retryable failure, never a completed
+      // launch or a cancelled task, unless Maestro itself already stopped the
+      // run for a cost cap, stall, or log failure.
       result.aborted = abortCause === "user_abort";
+      if (childAborted && !abortCause && !logWriteError) {
+        if (!result.errorMessage) {
+          result.errorMessage = CHILD_CANCEL_ERROR;
+          result.failureCause = "process";
+        }
+        if (result.exitCode === 0) result.exitCode = 1;
+      }
       // A stall already classified as provider silence keeps that cause; the
       // kill mechanics were the same but the accountability is not.
       if (abortCause && !(abortCause === "stalled" && result.failureCause === "provider")) {
@@ -1042,7 +1117,15 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       attempt.endedAt = Date.now();
       attempt.exitCode = result.exitCode;
       resolveAfterLog(() => resolve(result));
+    };
+    // "close" waits for every stdio pipe. A tool-spawned descendant that
+    // inherited pi's stdout and outlived it would hold the outcome, the task
+    // claim and the drive forever, so drain briefly after exit and settle.
+    proc.on("exit", (code, signal) => {
+      if (settled) return;
+      drainTimer = setTimeout(() => settle(code, signal, true), EXIT_SETTLE_DRAIN_MS);
     });
+    proc.on("close", (code, signal) => settle(code, signal, false));
 
     proc.on("error", (error) => {
       if (settled) return;
@@ -1111,6 +1194,7 @@ function startDetachedExecutor(
       eventFile: attempt.logFile,
       stderrFile,
       exitFile,
+      transportId: attempt.transportId,
       logEvents: options.logEvents ?? "compact",
       maxLogBytes: options.maxLogBytes ?? 0,
       maxStderrBytes: 16_000,
@@ -1208,6 +1292,8 @@ function readAppendedLines(file: string, state: IncrementalLogState): string[] {
 interface DetachedTerminalState extends Partial<RunOutcome> {
   version: 1;
   sessionFile?: string;
+  /** The launch that wrote this record; absent from supervisors predating it. */
+  transportId?: string;
 }
 
 function monitorDetachedExecutor(
@@ -1370,23 +1456,34 @@ function monitorDetachedExecutor(
       // polling still settles the attempt.
       return undefined;
     }
+    let value: DetachedTerminalState | undefined;
     try {
-      const value = JSON.parse(text) as DetachedTerminalState;
-      return value.version === 1 && typeof value.exitCode === "number" ? value : undefined;
+      const parsed = JSON.parse(text) as DetachedTerminalState;
+      value = parsed?.version === 1 && typeof parsed.exitCode === "number" ? parsed : undefined;
     } catch {
       const code = Number.parseInt(text, 10);
-      return Number.isFinite(code) ? { version: 1, exitCode: code } : undefined;
+      value = Number.isFinite(code) ? { version: 1, exitCode: code } : undefined;
     }
+    // A launch that knows its identity accepts only its own record; legacy
+    // attempts predate the identity and keep reading their stored file.
+    if (attempt.transportId !== undefined && value?.transportId !== attempt.transportId) {
+      return undefined;
+    }
+    return value;
   };
   const poll = () => {
     try {
       for (const line of readAppendedLines(attempt.logFile, tail)) {
         if (!line.trim()) continue;
+        let parsed: unknown;
         try {
-          processEvent(JSON.parse(line) as JsonEvent);
+          parsed = JSON.parse(line);
         } catch {
           // Ignore malformed records; partial records stay buffered for the next poll.
+          continue;
         }
+        // The supervisor already recorded a diagnostic for a malformed record.
+        if (eventShapeError(parsed) === undefined) processEvent(parsed as JsonEvent);
       }
     } catch {
       // The launcher may not have created its event file yet.

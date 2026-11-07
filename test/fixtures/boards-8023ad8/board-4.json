@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Test task",
+      "brief": "Do the work",
+      "tier": "standard",
+      "status": "ready_for_review",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 1,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060731554,
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cost": 0,
+            "turns": 0
+          },
+          "touchedFiles": [],
+          "finalReport": "implemented",
+          "consumesAttempt": true,
+          "reviewReport": "VERDICT: APPROVE\nPrior reviewer evidence",
+          "reviewSessionFile": "/tmp/prior-review.jsonl",
+          "reviewModel": "prior-model",
+          "reviewProvider": "prior-provider",
+          "reviewUsage": {
+            "input": 3,
+            "output": 2,
+            "cost": 0.01,
+            "turns": 1
+          },
+          "failureReason": {
+            "kind": "reviewer_failure",
+            "message": "review provider failed",
+            "retryable": true
+          },
+          "executionFingerprint": "df15acd75fb7eaa3d5ed63eb5064a27b04f153ac4da2235feed8814d1b01f32f",
+          "reviewConvergenceHistory": [
+            {
+              "policy": "single",
+              "status": "operational_failure",
+              "requiredApprovals": 1,
+              "actualApprovals": 0,
+              "reviewerCount": 1,
+              "summary": "review provider failed",
+              "decidedAt": 2
+            }
+          ],
+          "reviewLaunches": [
+            {
+              "id": "legacy-t1-review-1",
+              "reviewerIndex": 1,
+              "role": "single",
+              "startedAt": 1794060731554,
+              "verdict": "approve",
+              "model": "prior-model",
+              "provider": "prior-provider",
+              "sessionFile": "/tmp/prior-review.jsonl",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cost": 0.01,
+                "turns": 1
+              },
+              "finalReport": "VERDICT: APPROVE\nPrior reviewer evidence"
+            }
+          ]
+        }
+      ],
+      "createdAt": 1794060731554,
+      "updatedAt": 1794060731554,
+      "dispatchClaim": {
+        "id": "3531795-1794060731554-yhn4n12ucu",
+        "kind": "review",
+        "claimedAt": 1794060731554,
+        "expiresAt": 1794060761554
+      }
+    }
+  ],
+  "revision": 2
+}

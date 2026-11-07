@@ -1,108 +1,87 @@
+/**
+ * The documentation site renders the repository's markdown files directly, so
+ * the files are the single source of truth. This list only adds navigation
+ * metadata. A slug is the lowercased file name, which is also how
+ * scripts/rehype-docs.mjs routes links between the files.
+ */
 export type DocPage = {
   slug: string;
   title: string;
   description: string;
   group: string;
-  content: string[];
+  /** Repository-relative markdown source. */
+  file: string;
 };
 
 export const docs: DocPage[] = [
   {
     slug: "getting-started",
     title: "Getting started",
-    description: "Install Maestro, check the environment, and run your first reviewed goal.",
+    description: "Install Maestro, check the environment, and run a first goal.",
     group: "Start here",
-    content: [
-      "Install Maestro with pi install, then open the project control center with /maestro.",
-      "A first run is safest when the task brief, write scope, success criteria, and verification command are explicit.",
-    ],
+    file: "docs/getting-started.md",
   },
   {
     slug: "how-it-works",
     title: "How it works",
-    description: "Understand the advisor, executor, reviewer, and human control loop.",
+    description: "Roles, task lifecycle, review, failures, and isolation.",
     group: "Start here",
-    content: [
-      "The current pi session plans and supervises. Every delegated task gets a fresh executor context, then an independent reviewer checks the result before approval.",
-      "The durable board is the single source of truth; UI status is a projection of that state.",
-    ],
+    file: "docs/how-it-works.md",
+  },
+  {
+    slug: "commands",
+    title: "Command reference",
+    description: "Every /maestro command, the dashboard keys, and the cost reports.",
+    group: "Use",
+    file: "docs/commands.md",
   },
   {
     slug: "configuration",
     title: "Configuration",
-    description:
-      "Tune models, concurrency, review policy, worktrees, budgets, and verification profiles.",
-    group: "Operate",
-    content: [
-      "Configuration resolves from defaults, operator-owned user settings, then non-executable project settings.",
-      "Verification commands are trusted operator configuration only. Repository configuration can select a known profile but cannot define commands.",
-    ],
+    description: "Settings, presets, tiers, budgets, and trusted verification profiles.",
+    group: "Use",
+    file: "docs/configuration.md",
   },
   {
     slug: "operations",
-    title: "Operations & recovery",
-    description: "Pause, resume, inspect, retry, recover, and reconcile without losing evidence.",
-    group: "Operate",
-    content: [
-      "Maestro preserves board state, attempts, logs, sessions, and checkpoint branches across interruptions.",
-      "Use timeline, board, doctor, and reconcile before changing state.",
-    ],
+    title: "Operations and recovery",
+    description: "What each drive stop means and the safe next step.",
+    group: "Use",
+    file: "docs/operations.md",
   },
   {
     slug: "architecture",
     title: "Architecture",
-    description: "The ownership boundaries and correctness transactions behind the extension.",
-    group: "Build with Maestro",
-    content: [
-      "Deterministic policy, persisted state, runtime adapters, and UI stay separate.",
-      "The composition entry is deliberately thin; board, runner, Git, execution, review, and integration each have one owner.",
-    ],
+    description: "Module ownership and the invariants the runtime keeps.",
+    group: "Project",
+    file: "docs/architecture.md",
   },
   {
     slug: "security",
-    title: "Security & trust",
-    description: "Know what Maestro isolates, what it does not, and how to report a vulnerability.",
-    group: "Build with Maestro",
-    content: [
-      "Executors and verification commands run with the current user's permissions.",
-      "Git worktrees provide isolation and recovery, not a security sandbox.",
-    ],
+    title: "Security",
+    description:
+      "Supported versions, how to report a vulnerability, and what Maestro does not isolate.",
+    group: "Project",
+    file: "SECURITY.md",
   },
   {
     slug: "contributing",
     title: "Contributing",
-    description: "Repository layout, verification expectations, and safe contract changes.",
-    group: "Build with Maestro",
-    content: [
-      "Keep modules readable and local. Behavioral tests are required for bug fixes.",
-      "Run the full check twice and confirm both runs report the same test count.",
-    ],
-  },
-  {
-    slug: "command-reference",
-    title: "Command reference",
-    description: "The complete human-operated command surface for planning, driving, and recovery.",
-    group: "Reference",
-    content: [
-      "Slash commands provide operational controls without expanding the model-facing API.",
-      "Dashboard shortcuts and command families cover plan, drive, inspection, recovery, recipes, workflows, and configuration.",
-    ],
+    description: "Repository layout, checks, test layers, and how releases are cut.",
+    group: "Project",
+    file: "CONTRIBUTING.md",
   },
   {
     slug: "changelog",
     title: "Changelog",
-    description: "Release notes for the 0.1.x line.",
-    group: "Reference",
-    content: [
-      "0.1.0 introduced reviewed planning, fresh-context RPC executors, fallbacks, worktrees, dashboard evidence, and recovery controls.",
-    ],
+    description: "Release notes.",
+    group: "Project",
+    file: "CHANGELOG.md",
   },
 ];
 
 export function getDoc(slug: string): DocPage {
   const doc = docs.find((item) => item.slug === slug);
   if (doc) return doc;
-  const fallback = docs[0];
-  if (!fallback) throw new Error("Documentation index is empty");
-  return fallback;
+  throw new Error(`Unknown documentation page: ${slug}`);
 }

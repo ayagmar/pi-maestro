@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "nextTaskNumber": 2,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Test task",
+      "brief": "Do the work",
+      "tier": "standard",
+      "status": "ready_for_review",
+      "dependsOn": [],
+      "attempts": [
+        {
+          "index": 0,
+          "logFile": "stub.jsonl",
+          "thinking": "low",
+          "startedAt": 1794060730505,
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cost": 0,
+            "turns": 0
+          },
+          "touchedFiles": [],
+          "finalReport": "executor completed the work",
+          "executionFingerprint": "d965bdc3bf0034303b6d85832722f8424e68852aa14f5dedb7fe252a39b524d0",
+          "reviewLaunches": [
+            {
+              "id": "T1-review-1-1-1",
+              "reviewerIndex": 1,
+              "role": "confirmer",
+              "startedAt": 1794060730505,
+              "usage": {
+                "input": 1,
+                "output": 2,
+                "cost": 0.01,
+                "turns": 1
+              },
+              "promptCharacters": 1917,
+              "promptApproximateTokens": 480,
+              "promptSections": [
+                {
+                  "name": "role",
+                  "characters": 210,
+                  "omitted": false
+                },
+                {
+                  "name": "Task T1: Test task",
+                  "characters": 34,
+                  "omitted": false
+                },
+                {
+                  "name": "Success criteria",
+                  "characters": 40,
+                  "omitted": false
+                },
+                {
+                  "name": "Executor report",
+                  "characters": 46,
+                  "omitted": false
+                },
+                {
+                  "name": "Success criteria",
+                  "characters": 285,
+                  "omitted": false
+                },
+                {
+                  "name": "Stop rule",
+                  "characters": 306,
+                  "omitted": false
+                },
+                {
+                  "name": "Verdict",
+                  "characters": 984,
+                  "omitted": false
+                }
+              ],
+              "logFile": "stub.jsonl",
+              "exitCode": 1,
+              "model": "primary",
+              "errorMessage": "rate limit exceeded",
+              "failureReason": {
+                "kind": "provider_failure",
+                "message": "rate limit exceeded",
+                "retryable": true
+              }
+            },
+            {
+              "id": "T1-review-1-1-2",
+              "reviewerIndex": 1,
+              "role": "confirmer",
+              "startedAt": 1794060730506,
+              "usage": {
+                "input": 1,
+                "output": 2,
+                "cost": 0.01,
+                "turns": 1
+              },
+              "promptCharacters": 1917,
+              "promptApproximateTokens": 480,
+              "promptSections": [
+                {
+                  "name": "role",
+                  "characters": 210,
+                  "omitted": false
+                },
+                {
+                  "name": "Task T1: Test task",
+                  "characters": 34,
+                  "omitted": false
+                },
+                {
+                  "name": "Success criteria",
+                  "characters": 40,
+                  "omitted": false
+                },
+                {
+                  "name": "Executor report",
+                  "characters": 46,
+                  "omitted": false
+                },
+                {
+                  "name": "Success criteria",
+                  "characters": 285,
+                  "omitted": false
+                },
+                {
+                  "name": "Stop rule",
+                  "characters": 306,
+                  "omitted": false
+                },
+                {
+                  "name": "Verdict",
+                  "characters": 984,
+                  "omitted": false
+                }
+              ],
+              "logFile": "stub.jsonl",
+              "exitCode": 0,
+              "model": "fallback",
+              "finalReport": "CRITERION 1: PASS — verified independently\nVERDICT: APPROVE",
+              "criterionEvidence": [
+                {
+                  "criterion": 1,
+                  "passed": true,
+                  "evidence": "verified independently"
+                }
+              ],
+              "verdict": "approve"
+            }
+          ]
+        }
+      ],
+      "createdAt": 1794060730505,
+      "updatedAt": 1794060730506,
+      "reviewPolicy": "confirm",
+      "successCriteria": ["observable result"],
+      "dispatchClaim": {
+        "id": "3531795-1794060730505-tdb6gpj49ta",
+        "kind": "review",
+        "claimedAt": 1794060730505,
+        "expiresAt": 1794060760505
+      }
+    }
+  ],
+  "revision": 8
+}

@@ -48,12 +48,18 @@ export function requestHandoffCommand(pi: Pick<ExtensionAPI, "sendUserMessage">)
   pi.sendUserMessage(`/${COMMAND} handoff`, { deliverAs: "followUp", expandPromptTemplates: true });
 }
 
+/**
+ * Shows `message` to the user. Print and JSON modes have no UI (`hasUI` is
+ * false) and pi drops notifications there, so the message goes to stderr,
+ * which keeps JSON stdout clean. RPC has a UI and keeps its notifications.
+ */
 export function notify(
   ctx: ExtensionContext,
   message: string,
   level: "info" | "warning" | "error" = "info"
 ): void {
   if (ctx.hasUI) ctx.ui.notify(message, level);
+  else console.error(message);
 }
 
 export async function runHandoff(options: {
