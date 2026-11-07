@@ -12,11 +12,24 @@ export function claimDispatchLifecycle(
   if (!dispatch?.claimed) return { dispatch };
 
   let leaseMs: number | undefined;
+  let releasing = false;
+  let closed = false;
+  const release = () => {
+    if (closed) return;
+    releasing = true;
+    releaseTaskDispatch(cwd, taskId, dispatch.claimId);
+    closed = true;
+    clearInterval(renewal);
+  };
   const renewal = setInterval(() => {
-    renewTaskDispatch(cwd, taskId, dispatch.claimId, leaseMs);
+    try {
+      if (releasing) release();
+      else renewTaskDispatch(cwd, taskId, dispatch.claimId, leaseMs);
+    } catch {
+      // A contended or failing board write is retried on the next tick.
+    }
   }, 10_000);
   renewal.unref();
-  let closed = false;
 
   return {
     dispatch,
@@ -24,11 +37,6 @@ export function claimDispatchLifecycle(
       leaseMs = durationMs;
       renewTaskDispatch(cwd, taskId, dispatch.claimId, durationMs);
     },
-    release: () => {
-      if (closed) return;
-      closed = true;
-      clearInterval(renewal);
-      releaseTaskDispatch(cwd, taskId, dispatch.claimId);
-    },
+    release,
   };
 }

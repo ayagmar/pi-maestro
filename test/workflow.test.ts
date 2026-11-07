@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test from "node:test";
+import { basename, join } from "node:path";
+import test, { mock } from "node:test";
 import { captureApprovedProvenance, taskFingerprint } from "../src/artifact-policy.js";
 import {
   createTask,
@@ -37,6 +45,8 @@ import {
   snapshot,
   taskCommitMessage,
 } from "../src/workflow.js";
+import { claimDispatchLifecycle } from "../src/workflow-dispatch.js";
+import { settleReattachedDetachedAttempt } from "../src/workflow-execution.js";
 import {
   reviewEvidence,
   reviewerLaunchPlan,
@@ -129,6 +139,24 @@ function recordExecutionFingerprint(
 
 const onUpdate = () => {};
 const trackRun = () => () => {};
+
+/** The next board save fails at the filesystem, as a full disk or a lost mount would. */
+function failNextBoardSave(): () => void {
+  const realRename = fs.renameSync;
+  let armed = true;
+  const rename = mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+    if (armed && basename(String(to)) === "board.json") {
+      armed = false;
+      throw new Error("disk full");
+    }
+    realRename(from, to);
+  });
+  syncBuiltinESMExports();
+  return () => {
+    rename.mock.restore();
+    syncBuiltinESMExports();
+  };
+}
 
 test("artifact gates reject empty work, test deletion, config narrowing, and conflict markers", () => {
   const { task } = boardWithTask("ready_for_review");
@@ -1187,6 +1215,62 @@ test("candidate mutation between logical reviewers stops convergence", async () 
   }
 });
 
+test("reviewer spend is billed when the budget stops a panel", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-panel-billing-"));
+  try {
+    const task = reviewPolicyTask(cwd, "confirm");
+    let launches = 0;
+    const reviewers = queuedReviewerReports([
+      { usage: { input: 3, output: 4, cost: 0.75, turns: 2 } },
+    ]);
+
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      reviewRequiredApprovals: 2,
+      canStartExecutor: () => launches < 1,
+      startExecutor: (options) => {
+        launches += 1;
+        return reviewers(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    const settled = findTask(loadBoard(cwd), task.id);
+    assert.equal(launches, 1);
+    assert.equal(settled?.status, "ready_for_review");
+    assert.equal(settled?.attempts.at(-1)?.usage.cost, 0.75);
+    assert.equal(settled?.attempts.at(-1)?.reviewUsage?.cost, 0.75);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a review refused before its first launch leaves no review usage behind", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-panel-refused-"));
+  try {
+    const task = reviewPolicyTask(cwd, "confirm");
+
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      canStartExecutor: () => false,
+      startExecutor: () => {
+        throw new Error("reviewer must not start");
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewUsage, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("failed trusted candidate verification blocks reviewer launch", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-verification-gate-"));
   try {
@@ -1226,6 +1310,81 @@ test("failed trusted candidate verification blocks reviewer launch", async () =>
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+for (const interruptedRun of [1, 2]) {
+  const stage = interruptedRun === 1 ? "candidate" : "post-integration";
+  test(`shutdown during ${stage} verification leaves the task ready for review`, {
+    timeout: 20_000,
+  }, async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "maestro-interrupted-verification-"));
+    const control = mkdtempSync(join(tmpdir(), "maestro-interrupted-control-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf-8" }).trim();
+    try {
+      git("init", "-q");
+      git("config", "user.email", "test@example.com");
+      git("config", "user.name", "Test");
+      writeFileSync(join(cwd, "file.txt"), "before\n");
+      git("add", "file.txt");
+      git("commit", "-q", "-m", "initial");
+      const head = git("rev-parse", "HEAD");
+
+      const { board, task } = boardWithTask("ready_for_review");
+      task.writePaths = ["file.txt"];
+      task.verificationProfile = "required";
+      const completed = attempt("done");
+      completed.touchedFiles = ["file.txt"];
+      completed.diff = "+after";
+      task.attempts.push(completed);
+      writeFileSync(join(cwd, "file.txt"), "after\n");
+
+      const marker = join(control, "verifying");
+      const script = join(cwd, "verify.cjs");
+      writeFileSync(
+        script,
+        `const fs = require("node:fs");\nconst countFile = ${JSON.stringify(join(control, "count"))};\nconst count = Number(fs.existsSync(countFile) ? fs.readFileSync(countFile, "utf8") : 0) + 1;\nfs.writeFileSync(countFile, String(count));\nif (count === ${interruptedRun}) { fs.writeFileSync(${JSON.stringify(marker)}, "started"); setTimeout(() => {}, 30_000); }\n`
+      );
+      const verificationProfiles = {
+        required: { command: `${process.execPath} ${script}`, timeoutSeconds: 60 },
+      };
+      saveConfig("project", cwd, { ...config, autoCommit: true, verificationProfiles });
+      recordExecutionFingerprint(cwd, board, task, { ...loadConfig(cwd), verificationProfiles });
+      saveBoard(cwd, board);
+
+      const shutdown = new AbortController();
+      const review = reviewTask({
+        cwd,
+        task,
+        tier,
+        autoCommit: true,
+        verificationProfiles,
+        signal: shutdown.signal,
+        startExecutor: executor({
+          finalReport: "VERDICT: APPROVE",
+          usage: { input: 1, output: 1, cost: 0.5, turns: 1 },
+        }),
+        onUpdate,
+        trackRun,
+      });
+      while (!existsSync(marker)) await new Promise((resolve) => setTimeout(resolve, 10));
+      shutdown.abort();
+      const result = await review;
+
+      const settled = findTask(loadBoard(cwd), task.id);
+      assert.equal(result.status, "ready_for_review");
+      assert.equal(settled?.status, "ready_for_review");
+      assert.equal(settled?.dispatchClaim, undefined);
+      assert.equal(settled?.reviewNotes, undefined);
+      assert.equal(settled?.attempts.at(-1)?.reviewConvergence, undefined);
+      assert.equal(settled?.attempts.at(-1)?.failureReason, undefined);
+      // Reviewers that already ran stay billed; nothing reached the branch.
+      assert.equal(settled?.attempts.at(-1)?.usage.cost, interruptedRun === 1 ? 0 : 0.5);
+      assert.equal(git("rev-parse", "HEAD"), head);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(control, { recursive: true, force: true });
+    }
+  });
+}
 
 test("review ownership remains claimed through post-integration verification", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-review-ownership-"));
@@ -1399,6 +1558,75 @@ test("formatDriveSummary reports outcomes, attempts, meaningful cost, and identi
   assert.match(summary, /models: openai\/gpt-5, anthropic\/claude/);
   assert.match(summary, /providers: openai, anthropic/);
   assert.match(summary, /dependency unavailable$/);
+});
+
+test("a failed final attempt write still fails the task and keeps the attempt's spend", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-final-write-"));
+  let restore = () => {};
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const settling = executor({
+      usage: { input: 10, output: 5, cost: 1.25, turns: 2 },
+    });
+
+    await assert.rejects(
+      executeTask({
+        cwd,
+        board,
+        task,
+        tier,
+        config,
+        startExecutor: (options) => {
+          const handle = settling(options);
+          return {
+            ...handle,
+            outcome: handle.outcome.then((outcome) => {
+              restore = failNextBoardSave();
+              return outcome;
+            }),
+          };
+        },
+        onUpdate,
+        trackRun,
+      }),
+      /disk full/
+    );
+    restore();
+
+    const settled = findTask(loadBoard(cwd), task.id);
+    assert.equal(settled?.status, "failed");
+    assert.equal(settled?.dispatchClaim, undefined);
+    assert.equal(settled?.attempts.at(-1)?.failureReason?.kind, "executor_failure");
+    assert.equal(settled?.attempts.at(-1)?.usage.cost, 1.25);
+  } finally {
+    restore();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a dispatch claim whose release failed is released on a later renewal tick", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-release-retry-"));
+  mock.timers.enable({ apis: ["setInterval"] });
+  let restore = () => {};
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+    const lifecycle = claimDispatchLifecycle(cwd, task.id, "execute", () => true);
+    assert.ok(lifecycle.dispatch?.claimed);
+
+    restore = failNextBoardSave();
+    assert.throws(() => lifecycle.release?.(), /disk full/);
+    restore();
+    assert.ok(findTask(loadBoard(cwd), task.id)?.dispatchClaim);
+
+    mock.timers.tick(10_000);
+    assert.equal(findTask(loadBoard(cwd), task.id)?.dispatchClaim, undefined);
+  } finally {
+    restore();
+    mock.timers.reset();
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("drive completes an all-cancelled selection without launching work", async () => {
@@ -5503,6 +5731,110 @@ test("launch cost caps combine the per-role cap with the remaining run budget", 
     // After the executor spent $1, the reviewer cap is min($2.5, $2 remaining).
     const reviewCap = [...capsByRun.entries()].find(([runId]) => runId.includes("-review-"))?.[1];
     assert.equal(reviewCap, 2);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a fair-share budget cut retries the task without using up an attempt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-fair-share-"));
+  try {
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    createTask(board, { title: "Big", brief: "Do the work", tier: "standard" });
+    createTask(board, { title: "Small", brief: "Do the work", tier: "standard" });
+    saveBoard(cwd, board);
+    const cheap = { input: 1, output: 1, cost: 0.05, turns: 1 };
+    let bigLaunches = 0;
+
+    const result = await driveBoard({
+      retryDelayScale: 0,
+      quotaStatus: async () => undefined,
+      cwd,
+      config: { ...config, maxParallel: 2, maxAttempts: 1, maxCostPerTask: 5, maxRunCost: 4 },
+      resolvedTiers: new Map([
+        ["standard", tier],
+        ["review", tier],
+      ]),
+      startExecutor: (options) => {
+        if (options.runId.includes("-review-")) {
+          return executor({ usage: cheap, finalReport: "VERDICT: APPROVE" })(options);
+        }
+        if (options.runId.startsWith("T1-")) bigLaunches += 1;
+        if (!options.runId.startsWith("T1-") || bigLaunches > 1) {
+          return executor({ usage: cheap })(options);
+        }
+        const cap = options.maxCost ?? 0;
+        return executor({
+          exitCode: 1,
+          usage: { input: 1, output: 1, cost: cap, turns: 1 },
+          errorMessage: `cost cap exceeded: $${cap} > $${cap} (remaining run budget (maxRunCost))`,
+          failureCause: "cost_cap",
+        })(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(result.stoppedBecause.code, "completed");
+    const big = findTask(loadBoard(cwd), "T1");
+    assert.equal(big?.status, "approved");
+    assert.equal(big?.attempts.length, 2);
+    assert.equal(big?.attempts[0]?.failureReason?.kind, "cost_cap");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a reattached launch cut at its budget share keeps its attempt", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-fair-share-reattach-"));
+  try {
+    const { board, task } = boardWithTask("running");
+    const running = attempt();
+    task.attempts.push(running);
+    task.dispatchClaim = { id: "claim", kind: "execute", claimedAt: Date.now() };
+    saveBoard(cwd, board);
+
+    settleReattachedDetachedAttempt(cwd, task.id, "claim", running, {
+      exitCode: 1,
+      usage: { input: 1, output: 1, cost: 0.5, turns: 1 },
+      finalReport: "",
+      touchedFiles: [],
+      aborted: false,
+      errorMessage: "cost cap exceeded: $0.5 > $0.5 (remaining run budget (maxRunCost))",
+      failureCause: "cost_cap",
+    });
+
+    const settled = findTask(loadBoard(cwd), task.id);
+    assert.equal(settled?.status, "failed");
+    assert.equal(settled?.attempts.at(-1)?.consumesAttempt, false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a per-task cost cap still uses up the attempt", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-task-cap-"));
+  try {
+    const { board, task } = boardWithTask();
+    saveBoard(cwd, board);
+
+    await executeTask({
+      cwd,
+      board,
+      task,
+      tier,
+      config: { ...config, maxCostPerTask: 2 },
+      startExecutor: executor({
+        exitCode: 1,
+        usage: { input: 1, output: 1, cost: 2.01, turns: 1 },
+        errorMessage: "cost cap exceeded: $2.01 > $2 (maxCostPerTask)",
+        failureCause: "cost_cap",
+      }),
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.consumesAttempt, true);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -19,6 +20,7 @@ import {
   applyPlanTaskEdits,
   approvePlan,
   archiveBoard,
+  assertTaskNotDispatched,
   attemptFailureCause,
   blockedReason,
   claimTaskDispatch,
@@ -1713,6 +1715,77 @@ test("an expired dispatch lease held by another live process is not reclaimed un
     owner.kill("SIGKILL");
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+function expiredClaimBoard(cwd: string, ownerPid: number, ownerStart?: string): string {
+  const board = emptyBoard();
+  const task = createTask(board, { title: "Busy", brief: "work", tier: "standard" });
+  forceStatus(task, "running");
+  task.dispatchClaim = {
+    id: "expired-claim",
+    kind: "execute",
+    claimedAt: Date.now() - 120_000,
+    expiresAt: Date.now() - 60_000,
+    ownerPid,
+    ...(ownerStart ? { ownerStart } : {}),
+  };
+  task.attempts.push({
+    index: 1,
+    logFile: join(cwd, "attempt.jsonl"),
+    thinking: "low",
+    startedAt: Date.now() - 120_000,
+    usage: { input: 0, output: 0, cost: 0, turns: 3 },
+    touchedFiles: [],
+  });
+  saveBoard(cwd, board);
+  return task.id;
+}
+
+test("startup clears an expired claim whose owner is a zombie", { timeout: 10_000 }, async () => {
+  if (process.platform !== "linux") return;
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-zombie-owner-"));
+  // The shell's exec leaves a parent that never reaps its finished child.
+  const parent = spawn("sh", ["-c", "sleep 0.01 & echo $!; exec sleep 60"], {
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  try {
+    const [line] = (await once(parent.stdout, "data")) as [Buffer];
+    const zombie = Number.parseInt(line.toString(), 10);
+    const stateOf = () => readFileSync(`/proc/${zombie}/stat`, "utf-8").split(") ")[1]?.[0];
+    while (stateOf() !== "Z") await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const taskId = expiredClaimBoard(cwd, zombie, processStartId(zombie));
+    sweepDispatchState(cwd);
+
+    assert.equal(findTask(loadBoard(cwd), taskId)?.dispatchClaim, undefined);
+  } finally {
+    parent.kill("SIGKILL");
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a process that cannot be signalled keeps a claim only when its start id matches", () => {
+  if (process.platform !== "linux" || process.getuid?.() === 0) return;
+  const ownerStart = processStartId(1);
+  if (!ownerStart) return;
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-eperm-owner-"));
+  try {
+    const confirmed = expiredClaimBoard(cwd, 1, ownerStart);
+    sweepDispatchState(cwd);
+    assert.equal(findTask(loadBoard(cwd), confirmed)?.dispatchClaim?.id, "expired-claim");
+
+    const unconfirmed = expiredClaimBoard(cwd, 1);
+    sweepDispatchState(cwd);
+    assert.equal(findTask(loadBoard(cwd), unconfirmed)?.dispatchClaim, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("the dispatched-task error names the process that owns the claim", () => {
+  const task = createTask(emptyBoard(), { title: "Busy", brief: "work", tier: "standard" });
+  task.dispatchClaim = { id: "c", kind: "review", claimedAt: 1, ownerPid: 4242 };
+  assert.throws(() => assertTaskNotDispatched(task), /review dispatch in process 4242/);
 });
 
 test("startup recovers a running task that a previous build left without a dispatch claim", () => {

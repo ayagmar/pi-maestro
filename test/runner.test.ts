@@ -17,6 +17,8 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createTask, loadBoard, saveBoard } from "../src/board.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
 import { compactEvent } from "../src/detached-policy.mjs";
 import {
   applyAssistantMessage,
@@ -37,7 +39,8 @@ import {
   touchedFile,
   windowsTaskkillArguments,
 } from "../src/runner.js";
-import { type Attempt } from "../src/types.js";
+import { type Attempt, type Board } from "../src/types.js";
+import { driveBoard } from "../src/workflow.js";
 
 const wait = async (milliseconds: number): Promise<void> =>
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -1117,7 +1120,7 @@ process.stdin.on("end", () => process.exit(0));
 }
 
 for (const detached of [false, true]) {
-  test(`${detached ? "detached" : "attached"} launch cancelled inside the child settles as aborted, not approved`, async () => {
+  test(`${detached ? "detached" : "attached"} launch cancelled inside the child settles as a retryable failure, not approved`, async () => {
     if (detached && process.platform === "win32") return;
     const root = mkdtempSync(join(tmpdir(), "maestro-child-abort-"));
     const fakePi = join(root, "fake-pi.mjs");
@@ -1160,9 +1163,11 @@ process.stdin.on("end", () => process.exit(0));
         runKind: "review",
         detached,
       }).outcome;
-      assert.equal(cancelled.aborted, true);
+      assert.equal(cancelled.aborted, false);
       assert.notEqual(cancelled.exitCode, 0);
-      assert.equal(cancelled.failureReason?.kind, "user_abort");
+      assert.equal(cancelled.failureReason?.kind, "executor_failure");
+      assert.equal(cancelled.failureReason?.retryable, true);
+      assert.equal(cancelled.errorMessage, "run cancelled inside the executor");
 
       // Maestro's own cost-cap stop keeps its classification even though pi
       // reports the resulting settlement as aborted.
@@ -1178,6 +1183,83 @@ process.stdin.on("end", () => process.exit(0));
       }).outcome;
       assert.equal(capped.aborted, false);
       assert.equal(capped.failureReason?.kind, "cost_cap");
+    } finally {
+      process.argv[1] = originalScript;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const detached of [false, true]) {
+  test(`${detached ? "detached" : "attached"} drive retries a child-side cancel and never counts it as settled work`, {
+    timeout: 30_000,
+  }, async () => {
+    if (detached && process.platform === "win32") return;
+    const root = mkdtempSync(join(tmpdir(), "maestro-child-abort-drive-"));
+    const cwd = join(root, "project");
+    mkdirSync(cwd);
+    const fakePi = join(root, "fake-pi.mjs");
+    // Launch 1 is an executor a permission extension cancels, launch 2 its
+    // retry, and launch 3 a reviewer that approves and is then cancelled.
+    writeFileSync(
+      fakePi,
+      `import { appendFileSync, readFileSync } from "node:fs";
+const counter = ${JSON.stringify(join(root, "launches"))};
+appendFileSync(counter, "x");
+const launch = readFileSync(counter, "utf8").length;
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() ?? "";
+  for (const line of lines) {
+    const command = JSON.parse(line);
+    if (command.type !== "prompt") continue;
+    const text = launch === 3 ? "VERDICT: APPROVE" : "executor report";
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", usage: { cost: { total: 0.01 } }, content: [{ type: "text", text }] } }));
+    console.log(JSON.stringify({ type: "agent_settled", aborted: launch !== 2 }));
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+`
+    );
+    const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+    createTask(board, { title: "Gated work", brief: "Do the work", tier: "standard" });
+    saveBoard(cwd, board);
+    const tier = { thinking: "low" };
+    const originalScript = process.argv[1];
+    if (originalScript === undefined) throw new Error("test runner script path is unavailable");
+    process.argv[1] = fakePi;
+    try {
+      const summary = await driveBoard({
+        retryDelayScale: 0,
+        quotaStatus: async () => undefined,
+        cwd,
+        config: {
+          ...DEFAULT_CONFIG,
+          planGate: false,
+          useWorktrees: false,
+          autoCommit: false,
+          detachedExecutors: detached,
+        },
+        resolvedTiers: new Map([
+          ["standard", tier],
+          ["review", tier],
+        ]),
+        startExecutor,
+        onUpdate: () => {},
+        trackRun: () => () => {},
+      });
+
+      // "completed" is what archives the board, so an unfinished task must not reach it.
+      assert.equal(summary.stoppedBecause.code, "reviewer_failure");
+      const task = loadBoard(cwd).tasks[0];
+      assert.equal(task?.status, "ready_for_review");
+      assert.equal(task?.attempts.length, 2);
+      assert.equal(task?.attempts[0]?.errorMessage, "run cancelled inside the executor");
+      assert.equal(task?.attempts[0]?.failureReason?.retryable, true);
+      assert.equal(task?.attempts[1]?.reviewLaunches?.at(-1)?.verdict, undefined);
+      assert.equal(task?.attempts[1]?.reviewConvergence?.status, "operational_failure");
     } finally {
       process.argv[1] = originalScript;
       rmSync(root, { recursive: true, force: true });

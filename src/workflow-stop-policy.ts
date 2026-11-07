@@ -363,7 +363,11 @@ export function providerFailureMessage(task: Task): string | undefined {
 export function providerBlockedTask(task: Task): boolean {
   const latest = task.attempts.at(-1);
   if (!latest) return false;
-  if (task.status === "failed") return !consumesMaxAttempt(latest);
+  if (task.status === "failed") {
+    // A launch cut at its share of the run budget also keeps its attempt, but
+    // no provider is at fault and the normal retry path resumes it.
+    return !consumesMaxAttempt(latest) && latest.failureReason?.kind !== "cost_cap";
+  }
   if (task.status !== "ready_for_review") return false;
   // A pre-review gate settlement (stale execution fingerprint, artifact or
   // verification failure) is the current truth about this attempt. Matching

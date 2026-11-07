@@ -10,7 +10,7 @@ First release of Pi Maestro: an orchestrator and fresh-context executor workflow
 - Key hints in Maestro's list pickers and text input come from the keybindings pi injects, so remapped keys work and show correctly. The plan, brief, workflow, and model-picker viewers scroll and close with pi's selection keybindings, and they skip PgUp/PgDn hints in pi's fullscreen mode, where pi's own viewport takes those keys.
 - Inline pickers and the single-line editor pass pi's `blocked` status to `ctx.ui.custom`, so terminals that show pi's program status report Maestro as waiting for you.
 - A task report or review verdict opened from the dashboard is a custom session entry with its own renderer, so it never enters the model's context. Orchestrator kickoff and decision messages still reach the model.
-- In `pi --mode rpc`, `/maestro plan`, `/maestro workflows`, and the plan task editor use pi's stock select and editor dialogs, and the viewers send their text as a notification.
+- In `pi --mode rpc`, `/maestro plan`, `/maestro workflows`, and the plan task editor use pi's stock select and editor dialogs, and the viewers and the task report and review cards send their text as a notification.
 - In print (`-p`) and JSON mode, command output and notices go to stderr, so JSON stdout stays clean and `/maestro config show`, `costs`, `insights`, and `timeline` print their reports.
 - The live agent pane marks a launch finished on `agent_settled` and applies `context_edit` entries as they arrive. The agent selector truncates every row to the terminal width.
 - Executors launched from a standalone (Bun-compiled) pi binary re-run that binary directly, as pi's own subagent example does.
@@ -65,8 +65,9 @@ First release of Pi Maestro: an orchestrator and fresh-context executor workflow
 ### Cost and limits
 
 - `maxRunCost` bounds the board's lifetime spend, sunk cost included, and the drive shares one ledger across launches. Every launch is capped at a fair share of what is left, and none starts below one cent. Raising it with `/maestro config budget <usd>` resolves a pending `budget_blocked` decision, and a one-time notice fires at 80%.
+- Reviewer spend reaches the board even when the budget stops a panel partway.
 - `maxCostPerTask` and `maxCostPerReview` cap single launches. A capped attempt keeps its edits, and raising the cap above what it spent resumes it in place. A task stopped by a cap is not retried at the same cap.
-- `maxAttempts` counts only launches that produced real work. `maxTotalLaunchesPerRun`, `maxPlanTasks`, and the scale confirmation thresholds bound a run.
+- `maxAttempts` counts only launches that produced real work, so a launch cut at its share of the run budget is retried without using up an attempt. `maxTotalLaunchesPerRun`, `maxPlanTasks`, and the scale confirmation thresholds bound a run.
 - Plan approval and drive preflight show a labeled cost estimate and warn when projected reviewer spend is at least twice executor spend.
 - Seven presets (`inherit`, `openai-balanced`, `openai-budget`, `openai-quality`, `anthropic-balanced`, `anthropic-budget`, `anthropic-quality`) set tier models, and the settings editor groups settings by how often they matter.
 
@@ -80,10 +81,10 @@ First release of Pi Maestro: an orchestrator and fresh-context executor workflow
 
 ### Reliability
 
-- Claims record the owner's PID and start identity and stay held until the attempt, review, integration, and verification are saved. A claim whose owner is alive is never taken over, and startup fails any `running` task left without a claim.
-- Board locks use PID plus process start time, and two sessions reclaiming a dead lock cannot delete each other's. Board and config writes are atomic. A corrupt board is moved aside as `board.json.corrupt-<timestamp>`, and a config file that is corrupt or invalid as `maestro.json.corrupt-<timestamp>` or `maestro.json.invalid-<timestamp>`, only if it is still the file that was read.
-- Every launch uses its own event log and transport files, and a detached launch accepts only a terminal record carrying its launch id. An attached launch settles two seconds after pi exits and kills its process group. A launch pi settles with `aborted: true` is recorded as cancelled. Malformed executor output is skipped with at most three diagnostics per launch.
-- A reload or shutdown retires the drive: it launches nothing more, a running verification is cancelled, and promotion is refused. Startup cleanup never removes a checkout in use.
+- Claims record the owner's PID and start identity and stay held until the attempt, review, integration, and verification are saved. A claim whose owner is alive is never taken over, and startup fails any `running` task left without a claim. A second session on the same project leaves another live session's detached executors and drive alone. If the final write for an attempt fails, the task is still marked failed with its spend, and a claim that could not be released is retried. A zombie owner counts as gone, and the "task is dispatched" error names the owning process.
+- Board locks use PID plus process start time, and two sessions reclaiming a dead lock cannot delete each other's. Board and config writes are atomic, and saving a symlinked config updates the file it points at. A corrupt board is moved aside as `board.json.corrupt-<timestamp>`, and a config file that is corrupt or invalid as `maestro.json.corrupt-<timestamp>` or `maestro.json.invalid-<timestamp>`, only if it is still the file that was read.
+- Every launch uses its own event log and transport files, and a detached launch accepts only a terminal record carrying its launch id. An attached launch settles two seconds after pi exits and kills its process group. A launch pi settles with `aborted: true` without Maestro asking is recorded as a retryable failure, so an extension that cancels inside an executor can no longer finish the drive and archive the board. Malformed executor output is skipped with at most three diagnostics per launch.
+- A reload or shutdown retires the drive: it launches nothing more, a running verification is cancelled, and promotion is refused. A task caught in verification or integration stays ready for review with no failure recorded. Startup cleanup never removes a checkout in use.
 - A session is resumed only inside the checkout it recorded. An executor whose prompt pi reports as `handled` fails at once.
 - Reading an agent transcript or run log with the model's read tools is blocked, because it can grow the orchestrator's own session on every read.
 - Executor sessions live under pi's per-project session directory at `.maestro/<launch>/`, so usage tools count them while `/resume` stays short. `/maestro back` keeps its return target when a session switch is cancelled.

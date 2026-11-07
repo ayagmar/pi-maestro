@@ -27,6 +27,7 @@ import {
   billedUsage,
   boundedBytes,
   boundedText,
+  CHILD_CANCEL_ERROR,
   compactEvent,
   EXIT_SETTLE_DRAIN_MS,
   eventShapeError,
@@ -50,6 +51,22 @@ const VERIFICATION_KILL_GRACE_MS = 250;
 type LogStream = Writable & { end(callback?: () => void): unknown };
 
 export type RunFailureCause = "provider" | "process" | "user_abort" | "cost_cap" | "stalled";
+
+/**
+ * A zombie has exited but still answers signals until its parent reaps it,
+ * which in a container without an init process may be never. Linux only;
+ * elsewhere the answer is false and callers keep their liveness check.
+ */
+export function processIsZombie(pid: number): boolean {
+  if (process.platform !== "linux") return false;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    // Field 3 (state) follows the "(comm) " prefix; comm may itself hold ")".
+    return stat[stat.lastIndexOf(")") + 2] === "Z";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Kernel-reported process start identity, so a recycled PID cannot masquerade
@@ -1056,13 +1073,16 @@ export function startExecutor(options: StartExecutorOptions): ExecutorHandle {
       // A cost-cap abort carries an errorMessage and must land as a failure
       // (retryable, visible reason), not as a user cancellation.
       // An extension inside the child can cancel the run (ctx.abort()) after a
-      // successful message; pi then settles with aborted and may exit 0. That
-      // is a cancellation, never a completed launch, unless Maestro itself
-      // already stopped the run for a cost cap, stall, or log failure.
-      const cancelledInChild = childAborted && !abortCause && !logWriteError;
-      result.aborted = abortCause === "user_abort" || cancelledInChild;
-      if (cancelledInChild) {
-        result.failureCause = "user_abort";
+      // successful message; pi then settles with aborted and may exit 0. Nobody
+      // asked Maestro to stop, so that is a retryable failure, never a completed
+      // launch or a cancelled task, unless Maestro itself already stopped the
+      // run for a cost cap, stall, or log failure.
+      result.aborted = abortCause === "user_abort";
+      if (childAborted && !abortCause && !logWriteError) {
+        if (!result.errorMessage) {
+          result.errorMessage = CHILD_CANCEL_ERROR;
+          result.failureCause = "process";
+        }
         if (result.exitCode === 0) result.exitCode = 1;
       }
       // A stall already classified as provider silence keeps that cause; the

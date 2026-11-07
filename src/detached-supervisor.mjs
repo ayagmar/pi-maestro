@@ -17,6 +17,7 @@ import {
   billedUsage,
   boundedBytes,
   boundedText,
+  CHILD_CANCEL_ERROR,
   compactEvent,
   EXIT_SETTLE_DRAIN_MS,
   eventShapeError,
@@ -390,8 +391,11 @@ const finish = (code, signal, viaDrain = false) => {
   stdoutBuffer += stdoutDecoder.end();
   if (stdoutBuffer.trim()) processStdoutLine(stdoutBuffer);
   // A run cancelled inside the child (pi >= 1.1 agent_settled.aborted) is a
-  // cancellation even when pi exits 0; Maestro's own causes take precedence.
-  if (childAborted && !abortCause) abortCause = "user_abort";
+  // retryable failure even when pi exits 0; Maestro's own causes take precedence.
+  if (childAborted && !abortCause && !errorMessage) {
+    errorMessage = CHILD_CANCEL_ERROR;
+    failureCause = "process";
+  }
   // A stall already classified as provider silence keeps that cause.
   if (abortCause === "cost_cap" || (abortCause === "stalled" && failureCause !== "provider")) {
     failureCause = abortCause;

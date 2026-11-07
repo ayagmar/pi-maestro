@@ -491,22 +491,25 @@ export default function maestro(
     });
   }
 
-  function showTaskReport(cwd: string, taskId: string): void {
-    const task = findTask(loadBoard(cwd), taskId);
-    if (!task) return;
-    const report = lastReport(task) ?? "(no report yet)";
-    pi.appendEntry<ReportCard>(REPORT_ENTRY_TYPE, {
-      markdown: `## ${task.id} ${task.title} — last report\n\n${report}`,
-    });
+  // pi renders custom entries only in the TUI; an RPC client would get a raw
+  // event it may not handle, so everything else receives a notification.
+  function showReportCard(ctx: ExtensionContext, markdown: string): void {
+    if (ctx.mode === "tui") pi.appendEntry<ReportCard>(REPORT_ENTRY_TYPE, { markdown });
+    else notify(ctx, markdown);
   }
 
-  function showTaskReview(cwd: string, taskId: string): void {
-    const task = findTask(loadBoard(cwd), taskId);
+  function showTaskReport(ctx: ExtensionContext, taskId: string): void {
+    const task = findTask(loadBoard(ctx.cwd), taskId);
+    if (!task) return;
+    const report = lastReport(task) ?? "(no report yet)";
+    showReportCard(ctx, `## ${task.id} ${task.title} — last report\n\n${report}`);
+  }
+
+  function showTaskReview(ctx: ExtensionContext, taskId: string): void {
+    const task = findTask(loadBoard(ctx.cwd), taskId);
     if (!task) return;
     const review = task.attempts.at(-1)?.reviewReport ?? "(no review yet)";
-    pi.appendEntry<ReportCard>(REPORT_ENTRY_TYPE, {
-      markdown: `## ${task.id} ${task.title} — review verdict\n\n${review}`,
-    });
+    showReportCard(ctx, `## ${task.id} ${task.title} — review verdict\n\n${review}`);
   }
 
   async function showMaestroHome(ctx: ExtensionCommandContext): Promise<string | null> {

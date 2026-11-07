@@ -25,6 +25,7 @@ import {
   boundedReport,
   boundedReportBytes,
   detachedAttemptIsLive,
+  processIsZombie,
   processStartId,
 } from "./runner.js";
 import { boardValidator, describeInvalid } from "./schemas.js";
@@ -854,8 +855,10 @@ function updateTaskUnlocked(
 
 export function assertTaskNotDispatched(task: Task): void {
   if (!task.dispatchClaim) return;
+  const { kind, ownerPid } = task.dispatchClaim;
+  const owner = ownerPid === undefined ? "" : ` in process ${ownerPid}`;
   throw new Error(
-    `${task.id} is owned by an active ${task.dispatchClaim.kind} dispatch. Wait for it to finish or abort it first.`
+    `${task.id} is owned by an active ${kind} dispatch${owner}. Wait for it to finish or abort it first.`
   );
 }
 
@@ -980,20 +983,21 @@ function dispatchClaimExpired(claim: DispatchClaim): boolean {
  * held by this process belong to the current or a previous (reloaded)
  * extension instance; those keep plain lease semantics.
  */
-function dispatchOwnerIsLive(claim: DispatchClaim): boolean {
+export function dispatchOwnerIsLive(claim: DispatchClaim): boolean {
   const pid = claim.ownerPid;
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
     return false;
   }
-  if (typeof claim.ownerStart === "string") {
-    const current = processStartId(pid);
-    if (current !== undefined && current !== claim.ownerStart) return false;
-  }
+  const current = typeof claim.ownerStart === "string" ? processStartId(pid) : undefined;
+  if (current !== undefined && current !== claim.ownerStart) return false;
+  if (processIsZombie(pid)) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    // Another user's process proves nothing about a PID that may be recycled,
+    // so it holds the claim only when its start identity confirmed the match.
+    return (error as NodeJS.ErrnoException).code === "EPERM" && current !== undefined;
   }
 }
 

@@ -88,10 +88,10 @@ test("approval pruning removes only the approved task's superseded logs", () => 
   }
 });
 
-test("pruning a detached launch's log also removes its control, exit, and stderr files", () => {
+test("pruning a detached launch's log also removes its control, exit, stderr, and supervisor files", () => {
   const { cwd, board, logs } = fixture();
   try {
-    const companions = ["", ".control", ".exit", ".stderr"];
+    const companions = ["", ".control", ".exit", ".stderr", ".supervisor.json"];
     // An unreferenced launch of the superseded attempt, in the namespaced form.
     const namespaced = "T1-attempt-1.0a1b2c3d.jsonl";
     for (const suffix of companions) {

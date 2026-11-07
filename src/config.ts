@@ -1,4 +1,12 @@
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { PROJECT_CONFIG_FILE, USER_CONFIG_FILE } from "./constants.js";
@@ -399,8 +407,16 @@ export function loadConfig(cwd: string): MaestroConfig {
 export function saveConfig(scope: ConfigScope, cwd: string, config: MaestroConfig): void {
   const error = validateEffectiveConfig(config);
   if (error) throw new Error(`Cannot save invalid effective maestro configuration: ${error}`);
-  const file = configFile(scope, cwd);
-  mkdirSync(dirname(file), { recursive: true });
+  const configPath = configFile(scope, cwd);
+  mkdirSync(dirname(configPath), { recursive: true });
+  // A rename replaces a symlink itself, which would silently detach a config
+  // kept in a dotfile repo, so save to the file the link points at.
+  let file = configPath;
+  try {
+    file = realpathSync(configPath);
+  } catch {
+    // A first save has nothing to resolve.
+  }
   // Write a sibling and rename it into place: a reader never sees a
   // half-written file (and quarantines it as corrupt), and a failed write
   // leaves the previous settings intact.

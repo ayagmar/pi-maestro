@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -1111,6 +1111,66 @@ test("multi-word static and dynamic argument completions are combined", async ()
       assert.ok(opening.some((item) => item.value === "board"));
     }
   );
+});
+
+test("a second session leaves a live session's detached executor and drive alone", async () => {
+  if (process.platform === "win32") return;
+  const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], {
+    stdio: "ignore",
+  });
+  try {
+    await withBoard(
+      (cwd) => {
+        assert.ok(other.pid);
+        const logFile = join(cwd, "detached.jsonl");
+        writeFileSync(logFile, "");
+        writeFileSync(`${logFile}.exit`, JSON.stringify({ version: 1, exitCode: 0 }));
+        const board: Board = {
+          version: 1,
+          nextTaskNumber: 1,
+          tasks: [],
+          activeDrive: { id: "drive-a", ownerSession: "/tmp/session-a.jsonl", startedAt: 1 },
+        };
+        const task = createTask(board, { title: "Busy", brief: "work", tier: "standard" });
+        forceStatus(task, "running");
+        task.dispatchClaim = {
+          id: "claim-a",
+          kind: "execute",
+          claimedAt: Date.now(),
+          expiresAt: Date.now() + 60_000,
+          ownerPid: other.pid,
+        };
+        task.attempts.push({
+          ...executorAttempt(),
+          index: 1,
+          logFile,
+          exitFile: `${logFile}.exit`,
+          controlFile: `${logFile}.control`,
+          detached: true,
+        });
+        saveBoard(cwd, board);
+      },
+      async (cwd) => {
+        const second = loadMaestro(cwd, undefined, "/tmp/session-b.jsonl");
+        second.events.get("session_start")?.({ reason: "startup" }, second.ctx);
+        assert.equal(
+          second.notices.some((notice) => notice.includes("reattached")),
+          false
+        );
+
+        const exited = new Promise((resolve) => other.once("exit", resolve));
+        other.kill("SIGKILL");
+        await exited;
+        // Once the owner is gone, the next session takes the attempt over.
+        const third = loadMaestro(cwd, undefined, "/tmp/session-c.jsonl");
+        third.events.get("session_start")?.({ reason: "startup" }, third.ctx);
+        assert.ok(third.notices.some((notice) => notice.includes("reattached")));
+        await waitFor(() => loadBoard(cwd).tasks[0]?.status !== "running", "reattached settlement");
+      }
+    );
+  } finally {
+    other.kill("SIGKILL");
+  }
 });
 
 test("task-id argument completion includes board tasks", async () => {
@@ -3904,6 +3964,44 @@ test("a report opened from the dashboard is a session entry the model never sees
       const text = renderer(entry, { expanded: false }, fakeTheme)?.render(100).join("\n") ?? "";
       assert.match(text, /T1 Reported — last report/);
       assert.match(text, /Implemented the reported change/);
+    }
+  );
+});
+
+test("a report and review opened from the task browser reach an RPC client as notifications", async () => {
+  await withBoard(
+    (cwd) => {
+      const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+      const task = createTask(board, { title: "Reported", brief: "work", tier: "standard" });
+      const attempt = executorAttempt();
+      attempt.endedAt = 2;
+      attempt.finalReport = "Implemented the reported change";
+      attempt.reviewReport = "Checked it\nVERDICT: APPROVE";
+      task.attempts.push(attempt);
+      task.status = "ready_for_review";
+      saveBoard(cwd, board);
+    },
+    async (cwd) => {
+      const { ctx, command, notices, entries } = loadMaestro(
+        cwd,
+        undefined,
+        owner,
+        { steps: [] },
+        { mode: "rpc" }
+      );
+      ctx.switchSession = async () => ({ cancelled: false });
+      for (const action of ["View last report", "View review verdict"]) {
+        const answers = [
+          (options: string[]) => options[0],
+          (options: string[]) => options.find((option) => option.startsWith(action)),
+        ];
+        ctx.ui.select = async (_title, options) => answers.shift()?.(options);
+        await command.handler("board", ctx);
+      }
+
+      assert.deepEqual(entries, []);
+      assert.ok(notices.some((notice) => /last report[\s\S]*Implemented the/.test(notice)));
+      assert.ok(notices.some((notice) => /review verdict[\s\S]*Checked it/.test(notice)));
     }
   );
 });
