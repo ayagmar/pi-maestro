@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -452,6 +454,28 @@ test("saveConfig writes the scope file", () => {
     assert.deepEqual(written, DEFAULT_CONFIG);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("saveConfig writes through a symlinked config file", () => {
+  if (process.platform === "win32") return;
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-link-"));
+  const dotfiles = mkdtempSync(join(tmpdir(), "maestro-config-dotfiles-"));
+  try {
+    const target = join(dotfiles, "maestro.json");
+    writeFileSync(target, "{}\n");
+    mkdirSync(join(cwd, ".pi"));
+    const link = join(cwd, ".pi", "maestro.json");
+    symlinkSync(target, link);
+
+    saveConfig("project", cwd, DEFAULT_CONFIG);
+
+    assert.equal(lstatSync(link).isSymbolicLink(), true);
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf-8")), DEFAULT_CONFIG);
+    assert.deepEqual(readdirSync(dotfiles), ["maestro.json"]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dotfiles, { recursive: true, force: true });
   }
 });
 
