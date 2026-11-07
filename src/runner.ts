@@ -147,6 +147,9 @@ function signalProcessTree(
   }
 }
 
+/** The cost-cap source of a launch capped at its share of a run budget split across parallel launches. */
+export const FAIR_SHARE_CAP_SOURCE = "fair share of the remaining run budget (maxRunCost)";
+
 export interface VerificationResult {
   ok: boolean;
   exitCode: number;
@@ -314,6 +317,13 @@ export function classifyFailure(
     // remainder rather than maxCostPerTask, the remedy is the budget: a real
     // board was told to raise maxCostPerTask while $1.09 of run budget was the
     // actual wall, and burned two more attempts against it.
+    if (message.includes(FAIR_SHARE_CAP_SOURCE)) {
+      return {
+        kind: "cost_cap",
+        message: `${message}. Parallel launches split the remaining run budget, and this one used its share; the drive retries it without using up an attempt.`,
+        retryable: true,
+      };
+    }
     const budgetBound = message.includes("remaining run budget");
     return {
       kind: "cost_cap",

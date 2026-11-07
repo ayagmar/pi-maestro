@@ -17,7 +17,7 @@ import {
   remainingRunBudget,
   runBudgetWarning,
 } from "./format.js";
-import { mapWithConcurrencyLimit } from "./runner.js";
+import { FAIR_SHARE_CAP_SOURCE, mapWithConcurrencyLimit } from "./runner.js";
 import { type DriveWait, type MaestroConfig, type Task, type TierConfig } from "./types.js";
 import {
   calculateSchedulingWave,
@@ -245,8 +245,9 @@ export async function driveBoard(options: {
       boardCostAtStart + settledLaunchSpend
     );
     const available = Math.max(0, maxRunCost - spent - reservedLaunchCaps);
-    return available / Math.max(1, launchSlots - inflightLaunches);
+    return available / freeLaunchSlots();
   };
+  const freeLaunchSlots = (): number => Math.max(1, launchSlots - inflightLaunches);
   const budgetAllowsLaunch = (): boolean => {
     const share = launchBudgetShare();
     return share === undefined || share >= MIN_LAUNCH_ALLOWANCE_USD;
@@ -271,7 +272,12 @@ export async function driveBoard(options: {
         : undefined;
     const launchOptions =
       requested === undefined || share < requested
-        ? { ...startOptions, maxCost: share, maxCostSource: "remaining run budget (maxRunCost)" }
+        ? {
+            ...startOptions,
+            maxCost: share,
+            maxCostSource:
+              freeLaunchSlots() > 1 ? FAIR_SHARE_CAP_SOURCE : "remaining run budget (maxRunCost)",
+          }
         : startOptions;
     rawLaunches += 1;
     const handle = startExecutor(launchOptions);

@@ -5767,7 +5767,7 @@ test("a fair-share budget cut retries the task without using up an attempt", asy
         return executor({
           exitCode: 1,
           usage: { input: 1, output: 1, cost: cap, turns: 1 },
-          errorMessage: `cost cap exceeded: $${cap} > $${cap} (remaining run budget (maxRunCost))`,
+          errorMessage: `cost cap exceeded: $${cap} > $${cap} (${options.maxCostSource})`,
           failureCause: "cost_cap",
         })(options);
       },
@@ -5777,6 +5777,9 @@ test("a fair-share budget cut retries the task without using up an attempt", asy
 
     assert.equal(result.stoppedBecause.code, "completed");
     const big = findTask(loadBoard(cwd), "T1");
+    // The operator is not told to raise a budget that still had money.
+    assert.match(big?.attempts[0]?.failureReason?.message ?? "", /used its share/);
+    assert.doesNotMatch(big?.attempts[0]?.failureReason?.message ?? "", /config budget/);
     assert.equal(big?.status, "approved");
     assert.equal(big?.attempts.length, 2);
     assert.equal(big?.attempts[0]?.failureReason?.kind, "cost_cap");
