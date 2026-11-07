@@ -22,6 +22,7 @@ import {
   runVerification,
 } from "./runner.js";
 import {
+  type Attempt,
   type MaestroConfig,
   type ReviewLaunch,
   type Task,
@@ -61,6 +62,23 @@ import {
  * review tier with its configured thinking instead.
  */
 export const CHEAP_REVIEW_THINKING = "low";
+
+/** Reviewer usage is billed against the task for honest per-task cost. */
+function addReviewUsage(attempt: Attempt, launches: ReviewLaunch[]): void {
+  const previous = attempt.reviewUsage ?? { input: 0, output: 0, cost: 0, turns: 0 };
+  const reviewUsage = { ...previous };
+  for (const { usage } of launches) {
+    attempt.usage.input += usage.input;
+    attempt.usage.output += usage.output;
+    attempt.usage.cost += usage.cost;
+    attempt.usage.turns += usage.turns;
+    reviewUsage.input += usage.input;
+    reviewUsage.output += usage.output;
+    reviewUsage.cost += usage.cost;
+    reviewUsage.turns += usage.turns;
+  }
+  attempt.reviewUsage = reviewUsage;
+}
 
 export async function reviewTask(options: {
   cwd: string;
@@ -658,6 +676,19 @@ export async function reviewTask(options: {
       return "verdict" in escalated || "launchLimit" in escalated ? escalated : first;
     };
 
+    /**
+     * Bills launches for a review that stops before its final record. With no
+     * launches it writes nothing: a reviewUsage on an attempt without
+     * reviewLaunches reads as a legacy review.
+     */
+    const billSettledReviewers = (): Task | undefined =>
+      reviewLaunches.length === 0
+        ? findTask(loadBoard(cwd), task.id)
+        : updateTask(cwd, task.id, (fresh) => {
+            const attempt = fresh.attempts.at(-1);
+            if (attempt && reviewIdentityMatches(fresh)) addReviewUsage(attempt, reviewLaunches);
+          });
+
     // Re-review of work an intact panel already approved costs one reviewer,
     // not a fresh panel. Contested work keeps the full policy.
     const requiredApprovals = effectiveRequiredApprovals(
@@ -702,10 +733,7 @@ export async function reviewTask(options: {
     }
 
     if (launchLimitReached) {
-      return snapshot(
-        findTask(loadBoard(cwd), task.id) ?? task,
-        "workflow raw launch limit reached"
-      );
+      return snapshot(billSettledReviewers() ?? task, "workflow raw launch limit reached");
     }
 
     const approvals = logicalResults.filter((result) => result.verdict.approved).length;
@@ -848,34 +876,9 @@ export async function reviewTask(options: {
         settlementProvenance = liveProvenance;
       }
       finalMutationApplied = true;
-      // Reviewer usage is billed against the task for honest per-task cost.
       const attempt = fresh.attempts.at(-1);
       if (attempt) {
-        const reviewUsage = reviewLaunches.reduce(
-          (total, launch) => ({
-            input: total.input + launch.usage.input,
-            output: total.output + launch.usage.output,
-            cost: total.cost + launch.usage.cost,
-            turns: total.turns + launch.usage.turns,
-          }),
-          { input: 0, output: 0, cost: 0, turns: 0 }
-        );
-        attempt.usage.input += reviewUsage.input;
-        attempt.usage.output += reviewUsage.output;
-        attempt.usage.cost += reviewUsage.cost;
-        attempt.usage.turns += reviewUsage.turns;
-        const previousReviewUsage = attempt.reviewUsage ?? {
-          input: 0,
-          output: 0,
-          cost: 0,
-          turns: 0,
-        };
-        attempt.reviewUsage = {
-          input: previousReviewUsage.input + reviewUsage.input,
-          output: previousReviewUsage.output + reviewUsage.output,
-          cost: previousReviewUsage.cost + reviewUsage.cost,
-          turns: previousReviewUsage.turns + reviewUsage.turns,
-        };
+        addReviewUsage(attempt, reviewLaunches);
         const latestLaunch = reviewLaunches.at(-1);
         if (latestLaunch?.model !== undefined) attempt.reviewModel = latestLaunch.model;
         if (latestLaunch?.provider !== undefined) attempt.reviewProvider = latestLaunch.provider;

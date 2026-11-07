@@ -65,6 +65,7 @@ First release of Pi Maestro: an orchestrator and fresh-context executor workflow
 ### Cost and limits
 
 - `maxRunCost` bounds the board's lifetime spend, sunk cost included, and the drive shares one ledger across launches. Every launch is capped at a fair share of what is left, and none starts below one cent. Raising it with `/maestro config budget <usd>` resolves a pending `budget_blocked` decision, and a one-time notice fires at 80%.
+- Reviewer spend reaches the board even when the budget stops a panel partway.
 - `maxCostPerTask` and `maxCostPerReview` cap single launches. A capped attempt keeps its edits, and raising the cap above what it spent resumes it in place. A task stopped by a cap is not retried at the same cap.
 - `maxAttempts` counts only launches that produced real work, so a launch cut at its share of the run budget is retried without using up an attempt. `maxTotalLaunchesPerRun`, `maxPlanTasks`, and the scale confirmation thresholds bound a run.
 - Plan approval and drive preflight show a labeled cost estimate and warn when projected reviewer spend is at least twice executor spend.

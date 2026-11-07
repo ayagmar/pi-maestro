@@ -1215,6 +1215,62 @@ test("candidate mutation between logical reviewers stops convergence", async () 
   }
 });
 
+test("reviewer spend is billed when the budget stops a panel", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-panel-billing-"));
+  try {
+    const task = reviewPolicyTask(cwd, "confirm");
+    let launches = 0;
+    const reviewers = queuedReviewerReports([
+      { usage: { input: 3, output: 4, cost: 0.75, turns: 2 } },
+    ]);
+
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      reviewRequiredApprovals: 2,
+      canStartExecutor: () => launches < 1,
+      startExecutor: (options) => {
+        launches += 1;
+        return reviewers(options);
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    const settled = findTask(loadBoard(cwd), task.id);
+    assert.equal(launches, 1);
+    assert.equal(settled?.status, "ready_for_review");
+    assert.equal(settled?.attempts.at(-1)?.usage.cost, 0.75);
+    assert.equal(settled?.attempts.at(-1)?.reviewUsage?.cost, 0.75);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a review refused before its first launch leaves no review usage behind", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-panel-refused-"));
+  try {
+    const task = reviewPolicyTask(cwd, "confirm");
+
+    await reviewTask({
+      cwd,
+      task,
+      tier,
+      canStartExecutor: () => false,
+      startExecutor: () => {
+        throw new Error("reviewer must not start");
+      },
+      onUpdate,
+      trackRun,
+    });
+
+    assert.equal(findTask(loadBoard(cwd), task.id)?.attempts.at(-1)?.reviewUsage, undefined);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("failed trusted candidate verification blocks reviewer launch", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-verification-gate-"));
   try {
