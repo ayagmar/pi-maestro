@@ -15,7 +15,14 @@ import {
   setKeybindings,
   TUI_KEYBINDINGS,
 } from "@earendil-works/pi-tui";
-import { DEFAULT_CONFIG, loadConfig, saveConfig, validateEffectiveConfig } from "../src/config.js";
+import {
+  DEFAULT_CONFIG,
+  loadConfig,
+  matchingPreset,
+  setProjectConfigTrust,
+  saveConfig,
+  validateEffectiveConfig,
+} from "../src/config.js";
 import {
   applySettingsChange,
   buildModelChoices,
@@ -277,6 +284,18 @@ test("section summaries keep their full text after a setting changes", async () 
         // Essentials → "Max parallel executors" (second row) → cycle 3 → 4.
         component.handleInput("\r");
         component.handleInput("\x1b[B");
+        setProjectConfigTrust(false);
+        try {
+          component.handleInput("\r");
+          assert.match(
+            stripVTControlCharacters(row("Max parallel executors")),
+            /\b3\b/,
+            "refused edit must restore the displayed value"
+          );
+          assert.equal(existsSync(join(cwd, ".pi", "maestro.json")), false);
+        } finally {
+          setProjectConfigTrust(true);
+        }
         component.handleInput("\r");
         component.handleInput("\x1b");
 
@@ -311,6 +330,19 @@ test("model picker changes preserve qualified values, sentinels, and fallback ch
   config = applySettingsChange(config, "fallback:standard", "(none)");
   assert.equal(config.tiers.standard?.model, undefined);
   assert.deepEqual(config.tiers.standard?.fallbacks, ["provider-c/last-resort"]);
+});
+
+test("switching executor presets keeps the selected trusted verification profile and its command", () => {
+  const config = {
+    ...DEFAULT_CONFIG,
+    verificationProfiles: { unit: { command: "npm test", timeoutSeconds: 60 } },
+    defaultVerificationProfile: "unit",
+  };
+  const next = applySettingsChange(config, "preset", "inherit");
+  assert.equal(matchingPreset(next), "inherit");
+  assert.equal(presetDrift(next), undefined);
+  assert.equal(next.defaultVerificationProfile, "unit");
+  assert.deepEqual(next.verificationProfiles, config.verificationProfiles);
 });
 
 test("the review ladder settings round-trip through applySettingsChange", () => {

@@ -24,7 +24,6 @@ import {
   PRESETS,
   saveConfig,
   THINKING_LEVELS,
-  validateEffectiveConfig,
 } from "./config.js";
 import { type MaestroConfig } from "./types.js";
 
@@ -187,7 +186,13 @@ export function applySettingsChange(
 
   if (id === "preset") {
     const preset = findPreset(value);
-    return preset ? structuredClone(preset.config) : config;
+    if (!preset) return config;
+    const next = structuredClone(preset.config);
+    // Presets configure agent tiers and run limits, not trusted commands.
+    if (config.verificationProfiles) next.verificationProfiles = config.verificationProfiles;
+    if (config.defaultVerificationProfile)
+      next.defaultVerificationProfile = config.defaultVerificationProfile;
+    return next;
   }
   if (id === "planGate") config.planGate = value === "on";
   else if (id === "livePanes") config.livePanes = value === "on";
@@ -284,10 +289,9 @@ export async function showSettings(
   ctx: ExtensionCommandContext,
   scope: ConfigScope
 ): Promise<void> {
-  let config: MaestroConfig = structuredClone(loadConfig(ctx.cwd));
+  let config: MaestroConfig = structuredClone(loadConfig(ctx.cwd, scope));
   const modelChoices = buildModelChoices(ctx.modelRegistry);
   const preferredProvider = ctx.model?.provider;
-  const persist = () => saveConfig(scope, ctx.cwd, config);
 
   await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
     let settingsFocused = false;
@@ -790,13 +794,15 @@ export async function showSettings(
         getSettingsListTheme(),
         (id, value) => {
           const updated = applySettingsChange(structuredClone(config), id, value);
-          const error = validateEffectiveConfig(updated);
-          if (error) {
-            ctx.ui.notify(`Setting not saved: ${error}`, "warning");
-            return;
+          try {
+            saveConfig(scope, ctx.cwd, updated);
+            config = updated;
+          } catch (error) {
+            ctx.ui.notify(
+              `Setting not saved: ${error instanceof Error ? error.message : String(error)}`,
+              "warning"
+            );
           }
-          config = updated;
-          persist();
           items = buildSectionItems(section);
           for (const item of items) list.updateValue(item.id, item.currentValue);
           updateNavigationValues();
@@ -912,6 +918,7 @@ export function presetDrift(config: MaestroConfig): string | undefined {
     const reference = preset.config as unknown as Record<string, unknown>;
     const candidate = config as unknown as Record<string, unknown>;
     for (const key of new Set([...Object.keys(reference), ...Object.keys(candidate)])) {
+      if (key === "verificationProfiles" || key === "defaultVerificationProfile") continue;
       if (key === "tiers") {
         const referenceTiers = preset.config.tiers;
         const candidateTiers = config.tiers;

@@ -5,6 +5,8 @@
 - User: `~/.pi/agent/maestro.json`
 - Project: `<repo>/.pi/maestro.json`
 
+The user editor shows user settings without overrides from the current project. Project saves can select a verification profile by name but never copy its command from user config. Changing presets keeps your verification profiles and default selection.
+
 Resolution order is defaults, then user config, then project config. Top-level keys merge by key. `tiers` merge by tier name, and a later scope's whole tier object replaces the earlier one of the same name. Maestro validates the effective configuration after the merge and reports incompatible values instead of clamping them or saving a configuration that cannot run.
 
 Project config tunes ordinary settings and may select a user-defined `defaultVerificationProfile`; commands in a project's `verificationProfiles` are ignored. Pi decides whether a project is trusted. In an untrusted project, `.pi/maestro.json` is not read at all, so budgets, attempt caps, tier models, and tier tool lists keep their user or default values.
@@ -97,7 +99,7 @@ Before a dispatch, Maestro resolves the primary and fallbacks for every tier in 
 
 ## Budgets and caps
 
-`maxRunCost` counts the board's lifetime spend, including sunk cost in cancelled and superseded tasks. Excluding it would let a cancel-and-replan loop spend without bound. `/maestro config budget <usd>` raises it in one deliberate step and resolves a pending `budget_blocked` decision when the new budget clears current spend. A running drive re-reads the budget at every boundary, so a raise takes effect without a restart, and a one-time notice fires at 80% consumption.
+`maxRunCost` counts the board's lifetime spend, including sunk cost in cancelled and superseded tasks. Excluding it would let a cancel-and-replan loop spend without bound. `/maestro config budget <usd>` raises it in one deliberate step and resolves a pending `budget_blocked` decision when the new budget clears current spend. The command writes a project override, so pi must trust the project. Use a decimal USD amount, or `0` to turn the cap off. If the existing project config cannot be read, the command leaves it and the budget decision untouched. A running drive re-reads the budget at every boundary, so a raise takes effect without a restart, and a one-time notice fires at 80% consumption.
 
 Each drive keeps one spend ledger. Every raw executor or reviewer launch is capped at a share of the budget left after settled spend and the caps of launches still running, so three parallel executors with $3 left can spend $3 in total, and the second reviewer of a `confirm` panel sees what the first one spent. A launch cut at its share while `maxCostPerTask` was not the limit does not count against `maxAttempts`. A launch does not start when that share falls below one cent. The gate runs before a batch, so already-running executors are never aborted by it, and reviews can still run.
 

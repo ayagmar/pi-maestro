@@ -1,5 +1,3 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { completionFreshness } from "./artifact-policy.js";
 import {
@@ -11,7 +9,7 @@ import {
   updateBoard,
   validatePlan,
 } from "./board.js";
-import { configFile, describeConfig, loadConfig, validateConfig } from "./config.js";
+import { describeConfig, loadConfig, saveProjectBudget } from "./config.js";
 import { activeRunCost, boardUsage, formatCostSummary } from "./format.js";
 import { notify } from "./handoff.js";
 import { deriveModelInsights, formatModelInsights } from "./insights.js";
@@ -27,9 +25,9 @@ export async function handleConfigCommand(
   rest: string,
   onChanged: () => void
 ): Promise<void> {
-  const [sub, amountRaw] = rest.split(/\s+/).filter(Boolean);
+  const [sub, ...args] = rest.split(/\s+/).filter(Boolean);
   if (sub === "budget") {
-    handleBudgetCommand(ctx, amountRaw, onChanged);
+    handleBudgetCommand(ctx, args.length ? args.join(" ") : undefined, onChanged);
     return;
   }
   if (ctx.mode !== "tui" || rest === "show") {
@@ -52,13 +50,13 @@ function handleBudgetCommand(
   amountRaw: string | undefined,
   onChanged: () => void
 ): void {
-  const config = loadConfig(ctx.cwd);
   const tasks = loadBoard(ctx.cwd).tasks;
   const total = boardUsage(tasks).cost;
   const sunk = total - activeRunCost(tasks);
   const spendSummary = `board spend $${total.toFixed(4)}${sunk > 0 ? ` ($${sunk.toFixed(4)} sunk in cancelled tasks)` : ""}`;
   if (amountRaw === undefined) {
-    const current = config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`;
+    const { maxRunCost } = loadConfig(ctx.cwd);
+    const current = maxRunCost === 0 ? "off" : `$${maxRunCost}`;
     notify(
       ctx,
       `Run budget: ${current} · ${spendSummary}. Set it with /maestro config budget <usd> (0 disables).`
@@ -66,25 +64,24 @@ function handleBudgetCommand(
     return;
   }
   const amount = Number(amountRaw.replace(/^\$/, ""));
-  if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000) {
+  if (
+    !/^\$?(?:\d+\.?\d*|\.\d+)$/.test(amountRaw) ||
+    amount > 1_000_000 ||
+    (amount === 0 && /[1-9]/.test(amountRaw))
+  ) {
     notify(ctx, "Budget must be a number of USD from 0 to 1000000 (0 disables).", "warning");
     return;
   }
-  const file = configFile("project", ctx.cwd);
-  let projectSettings: Record<string, unknown> = {};
   try {
-    projectSettings = JSON.parse(readFileSync(file, "utf-8")) as Record<string, unknown>;
-  } catch {
-    // Missing or invalid project config starts from an empty override set.
-  }
-  projectSettings.maxRunCost = amount;
-  const error = validateConfig(projectSettings);
-  if (error) {
-    notify(ctx, `Budget not saved: existing project config is invalid (${error}).`, "warning");
+    saveProjectBudget(ctx.cwd, amount);
+  } catch (error) {
+    notify(
+      ctx,
+      `Budget not saved: ${error instanceof Error ? error.message : String(error)}`,
+      "warning"
+    );
     return;
   }
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify(projectSettings, null, 2)}\n`, "utf-8");
   // The raise is the fix for a pending budget stop: resolve it in the same
   // step so recovery is one command instead of config-edit + decision surgery.
   let resolvedDecision = false;
@@ -92,6 +89,7 @@ function handleBudgetCommand(
     updateBoard(ctx.cwd, (board) => {
       const decision = board.activeDecision;
       if (!decision || decision.resolution || decision.kind !== "budget_blocked") return false;
+      if (amount !== 0 && boardUsage(board.tasks).cost >= amount) return false;
       decision.resolution = { intervention: "resume", resolvedAt: Date.now() };
       delete decision.deliveryClaim;
       resolvedDecision = true;

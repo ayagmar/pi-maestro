@@ -199,8 +199,13 @@ export function findPreset(name: string): Preset | undefined {
 
 /** Name of the preset the config matches, or "custom". */
 export function matchingPreset(config: MaestroConfig): string {
+  const {
+    verificationProfiles: _commands,
+    defaultVerificationProfile: _selection,
+    ...settings
+  } = config;
   for (const preset of PRESETS) {
-    if (JSON.stringify(preset.config) === JSON.stringify(config)) return preset.name;
+    if (JSON.stringify(preset.config) === JSON.stringify(settings)) return preset.name;
   }
   return "custom";
 }
@@ -384,9 +389,19 @@ export function isProjectConfigTrusted(): boolean {
  * A repository may select a user-defined verification profile, but cannot define
  * commands. An untrusted project contributes no settings at all.
  */
-export function loadConfig(cwd: string): MaestroConfig {
+export function loadConfig(cwd: string, scope: ConfigScope = "project"): MaestroConfig {
   const user = readConfigFile(configFile("user", cwd));
-  const project = projectConfigTrusted ? readConfigFile(configFile("project", cwd)) : undefined;
+  const project =
+    scope === "project" && projectConfigTrusted
+      ? readConfigFile(configFile("project", cwd))
+      : undefined;
+  return resolveConfig(user, project);
+}
+
+function resolveConfig(
+  user?: Partial<MaestroConfig>,
+  project?: Partial<MaestroConfig>
+): MaestroConfig {
   const trusted = mergeConfig(DEFAULT_CONFIG, user);
   let resolved = trusted;
   if (project) {
@@ -407,16 +422,69 @@ export function loadConfig(cwd: string): MaestroConfig {
 export function saveConfig(scope: ConfigScope, cwd: string, config: MaestroConfig): void {
   const error = validateEffectiveConfig(config);
   if (error) throw new Error(`Cannot save invalid effective maestro configuration: ${error}`);
-  const configPath = configFile(scope, cwd);
+  if (scope === "project") {
+    const { verificationProfiles: _userCommands, ...settings } = config;
+    writeProjectConfig(cwd, settings);
+  } else {
+    if (isProjectConfigTrusted())
+      resolveConfig(config, readForUpdate(configFile("project", cwd), true));
+    writeConfigFile(configFile(scope, cwd), config);
+  }
+}
+
+/** Change just the project budget, without materializing inherited user settings. */
+export function saveProjectBudget(cwd: string, amount: number): void {
+  if (!isProjectConfigTrusted()) throw new Error("This project is not trusted by pi.");
+  const file = configFile("project", cwd);
+  const updated = { ...readForUpdate(file), maxRunCost: amount };
+  writeProjectConfig(cwd, updated);
+}
+
+// A save should fail, not quarantine or replace a file it cannot validate.
+function readForUpdate(file: string, ignoreInvalidOverride = false): Partial<MaestroConfig> {
+  let raw: unknown = {};
+  try {
+    raw = JSON.parse(readFileSync(file, "utf-8"));
+  } catch (error) {
+    if (ignoreInvalidOverride && error instanceof SyntaxError) return {};
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Cannot read existing config at ${file}.`, { cause: error });
+    }
+  }
+  if (!configFileValidator.check(raw) || validateConfig(raw)) {
+    if (ignoreInvalidOverride) return {};
+    throw new Error(`Invalid config at ${file}.`);
+  }
+  return raw;
+}
+
+function writeProjectConfig(cwd: string, settings: Partial<MaestroConfig>): void {
+  if (!isProjectConfigTrusted()) throw new Error("This project is not trusted by pi.");
+  const user = configFile("user", cwd);
+  const project = configFile("project", cwd);
+  const target = configWriteTarget(project);
+  if (target === configWriteTarget(user))
+    throw new Error("Project and user config point to the same file.");
+  const error = validateConfig(settings);
+  if (error) throw new Error(error);
+  resolveConfig(readForUpdate(user), settings);
+  writeConfigFile(target, settings);
+}
+
+function configWriteTarget(file: string): string {
+  try {
+    return realpathSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return file;
+  }
+}
+
+function writeConfigFile(configPath: string, config: Partial<MaestroConfig>): void {
   mkdirSync(dirname(configPath), { recursive: true });
   // A rename replaces a symlink itself, which would silently detach a config
   // kept in a dotfile repo, so save to the file the link points at.
-  let file = configPath;
-  try {
-    file = realpathSync(configPath);
-  } catch {
-    // A first save has nothing to resolve.
-  }
+  const file = configWriteTarget(configPath);
   // Write a sibling and rename it into place: a reader never sees a
   // half-written file (and quarantines it as corrupt), and a failed write
   // leaves the previous settings intact.

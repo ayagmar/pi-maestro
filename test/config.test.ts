@@ -29,6 +29,7 @@ import {
   resolveTierModel,
   resolveTierModels,
   saveConfig,
+  saveProjectBudget,
   setProjectConfigTrust,
   THINKING_LEVELS,
   validateConfig,
@@ -526,6 +527,49 @@ test("loadConfig accepts valid cross-scope override combinations", () => {
   }
 });
 
+test("scoped saves refuse an aliased user dotfile and validate both layers before writing", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-save-scope-"));
+  const agentDir = join(cwd, "agent");
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    mkdirSync(agentDir);
+    mkdirSync(join(cwd, ".pi"));
+    const user = join(agentDir, "maestro.json");
+    const project = join(cwd, ".pi", "maestro.json");
+    const userText = JSON.stringify({
+      verificationProfiles: { unit: { command: "npm test", timeoutSeconds: 60 } },
+    });
+    writeFileSync(user, userText);
+    symlinkSync(user, project);
+    assert.throws(() => saveConfig("project", cwd, loadConfig(cwd)), /same file/);
+    assert.throws(() => saveProjectBudget(cwd, 750), /same file/);
+    assert.equal(readFileSync(user, "utf8"), userText);
+    rmSync(project);
+    const projectText = JSON.stringify({ maxReviewerLaunches: 2 });
+    writeFileSync(project, projectText);
+    const incompatible = { ...loadConfig(cwd, "user"), reviewRequiredApprovals: 3 };
+    assert.throws(() => saveConfig("user", cwd, incompatible), /reviewRequiredApprovals/);
+    assert.equal(readFileSync(user, "utf8"), userText);
+    writeFileSync(user, JSON.stringify(incompatible));
+    assert.throws(() => saveProjectBudget(cwd, 750), /reviewRequiredApprovals/);
+    assert.equal(readFileSync(project, "utf8"), projectText);
+
+    // A malformed project contributes no runtime override. Editing user settings
+    // should work without writing, renaming, or trying to repair that project.
+    for (const invalid of ["{unfinished", '{"maxReviewerLaunches":0}']) {
+      writeFileSync(project, invalid);
+      saveConfig("user", cwd, { ...DEFAULT_CONFIG, maxParallel: 4 });
+      assert.equal(loadConfig(cwd, "user").maxParallel, 4);
+      assert.equal(readFileSync(project, "utf8"), invalid);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig resolves defaults, then user, then project, in that precedence order", () => {
   const cwd = mkdtempSync(join(tmpdir(), "maestro-config-cwd-"));
   const agentDir = mkdtempSync(join(tmpdir(), "maestro-config-agent-"));
@@ -560,7 +604,20 @@ test("loadConfig resolves defaults, then user, then project, in that precedence 
       })
     );
     const selected = loadConfig(cwd);
+    assert.equal(
+      loadConfig(cwd, "user").maxAttempts,
+      6,
+      "user editor must not absorb project overrides"
+    );
     assert.equal(selected.defaultVerificationProfile, "trusted");
+    saveConfig("project", cwd, selected);
+    const projectFile = JSON.parse(readFileSync(join(cwd, ".pi", "maestro.json"), "utf8"));
+    assert.equal(
+      projectFile.verificationProfiles,
+      undefined,
+      "never copy user commands to a repository"
+    );
+    assert.equal(projectFile.defaultVerificationProfile, "trusted");
     assert.deepEqual(Object.keys(selected.verificationProfiles ?? {}), ["trusted"]);
 
     // An unknown project selection is ignored instead of becoming executable.

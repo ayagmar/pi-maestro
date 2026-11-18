@@ -5676,8 +5676,11 @@ test("/maestro config budget raises the run budget in one deliberate step", asyn
       assert.match(notices.at(-1) ?? "", /Run budget: \$35/);
       assert.match(notices.at(-1) ?? "", /\$36\.0000 sunk in cancelled tasks/);
 
-      await command.handler("config budget nonsense", ctx);
-      assert.match(notices.at(-1) ?? "", /Budget must be a number/);
+      for (const invalid of ["nonsense", "$", "0x0", "0 typo"]) {
+        await command.handler(`config budget ${invalid}`, ctx);
+        assert.match(notices.at(-1) ?? "", /Budget must be a number/);
+        assert.equal(loadConfig(cwd).maxRunCost, 35);
+      }
 
       await command.handler("config budget 120", ctx);
       assert.match(notices.at(-1) ?? "", /Run budget → \$120/);
@@ -5723,6 +5726,25 @@ test("/maestro config budget resolves a pending budget_blocked decision in the s
       // would come straight back on resume.
       await command.handler("config budget 5", ctx);
       assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+
+      setProjectConfigTrust(false);
+      try {
+        await command.handler("config budget 200", ctx);
+        assert.match(notices.at(-1) ?? "", /not trusted/i);
+        assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      } finally {
+        setProjectConfigTrust(true);
+      }
+      assert.equal(loadConfig(cwd).maxRunCost, 5);
+
+      const file = join(cwd, ".pi", "maestro.json");
+      const saved = readFileSync(file, "utf8");
+      writeFileSync(file, "{unfinished");
+      await command.handler("config budget 200", ctx);
+      assert.match(notices.at(-1) ?? "", /Budget not saved/);
+      assert.equal(readFileSync(file, "utf8"), "{unfinished");
+      assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      writeFileSync(file, saved);
 
       await command.handler("config budget 200", ctx);
       assert.match(notices.at(-1) ?? "", /Pending budget_blocked decision resolved/);
