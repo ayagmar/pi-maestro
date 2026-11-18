@@ -1,3 +1,7 @@
+# release-it 21.1.2 pins proxy-agent 8.0.2; 8.0.3 carries the basic-ftp fixes.
+# Remove this once release-it depends on the patched proxy chain.
+overrides:
+  "release-it@21.1.2>proxy-agent": 8.0.3
 allowBuilds:
   esbuild: false
   protobufjs: false
