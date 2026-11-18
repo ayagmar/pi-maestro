@@ -5064,6 +5064,7 @@ test("passive agent pane and session browser resolve every close", async () => {
         margin: 1,
       });
       viewer.component.handleInput("\x1b[C");
+      viewer.component.render?.(80); // the frame the key is pressed on
       viewer.component.handleInput("s");
       viewer.component.handleInput("\r");
       viewer.component.handleInput("F");
@@ -5236,6 +5237,7 @@ test("review launches update the passive agent pane with transcript actions", as
       const focusedPane = runtime.overlays[1];
       assert.ok(focusedPane);
       assert.equal(focusedPane.focused, true);
+      focusedPane.component.render?.(80); // the frame the key is pressed on
       focusedPane.component.handleInput("s");
       focusedPane.component.handleInput("\r");
       focusedPane.component.handleInput("F");

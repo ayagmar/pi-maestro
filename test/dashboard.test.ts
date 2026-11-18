@@ -323,6 +323,7 @@ test("dashboard steer mode routes submitted text to the live run", () => {
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s"); // open steering templates
     dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\x1b[B");
@@ -348,6 +349,7 @@ test("dashboard queues a follow-up for the selected live run", () => {
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("F");
     for (const character of "summarize after checks") dashboard.handleInput(character);
     dashboard.handleInput("\r");
@@ -368,11 +370,13 @@ test("dashboard focuses only its active text input", () => {
     dashboard.focused = true;
     assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: false });
 
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("F");
     assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: true });
     dashboard.handleInput("\x1b");
     assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: false });
 
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     for (let index = 0; index < 3; index += 1) dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
@@ -396,6 +400,7 @@ test("dashboard sends the selected steering template", () => {
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
@@ -418,6 +423,7 @@ test("dashboard keeps every steering template visible at constrained height", ()
     "Custom message...",
   ];
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     for (const option of options) {
       const body = dashboard.render(120).slice(1, 3).join("\n");
@@ -437,6 +443,7 @@ test("dashboard cancels the steering template chooser with escape", () => {
     makeActions(board, { isLive: () => true, close: () => (closed = true) })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     assert.match(dashboard.render(100).join("\n"), /Custom message\.\.\./);
 
@@ -460,6 +467,7 @@ test("dashboard abort requires y confirmation", () => {
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("x");
     dashboard.handleInput("n"); // decline
     assert.deepEqual(aborted, []);
@@ -1695,6 +1703,7 @@ test("dashboard drops a steer when its task stops running instead of sending it 
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
@@ -1728,46 +1737,66 @@ const EXECUTOR_1_RELAUNCHED: LiveLaunchIdentity = { ...EXECUTOR_1, logFile: "T1.
 const LIVE_ACTIONS = [
   {
     name: "steer",
-    open: (dashboard: Dashboard) => {
-      dashboard.handleInput("s");
+    key: "s",
+    // Custom message: down to "Custom message...", choose it, type.
+    fill: (dashboard: Dashboard) => {
       for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
       dashboard.handleInput("\r");
       for (const ch of "fix it") dashboard.handleInput(ch);
     },
     confirm: "\r",
     sent: "steer:fix it",
-    prompt: /steer T1 executor · attempt 1 ▸/,
+    prompt: /steer T1 \w+ · attempt 1 ▸/,
+    queued: /Queued steer for T1 executor · attempt 1/,
+    refused: /Nothing sent: T1 executor · attempt 1 ended/,
+  },
+  {
+    name: "steer template",
+    key: "s",
+    fill: () => {},
+    confirm: "\r",
+    sent: "steer:Stop - wrong approach, report current state",
+    prompt: /Steer T1 \w+ · attempt 1:/,
     queued: /Queued steer for T1 executor · attempt 1/,
     refused: /Nothing sent: T1 executor · attempt 1 ended/,
   },
   {
     name: "follow-up",
-    open: (dashboard: Dashboard) => {
-      dashboard.handleInput("F");
+    key: "F",
+    fill: (dashboard: Dashboard) => {
       for (const ch of "fix it") dashboard.handleInput(ch);
     },
     confirm: "\r",
     sent: "followUp:fix it",
-    prompt: /follow-up T1 executor · attempt 1 ▸/,
+    prompt: /follow-up T1 \w+ · attempt 1 ▸/,
     queued: /Queued follow-up for T1 executor · attempt 1/,
     refused: /Nothing sent: T1 executor · attempt 1 ended/,
   },
   {
     name: "abort",
-    open: (dashboard: Dashboard) => dashboard.handleInput("x"),
+    key: "x",
+    fill: () => {},
     confirm: "y",
     sent: "abort",
-    prompt: /Abort T1 executor · attempt 1\? Press y/,
+    prompt: /Abort T1 \w+ · attempt 1\? Press y/,
     queued: /Abort requested for T1 executor · attempt 1/,
     refused: /Nothing aborted: T1 executor · attempt 1 ended/,
   },
 ] as const;
+
+/** Render the frame the operator acts on, press the action key, fill the prompt. */
+function openLiveAction(dashboard: Dashboard, action: (typeof LIVE_ACTIONS)[number]): void {
+  dashboard.render(120);
+  dashboard.handleInput(action.key);
+  action.fill(dashboard);
+}
 
 function launchHarness() {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
   let current: LiveLaunchIdentity | undefined = EXECUTOR_1;
   const dispatched: { action: string; launch: LiveLaunchIdentity }[] = [];
   const selected: string[] = [];
+  let closed = 0;
   const record = (action: string) => (launch: LiveLaunchIdentity, message?: string) => {
     dispatched.push({ action: message === undefined ? action : `${action}:${message}`, launch });
     return true;
@@ -1785,23 +1814,32 @@ function launchHarness() {
       abort: record("abort"),
       hasExecutorSession: () => true,
       selectTaskAction: (taskId, action) => selected.push(`${taskId}:${action}`),
+      close: () => {
+        closed += 1;
+      },
     })
   );
   return {
     dashboard,
     dispatched,
     selected,
+    closed: () => closed,
     setCurrent: (launch: LiveLaunchIdentity | undefined) => {
       current = launch;
     },
   };
 }
 
+const TRANSITIONS = [
+  ["an executor-to-reviewer handoff", REVIEWER_1],
+  ["a same-kind replacement", EXECUTOR_1_RELAUNCHED],
+] as const;
+
 for (const action of LIVE_ACTIONS) {
   test(`dashboard ${action.name} reaches the unchanged launch it was opened on`, () => {
     const { dashboard, dispatched } = launchHarness();
     try {
-      action.open(dashboard);
+      openLiveAction(dashboard, action);
       const lines = dashboard.render(120).join("\n");
       assert.match(lines, action.prompt);
       dashboard.handleInput(action.confirm);
@@ -1812,14 +1850,11 @@ for (const action of LIVE_ACTIONS) {
     }
   });
 
-  for (const [transition, next] of [
-    ["an executor-to-reviewer handoff", REVIEWER_1],
-    ["a same-kind replacement", EXECUTOR_1_RELAUNCHED],
-  ] as const) {
+  for (const [transition, next] of TRANSITIONS) {
     test(`dashboard ${action.name} is dropped across ${transition}`, () => {
       const { dashboard, dispatched, selected, setCurrent } = launchHarness();
       try {
-        action.open(dashboard);
+        openLiveAction(dashboard, action);
         dashboard.render(120); // the last frame the operator saw, on the executor
         setCurrent(next); // no render between the switch and the confirming key
         dashboard.handleInput(action.confirm);
@@ -1833,19 +1868,41 @@ for (const action of LIVE_ACTIONS) {
         dashboard.dispose();
       }
     });
+
+    test(`dashboard ${action.name} key is not taken for a launch that replaced the one on screen (${transition})`, () => {
+      const { dashboard, dispatched, setCurrent } = launchHarness();
+      try {
+        dashboard.render(120); // the operator sees the executor's controls
+        setCurrent(next); // replaced before the next paint
+        dashboard.handleInput(action.key); // pressed for the executor on screen
+        const lines = dashboard.render(120).join("\n");
+        assert.doesNotMatch(lines, action.prompt);
+        assert.match(lines, action.refused);
+
+        // A press on the refreshed frame reaches the launch it now shows.
+        openLiveAction(dashboard, action);
+        dashboard.handleInput(action.confirm);
+        assert.deepEqual(dispatched, [{ action: action.sent, launch: next }]);
+      } finally {
+        dashboard.dispose();
+      }
+    });
   }
 
-  test(`dashboard ${action.name} is dropped when a render sees its launch end`, () => {
-    const { dashboard, dispatched, setCurrent } = launchHarness();
+  test(`dashboard ${action.name} key after a repaint closed its prompt does nothing`, () => {
+    const { dashboard, dispatched, selected, closed, setCurrent } = launchHarness();
     try {
-      action.open(dashboard);
-      setCurrent(REVIEWER_1);
+      openLiveAction(dashboard, action);
+      setCurrent(undefined); // the last live run ends; its session can be opened
       const lines = dashboard.render(120).join("\n");
       assert.doesNotMatch(lines, action.prompt);
-      assert.match(lines, action.refused);
-      setCurrent(undefined);
-      dashboard.handleInput(action.confirm);
+      assert.match(lines, /Nothing (sent|aborted): T1 executor · attempt 1 ended/);
+
+      dashboard.handleInput(action.confirm); // typed for the prompt that just closed
+      dashboard.handleInput("\r"); // a deliberate browse key afterwards still works
       assert.deepEqual(dispatched, []);
+      assert.equal(closed(), 0);
+      assert.deepEqual(selected, ["T1:open_executor"]);
     } finally {
       dashboard.dispose();
     }
@@ -1863,6 +1920,7 @@ test("dashboard reports a launch the controller no longer runs instead of claimi
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("x");
     dashboard.handleInput("y");
     const lines = dashboard.render(120).join("\n");
@@ -1888,6 +1946,7 @@ test("dashboard does not carry a cancelled steer draft or a notice to another ta
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
@@ -1895,6 +1954,7 @@ test("dashboard does not carry a cancelled steer draft or a notice to another ta
     dashboard.handleInput("\x1b"); // abandon the draft
     dashboard.handleInput("\x1b[B"); // select T2
 
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
@@ -1902,6 +1962,7 @@ test("dashboard does not carry a cancelled steer draft or a notice to another ta
     dashboard.handleInput("\r"); // empty custom message sends nothing
     assert.deepEqual(sent, []);
 
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     dashboard.handleInput("\r"); // first template, for T2
     assert.deepEqual(sent, ["T2:Stop - wrong approach, report current state"]);
@@ -2003,6 +2064,7 @@ test("dashboard consumes the key that finds its live prompt invalidated", () => 
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("F");
     for (const ch of "hello") dashboard.handleInput(ch);
     dashboard.render(100); // the last frame the operator saw, with T1 still live
@@ -2012,8 +2074,9 @@ test("dashboard consumes the key that finds its live prompt invalidated", () => 
     assert.deepEqual(selected, [], "Enter must not open the settled session");
     assert.match(dashboard.render(100).join("\n"), /Nothing sent: T1 executor · attempt 1 ended/);
 
-    dashboard.handleInput("F");
     live = true;
+    dashboard.render(100); // the frame the key is pressed on
+    dashboard.handleInput("F");
     dashboard.handleInput("F"); // still a prompt: types into the follow-up input
     live = false;
     dashboard.handleInput("a"); // meant for the prompt; must not start an approval
@@ -2969,11 +3032,13 @@ test("live pane steers and queues follow-up for the selected launch", () => {
   try {
     pane.focused = true;
     pane.handleInput("\x1b[C");
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("s");
     pane.handleInput("\r");
     assert.deepEqual(steered, ["T2:Stop - wrong approach, report current state"]);
     assert.match(pane.render(80).join("\n"), /Queued steer for T2/);
 
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("F");
     for (const character of "summarize later") pane.handleInput(character);
     pane.handleInput("\r");
@@ -3031,10 +3096,12 @@ for (const [transition, after] of [
       try {
         pane.focused = true;
         if (action === "steer") {
+          pane.render(80); // the frame the key is pressed on
           pane.handleInput("s");
           for (let i = 0; i < 3; i++) pane.handleInput("\x1b[B");
           pane.handleInput("\r");
         } else {
+          pane.render(80); // the frame the key is pressed on
           pane.handleInput("F");
         }
         for (const ch of "fix it") pane.handleInput(ch);
@@ -3053,6 +3120,109 @@ for (const [transition, after] of [
   }
 }
 
+function paneHarness(initial: readonly LivePaneLaunch[]) {
+  let launches = initial;
+  const sent: string[] = [];
+  const opened: string[] = [];
+  let escaped = 0;
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {
+      escaped += 1;
+    },
+    onCycleVisibility: () => {},
+    onSteer: (launch, message) => Boolean(sent.push(`steer:${launch.logFile}:${message}`)),
+    onFollowUp: (launch, message) => Boolean(sent.push(`follow:${launch.logFile}:${message}`)),
+    onOpenSession: (launch) => opened.push(launch.key),
+    height: 10,
+  });
+  pane.focused = true;
+  return {
+    pane,
+    sent,
+    opened,
+    escaped: () => escaped,
+    setLaunches: (next: readonly LivePaneLaunch[]) => {
+      launches = next;
+    },
+  };
+}
+
+const PANE_REVIEWER: LivePaneLaunch = {
+  ...PANE_EXECUTOR,
+  key: "T1:review:1:1",
+  title: "Task T1 · review #1",
+  kind: "review",
+  logFile: "/missing/T1-review.1.bbbb.jsonl",
+};
+
+for (const [transition, after, next] of [
+  [
+    "an executor-to-reviewer handoff",
+    [{ ...PANE_EXECUTOR, live: false }, PANE_REVIEWER],
+    PANE_REVIEWER,
+  ],
+  [
+    "a same-kind replacement",
+    [{ ...PANE_EXECUTOR, logFile: "/missing/T1.1.cccc.jsonl" }],
+    { ...PANE_EXECUTOR, logFile: "/missing/T1.1.cccc.jsonl" },
+  ],
+] as const satisfies readonly (readonly [string, readonly LivePaneLaunch[], LivePaneLaunch])[]) {
+  for (const [action, key, prefix] of [
+    ["steer", "s", "steer"],
+    ["follow-up", "F", "follow"],
+  ] as const) {
+    test(`live pane ${action} key is not taken for a launch that replaced the one on screen (${transition})`, () => {
+      const { pane, sent, setLaunches } = paneHarness([PANE_EXECUTOR]);
+      try {
+        pane.render(80); // the operator sees the executor
+        setLaunches(after); // replaced before the next paint
+        pane.handleInput(key);
+        assert.doesNotMatch(
+          pane.render(80).join("\n"),
+          /(steer|follow-up) T1 .*▸|Steer T1|Custom message/
+        );
+
+        // A press on the refreshed frame opens on the launch it now shows.
+        pane.handleInput(key);
+        if (action === "steer") {
+          for (let i = 0; i < 3; i++) pane.handleInput("\x1b[B");
+          pane.handleInput("\r");
+        }
+        for (const ch of "fix it") pane.handleInput(ch);
+        pane.handleInput("\r");
+        assert.deepEqual(sent, [`${prefix}:${next.logFile}:fix it`]);
+      } finally {
+        pane.dispose();
+      }
+    });
+  }
+}
+
+for (const action of ["steer template", "follow-up"] as const) {
+  test(`live pane ${action} Enter after a repaint closed its prompt does nothing`, () => {
+    const { pane, sent, opened, escaped, setLaunches } = paneHarness([PANE_EXECUTOR]);
+    try {
+      pane.render(80);
+      pane.handleInput(action === "follow-up" ? "F" : "s");
+      if (action === "follow-up") for (const ch of "fix it") pane.handleInput(ch);
+      // The launch settles with a session the pane could open on Enter.
+      setLaunches([{ ...PANE_EXECUTOR, live: false, sessionFile: "/missing/T1.session.jsonl" }]);
+      assert.match(pane.render(80).join("\n"), /Nothing sent: T1 executor · attempt 1 ended/);
+
+      pane.handleInput("\r"); // typed for the prompt that just closed
+      assert.deepEqual(sent, []);
+      assert.deepEqual(opened, []);
+      assert.equal(escaped(), 0);
+      pane.handleInput("\r"); // a deliberate Enter afterwards still opens the session
+      assert.deepEqual(opened, [PANE_EXECUTOR.key]);
+    } finally {
+      pane.dispose();
+    }
+  });
+}
+
 test("live pane does not carry a cancelled draft into the next prompt", () => {
   const pane = new LivePaneComponent(fakeTheme, {
     getLaunches: () => [PANE_EXECUTOR],
@@ -3065,9 +3235,11 @@ test("live pane does not carry a cancelled draft into the next prompt", () => {
   });
   try {
     pane.focused = true;
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("F");
     for (const ch of "draft") pane.handleInput(ch);
     pane.handleInput("\x1b");
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("F");
     assert.doesNotMatch(pane.render(80).join("\n"), /draft/);
   } finally {
@@ -3098,11 +3270,13 @@ test("live pane focuses only its active text input", () => {
     pane.focused = true;
     assert.deepEqual(inputFocuses(pane), { steer: false, followUp: false });
 
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("F");
     assert.deepEqual(inputFocuses(pane), { steer: false, followUp: true });
     pane.handleInput("\x1b");
     assert.deepEqual(inputFocuses(pane), { steer: false, followUp: false });
 
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("s");
     for (let index = 0; index < 3; index += 1) pane.handleInput("\x1b[B");
     pane.handleInput("\r");

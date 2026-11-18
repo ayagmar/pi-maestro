@@ -135,7 +135,9 @@ type Mode =
   | "confirm_abort"
   | "confirm_accept"
   | "jump"
-  | "help";
+  | "help"
+  /** A repaint closed a prompt; the next key was typed for it and is dropped. */
+  | "prompt_cancelled";
 type LiveAction = "steer" | "follow_up" | "abort";
 /** Keys whose availability depends on the selected task. */
 type TaskActionKey =
@@ -253,6 +255,7 @@ type DashboardFrame = {
   grouped: ReturnType<typeof groupTasks>;
   phases: ReturnType<typeof projectRunPhases>;
   liveKinds: Map<string, "execute" | "review">;
+  liveLaunches: Map<string, LiveLaunchIdentity>;
   staleTaskIds: Set<string>;
   liveRuns: Map<string, { cost: number; turns: number; lastActivity: string }>;
 };
@@ -300,6 +303,11 @@ export class Dashboard {
    * steer_templates, steer, follow_up or confirm_abort.
    */
   private liveTarget: { launch: LiveLaunchIdentity; action: LiveAction } | undefined;
+  /** The selected task and its live launch as the last render showed them. */
+  private shownTarget: { taskId: string | undefined; launch: LiveLaunchIdentity | undefined } = {
+    taskId: undefined,
+    launch: undefined,
+  };
   private helpScroll = 0;
   private helpPageSize = 5;
   private queuedNotice: string | undefined;
@@ -364,10 +372,13 @@ export class Dashboard {
     const config = this.actions.getConfig?.();
     const liveKinds = new Map<string, "execute" | "review">();
     const liveRuns = new Map<string, { cost: number; turns: number; lastActivity: string }>();
+    const liveLaunches = new Map<string, LiveLaunchIdentity>();
     for (const task of board.tasks) {
       const kind = this.actions.liveKind(task.id);
       if (kind) liveKinds.set(task.id, kind);
       if (!this.actions.isLive(task.id)) continue;
+      const launch = this.actions.liveLaunch(task.id);
+      if (launch) liveLaunches.set(task.id, launch);
       const liveRun = this.actions.getLiveRun?.(task.id);
       if (liveRun) liveRuns.set(task.id, liveRun);
     }
@@ -389,6 +400,7 @@ export class Dashboard {
       grouped: groupTasks(board),
       phases: projectRunPhases(board, liveKinds, config),
       liveKinds,
+      liveLaunches,
       staleTaskIds,
       liveRuns,
     };
@@ -459,9 +471,24 @@ export class Dashboard {
     return tail;
   }
 
+  /**
+   * Open a prompt on the launch the operator saw. If the selection or the
+   * task's live launch changed since the last render, drop the key so the
+   * repaint shows the new launch and the operator presses again.
+   */
   private beginLiveAction(task: Task, action: LiveAction): void {
-    const launch = this.actions.liveLaunch(task.id);
+    const launch = this.frame.liveLaunches.get(task.id);
     if (!launch) return;
+    const shown = this.shownTarget;
+    if (shown.taskId !== task.id || !shown.launch) return;
+    if (!sameLaunch(shown.launch, launch)) {
+      this.queuedNotice = launchEndedNotice(
+        shown.launch,
+        launch,
+        action === "abort" ? "aborted" : "sent"
+      );
+      return;
+    }
     this.liveTarget = { launch, action };
     this.mode =
       action === "steer"
@@ -622,7 +649,7 @@ export class Dashboard {
       case "s":
       case "F":
       case "x":
-        return live && this.actions.liveLaunch(task.id) ? undefined : "task is not running";
+        return live && this.frame.liveLaunches.has(task.id) ? undefined : "task is not running";
       case "e":
       case "t":
         return undefined;
@@ -676,9 +703,10 @@ export class Dashboard {
   private routeInput(data: string): void {
     this.frame = this.buildFrame();
     this.frameFresh = true;
-    if (this.reconcileLiveAction()) {
+    if (this.reconcileLiveAction() || this.mode === "prompt_cancelled") {
       // The key was typed for a prompt that no longer exists; it must not also
       // run as a browse action on the task that is now selected.
+      if (this.mode === "prompt_cancelled") this.mode = "browse";
       this.actions.requestRender();
       return;
     }
@@ -976,7 +1004,7 @@ export class Dashboard {
     this.syncInputFocus();
     if (this.frameFresh) this.frameFresh = false;
     else this.frame = this.buildFrame();
-    this.reconcileLiveAction();
+    if (this.reconcileLiveAction()) this.mode = "prompt_cancelled";
     width = Math.max(1, Math.floor(width));
     const theme = this.theme;
     const board = this.frame.board;
@@ -1030,6 +1058,11 @@ export class Dashboard {
 
     lines.push(theme.fg("dim", "─".repeat(width)));
     lines.push(this.renderFooter(width));
+    const shown = this.selectedTask();
+    this.shownTarget = {
+      taskId: shown?.id,
+      launch: shown ? this.frame.liveLaunches.get(shown.id) : undefined,
+    };
     return lines.map((line) => truncateToWidth(line, width));
   }
 
@@ -1510,7 +1543,7 @@ export class Dashboard {
         height
       );
     }
-    if (this.mode === "browse" && this.queuedNotice) {
+    if ((this.mode === "browse" || this.mode === "prompt_cancelled") && this.queuedNotice) {
       return [this.theme.fg("success", truncateToWidth(`✓ ${this.queuedNotice}`, width))].slice(
         0,
         height

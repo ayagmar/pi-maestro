@@ -151,7 +151,13 @@ type SessionTranscript = {
 };
 
 type LivePaneStatus = "thinking" | "streaming" | "tool" | "done";
-type LivePaneMode = "browse" | "steer_templates" | "steer" | "follow_up";
+type LivePaneMode =
+  | "browse"
+  | "steer_templates"
+  | "steer"
+  | "follow_up"
+  /** A repaint closed a prompt; the next key was typed for it and is dropped. */
+  | "prompt_cancelled";
 
 const OSC133_PROMPT_MARKERS = ["\x1b]133;A\x07", "\x1b]133;B\x07", "\x1b]133;C\x07"] as const;
 
@@ -227,6 +233,8 @@ export class LivePaneComponent {
   private mode: LivePaneMode = "browse";
   /** The exact launch an open prompt is addressed to; set exactly while mode is not browse. */
   private promptTarget: LiveLaunchIdentity | undefined;
+  /** The selected launch as the last render showed it. */
+  private shownLaunch: LivePaneLaunch | undefined;
   private steerOption = 0;
   private readonly steerInput = new Input();
   private readonly followUpInput = new Input();
@@ -307,9 +315,13 @@ export class LivePaneComponent {
       this.options.onCycleVisibility();
       return;
     }
-    if (this.mode !== "browse" && this.reconcilePrompt(this.syncLaunches())) {
+    if (
+      this.mode === "prompt_cancelled" ||
+      (this.mode !== "browse" && this.reconcilePrompt(this.syncLaunches()))
+    ) {
       // The key was typed for a prompt that no longer exists; it must not also
       // run as a pane action on whatever launch is selected now.
+      if (this.mode === "prompt_cancelled") this.mode = "browse";
       this.options.requestRender();
       return;
     }
@@ -409,9 +421,10 @@ export class LivePaneComponent {
     const contentWidth = framed ? safeWidth - 2 : safeWidth;
     const contentHeight = framed ? height - 2 : height;
     const launches = this.syncLaunches();
-    this.reconcilePrompt(launches);
+    if (this.reconcilePrompt(launches)) this.mode = "prompt_cancelled";
     this.syncInputFocus();
     const selected = launches.find((launch) => launch.key === this.selectedKey);
+    this.shownLaunch = selected;
     if (!selected) {
       const settled = this.renderSettled(contentWidth, contentHeight);
       return framed ? this.frameSession(settled, safeWidth, height) : settled;
@@ -885,7 +898,7 @@ export class LivePaneComponent {
   }
 
   private renderActionControls(width: number, height: number): string[] {
-    if (this.mode !== "browse" && this.promptTarget) {
+    if (this.mode !== "browse" && this.mode !== "prompt_cancelled" && this.promptTarget) {
       return liveActionPromptLines(
         this.theme,
         {
@@ -898,7 +911,7 @@ export class LivePaneComponent {
         height
       );
     }
-    if (this.mode === "browse" && this.queuedNotice) {
+    if ((this.mode === "browse" || this.mode === "prompt_cancelled") && this.queuedNotice) {
       return [this.theme.fg("success", truncateToWidth(`✓ ${this.queuedNotice}`, width))].slice(
         0,
         height
@@ -907,7 +920,18 @@ export class LivePaneComponent {
     return [];
   }
 
+  /**
+   * Open a prompt on the launch the operator saw. If the selection or that
+   * launch changed since the last render, drop the key so the repaint shows
+   * the new launch and the operator presses again.
+   */
   private openPrompt(launch: LivePaneLaunch, mode: "steer_templates" | "follow_up"): void {
+    const shown = this.shownLaunch;
+    if (!shown || shown.key !== launch.key || shown.live === false) return;
+    if (!sameLaunch(shown, launch)) {
+      this.queuedNotice = launchEndedNotice(shown, launch, "sent");
+      return;
+    }
     this.promptTarget = {
       taskId: launch.taskId,
       kind: launch.kind,
@@ -940,7 +964,7 @@ export class LivePaneComponent {
    * to whatever is selected now. Returns true when it cancelled the prompt.
    */
   private reconcilePrompt(launches: readonly LivePaneLaunch[]): boolean {
-    if (this.mode === "browse") return false;
+    if (this.mode === "browse" || this.mode === "prompt_cancelled") return false;
     const target = this.promptTarget;
     if (!target) {
       this.cancelPrompt();
