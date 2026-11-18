@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -463,5 +471,101 @@ test("settings changes preserve existing values and persist provider-qualified s
     assert.equal(persisted.tiers.review.tools, DEFAULT_CONFIG.tiers.review?.tools);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("user settings flag rows a trusted project overrides, and keep editing the user value", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-settings-override-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-settings-override-agent-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const userFile = join(agentDir, "maestro.json");
+  const projectFile = join(cwd, ".pi", "maestro.json");
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+  } as unknown as Theme;
+
+  type Component = {
+    focused: boolean;
+    render(width: number): string[];
+    handleInput(data: string): void;
+  };
+  const open = async (inspect: (component: Component) => void) => {
+    const context = {
+      cwd,
+      modelRegistry: registryWithModels([]),
+      ui: {
+        notify: () => {},
+        custom: async (factory: (...args: unknown[]) => unknown) => {
+          const component = factory(
+            { requestRender: () => {} },
+            theme,
+            keybindings,
+            () => {}
+          ) as Component;
+          component.focused = true;
+          inspect(component);
+        },
+      },
+    } as unknown as ExtensionCommandContext;
+    await showSettings(context, "user");
+  };
+  const screen = (component: Component) =>
+    stripVTControlCharacters(component.render(160).join("\n"));
+
+  try {
+    saveConfig("user", cwd, { ...DEFAULT_CONFIG, maxRunCost: 10 });
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(projectFile, JSON.stringify({ maxRunCost: 200 }));
+
+    await open((component) => {
+      // The menu says a section has overrides before it is opened.
+      assert.match(screen(component), /Essentials.*1 overridden by project/);
+      assert.doesNotMatch(screen(component), /Safety limits.*overridden/);
+
+      component.handleInput("\r");
+      component.handleInput("\x1b[B");
+      component.handleInput("\x1b[B");
+      const row = screen(component);
+      assert.match(row, /Run cost cap \(USD\) · project: \$200\s+\$10/);
+      assert.match(row, /runs here use \$200, not your user value \$10/);
+
+      // Cycling edits the user value; the project value stays on display.
+      component.handleInput("\r");
+      assert.match(screen(component), /Run cost cap \(USD\) · project: \$200\s+\$5/);
+    });
+    assert.equal(JSON.parse(readFileSync(userFile, "utf8")).maxRunCost, 5);
+    assert.deepEqual(JSON.parse(readFileSync(projectFile, "utf8")), { maxRunCost: 200 });
+    assert.equal(loadConfig(cwd).maxRunCost, 200);
+
+    // An untrusted project is not read, so it cannot be advertised either.
+    setProjectConfigTrust(false);
+    try {
+      await open((component) => {
+        assert.doesNotMatch(screen(component), /overridden by project/);
+      });
+    } finally {
+      setProjectConfigTrust(true);
+    }
+
+    // Rendering never moves a damaged project file aside.
+    writeFileSync(projectFile, "{unfinished");
+    await open((component) => {
+      assert.doesNotMatch(screen(component), /overridden by project/);
+      component.handleInput("\r");
+      assert.doesNotMatch(screen(component), /project:/);
+    });
+    assert.equal(readFileSync(projectFile, "utf8"), "{unfinished");
+    assert.deepEqual(
+      readdirSync(join(cwd, ".pi")),
+      ["maestro.json"],
+      "the damaged file must stay put for the owner to fix"
+    );
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
   }
 });

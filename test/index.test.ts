@@ -5726,6 +5726,14 @@ test("/maestro config budget resolves a pending budget_blocked decision in the s
       // would come straight back on resume.
       await command.handler("config budget 5", ctx);
       assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      assert.match(notices.at(-1) ?? "", /budget stop stays pending: board spend is \$11\.0000/);
+      assert.doesNotMatch(notices.at(-1) ?? "", /resume or \/maestro drive/);
+
+      // Equal to spend is still over the line: the cap only clears when exceeded.
+      await command.handler("config budget 11", ctx);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      assert.match(notices.at(-1) ?? "", /stays pending/);
+      await command.handler("config budget 5", ctx);
 
       setProjectConfigTrust(false);
       try {

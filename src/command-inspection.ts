@@ -85,22 +85,32 @@ function handleBudgetCommand(
   // The raise is the fix for a pending budget stop: resolve it in the same
   // step so recovery is one command instead of config-edit + decision surgery.
   let resolvedDecision = false;
-  if (amount === 0 || amount > total) {
-    updateBoard(ctx.cwd, (board) => {
-      const decision = board.activeDecision;
-      if (!decision || decision.resolution || decision.kind !== "budget_blocked") return false;
-      if (amount !== 0 && boardUsage(board.tasks).cost >= amount) return false;
-      decision.resolution = { intervention: "resume", resolvedAt: Date.now() };
-      delete decision.deliveryClaim;
-      resolvedDecision = true;
-      return true;
-    });
-  }
+  const stop: { spent?: number } = {};
+  updateBoard(ctx.cwd, (board) => {
+    const decision = board.activeDecision;
+    if (!decision || decision.resolution || decision.kind !== "budget_blocked") return false;
+    const spent = boardUsage(board.tasks).cost;
+    // Judge against fresh spend: a raise that does not clear it would send the
+    // drive straight back into the same stop.
+    if (amount !== 0 && spent >= amount) {
+      stop.spent = spent;
+      return false;
+    }
+    decision.resolution = { intervention: "resume", resolvedAt: Date.now() };
+    delete decision.deliveryClaim;
+    resolvedDecision = true;
+    return true;
+  });
   const remaining =
     amount === 0 ? "budget disabled" : `$${Math.max(0, amount - total).toFixed(4)} remaining`;
+  const outcome =
+    stop.spent === undefined
+      ? `${resolvedDecision ? " Pending budget_blocked decision resolved." : ""} Use /maestro resume or /maestro drive to continue.`
+      : ` The budget stop stays pending: board spend is $${stop.spent.toFixed(4)}, which this budget does not exceed. Set a budget above that, or 0 to turn the cap off.`;
   notify(
     ctx,
-    `Run budget → ${amount === 0 ? "off" : `$${amount}`} · ${spendSummary} · ${remaining}.${resolvedDecision ? " Pending budget_blocked decision resolved." : ""} Use /maestro resume or /maestro drive to continue.`
+    `Run budget → ${amount === 0 ? "off" : `$${amount}`} · ${spendSummary} · ${remaining}.${outcome}`,
+    stop.spent === undefined ? "info" : "warning"
   );
   onChanged();
 }

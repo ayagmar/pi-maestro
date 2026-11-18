@@ -720,3 +720,27 @@ test("a session reading the config while another saves it never sees a half-writ
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("a user save that only conflicts with the project file names that file", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "maestro-config-conflict-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "maestro-config-conflict-agent-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const projectFile = join(cwd, ".pi", "maestro.json");
+  try {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(projectFile, JSON.stringify({ confirmationPlanTasks: 60 }));
+    assert.throws(
+      () => saveConfig("user", cwd, { ...DEFAULT_CONFIG, maxPlanTasks: 32 }),
+      (error: Error) =>
+        error.message.includes(projectFile) &&
+        /confirmationPlanTasks \(60\) cannot exceed maxPlanTasks \(32\)/.test(error.message)
+    );
+    assert.equal(existsSync(join(agentDir, "maestro.json")), false);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});

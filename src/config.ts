@@ -426,9 +426,51 @@ export function saveConfig(scope: ConfigScope, cwd: string, config: MaestroConfi
     const { verificationProfiles: _userCommands, ...settings } = config;
     writeProjectConfig(cwd, settings);
   } else {
-    if (isProjectConfigTrusted())
-      resolveConfig(config, readForUpdate(configFile("project", cwd), true));
+    if (isProjectConfigTrusted()) assertCompatibleWithProject(cwd, config);
     writeConfigFile(configFile(scope, cwd), config);
+  }
+}
+
+/**
+ * A user save that is valid alone can still make the merged config unusable
+ * when the trusted project file sets the other half of a limit. Name that file
+ * so the owner knows what to fix instead of reading an anonymous merge error.
+ */
+function assertCompatibleWithProject(cwd: string, user: MaestroConfig): void {
+  const file = configFile("project", cwd);
+  try {
+    resolveConfig(user, readForUpdate(file, true));
+  } catch (error) {
+    const reason = (error instanceof Error ? error.message : String(error)).replace(
+      /^Invalid effective maestro configuration: /,
+      ""
+    );
+    throw new Error(
+      `This value conflicts with the project config at ${file}: ${reason}. Change or remove that project value first.`,
+      { cause: error }
+    );
+  }
+}
+
+/**
+ * The effective config when a trusted project file sits on top of `user`, or
+ * undefined when nothing overrides it. The settings editor uses this to show
+ * what a run will really use. It never moves a file aside, unlike `loadConfig`:
+ * an unreadable, invalid, conflicting, untrusted or aliased project file just
+ * contributes nothing here.
+ */
+export function previewProjectOverride(
+  cwd: string,
+  user: MaestroConfig
+): MaestroConfig | undefined {
+  if (!isProjectConfigTrusted()) return undefined;
+  const file = configFile("project", cwd);
+  try {
+    if (configWriteTarget(file) === configWriteTarget(configFile("user", cwd))) return undefined;
+    const project = readForUpdate(file, true);
+    return Object.keys(project).length === 0 ? undefined : resolveConfig(user, project);
+  } catch {
+    return undefined;
   }
 }
 
