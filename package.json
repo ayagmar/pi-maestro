@@ -66,12 +66,12 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.5",
+    "@biomejs/biome": "^2.6.8",
     "@earendil-works/pi-ai": "^1.5.2",
     "@earendil-works/pi-coding-agent": "^1.5.2",
     "@earendil-works/pi-tui": "^1.5.2",
     "@release-it/conventional-changelog": "^12.0.2",
-    "@types/node": "^24.19.2",
+    "@types/node": "^26.6.6",
     "astro": "^7.4.12",
     "release-it": "^21.1.2",
     "tsx": "^4.23.15",
