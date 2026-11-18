@@ -32,7 +32,7 @@ pnpm run check    # typecheck, lint, format check, unit and integration tests, p
 git diff --check
 ```
 
-`pnpm run check` is what CI and the release workflow run. Try the extension against a real pi with `pi -e ./src/index.ts`. Node.js 22.19 or newer is required.
+`pnpm run check` is what CI and the release workflow run. Try the extension against a real pi with `pi -e ./src/index.ts`. Use Node.js 24 for development, as CI does. The extension runtime supports Node.js 22.19 or newer; the site and release tools require a newer patch of Node.
 
 Bug fixes should add a behavioral regression test. Registration assertions do not replace behavior tests. Never delete or narrow tests to make a gate pass.
 

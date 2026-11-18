@@ -57,7 +57,7 @@
     "preview": "astro preview"
   },
   "dependencies": {
-    "@earendil-works/pi-schema": "^1.5.1"
+    "@earendil-works/pi-schema": "^1.5.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -67,9 +67,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.5",
-    "@earendil-works/pi-ai": "^1.5.1",
-    "@earendil-works/pi-coding-agent": "^1.5.1",
-    "@earendil-works/pi-tui": "^1.5.1",
+    "@earendil-works/pi-ai": "^1.5.2",
+    "@earendil-works/pi-coding-agent": "^1.5.2",
+    "@earendil-works/pi-tui": "^1.5.2",
     "@release-it/conventional-changelog": "^12.0.2",
     "@types/node": "^24.19.2",
     "astro": "^7.4.5",

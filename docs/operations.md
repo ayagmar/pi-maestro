@@ -104,7 +104,7 @@ Pi's ordinary `/resume` picker reads only top-level session files, so these chil
 crowd or slow the human session list. `/maestro agents` and `/maestro open <taskId>` use the exact
 session path recorded on the board, and `/maestro back` returns to the owner session. After opening
 a child in Pi, use `/maestro back` rather than `/resume`: the child treats its launch directory as
-the active session directory.
+the active session directory. If Pi 1.5.2 asks what to do because a worktree was removed, choose **Continue** to inspect the recorded session in the current directory. **Fork** creates a separate session that is not on the board; `/maestro back` will not have the same return path.
 
 The transcript remains inside Pi's normal root. Usage tools that recursively discover Pi JSONL files
 continue to include every child request; tools that only inspect top-level files must opt into the
