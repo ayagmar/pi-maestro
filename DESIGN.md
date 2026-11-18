@@ -29,7 +29,7 @@ Use a committed honey/ochre anchor on a true neutral white foundation, with a de
 - **Honey Deep** (`--honey-deep`, `oklch(0.43 0.1 100)`): The same hue darkened for text, links, focus rings, and selected-state markers on white (8:1 on `--paper`).
 
 ### Secondary
-- **Control Ink** (`--ink-blue`, `oklch(0.23 0.045 245)`; `--ink-blue-light`, `oklch(0.31 0.05 245)`): A deep ink-blue counterpoint for the hero, the footer, the dark landing section, and the primary header action.
+- **Control Ink** (`--ink-blue`, `oklch(0.23 0.045 245)`; `--ink-blue-light`, `oklch(0.31 0.05 245)`): A deep ink-blue counterpoint for the example board caption, the footer, and the primary header action. The quickstart sits on the same white surface as the docs.
 
 ### Neutral
 - **True White** (`--paper`, `oklch(1 0 0)`): The principal reading surface; it must remain neutral rather than becoming cream or parchment. `--surface` (`oklch(0.97 0.004 245)`) is a faint cool tint for table headers, the page outline, and hover states, and `--line` (`oklch(0.88 0.008 245)`) draws dividers.
@@ -79,7 +79,7 @@ The system is flat by default. Depth comes from tonal separation, composition, a
 - **Header:** sticky, `4.25rem`, white with a hairline. The current page is marked with `aria-current` and a honey underline. Search opens a modal dialog (Ctrl or Cmd K) backed by a lazily loaded `/search-index.json`, with combobox and listbox semantics.
 - **Buttons:** `3rem` minimum height, `0.4rem` radius, weight 700. Primary is Signal Honey with ink text; on dark surfaces the secondary button is outlined in `--on-dark-muted`, and on white it is outlined in `--ink-soft`.
 - **Code blocks:** Console Black, `0.875rem` mono, horizontal scroll instead of wrapping, and a Copy button that is added to every documentation block by script and works without it as plain selectable text.
-- **Example board:** a real table (task, title, status, spend) with the footer line the extension prints. The first-run guide follows the same task through a rejected review and a running retry, with the phase rail, criterion evidence, and next action beside the commands. Both views label the task data as an example.
+- **Example board:** a real table (task, title, status, spend) with the footer line the extension prints. The caption labels the migration as an example. Below the table, a short note explains why the second task is retrying; a native disclosure reveals the review evidence. The shell install command appears once, separate from the first-run commands entered in Pi.
 - **Documentation:** pages render the repository's markdown directly. `src/data/doc-html.mjs` removes the file's own H1, routes relative links between files to site pages, and wraps tables in a focusable scroll region.
 - **Focus:** a 3px `--honey-deep` outline offset by 3px (Signal Honey on dark surfaces). Interactive targets are at least `2.75rem` tall.
 

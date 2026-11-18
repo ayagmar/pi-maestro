@@ -1,196 +1,72 @@
 ---
 import {
-  exampleBoard,
-  exampleEvidence,
-  exampleNext,
-  examplePhases,
-  exampleSpend,
-  exampleStatusLine,
+  exampleBoard, exampleEvidence, exampleRejection, exampleSpend, exampleStatusLine,
 } from "../data/example-board.js";
 import { installCommand, npmInstallCommand } from "../data/install.js";
 import { url } from "../data/site.js";
 import BaseLayout from "../layouts/BaseLayout.astro";
+import "../styles/home.css";
 
-const tasks = exampleBoard.tasks.map((task) => ({
-  id: task.id,
-  title: task.title,
-  status: task.status,
-  cost: exampleSpend(task.id),
-}));
+const guides = [
+  ["commands", "Commands", "Inspect a task, steer a running executor, or read its verdict."],
+  ["configuration", "Models and budgets", "Choose executor tiers, review policy, and spending limits."],
+  ["operations", "Recovery", "Find out why a drive stopped and when it can resume."],
+  ["security", "Trust boundaries", "Check what executors can write and who can define verification commands."],
+];
 ---
-<BaseLayout
-  title="Pi Maestro: orchestrated, reviewed work for Pi"
-  description="Pi Maestro is a Pi extension. Your model plans a goal into tasks, fresh-context executors do them, and an independent reviewer approves each result."
->
-  <section class="hero">
-    <div class="shell hero-grid">
-      <div class="hero-copy">
-        <h1>Plan once. Execute in fresh contexts. Approve after review.</h1>
-        <p class="hero-lede">
-          Pi Maestro is an extension for pi. The model in your session splits a goal into tasks with success criteria. Each task runs in its own pi process on a cheaper model, and a separate read-only reviewer has to approve it before it counts.
-        </p>
-        <div class="hero-actions">
-          <a class="button button-primary" href={url("/docs/getting-started/")}>Install Pi Maestro</a>
-          <a class="button button-quiet" href={url("/docs/")}>Read the docs</a>
-        </div>
-        <div class="install-command code-block">
-          <button class="copy-button" type="button" data-copy={installCommand} aria-label="Copy install command">Copy</button>
+<BaseLayout title="Pi Maestro: a reviewed task board for Pi" description="Run tasks in separate Pi sessions, review each result, and track retries and spend on a local board.">
+  <div class="shell manual">
+    <div class="manual-opening">
+      <header class="manual-intro">
+        <h1>Pi Maestro</h1>
+        <p class="manual-lede">Run coding tasks in separate Pi sessions.</p>
+        <p>Your Pi session plans the work. Each executor gets a task brief and the reports from its dependencies. By default, a separate reviewer checks the result against the brief before dependent tasks can run.</p>
+        <h2>Install</h2>
+        <div class="code-block manual-install">
+          <button class="copy-button" type="button" data-copy={installCommand} aria-label="Copy shell install command">Copy</button>
           <pre><code>{installCommand}</code></pre>
         </div>
-        <p class="hero-note">
-          Installs from GitHub. For a published release, use <code>{npmInstallCommand}</code>. Requires pi 1.5 or newer and Node.js 22.19 or newer. MIT licensed.
-        </p>
-      </div>
-      <figure class="board-example">
-        <figcaption>Example board mid-run: T2 was rejected once and is on its second attempt. Not live data.</figcaption>
+        <p class="requirements">Pi 1.5+ · Node.js 22.19+</p>
+        <details class="install-options">
+          <summary>Other install options</summary>
+          <p>For a published release, use <code>{npmInstallCommand}</code>. To pin a Git commit or install a local checkout, see the <a href={url("/docs/getting-started/")}>installation guide</a>.</p>
+        </details>
+      </header>
+      <figure class="run-sheet">
+        <figcaption><span>Session API migration</span><small>Example run</small></figcaption>
         <table>
-          <caption class="sr-only">Four tasks on a Maestro board with their status and spend</caption>
-          <thead class="board-head"><tr><th scope="col">Task</th><th scope="col">Title</th><th scope="col">Status</th><th scope="col">Spend</th></tr></thead>
-          <tbody>
-            {tasks.map((task) => (
-              <tr>
-                <th class="task-id" scope="row">{task.id}</th>
-                <td>{task.title}</td>
-                <td><span class={`status status-${task.status}`}>{task.status}</span></td>
-                <td>{task.cost}</td>
-              </tr>
-            ))}
-          </tbody>
+          <caption class="sr-only">Task board for an example migration, including spend per task</caption>
+          <thead><tr><th scope="col">Task</th><th scope="col">Status</th><th scope="col">Spend</th></tr></thead>
+          <tbody>{exampleBoard.tasks.map(task => (
+            <tr><th scope="row"><code>{task.id}</code> {task.title}</th><td class={`run-state state-${task.status}`}>{task.status}</td><td>{exampleSpend(task.id)}</td></tr>
+          ))}</tbody>
         </table>
-        <p class="board-footer"><code>{exampleStatusLine}</code></p>
+        <p class="run-total"><code>{exampleStatusLine}</code></p>
+        <div class="run-review">
+          <h2>Why T2 is running again</h2>
+          <p>The adapter compiled on the first attempt, but its tests still used the old token helper. The reviewer requested changes. T3 waits for T2 to pass.</p>
+          <details><summary>Review evidence for attempt 1</summary>
+            <p><code>{exampleEvidence.path}</code></p>
+            <ul>{exampleRejection.criterionEvidence.map(item => <li><strong>{item.passed ? "Pass" : "Fail"}</strong> {item.evidence}</li>)}</ul>
+          </details>
+        </div>
       </figure>
     </div>
-  </section>
-
-  <section class="section" id="first-run" aria-labelledby="first-run-title">
-    <div class="shell first-run">
-      <div class="first-run-steps">
-        <h2 id="first-run-title">What a first run shows you</h2>
-        <p>Run these in a Git repository that has at least one commit. Nothing below needs configuration; the default preset uses your pi model.</p>
-        <ol class="step-list">
-          <li>
-            <p>Install from your shell, then start pi in the repository. Inside pi, <code>/maestro doctor</code> checks config, authenticated models, Git, and worktrees without printing keys.</p>
-            <div class="code-block">
-              <button class="copy-button" type="button" data-copy={installCommand} aria-label="Copy shell install command">Copy</button>
-              <pre><code>{installCommand}</code></pre>
-            </div>
-          </li>
-          <li>
-            <p>Hand over a goal. Your model turns it into tasks with success criteria. With <code>planGate</code> on, <code>/maestro plan</code> shows them for approval first.</p>
-            <div class="code-block">
-              <button class="copy-button" type="button" data-copy="/maestro start migrate the auth module to the new session API and add tests" aria-label="Copy start command">Copy</button>
-              <pre><code>/maestro start migrate the auth module to the new session API and add tests</code></pre>
-            </div>
-          </li>
-          <li>
-            <p>Run the loop, then read the board. <code>/maestro board</code> opens on the current phase and never calls a model.</p>
-            <div class="code-block">
-              <button class="copy-button" type="button" data-copy={"/maestro drive\n/maestro board"} aria-label="Copy drive and board commands">Copy</button>
-              <pre><code>/maestro drive
-/maestro board</code></pre>
-            </div>
-          </li>
-        </ol>
-      </div>
-      <figure class="board-demo">
-        <figcaption>
-          The dashboard for the example board above. Phase names, state labels, evidence lines, and <code>Next:</code> text are the ones <code>/maestro board</code> prints; the task data is made up.
-        </figcaption>
-        <section aria-labelledby="demo-phase">
-          <h3 id="demo-phase">Phase</h3>
-          <ol class="phase-rail">
-            {examplePhases.map((phase) => (
-              <li class:list={{ "is-current": phase.state === "current" }} aria-current={phase.state === "current" ? "step" : undefined}>
-                <span class="phase-name">{phase.label}</span>
-                <span class="phase-state">{phase.state}</span>
-                <span class="phase-tasks">{phase.tasks}</span>
-              </li>
-            ))}
-          </ol>
-        </section>
-        <section aria-labelledby="demo-evidence">
-          <h3 id="demo-evidence">Review evidence</h3>
-          <p class="demo-path"><code>{exampleEvidence.path}</code></p>
-          <ul class="evidence-lines">
-            {exampleEvidence.lines.map((line) => <li><code>{line}</code></li>)}
-          </ul>
-        </section>
-        <section aria-labelledby="demo-next">
-          <h3 id="demo-next">Your next action</h3>
-          <p class="next-line"><span>While the retry runs</span><code>Next: {exampleNext.live}</code></p>
-          <p class="next-line"><span>If the drive stops first</span><code>Next: {exampleNext.stopped}</code></p>
-        </section>
-      </figure>
+    <div class="manual-guides">
+      <section id="first-run" aria-labelledby="first-run-title">
+        <h2 id="first-run-title">Run your first board</h2>
+        <p>Start Pi in a Git repository with at least one commit. Enter these commands in Pi, not in your shell.</p>
+        <dl class="run-commands">
+          <dt><code>/maestro doctor</code></dt><dd>Check your model, credentials, and Git setup.</dd>
+          <dt><code>/maestro start migrate the session API and add tests</code></dt><dd>Ask Pi to plan the migration. If plan approval is enabled, open <code>/maestro plan</code>, review the tasks, and choose <strong>Approve plan</strong> before continuing.</dd>
+          <dt><code>/maestro drive</code></dt><dd>Run the tasks and their reviews. Open <code>/maestro board</code> to watch without calling a model.</dd>
+        </dl>
+      </section>
+      <nav class="manual-reference" aria-labelledby="reference-title">
+        <h2 id="reference-title">Reference</h2>
+        <ul>{guides.map(([slug, title, description]) => <li><a href={url(`/docs/${slug}/`)}>{title}</a><p>{description}</p></li>)}</ul>
+        <a href={url("/docs/")}>All documentation</a>
+      </nav>
     </div>
-  </section>
-
-  <section class="section">
-    <div class="shell">
-      <div class="section-intro">
-        <h2>From goal to approved work</h2>
-        <p>Run <code>/maestro start &lt;goal&gt;</code>. Everything after that is recorded on a board in <code>.pi/maestro/</code>, so a restart loses nothing.</p>
-      </div>
-      <ol class="flow">
-        <li>
-          <h3>Plan</h3>
-          <p>Each task gets a self-contained brief, 1 to 12 success criteria, bounded write paths, dependencies, and a tier. With <code>planGate</code> on, nothing runs until you approve the plan.</p>
-        </li>
-        <li>
-          <h3>Execute</h3>
-          <p>Tasks whose dependencies are approved run in parallel, three at a time by default, as separate <code>pi --mode rpc</code> processes. Each uses the model and fallbacks of its tier and sees only its brief and the reports of approved dependencies.</p>
-        </li>
-        <li>
-          <h3>Review</h3>
-          <p>A reviewer with a fresh context and <code>read,grep,find,ls</code> checks every criterion and ends with <code>VERDICT: APPROVE</code> or <code>VERDICT: REQUEST_CHANGES</code>. A rejection sends the findings into the next attempt.</p>
-        </li>
-        <li>
-          <h3>Integrate</h3>
-          <p>Artifact checks and any trusted verification command run before the work lands as one conventional commit per task.</p>
-        </li>
-      </ol>
-    </div>
-  </section>
-
-  <section class="section section-dark">
-    <div class="shell split">
-      <div>
-        <h2>The orchestrator stays small</h2>
-        <p>The expensive model plans, picks tiers, and decides what to do when a drive stops. It never reads raw executor output. A single <code>maestro_drive</code> call spans the whole run and returns one bounded outcome, so the orchestrator spends one turn on a drive instead of polling it.</p>
-        <p>The model has three tools: <code>maestro_plan</code>, <code>maestro_update</code>, and <code>maestro_drive</code>. Approval, pause, abort, and recovery are commands only you can run.</p>
-      </div>
-      <div>
-        <h2>Spend and attempts are capped</h2>
-        <p>By default one attempt is cut off at $5, and no new batch starts once the board's spend reaches $25. A task gets three attempts, and a drive runs at most 20 rounds. When a limit trips, the drive stops with a named reason and the safe next step.</p>
-        <p><a class="text-link" href={url("/docs/operations/")}>What each stop means</a></p>
-      </div>
-    </div>
-  </section>
-
-  <section class="section">
-    <div class="shell split">
-      <div>
-        <h2>Everything is inspectable</h2>
-        <p>The board, a status history, raw event logs, executor and reviewer sessions, and checkpoint branches stay on disk. <code>/maestro board</code> walks eight phases from discovery to completion. <code>/maestro timeline</code>, <code>costs</code>, and <code>reconcile</code> read that evidence without calling a model.</p>
-        <p><a class="text-link" href={url("/docs/commands/")}>Command reference</a></p>
-      </div>
-      <div>
-        <h2>What it does not do</h2>
-        <p>Maestro is not a sandbox. Executors edit files with your account's permissions, and verification commands are arbitrary local code that only your user config can define. Reviewers are read-only by default, and manual approval skips them. An untrusted project cannot change budgets, models, or tool lists.</p>
-        <p><a class="text-link" href={url("/docs/security/")}>Security and trust boundaries</a></p>
-      </div>
-    </div>
-  </section>
-
-  <section class="section install-band">
-    <div class="shell install-layout">
-      <div>
-        <h2>Install from Git or use a pinned commit</h2>
-        <p>The GitHub install tracks the default branch, and <code>pi update</code> pulls newer commits. Add <code>@&lt;ref&gt;</code> to the source to pin a commit. A local checkout needs its dependencies installed first. <a class="text-link" href={url("/docs/getting-started/")}>Every install option</a></p>
-      </div>
-      <div class="code-block">
-        <button class="copy-button" type="button" data-copy={installCommand} aria-label="Copy install command">Copy</button>
-        <pre><code>{installCommand}</code></pre>
-      </div>
-    </div>
-  </section>
+  </div>
 </BaseLayout>

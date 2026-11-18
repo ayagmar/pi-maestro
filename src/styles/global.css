@@ -100,11 +100,6 @@ h3 {
   outline: 3px solid var(--honey-deep);
   outline-offset: 3px;
 }
-.hero :focus-visible,
-.section-dark :focus-visible,
-.board-example :focus-visible {
-  outline-color: var(--honey);
-}
 .sr-only {
   position: absolute;
   width: 1px;
@@ -351,9 +346,6 @@ kbd {
   font-size: var(--text-sm);
   line-height: 1.6;
 }
-.install-command pre {
-  border: 1px solid var(--console-line);
-}
 .copy-button {
   position: absolute;
   top: 0.5rem;
@@ -373,334 +365,14 @@ kbd {
   outline-color: var(--honey);
 }
 
-/* Landing page */
-.hero {
-  color: var(--paper);
-  background: var(--ink-blue);
-}
-.hero-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
-  gap: clamp(2rem, 6vw, 6rem);
-  align-items: center;
-  padding-block: clamp(3rem, 7vw, 6.5rem);
-}
-.hero h1 {
-  max-width: 16ch;
-  margin: 0 0 var(--space-4);
-  font-size: var(--text-display);
-  letter-spacing: -0.03em;
-}
-.hero-lede {
-  max-width: 38rem;
-  margin: 0;
-  color: var(--on-dark);
-  font-size: var(--text-lead);
-}
 .hero-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-block: var(--space-5) var(--space-4);
 }
-.install-command {
-  max-width: 34rem;
-}
-.hero-note {
-  margin: var(--space-3) 0 0;
-  color: var(--on-dark-muted);
-  font-size: var(--text-sm);
-}
-.hero-note code {
-  padding: 0;
-  background: none;
-  color: var(--on-dark);
-}
-.board-example {
-  min-width: 0;
-  margin: 0;
-  padding: var(--space-3);
-  border: 1px solid var(--console-line);
-  border-radius: var(--radius);
-  color: var(--on-dark);
-  background: var(--console);
-}
-.board-example figcaption {
-  padding-bottom: var(--space-2);
-  border-bottom: 1px solid var(--console-line);
-  color: var(--on-dark-muted);
-  font-size: var(--text-sm);
-}
-.board-example table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--text-sm);
-}
-.board-example th,
-.board-example td {
-  padding: 0.6rem 0.4rem;
-  border-bottom: 1px solid var(--console-line);
-  text-align: left;
-  vertical-align: baseline;
-}
-.board-head th {
-  color: var(--on-dark-muted);
-  font-weight: 600;
-}
-.task-id {
-  font-family: var(--font-mono);
-}
-.board-example td:last-child {
-  font-family: var(--font-mono);
-  text-align: right;
-}
-.status {
-  display: inline-block;
-  padding: 0.1rem 0.5rem;
-  border: 1px solid currentColor;
-  border-radius: 0.25rem;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  white-space: nowrap;
-}
-.status-approved {
-  color: var(--success);
-}
-.status-running {
-  color: var(--honey);
-}
-.status-changes_requested {
-  color: var(--warning);
-}
-.status-todo {
-  color: var(--on-dark-muted);
-}
-.board-footer {
-  margin: var(--space-3) 0 0;
-  color: var(--on-dark-muted);
-  font-size: 0.8rem;
-}
-.board-footer code {
-  padding: 0;
-  background: none;
-  overflow-wrap: anywhere;
-}
-
-/* First run: steps beside the dashboard it produces */
-.first-run {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
-  gap: clamp(2rem, 5vw, 4.5rem);
-  align-items: start;
-}
-.first-run-steps h2 {
-  margin: 0 0 var(--space-2);
-  font-size: var(--text-title);
-  letter-spacing: -0.02em;
-}
-.first-run-steps > p {
-  max-width: var(--measure);
-  color: var(--ink-soft);
-}
-.step-list {
-  display: grid;
-  gap: var(--space-4);
-  margin: var(--space-4) 0 0;
-  padding: 0;
-  list-style: none;
-  counter-reset: step;
-}
-.step-list li {
-  display: grid;
-  gap: var(--space-1);
-  padding-left: 2.5rem;
-  position: relative;
-  counter-increment: step;
-}
-.step-list li::before {
-  content: counter(step);
-  position: absolute;
-  left: 0;
-  top: 0;
-  display: grid;
-  place-items: center;
-  width: 1.75rem;
-  height: 1.75rem;
-  border-radius: 50%;
-  color: var(--ink);
-  background: var(--honey);
-  font-size: var(--text-sm);
-  font-weight: 700;
-}
-.step-list p {
-  max-width: var(--measure);
-  margin: 0;
-}
-.step-list .code-block {
-  min-width: 0;
-}
-.step-list pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.board-demo {
-  display: grid;
-  gap: var(--space-3);
-  min-width: 0;
-  margin: 0;
-  padding: var(--space-3);
-  border: 1px solid var(--console-line);
-  border-radius: var(--radius);
-  color: var(--on-dark);
-  background: var(--console);
-}
-.board-demo figcaption {
-  padding-bottom: var(--space-2);
-  border-bottom: 1px solid var(--console-line);
-  color: var(--on-dark-muted);
-  font-size: var(--text-sm);
-}
-.board-demo h3 {
-  margin: 0 0 var(--space-1);
-  color: var(--on-dark);
-  font-size: var(--text-body);
-}
-.board-demo code {
-  padding: 0;
-  background: none;
-  color: inherit;
-  font-size: 0.8rem;
-  overflow-wrap: anywhere;
-}
-.phase-rail {
-  display: grid;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: var(--text-sm);
-}
-.phase-rail li {
-  display: grid;
-  grid-template-columns: 8.5rem minmax(0, 1fr) auto;
-  gap: 0.2rem 0.75rem;
-  padding: 0.4rem 0.6rem;
-  border-left: 3px solid var(--console-line);
-  color: var(--on-dark-muted);
-}
-.phase-rail .is-current {
-  border-left-color: var(--honey);
-  color: var(--on-dark);
-  background: var(--ink-blue);
-  font-weight: 700;
-}
-.phase-state::before {
-  content: "· ";
-}
-.phase-tasks {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  text-align: right;
-}
-.demo-path {
-  margin: 0 0 var(--space-1);
-  color: var(--on-dark-muted);
-}
-.evidence-lines {
-  display: grid;
-  gap: 0.35rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.evidence-lines li {
-  padding-left: 0.75rem;
-  border-left: 3px solid var(--console-line);
-}
-.next-line {
-  display: grid;
-  gap: 0.15rem;
-  margin: 0 0 var(--space-2);
-}
-.next-line span {
-  color: var(--on-dark-muted);
-  font-size: var(--text-sm);
-}
-.next-line code {
-  color: var(--honey);
-}
-
 .section {
   padding-block: clamp(3rem, 7vw, 5.5rem);
-}
-.section-dark {
-  color: var(--on-dark);
-  background: var(--ink-blue);
-}
-.section-dark h2 {
-  color: var(--paper);
-}
-.section-intro {
-  max-width: var(--measure);
-  margin-bottom: var(--space-5);
-}
-.section h2,
-.section-intro h2 {
-  margin: 0 0 var(--space-2);
-  font-size: var(--text-title);
-  letter-spacing: -0.02em;
-}
-.section-dark code {
-  color: var(--paper);
-  background: var(--ink-blue-light);
-}
-.flow {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-4);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.flow li {
-  padding-top: var(--space-3);
-  border-top: 3px solid var(--honey);
-}
-.flow h3 {
-  margin: 0 0 var(--space-1);
-  font-size: 1.2rem;
-}
-.flow p {
-  margin: 0;
-  color: var(--ink-soft);
-}
-.split {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: clamp(2rem, 6vw, 5rem);
-}
-.split p {
-  max-width: 34rem;
-}
-.text-link {
-  font-weight: 700;
-  text-decoration-thickness: 0.1em;
-}
-.section-dark .text-link {
-  color: var(--honey);
-}
-.install-band {
-  background: var(--surface);
-  border-top: 1px solid var(--line);
-}
-.install-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-  gap: clamp(2rem, 6vw, 5rem);
-  align-items: center;
-}
-.install-layout p {
-  max-width: 30rem;
-  color: var(--ink-soft);
 }
 
 /* Footer */
@@ -1100,15 +772,6 @@ kbd {
 }
 
 @media (max-width: 900px) {
-  .hero-grid,
-  .split,
-  .first-run,
-  .install-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .flow {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
   .docs-shell {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1133,7 +796,6 @@ kbd {
   .shell {
     width: min(1180px, calc(100% - 2rem));
   }
-  .flow,
   .footer-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1162,12 +824,6 @@ kbd {
     align-self: flex-end;
     min-height: 2.75rem;
   }
-  /* One-line install commands wrap on a phone so the whole source is visible. */
-  .install-command pre,
-  .install-layout pre {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
   .code-block pre,
   .prose .code-block pre {
     padding-right: 1rem;
@@ -1176,20 +832,6 @@ kbd {
     width: calc(100% - 1rem);
     max-height: calc(100dvh - 1rem);
     margin-top: 0.5rem;
-  }
-  .phase-rail li {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .phase-state {
-    grid-column: 1;
-    grid-row: 2;
-  }
-  .phase-tasks {
-    grid-column: 2;
-    grid-row: 1;
-  }
-  .board-example td:nth-child(2) {
-    min-width: 6rem;
   }
 }
 @media (pointer: coarse) {
@@ -1211,7 +853,6 @@ kbd {
   }
 }
 @media (forced-colors: active) {
-  .status,
   .copy-button,
   .docs-toc {
     border: 1px solid CanvasText;
