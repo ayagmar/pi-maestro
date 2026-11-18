@@ -152,6 +152,7 @@ h3 {
   display: inline-flex;
   align-items: center;
   gap: 0.65rem;
+  min-height: 2.75rem;
   text-decoration: none;
   white-space: nowrap;
 }
@@ -189,6 +190,9 @@ h3 {
   margin-left: auto;
 }
 .desktop-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
   padding-block: 0.4rem;
   color: var(--ink-soft);
   font-size: var(--text-sm);
@@ -221,6 +225,13 @@ h3 {
   background: var(--paper);
   font-size: var(--text-sm);
   text-decoration: none;
+}
+/* Search is a script feature. Without it the Docs link and the docs index stay. */
+.search-trigger {
+  display: none;
+}
+.js .search-trigger {
+  display: inline-flex;
 }
 .search-trigger:hover {
   border-color: var(--honey-deep);
@@ -400,6 +411,11 @@ kbd {
   color: var(--on-dark-muted);
   font-size: var(--text-sm);
 }
+.hero-note code {
+  padding: 0;
+  background: none;
+  color: var(--on-dark);
+}
 .board-example {
   min-width: 0;
   margin: 0;
@@ -468,6 +484,149 @@ kbd {
   padding: 0;
   background: none;
   overflow-wrap: anywhere;
+}
+
+/* First run: steps beside the dashboard it produces */
+.first-run {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  gap: clamp(2rem, 5vw, 4.5rem);
+  align-items: start;
+}
+.first-run-steps h2 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-title);
+  letter-spacing: -0.02em;
+}
+.first-run-steps > p {
+  max-width: var(--measure);
+  color: var(--ink-soft);
+}
+.step-list {
+  display: grid;
+  gap: var(--space-4);
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+.step-list li {
+  display: grid;
+  gap: var(--space-1);
+  padding-left: 2.5rem;
+  position: relative;
+  counter-increment: step;
+}
+.step-list li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  color: var(--ink);
+  background: var(--honey);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+.step-list p {
+  max-width: var(--measure);
+  margin: 0;
+}
+.step-list .code-block {
+  min-width: 0;
+}
+.step-list pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.board-demo {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--console-line);
+  border-radius: var(--radius);
+  color: var(--on-dark);
+  background: var(--console);
+}
+.board-demo figcaption {
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--console-line);
+  color: var(--on-dark-muted);
+  font-size: var(--text-sm);
+}
+.board-demo h3 {
+  margin: 0 0 var(--space-1);
+  color: var(--on-dark);
+  font-size: var(--text-body);
+}
+.board-demo code {
+  padding: 0;
+  background: none;
+  color: inherit;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+.phase-rail {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-sm);
+}
+.phase-rail li {
+  display: grid;
+  grid-template-columns: 8.5rem minmax(0, 1fr) auto;
+  gap: 0.2rem 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-left: 3px solid var(--console-line);
+  color: var(--on-dark-muted);
+}
+.phase-rail .is-current {
+  border-left-color: var(--honey);
+  color: var(--on-dark);
+  background: var(--ink-blue);
+  font-weight: 700;
+}
+.phase-state::before {
+  content: "· ";
+}
+.phase-tasks {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  text-align: right;
+}
+.demo-path {
+  margin: 0 0 var(--space-1);
+  color: var(--on-dark-muted);
+}
+.evidence-lines {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.evidence-lines li {
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--console-line);
+}
+.next-line {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0 0 var(--space-2);
+}
+.next-line span {
+  color: var(--on-dark-muted);
+  font-size: var(--text-sm);
+}
+.next-line code {
+  color: var(--honey);
 }
 
 .section {
@@ -562,9 +721,12 @@ kbd {
 .footer-links {
   display: grid;
   align-content: start;
-  gap: 0.4rem;
+  justify-items: start;
 }
 .footer-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
   color: var(--on-dark);
 }
 .footer-links a:hover {
@@ -608,7 +770,9 @@ kbd {
   font-weight: 700;
 }
 .docs-nav-group a {
-  display: block;
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
   padding: 0.4rem 0.7rem;
   border-left: 3px solid var(--line);
   color: var(--ink-soft);
@@ -626,6 +790,9 @@ kbd {
   font-weight: 700;
 }
 .docs-sidebar-github {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
   color: var(--ink-soft);
   font-size: var(--text-sm);
 }
@@ -673,10 +840,15 @@ kbd {
   margin: 0 0 0.4rem;
   font-size: var(--text-sm);
 }
+.docs-toc a {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+}
 .docs-toc ul {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
-  gap: 0.2rem 1.5rem;
+  gap: 0 1.5rem;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -836,7 +1008,8 @@ kbd {
 /* Search */
 .search-dialog {
   width: min(40rem, calc(100% - 2rem));
-  max-height: min(34rem, calc(100vh - 4rem));
+  max-height: min(34rem, calc(100dvh - 4rem));
+  overflow: hidden;
   margin-top: 8vh;
   padding: 0;
   border: 1px solid var(--ink-soft);
@@ -849,7 +1022,9 @@ kbd {
 }
 .search-dialog-inner {
   display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: var(--space-2);
+  max-height: inherit;
   padding: var(--space-3);
 }
 .search-heading {
@@ -894,13 +1069,17 @@ kbd {
   outline-offset: 2px;
 }
 .search-results {
-  display: grid;
-  max-height: 20rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .search-result {
+  flex: none;
   display: grid;
   gap: 0.15rem;
+  min-height: 2.75rem;
   padding: 0.65rem 0.75rem;
   border-radius: var(--radius);
   text-decoration: none;
@@ -923,6 +1102,7 @@ kbd {
 @media (max-width: 900px) {
   .hero-grid,
   .split,
+  .first-run,
   .install-layout {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -970,6 +1150,51 @@ kbd {
   }
   .docs-next {
     flex-direction: column;
+  }
+  /* A long command would run under the Copy button, so the button gets its own row. */
+  .code-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .code-block .copy-button {
+    position: static;
+    align-self: flex-end;
+    min-height: 2.75rem;
+  }
+  /* One-line install commands wrap on a phone so the whole source is visible. */
+  .install-command pre,
+  .install-layout pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .code-block pre,
+  .prose .code-block pre {
+    padding-right: 1rem;
+  }
+  .search-dialog {
+    width: calc(100% - 1rem);
+    max-height: calc(100dvh - 1rem);
+    margin-top: 0.5rem;
+  }
+  .phase-rail li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .phase-state {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .phase-tasks {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .board-example td:nth-child(2) {
+    min-width: 6rem;
+  }
+}
+@media (pointer: coarse) {
+  .copy-button {
+    min-height: 2.75rem;
   }
 }
 @media (prefers-reduced-motion: no-preference) {

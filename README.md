@@ -35,14 +35,12 @@ you ──▶ orchestrator (your session, your model)
 ## Install
 
 ```bash
-pi install npm:@ayagmar/pi-maestro
-# or straight from GitHub
 pi install git:github.com/ayagmar/pi-maestro
-# or from a local checkout
-pi install /path/to/pi-maestro
 ```
 
-The npm package is scoped because the unscoped `pi-maestro` name on npm belongs to an unrelated project. Try it for one session with `pi -e npm:@ayagmar/pi-maestro`, and update an installed copy with `pi update npm:@ayagmar/pi-maestro`. A project-scoped install (`pi install -l …`) loads only in projects you have trusted in pi.
+This clones the repository and installs its dependencies. Try it for one session with `pi -e git:github.com/ayagmar/pi-maestro`, update with `pi update git:github.com/ayagmar/pi-maestro`, and append `@<ref>` to the source to pin a commit. A project-scoped install (`pi install -l …`) loads only in projects you have trusted in pi; in an untrusted project the command needs `--approve`.
+
+Pi Maestro is not on npm yet: `npm view @ayagmar/pi-maestro` returns 404, so `pi install npm:@ayagmar/pi-maestro` fails today. That command will work once the first release is published. The package is scoped because the unscoped `pi-maestro` name on npm belongs to an unrelated project. To use a local checkout, run `npm install --omit=dev` (or `pnpm install`) in it first, then `pi install /path/to/pi-maestro`; without its dependencies the extension fails to load.
 
 ## Compatibility and support
 
@@ -52,7 +50,7 @@ Report bugs through [GitHub Issues](https://github.com/ayagmar/pi-maestro/issues
 
 ## Five-minute start
 
-1. Install the extension.
+1. Install the extension, in a Git repository that has at least one commit.
 2. Run `/maestro doctor` (or `/maestro`, then **Check setup and recovery**). It checks config, authenticated models, Git, and worktrees, and never prints keys.
 3. Run `/maestro start <goal>`, for example `/maestro start migrate the auth module to the new session API and add tests`.
 4. The orchestrator creates tasks. With `planGate` on, read and approve them with `/maestro plan`.

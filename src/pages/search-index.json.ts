@@ -17,7 +17,8 @@ function anchor(text: string, seen: Map<string, number>): string {
 const plain = (markdown: string) =>
   markdown
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/[`*_]/g, "")
+    // Keep underscores: they are part of identifiers such as budget_blocked.
+    .replace(/[`*]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 

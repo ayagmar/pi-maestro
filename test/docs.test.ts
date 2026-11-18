@@ -5,6 +5,18 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { MAESTRO_COMMANDS } from "../src/commands.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
+import { projectEvidenceSections } from "../src/dashboard-evidence.js";
+import { taskLaunches } from "../src/dashboard-launches.js";
+import {
+  exampleBoard,
+  exampleEvidence,
+  exampleLiveKinds,
+  exampleNext,
+  examplePhases,
+  exampleStatusLine,
+} from "../src/data/example-board.js";
+import { boardUsage, progressBar } from "../src/format.js";
+import { projectRunPhases, projectStatus } from "../src/status.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path: string) => readFileSync(join(root, path), "utf-8");
@@ -221,15 +233,61 @@ test("supported pi line in user docs matches the pi devDependency", () => {
   }
 });
 
-test("README, getting started, and the landing page lead with the same npm install command", () => {
-  const install = "pi install npm:@ayagmar/pi-maestro";
-  for (const doc of ["README.md", "docs/getting-started.md", "src/pages/index.astro"]) {
-    assert.ok(read(doc).includes(install), `${doc} must show ${install}`);
+test("README, getting started, and the landing page lead with the working Git install", () => {
+  const install = "pi install git:github.com/ayagmar/pi-maestro";
+  const npm = "pi install npm:@ayagmar/pi-maestro";
+  const commands = read("src/data/install.ts");
+  assert.ok(commands.includes(`"${install}"`));
+  assert.ok(commands.includes(`"${npm}"`));
+  for (const doc of ["README.md", "docs/getting-started.md"]) {
+    const text = read(doc);
+    assert.ok(text.includes(install), `${doc} must show ${install}`);
+    // The npm command stays documented, but after the working source and as unpublished.
+    assert.ok(text.indexOf(install) < text.indexOf(npm), `${doc} must lead with the Git source`);
+    assert.match(text, /not (?:on npm|published to npm) yet/, `${doc} must say npm is unpublished`);
   }
-  assert.ok(
-    read("src/pages/index.astro").includes(`data-copy="${install}"`),
-    "the landing page must copy the install command"
+  const landing = read("src/pages/index.astro");
+  assert.match(landing, /data-copy=\{installCommand\}/);
+  assert.doesNotMatch(landing, /data-copy="pi install npm:/);
+  assert.match(landing, /does not exist there yet/);
+});
+
+test("the landing example board shows what the extension projects for it", () => {
+  const phases = projectRunPhases(exampleBoard, exampleLiveKinds);
+  const status = projectStatus(exampleBoard, ["T2"], undefined, exampleLiveKinds);
+  const progress = progressBar(status.approved, status.total);
+  const cost = boardUsage(exampleBoard.tasks).cost.toFixed(2);
+  assert.equal(
+    exampleStatusLine,
+    `⚡ maestro ${status.code} · ${status.phase} · ${progress} · ${status.running} running · $${cost}`
   );
+  assert.deepEqual(
+    examplePhases,
+    phases.map((phase) => ({
+      label: phase.label,
+      // The labels the dashboard gives a phase.
+      state: phase.current
+        ? "current"
+        : phase.taskIds.length > 0
+          ? "retained evidence"
+          : "no evidence",
+      tasks: phase.taskIds.join(", ") || "none",
+    }))
+  );
+  const task = exampleBoard.tasks.find((item) => item.id === "T2");
+  assert.ok(task);
+  const launch = taskLaunches(task).find((item) => item.kind === "review");
+  const review = projectEvidenceSections(task, launch, { phaseLabel: "execution" }).find(
+    (section) => section.title === "Review"
+  );
+  assert.deepEqual(
+    review?.lines.filter((line) => !line.startsWith("Review usage")),
+    exampleEvidence.lines
+  );
+  // The dashboard's Next lines are private to its renderer, so check the shipped source.
+  const dashboard = read("src/dashboard.ts");
+  assert.ok(dashboard.includes(exampleNext.live));
+  assert.ok(dashboard.includes(exampleNext.stopped));
 });
 
 test("every markdown guide is a docs site page and the site keeps no copy of it", () => {
