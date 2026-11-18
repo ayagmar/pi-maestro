@@ -11,9 +11,9 @@ import {
 } from "./board.js";
 import {
   DEFAULT_DASHBOARD_BODY_HEIGHT,
+  liveActionPromptLines,
   REFRESH_MS,
   STEER_OPTIONS,
-  steerTemplateLines,
 } from "./dashboard-controls.js";
 import { projectEvidenceSections } from "./dashboard-evidence.js";
 import {
@@ -27,7 +27,14 @@ import {
   wrapText,
 } from "./dashboard-format.js";
 
-import { type DashboardLaunch, taskLaunches } from "./dashboard-launches.js";
+import {
+  type DashboardLaunch,
+  type LiveLaunchIdentity,
+  launchEndedNotice,
+  launchTargetLabel,
+  sameLaunch,
+  taskLaunches,
+} from "./dashboard-launches.js";
 import {
   DASHBOARD_FILTERS,
   type DashboardFilter,
@@ -92,11 +99,14 @@ export interface DashboardActions {
   getConfig?(): MaestroConfig;
   isLive(taskId: string): boolean;
   liveKind(taskId: string): "execute" | "review" | undefined;
+  /** The launch steer, follow-up and abort address for this task right now. */
+  liveLaunch(taskId: string): LiveLaunchIdentity | undefined;
   liveActivity(taskId: string): string | undefined;
   getLiveRun?(taskId: string): { cost: number; turns: number; lastActivity: string } | undefined;
-  steer(taskId: string, message: string): void;
-  followUp(taskId: string, message: string): void;
-  abort(taskId: string): void;
+  /** Each returns false, doing nothing, when that exact launch is no longer live. */
+  steer(launch: LiveLaunchIdentity, message: string): boolean;
+  followUp(launch: LiveLaunchIdentity, message: string): boolean;
+  abort(launch: LiveLaunchIdentity): boolean;
   setTaskStatus(taskId: string, status: TaskStatus): void;
   hasExecutorSession(taskId: string): boolean;
   hasReviewerSession(taskId: string): boolean;
@@ -126,7 +136,7 @@ type Mode =
   | "confirm_accept"
   | "jump"
   | "help";
-type LiveAction = "steer" | "follow_up";
+type LiveAction = "steer" | "follow_up" | "abort";
 /** Keys whose availability depends on the selected task. */
 type TaskActionKey =
   | "s"
@@ -158,7 +168,6 @@ const TASK_ACTION_KEYS: readonly TaskActionKey[] = [
   "t",
 ];
 const TASK_RUNNING = "task is running";
-type ConfirmAction = "abort" | "accept";
 type NavigationLevel = "phase" | "task" | "launch";
 type DetailView = "transcript" | "timeline" | "summary" | "evidence";
 
@@ -272,7 +281,7 @@ export class Dashboard {
   private launchIndex = 0;
   private selectedLaunchKey: string | undefined;
   private mode: Mode = "browse";
-  private pendingConfirm: { taskId: string; action: ConfirmAction } | undefined;
+  private pendingAccept: { taskId: string } | undefined;
   private pendingManualStatus:
     | { taskId: string; options: readonly TaskStatus[]; selected: number }
     | undefined;
@@ -285,8 +294,12 @@ export class Dashboard {
   private followUpInput = new Input();
   private jumpInput = new Input();
   private jumpMiss: string | undefined;
-  /** The task a steer or follow-up is addressed to, fixed when the prompt opens. */
-  private liveTarget: { taskId: string; action: LiveAction } | undefined;
+  /**
+   * The exact launch a steer, follow-up or abort prompt is addressed to,
+   * fixed when the prompt opens. Set exactly while the mode is
+   * steer_templates, steer, follow_up or confirm_abort.
+   */
+  private liveTarget: { launch: LiveLaunchIdentity; action: LiveAction } | undefined;
   private helpScroll = 0;
   private helpPageSize = 5;
   private queuedNotice: string | undefined;
@@ -447,11 +460,18 @@ export class Dashboard {
   }
 
   private beginLiveAction(task: Task, action: LiveAction): void {
-    this.liveTarget = { taskId: task.id, action };
-    this.mode = action === "steer" ? "steer_templates" : "follow_up";
+    const launch = this.actions.liveLaunch(task.id);
+    if (!launch) return;
+    this.liveTarget = { launch, action };
+    this.mode =
+      action === "steer"
+        ? "steer_templates"
+        : action === "follow_up"
+          ? "follow_up"
+          : "confirm_abort";
   }
 
-  /** Drop an unsent steer or follow-up, including any draft text. */
+  /** Drop an unsent steer, follow-up or abort, including any draft text. */
   private cancelLiveAction(notice?: string): void {
     this.liveTarget = undefined;
     this.mode = "browse";
@@ -462,21 +482,41 @@ export class Dashboard {
   }
 
   /**
-   * A steer or follow-up belongs to the task it was opened on. If that task
-   * stops running or leaves the selection while the prompt is open, cancel it
-   * rather than address a different or finished task. Returns true when it
-   * cancelled the prompt, so the key that found it invalid can be dropped.
+   * Why the prompt's launch can no longer receive it: the launch ended, or the
+   * task's live run is now a different launch (its reviewer, or a replacement
+   * of the same kind). Undefined while the launch is still the task's live run.
+   */
+  private staleTargetNotice(target: { launch: LiveLaunchIdentity; action: LiveAction }) {
+    const current = this.actions.liveLaunch(target.launch.taskId);
+    if (current && sameLaunch(current, target.launch)) return undefined;
+    return launchEndedNotice(
+      target.launch,
+      current,
+      target.action === "abort" ? "aborted" : "sent"
+    );
+  }
+
+  /**
+   * A steer, follow-up or abort belongs to the launch it was opened on. If
+   * that launch ends, the task's live run changes to another launch, or the
+   * task leaves the selection while the prompt is open, cancel it rather than
+   * address a different or finished launch. Returns true when it cancelled the
+   * prompt, so the key that found it invalid can be dropped.
    */
   private reconcileLiveAction(): boolean {
     const target = this.liveTarget;
     const live =
-      this.mode === "steer_templates" || this.mode === "steer" || this.mode === "follow_up";
+      this.mode === "steer_templates" ||
+      this.mode === "steer" ||
+      this.mode === "follow_up" ||
+      this.mode === "confirm_abort";
     if (!live) return false;
+    const stale = target ? this.staleTargetNotice(target) : undefined;
     if (!target) {
       this.cancelLiveAction();
-    } else if (!this.actions.isLive(target.taskId)) {
-      this.cancelLiveAction(`${target.taskId} is no longer running; nothing was sent`);
-    } else if (this.selectedTask()?.id === target.taskId) {
+    } else if (stale) {
+      this.cancelLiveAction(stale);
+    } else if (this.selectedTask()?.id === target.launch.taskId) {
       return false;
     } else {
       this.cancelLiveAction();
@@ -488,14 +528,31 @@ export class Dashboard {
     const target = this.liveTarget;
     const message = value.trim();
     this.cancelLiveAction();
-    if (!target || target.action !== action || !message) return;
-    if (!this.actions.isLive(target.taskId)) {
-      this.queuedNotice = `${target.taskId} is no longer running; nothing was sent`;
+    if (!target || target.action !== action || (action !== "abort" && !message)) return;
+    const stale = this.staleTargetNotice(target);
+    if (stale) {
+      this.queuedNotice = stale;
       return;
     }
-    if (action === "steer") this.actions.steer(target.taskId, message);
-    else this.actions.followUp(target.taskId, message);
-    this.queuedNotice = `Queued ${action === "steer" ? "steer" : "follow-up"} for ${target.taskId}`;
+    const label = launchTargetLabel(target.launch);
+    const dispatched =
+      action === "steer"
+        ? this.actions.steer(target.launch, message)
+        : action === "follow_up"
+          ? this.actions.followUp(target.launch, message)
+          : this.actions.abort(target.launch);
+    if (!dispatched) {
+      this.queuedNotice =
+        this.staleTargetNotice(target) ??
+        launchEndedNotice(target.launch, undefined, action === "abort" ? "aborted" : "sent");
+      return;
+    }
+    this.queuedNotice =
+      action === "steer"
+        ? `Queued steer for ${label}`
+        : action === "follow_up"
+          ? `Queued follow-up for ${label}`
+          : `Abort requested for ${label}`;
   }
 
   private submitSteer(value: string): void {
@@ -565,7 +622,7 @@ export class Dashboard {
       case "s":
       case "F":
       case "x":
-        return live ? undefined : "task is not running";
+        return live && this.actions.liveLaunch(task.id) ? undefined : "task is not running";
       case "e":
       case "t":
         return undefined;
@@ -649,22 +706,25 @@ export class Dashboard {
       return;
     }
 
-    if (this.mode === "confirm_abort" || this.mode === "confirm_accept") {
-      const pending = this.pendingConfirm;
+    if (this.mode === "confirm_abort") {
+      if (data === "y" || data === "Y") this.sendLiveAction("abort", "");
+      else this.cancelLiveAction();
+      this.frameFresh = false;
+      this.actions.requestRender();
+      return;
+    }
+
+    if (this.mode === "confirm_accept") {
+      const pending = this.pendingAccept;
       const task = pending ? findTask(this.frame.board, pending.taskId) : undefined;
-      if (data === "y" || data === "Y") {
-        if (pending?.action === "abort" && task && this.actions.isLive(task.id)) {
-          this.actions.abort(task.id);
-        }
-        if (
-          pending?.action === "accept" &&
-          task?.status === "ready_for_review" &&
-          !this.actions.isLive(task.id)
-        ) {
-          this.actions.setTaskStatus(task.id, "approved");
-        }
+      if (
+        (data === "y" || data === "Y") &&
+        task?.status === "ready_for_review" &&
+        !this.actions.isLive(task.id)
+      ) {
+        this.actions.setTaskStatus(task.id, "approved");
       }
-      this.pendingConfirm = undefined;
+      this.pendingAccept = undefined;
       this.mode = "browse";
       this.frameFresh = false;
       this.actions.requestRender();
@@ -787,10 +847,9 @@ export class Dashboard {
     } else if (data === "F" && task && !this.actionBlocker(task, "F")) {
       this.beginLiveAction(task, "follow_up");
     } else if (data === "x" && task && !this.actionBlocker(task, "x")) {
-      this.pendingConfirm = { taskId: task.id, action: "abort" };
-      this.mode = "confirm_abort";
+      this.beginLiveAction(task, "abort");
     } else if (data === "a" && task && !this.actionBlocker(task, "a")) {
-      this.pendingConfirm = { taskId: task.id, action: "accept" };
+      this.pendingAccept = { taskId: task.id };
       this.mode = "confirm_accept";
     } else if (data === "m" && task && !this.actionBlocker(task, "m")) {
       this.pendingManualStatus = {
@@ -1435,19 +1494,21 @@ export class Dashboard {
   }
 
   private renderSteerControls(width: number, height: number): string[] {
-    if (this.mode === "steer") {
-      return [
-        this.theme.fg("accent", "steer ▸ ") +
-          (this.steerInput.render(Math.max(1, width - 8))[0] ?? ""),
-        this.theme.fg("dim", "enter send · esc cancel"),
-      ].slice(0, height);
-    }
-    if (this.mode === "follow_up") {
-      return [
-        this.theme.fg("accent", "follow-up ▸ ") +
-          (this.followUpInput.render(Math.max(1, width - 12))[0] ?? ""),
-        this.theme.fg("dim", "enter queue · esc cancel"),
-      ].slice(0, height);
+    if (
+      this.liveTarget &&
+      (this.mode === "steer_templates" || this.mode === "steer" || this.mode === "follow_up")
+    ) {
+      return liveActionPromptLines(
+        this.theme,
+        {
+          mode: this.mode,
+          target: launchTargetLabel(this.liveTarget.launch),
+          input: this.mode === "follow_up" ? this.followUpInput : this.steerInput,
+          steerOption: this.steerOption,
+        },
+        width,
+        height
+      );
     }
     if (this.mode === "browse" && this.queuedNotice) {
       return [this.theme.fg("success", truncateToWidth(`✓ ${this.queuedNotice}`, width))].slice(
@@ -1455,9 +1516,7 @@ export class Dashboard {
         height
       );
     }
-    if (this.mode !== "steer_templates") return [];
-
-    return steerTemplateLines(this.theme, this.steerOption, width, height);
+    return [];
   }
 
   private renderFooter(width: number): string {
@@ -1469,7 +1528,11 @@ export class Dashboard {
     const can = (key: TaskActionKey) => Boolean(task) && !this.actionBlocker(task, key);
     return renderDashboardFooter(this.theme, width, {
       mode: this.mode,
-      ...(this.pendingConfirm ? { pendingTaskId: this.pendingConfirm.taskId } : {}),
+      ...(this.mode === "confirm_abort" && this.liveTarget
+        ? { pendingTarget: launchTargetLabel(this.liveTarget.launch) }
+        : this.pendingAccept
+          ? { pendingTarget: this.pendingAccept.taskId }
+          : {}),
       jumpPrompt: this.renderJumpPrompt(width),
       navigationLevel: this.navigationLevel,
       planPending: this.frame.board.planPending === true,

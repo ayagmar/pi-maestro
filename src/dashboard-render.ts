@@ -5,7 +5,8 @@ import { wrapText } from "./dashboard-format.js";
 
 export interface DashboardFooterView {
   mode: "browse" | "confirm_abort" | "confirm_accept" | "help" | "jump" | string;
-  pendingTaskId?: string;
+  /** What a pending confirmation acts on: a launch label for abort, a task id for accept. */
+  pendingTarget?: string;
   /** Input and trailing hint for the jump prompt, shown while it is open. */
   jumpPrompt?: string;
   navigationLevel: "phase" | "task" | "launch";
@@ -92,16 +93,16 @@ export function renderDashboardFooter(
   width: number,
   view: DashboardFooterView
 ): string {
-  if (view.mode === "confirm_abort" && view.pendingTaskId) {
+  if (view.mode === "confirm_abort" && view.pendingTarget) {
     return theme.fg(
       "error",
-      ` Abort ${view.pendingTaskId}? Press y to confirm, any other key to cancel `
+      ` Abort ${view.pendingTarget}? Press y to confirm, any other key to cancel `
     );
   }
-  if (view.mode === "confirm_accept" && view.pendingTaskId) {
+  if (view.mode === "confirm_accept" && view.pendingTarget) {
     return theme.fg(
       "warning",
-      ` Approve ${view.pendingTaskId} without review? Press y to confirm, any other key to cancel `
+      ` Approve ${view.pendingTarget} without review? Press y to confirm, any other key to cancel `
     );
   }
   if (view.mode === "help") {

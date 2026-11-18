@@ -52,9 +52,9 @@ During a run the footer shows progress, for example `⚡ maestro running · exec
 | `↑↓`, `←→`, `PgUp/PgDn` | Select, change level, scroll the transcript |
 | `Home`, `End` | Select the first or last phase, task, or launch |
 | `/` | Jump to a task by number (`12`), id (`T12`), id prefix, or title fragment. A task hidden by a filter or phase scope clears them; no match leaves the selection alone. `enter` goes, `esc` cancels |
-| `s` | Steer a running executor. Choose a template (stop and report, run the project checks, stay within scope) or write a custom message, which is queued into its next LLM call. The message goes to the task it was opened on; if that task stops running first, nothing is sent |
-| `F` | Send a follow-up to a live session |
-| `x` | Abort a running executor; its task becomes `cancelled` |
+| `s` | Steer the task's live executor or reviewer. Choose a template (stop and report, run the project checks, stay within scope) or write a custom message, which is queued into its next LLM call. The prompt names the launch it is bound to, for example `T2 executor · attempt 1`. If that launch ends first, including when the reviewer or a new launch of the same kind takes over, the prompt closes, nothing is sent, and the key you pressed does nothing else |
+| `F` | Send a follow-up to the task's live session, bound to one launch the same way as `s` |
+| `x` | Abort the task's live launch after `y` confirms; an aborted executor's task becomes `cancelled`. The confirmation names the launch, and if a different launch is running by the time you press `y`, nothing is aborted |
 | `a` | Accept eligible `ready_for_review` work after artifact checks. This bypasses review and is recorded as `approvalKind: "manual"` |
 | `m` | Set the status of any non-live, non-terminal task |
 | `r` | Retry, through the same path as `/maestro retry` |

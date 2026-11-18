@@ -28,10 +28,16 @@ import {
 import {
   bindingLabel,
   DEFAULT_DASHBOARD_BODY_HEIGHT,
+  liveActionPromptLines,
   REFRESH_MS,
   STEER_OPTIONS,
-  steerTemplateLines,
 } from "./dashboard-controls.js";
+import {
+  launchEndedNotice,
+  launchTargetLabel,
+  type LiveLaunchIdentity,
+  sameLaunch,
+} from "./dashboard-launches.js";
 import { type TranscriptItem, TranscriptTail } from "./transcript.js";
 
 /** Shared transcript projection used by the dashboard and agent-session viewer. */
@@ -110,8 +116,9 @@ export interface LivePaneOptions {
   initialSelectedKey?: string;
   /** Keep the shared agent selector in sync when the pane switches sessions. */
   onSelectionChange?(key: string | undefined): void;
-  onSteer?(launch: LivePaneLaunch, message: string): void;
-  onFollowUp?(launch: LivePaneLaunch, message: string): void;
+  /** Each returns false, sending nothing, when that exact launch is no longer live. */
+  onSteer?(launch: LivePaneLaunch, message: string): boolean;
+  onFollowUp?(launch: LivePaneLaunch, message: string): boolean;
   canOpenSession?(launch: LivePaneLaunch): boolean;
   onOpenSession?(launch: LivePaneLaunch): void;
   height?: number;
@@ -218,6 +225,8 @@ export class LivePaneComponent {
   private settledNotice: string | undefined;
   private queuedNotice: string | undefined;
   private mode: LivePaneMode = "browse";
+  /** The exact launch an open prompt is addressed to; set exactly while mode is not browse. */
+  private promptTarget: LiveLaunchIdentity | undefined;
   private steerOption = 0;
   private readonly steerInput = new Input();
   private readonly followUpInput = new Input();
@@ -228,15 +237,9 @@ export class LivePaneComponent {
     private readonly options: LivePaneOptions
   ) {
     this.steerInput.onSubmit = (value) => this.submitMessage("steer", value);
-    this.steerInput.onEscape = () => {
-      this.mode = "browse";
-      this.syncInputFocus();
-    };
+    this.steerInput.onEscape = () => this.cancelPrompt();
     this.followUpInput.onSubmit = (value) => this.submitMessage("follow_up", value);
-    this.followUpInput.onEscape = () => {
-      this.mode = "browse";
-      this.syncInputFocus();
-    };
+    this.followUpInput.onEscape = () => this.cancelPrompt();
     this.timer = setInterval(() => options.requestRender(), REFRESH_MS);
     this.timer.unref();
     if (options.initialSelectedKey) this.selectedKey = options.initialSelectedKey;
@@ -256,7 +259,7 @@ export class LivePaneComponent {
     this.scrollOffset = Number.MAX_SAFE_INTEGER;
     this.settledNotice = undefined;
     this.queuedNotice = undefined;
-    this.mode = "browse";
+    this.cancelPrompt();
     this.options.requestRender();
   }
 
@@ -304,6 +307,12 @@ export class LivePaneComponent {
       this.options.onCycleVisibility();
       return;
     }
+    if (this.mode !== "browse" && this.reconcilePrompt(this.syncLaunches())) {
+      // The key was typed for a prompt that no longer exists; it must not also
+      // run as a pane action on whatever launch is selected now.
+      this.options.requestRender();
+      return;
+    }
     if (this.mode === "steer_templates") {
       this.handleSteerTemplateInput(data);
       this.options.requestRender();
@@ -336,22 +345,14 @@ export class LivePaneComponent {
       this.options.onOpenSession(selected);
       return;
     }
-    if (
-      data === "s" &&
-      this.options.onSteer &&
-      launches.some((launch) => launch.key === this.selectedKey && launch.live !== false)
-    ) {
+    if (data === "s" && this.options.onSteer && selected && selected.live !== false) {
       this.steerOption = 0;
-      this.mode = "steer_templates";
+      this.openPrompt(selected, "steer_templates");
       this.options.requestRender();
       return;
     }
-    if (
-      data === "F" &&
-      this.options.onFollowUp &&
-      launches.some((launch) => launch.key === this.selectedKey && launch.live !== false)
-    ) {
-      this.mode = "follow_up";
+    if (data === "F" && this.options.onFollowUp && selected && selected.live !== false) {
+      this.openPrompt(selected, "follow_up");
       this.options.requestRender();
       return;
     }
@@ -408,6 +409,7 @@ export class LivePaneComponent {
     const contentWidth = framed ? safeWidth - 2 : safeWidth;
     const contentHeight = framed ? height - 2 : height;
     const launches = this.syncLaunches();
+    this.reconcilePrompt(launches);
     this.syncInputFocus();
     const selected = launches.find((launch) => launch.key === this.selectedKey);
     if (!selected) {
@@ -883,19 +885,18 @@ export class LivePaneComponent {
   }
 
   private renderActionControls(width: number, height: number): string[] {
-    if (this.mode === "steer") {
-      return [
-        this.theme.fg("accent", "steer ▸ ") +
-          (this.steerInput.render(Math.max(1, width - 8))[0] ?? ""),
-        this.theme.fg("dim", "enter send · esc cancel"),
-      ].slice(0, height);
-    }
-    if (this.mode === "follow_up") {
-      return [
-        this.theme.fg("accent", "follow-up ▸ ") +
-          (this.followUpInput.render(Math.max(1, width - 12))[0] ?? ""),
-        this.theme.fg("dim", "enter queue · esc cancel"),
-      ].slice(0, height);
+    if (this.mode !== "browse" && this.promptTarget) {
+      return liveActionPromptLines(
+        this.theme,
+        {
+          mode: this.mode,
+          target: launchTargetLabel(this.promptTarget),
+          input: this.mode === "follow_up" ? this.followUpInput : this.steerInput,
+          steerOption: this.steerOption,
+        },
+        width,
+        height
+      );
     }
     if (this.mode === "browse" && this.queuedNotice) {
       return [this.theme.fg("success", truncateToWidth(`✓ ${this.queuedNotice}`, width))].slice(
@@ -903,14 +904,61 @@ export class LivePaneComponent {
         height
       );
     }
-    if (this.mode !== "steer_templates") return [];
+    return [];
+  }
 
-    return steerTemplateLines(this.theme, this.steerOption, width, height);
+  private openPrompt(launch: LivePaneLaunch, mode: "steer_templates" | "follow_up"): void {
+    this.promptTarget = {
+      taskId: launch.taskId,
+      kind: launch.kind,
+      logFile: launch.logFile,
+      ...(launch.attemptIndex === undefined ? {} : { attemptIndex: launch.attemptIndex }),
+    };
+    this.mode = mode;
+  }
+
+  /** Close the prompt and drop any draft text. */
+  private cancelPrompt(notice?: string): void {
+    this.promptTarget = undefined;
+    this.mode = "browse";
+    this.steerInput.setValue("");
+    this.followUpInput.setValue("");
+    if (notice) this.queuedNotice = notice;
+    this.syncInputFocus();
+  }
+
+  /** The live row for the prompt's exact launch, if it is still running. */
+  private promptLaunch(launches: readonly LivePaneLaunch[]): LivePaneLaunch | undefined {
+    const target = this.promptTarget;
+    if (!target) return undefined;
+    return launches.find((launch) => launch.live !== false && sameLaunch(launch, target));
+  }
+
+  /**
+   * A prompt belongs to the launch it was opened on. Cancel it when that
+   * launch ends or the selection moves to another launch, rather than send it
+   * to whatever is selected now. Returns true when it cancelled the prompt.
+   */
+  private reconcilePrompt(launches: readonly LivePaneLaunch[]): boolean {
+    if (this.mode === "browse") return false;
+    const target = this.promptTarget;
+    if (!target) {
+      this.cancelPrompt();
+      return true;
+    }
+    if (!this.promptLaunch(launches)) {
+      this.cancelPrompt(launchEndedNotice(target, undefined, "sent"));
+      return true;
+    }
+    const selected = launches.find((launch) => launch.key === this.selectedKey);
+    if (selected && sameLaunch(selected, target)) return false;
+    this.cancelPrompt();
+    return true;
   }
 
   private handleSteerTemplateInput(data: string): void {
     if (matchesKey(data, Key.escape)) {
-      this.mode = "browse";
+      this.cancelPrompt();
       return;
     }
     if (matchesKey(data, Key.up)) {
@@ -934,15 +982,20 @@ export class LivePaneComponent {
 
   private submitMessage(kind: "steer" | "follow_up", value: string): void {
     const launches = this.syncLaunches();
-    const selected = launches.find((launch) => launch.key === this.selectedKey);
-    this.mode = "browse";
-    this.steerInput.setValue("");
-    this.followUpInput.setValue("");
-    if (!selected || !value.trim()) return;
-
-    if (kind === "steer") this.options.onSteer?.(selected, value.trim());
-    else this.options.onFollowUp?.(selected, value.trim());
-    this.queuedNotice = `Queued ${kind === "steer" ? "steer" : "follow-up"} for ${selected.taskId}`;
+    if (this.reconcilePrompt(launches)) return;
+    const target = this.promptTarget;
+    const launch = this.promptLaunch(launches);
+    const message = value.trim();
+    this.cancelPrompt();
+    if (!target || !launch || !message) return;
+    const label = launchTargetLabel(target);
+    const sent =
+      kind === "steer"
+        ? this.options.onSteer?.(launch, message)
+        : this.options.onFollowUp?.(launch, message);
+    this.queuedNotice = sent
+      ? `Queued ${kind === "steer" ? "steer" : "follow-up"} for ${label}`
+      : launchEndedNotice(target, undefined, "sent");
   }
 
   private renderSettled(width: number, height: number): string[] {
@@ -967,7 +1020,7 @@ export class LivePaneComponent {
     this.scrollOffset = Number.MAX_SAFE_INTEGER;
     this.settledNotice = undefined;
     this.queuedNotice = undefined;
-    this.mode = "browse";
+    this.cancelPrompt();
     this.options.requestRender();
   }
 
@@ -1013,7 +1066,6 @@ export class LivePaneComponent {
       this.followMode = true;
       this.scrollOffset = Number.MAX_SAFE_INTEGER;
       this.queuedNotice = undefined;
-      this.mode = "browse";
     }
 
     if (this.selectedKey && !launches.some((launch) => launch.key === this.selectedKey)) {
@@ -1033,7 +1085,6 @@ export class LivePaneComponent {
       this.followMode = true;
       this.scrollOffset = Number.MAX_SAFE_INTEGER;
       this.queuedNotice = undefined;
-      this.mode = "browse";
     }
 
     this.previousLaunches = new Map(launches.map((launch) => [launch.key, launch]));

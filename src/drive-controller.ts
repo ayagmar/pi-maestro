@@ -14,6 +14,7 @@ import {
   validatePlan,
 } from "./board.js";
 import { loadConfig, resolveTierModel, resolveTierModels } from "./config.js";
+import { type LiveLaunchIdentity, sameLaunch } from "./dashboard-launches.js";
 import {
   MAX_DECISION_EVIDENCE_CHARS,
   MAX_DRIVE_TASK_IDS,
@@ -56,6 +57,15 @@ export interface LiveRun {
   /** The watchdog steered this run and it has not progressed since. */
   steered?: boolean;
   handle: ExecutorHandle;
+}
+
+export function liveLaunchOf(run: LiveRun): LiveLaunchIdentity {
+  return {
+    taskId: run.taskId,
+    kind: run.kind,
+    logFile: run.handle.attempt.logFile,
+    attemptIndex: run.handle.attempt.index,
+  };
 }
 
 export interface ActiveDriveControl {
@@ -188,6 +198,14 @@ export class DriveRuntimeController {
       if (run.taskId === taskId && (kind === undefined || run.kind === kind)) match = run;
     }
     return match;
+  }
+
+  /** The live run for exactly this launch, or undefined once it has ended. */
+  findLiveLaunch(launch: LiveLaunchIdentity): LiveRun | undefined {
+    for (const run of this.liveRuns) {
+      if (sameLaunch(liveLaunchOf(run), launch)) return run;
+    }
+    return undefined;
   }
 
   liveRunValues(): IterableIterator<LiveRun> {

@@ -131,11 +131,17 @@ export class LivePaneController {
               this.dependencies.refreshUI(ctx);
             },
             onCycleVisibility: () => this.cycle(ctx),
+            // Address the exact launch the prompt was opened on, never another
+            // live run of the same task.
             onSteer: (launch, message) => {
-              this.dependencies.driveController.getLiveRun(launch.taskId)?.handle.steer(message);
+              const live = this.dependencies.driveController.findLiveLaunch(launch);
+              live?.handle.steer(message);
+              return live !== undefined;
             },
             onFollowUp: (launch, message) => {
-              this.dependencies.driveController.getLiveRun(launch.taskId)?.handle.followUp(message);
+              const live = this.dependencies.driveController.findLiveLaunch(launch);
+              live?.handle.followUp(message);
+              return live !== undefined;
             },
             ...(isCommandContext(ctx)
               ? {

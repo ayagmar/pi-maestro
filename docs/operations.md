@@ -51,7 +51,8 @@ A decision delivered to the orchestrator wakes it with one model turn. If that t
 - `/maestro reconcile` reports missing review, artifact, integration, verification, or recovery proof without rewriting state.
 - `/maestro simulate` reports deterministic dependency waves; plan approval and drive preflight additionally report concurrency, raw launch upper bounds, verification-profile usage, an explicitly labeled projected-cost estimate, and whether explicit scale confirmation is required. Cost forecasting prefers archived per-model-and-tier launch averages, otherwise applies model pricing metadata to a rough 20,000-input/4,000-output-token launch, and finally uses a static $0.10 fallback for unresolved models.
 - `/maestro agents` and `ctrl+alt+w` open the rich executor/reviewer session browser. Live sessions
-  can be steered without switching; opening a completed session in Pi is offered only after the
+  can be steered without switching; a steer or follow-up goes only to the launch it was opened on
+  and is dropped if that launch ends first. Opening a completed session in Pi is offered only after the
   drive and active executors settle. `/maestro back` returns to the previous owner session.
 - `/maestro plan diff <file> [taskId]` and `/maestro recipe preview <name> [JSON]` are
   validated read-only inspections. Their deterministic references identify bounded omitted detail.

@@ -47,3 +47,40 @@ export function taskLaunches(task: Task): DashboardLaunch[] {
     return launches;
   });
 }
+
+/**
+ * One executor or reviewer process launch. The log file is per raw launch
+ * (startExecutor gives every launch its own transport id), so a later launch
+ * of the same task and kind never shares it.
+ */
+export interface LiveLaunchIdentity {
+  taskId: string;
+  kind: "execute" | "review";
+  logFile: string;
+  /** The task attempt the launch belongs to; display only. */
+  attemptIndex?: number;
+}
+
+export function sameLaunch(a: LiveLaunchIdentity, b: LiveLaunchIdentity): boolean {
+  return a.taskId === b.taskId && a.kind === b.kind && a.logFile === b.logFile;
+}
+
+/** How operator prompts and notices name a launch, e.g. "T2 reviewer · attempt 1". */
+export function launchTargetLabel(launch: LiveLaunchIdentity): string {
+  const role = launch.kind === "review" ? "reviewer" : "executor";
+  const attempt = launch.attemptIndex === undefined ? "" : ` · attempt ${launch.attemptIndex}`;
+  return `${launch.taskId} ${role}${attempt}`;
+}
+
+/**
+ * Why an operator action opened on `target` was not applied. The outcome
+ * comes first so it survives truncation in a narrow pane.
+ */
+export function launchEndedNotice(
+  target: LiveLaunchIdentity,
+  current: LiveLaunchIdentity | undefined,
+  outcome: "sent" | "aborted"
+): string {
+  const ended = `Nothing ${outcome}: ${launchTargetLabel(target)} ended`;
+  return current ? `${ended}; ${launchTargetLabel(current)} runs now` : ended;
+}

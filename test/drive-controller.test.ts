@@ -20,6 +20,7 @@ import {
   DriveRuntimeController,
   deliverPendingDecision,
   type LiveRun,
+  liveLaunchOf,
   persistActiveDrive,
   persistDriveDecision,
   resolveDriveDecision,
@@ -805,4 +806,39 @@ test("a drive scoped past the persisted task-id limit is refused before it start
     const ctx = { cwd } as unknown as Parameters<typeof validateDriveStart>[0];
     assert.throws(() => validateDriveStart(ctx, ids), /at most 64 tasks/);
   });
+});
+
+test("live launch lookup finds only the exact raw launch, not its reviewer or a replacement", () => {
+  const controller = new DriveRuntimeController();
+  const run = (kind: LiveRun["kind"], logFile: string): LiveRun => ({
+    taskId: "T1",
+    kind,
+    turns: 0,
+    cost: 0,
+    lastActivity: "working",
+    handle: {
+      attempt: {
+        index: 1,
+        logFile,
+        thinking: "low",
+        startedAt: 0,
+        usage: { input: 0, output: 0, cost: 0, turns: 0 },
+        touchedFiles: [],
+      },
+      outcome: new Promise(() => {}),
+      steer: () => {},
+      followUp: () => {},
+      abort: () => {},
+    },
+  });
+  const executor = run("execute", "T1.1.aaaa.jsonl");
+  controller.registerLiveRun(executor);
+  const target = liveLaunchOf(executor);
+  assert.equal(controller.findLiveLaunch(target), executor);
+
+  controller.removeLiveRun(executor);
+  controller.registerLiveRun(run("review", "T1-review.1.bbbb.jsonl"));
+  controller.registerLiveRun(run("execute", "T1.1.cccc.jsonl"));
+  assert.equal(controller.isTaskLive("T1"), true);
+  assert.equal(controller.findLiveLaunch(target), undefined);
 });
