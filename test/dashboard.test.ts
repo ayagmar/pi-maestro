@@ -1595,17 +1595,307 @@ test("dashboard evidence view keeps the selected task fixed while switching laun
   }
 });
 
-test("dashboard help lists every shared binding at width 80 and closes on the next key", () => {
+/** Page through help with Down and collect every distinct line that was ever visible. */
+function helpTranscript(dashboard: Dashboard, width: number): string {
+  const seen = new Set<string>();
+  for (let step = 0; step < 100; step++) {
+    for (const line of dashboard.render(width)) seen.add(line);
+    dashboard.handleInput("\x1b[6~"); // PgDn
+  }
+  return [...seen].join("\n");
+}
+
+test("dashboard help is scrollable, keeps every binding reachable, and ignores stray keys", () => {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
-  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  let closed = false;
+  const dashboard = new Dashboard(fakeTheme, makeActions(board, { close: () => (closed = true) }), {
+    getRows: () => 9,
+  });
   try {
     dashboard.handleInput("?");
-    const help = dashboard.render(80).join("\n");
-    for (const binding of DASHBOARD_BINDINGS) {
-      assert.ok(help.includes(binding.key), `missing ${binding.key}`);
-    }
+    const firstPage = dashboard.render(60);
+    assert.equal(firstPage.length, 9);
+    assert.match(firstPage.at(-1) ?? "", /scroll/);
+
     dashboard.handleInput("z");
-    assert.doesNotMatch(dashboard.render(80).join("\n"), /Dashboard help/);
+    dashboard.handleInput("a");
+    assert.match(dashboard.render(60).join("\n"), /Dashboard help/);
+
+    const everything = helpTranscript(dashboard, 60);
+    for (const binding of DASHBOARD_BINDINGS) {
+      assert.ok(everything.includes(binding.description), `missing ${binding.description}`);
+      assert.ok(everything.includes(binding.key), `missing ${binding.key}`);
+    }
+
+    dashboard.handleInput("\x1b[H"); // Home
+    assert.match(dashboard.render(60).join("\n"), /Dashboard help/);
+    dashboard.handleInput("\x1b");
+    assert.equal(closed, false, "esc closes help, not the dashboard");
+    assert.doesNotMatch(dashboard.render(60).join("\n"), /Dashboard help/);
+    dashboard.handleInput("?");
+    dashboard.handleInput("?");
+    assert.doesNotMatch(dashboard.render(60).join("\n"), /Dashboard help/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard help names why an action is unavailable for the selected task", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask({ status: "todo" })] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 80 });
+  try {
+    dashboard.handleInput("?");
+    const help = dashboard.render(100).join("\n");
+    assert.match(help, /steer · unavailable: task is not running/);
+    assert.match(help, /report · unavailable: no report yet/);
+    assert.match(help, /group filter\s*$/m);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard phase footer advertises help and jump", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { initialView: "phase" });
+  try {
+    const footer = dashboard.render(100).at(-1) ?? "";
+    assert.match(footer, /\? help/);
+    assert.match(footer, /\/ jump to task/);
+    assert.match(dashboard.render(100).join("\n"), /phase/i);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard drops a steer when its task stops running instead of sending it elsewhere", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [makeTask(), makeTask({ id: "T2" })],
+  };
+  let live = true;
+  const sent: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: (taskId) => live && taskId === "T1",
+      steer: (taskId, message) => sent.push(`${taskId}:${message}`),
+    })
+  );
+  try {
+    dashboard.handleInput("s");
+    for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+    for (const ch of "late") dashboard.handleInput(ch);
+    live = false; // the executor finished while the operator was typing
+    dashboard.handleInput("\r");
+
+    assert.deepEqual(sent, []);
+    assert.match(dashboard.render(100).join("\n"), /T1 is no longer running; nothing was sent/);
+    assert.equal(inputFocuses(dashboard).steer, false);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard does not carry a cancelled steer draft or a notice to another task", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [makeTask(), makeTask({ id: "T2" })],
+  };
+  const sent: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => true,
+      steer: (taskId, message) => sent.push(`${taskId}:${message}`),
+    })
+  );
+  try {
+    dashboard.handleInput("s");
+    for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+    for (const ch of "draft") dashboard.handleInput(ch);
+    dashboard.handleInput("\x1b"); // abandon the draft
+    dashboard.handleInput("\x1b[B"); // select T2
+
+    dashboard.handleInput("s");
+    for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+    assert.doesNotMatch(dashboard.render(100).join("\n"), /draft/);
+    dashboard.handleInput("\r"); // empty custom message sends nothing
+    assert.deepEqual(sent, []);
+
+    dashboard.handleInput("s");
+    dashboard.handleInput("\r"); // first template, for T2
+    assert.deepEqual(sent, ["T2:Stop - wrong approach, report current state"]);
+    assert.match(dashboard.render(100).join("\n"), /Queued steer for T2/);
+    dashboard.handleInput("\x1b[A"); // back to T1
+    assert.doesNotMatch(dashboard.render(100).join("\n"), /Queued steer/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard jumps to a task by number, id, or title and widens filters when needed", () => {
+  const tasks = [
+    makeTask({ id: "T1", title: "Alpha", status: "todo" }),
+    makeTask({ id: "T2", title: "Bravo", status: "approved" }),
+    makeTask({ id: "T12", title: "Charlie parser", status: "todo" }),
+  ];
+  const board: Board = { version: 1, nextTaskNumber: 13, tasks };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 40 });
+  const type = (text: string) => {
+    dashboard.handleInput("/");
+    for (const ch of text) dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+  };
+  const selectedHeading = () => dashboard.render(120).find((line) => line.includes("Run ›")) ?? "";
+  try {
+    type("12");
+    assert.match(selectedHeading(), /T12/);
+    type("alp");
+    assert.match(selectedHeading(), /T1\b/);
+
+    dashboard.handleInput("f"); // hide done
+    type("t2"); // T2 is approved, so it is hidden: jumping must reveal it
+    assert.match(selectedHeading(), /T2\b/);
+    assert.match(dashboard.render(120).join("\n"), /Jumped to T2; filters cleared/);
+
+    dashboard.handleInput("/");
+    for (const ch of "zzz") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    assert.match(dashboard.render(120).at(-1) ?? "", /no task matches "zzz"/);
+    assert.match(selectedHeading(), /T2\b/, "a miss leaves the selection alone");
+    dashboard.handleInput("\x1b");
+    assert.doesNotMatch(dashboard.render(120).at(-1) ?? "", /jump ▸/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard jump prefers a hidden exact id over a visible prefix or title match", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 121,
+    tasks: [
+      makeTask({ id: "T12", title: "Done work", status: "approved" }),
+      makeTask({ id: "T120", title: "Later work", status: "todo" }),
+      makeTask({ id: "T7", title: "Follow up on T12", status: "todo" }),
+    ],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 40 });
+  try {
+    dashboard.handleInput("f"); // hide done: T12 leaves the list, T120 and T7 stay
+    assert.doesNotMatch(dashboard.render(120).join("\n"), /T12 Done work/);
+    dashboard.handleInput("/");
+    for (const ch of "T12") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+
+    const output = dashboard.render(120).join("\n");
+    assert.match(output, /Run › [^\n]*› T12\n|Run › [^\n]*› T12 /);
+    assert.doesNotMatch(output, /Run › [^\n]*› T120/);
+    assert.match(output, /Jumped to T12; filters cleared/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard consumes the key that finds its live prompt invalidated", () => {
+  const executorAttempt = {
+    index: 1,
+    sessionFile: "executor.jsonl",
+    logFile: "missing.jsonl",
+    thinking: "medium" as const,
+    startedAt: 0,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+  };
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 2,
+    tasks: [makeTask({ status: "ready_for_review", attempts: [executorAttempt] })],
+  };
+  let live = true;
+  const selected: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => live,
+      hasExecutorSession: () => true,
+      selectTaskAction: (taskId, action) => selected.push(`${taskId}:${action}`),
+    })
+  );
+  try {
+    dashboard.handleInput("F");
+    for (const ch of "hello") dashboard.handleInput(ch);
+    dashboard.render(100); // the last frame the operator saw, with T1 still live
+    live = false; // T1 settles before the next key arrives
+
+    dashboard.handleInput("\r"); // Enter was meant to submit the follow-up
+    assert.deepEqual(selected, [], "Enter must not open the settled session");
+    assert.match(dashboard.render(100).join("\n"), /T1 is no longer running; nothing was sent/);
+
+    dashboard.handleInput("F");
+    live = true;
+    dashboard.handleInput("F"); // still a prompt: types into the follow-up input
+    live = false;
+    dashboard.handleInput("a"); // meant for the prompt; must not start an approval
+    assert.doesNotMatch(dashboard.render(100).at(-1) ?? "", /Approve T1/);
+
+    dashboard.handleInput("\r"); // the next key is a normal browse key again
+    assert.deepEqual(selected, ["T1:open_executor"]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard help paging probes each task capability once per frame and none in the footer", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask({ status: "todo" })] };
+  const calls = { retry: 0, executor: 0, reviewer: 0 };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      hasExecutorSession: () => {
+        calls.executor += 1;
+        return false;
+      },
+      hasReviewerSession: () => {
+        calls.reviewer += 1;
+        return false;
+      },
+      retryEligibility: (taskId) => {
+        calls.retry += 1;
+        return humanRetryEligibility(board, taskId, { maxAttempts: 3, isLive: () => false });
+      },
+    }),
+    { getRows: () => 8 }
+  );
+  try {
+    dashboard.handleInput("?");
+    for (const key of ["\x1b[6~", "\x1b[6~", "\x1b[5~"]) {
+      calls.retry = calls.executor = calls.reviewer = 0;
+      dashboard.handleInput(key);
+      dashboard.render(80);
+      assert.deepEqual(calls, { retry: 1, executor: 1, reviewer: 1 }, `after key ${key}`);
+    }
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard Home and End select the first and last task", () => {
+  const tasks = Array.from({ length: 30 }, (_, index) =>
+    makeTask({ id: `T${index + 1}`, status: "todo" })
+  );
+  const board: Board = { version: 1, nextTaskNumber: 31, tasks };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 12 });
+  try {
+    dashboard.handleInput("\x1b[F");
+    assert.match(dashboard.render(120).join("\n"), /T30 Do thing/);
+    dashboard.handleInput("\x1b[H");
+    assert.match(dashboard.render(120).join("\n"), /T1 Do thing/);
   } finally {
     dashboard.dispose();
   }

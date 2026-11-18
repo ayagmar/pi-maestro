@@ -45,12 +45,14 @@ During a run the footer shows progress, for example `⚡ maestro running · exec
 
 ### The dashboard
 
-`/maestro board` opens on the current workflow phase. `→` drills into the phase's tasks and then into executor and reviewer launches, `←` goes back, and `?` prints the full key list. The eight phases are discovery, plan approval, execution, review, integration, verification, recovery, and complete. Each is marked as current, needing attention, holding historical evidence, or empty, and its detail pane gives the purpose, task-state counts, and the next action. Refreshes read the board and never wake a model.
+`/maestro board` opens on the current workflow phase. `→` drills into the phase's tasks and then into executor and reviewer launches, `←` goes back, and `?` opens the full key list. Help scrolls with `↑↓`, `PgUp/PgDn`, `Home` and `End` so it stays complete in a small terminal, and only `esc`, `q` or `?` closes it. Rows that cannot be used on the selected task say why, for example `steer · unavailable: task is not running`. The footer shows `? help` at every level and lists only the actions the selected task allows. The eight phases are discovery, plan approval, execution, review, integration, verification, recovery, and complete. Each is marked as current, needing attention, holding historical evidence, or empty, and its detail pane gives the purpose, task-state counts, and the next action. Refreshes read the board and never wake a model.
 
 | Key | Action |
 |---|---|
 | `↑↓`, `←→`, `PgUp/PgDn` | Select, change level, scroll the transcript |
-| `s` | Steer a running executor. Choose a template (stop and report, run the project checks, stay within scope) or write a custom message, which is queued into its next LLM call |
+| `Home`, `End` | Select the first or last phase, task, or launch |
+| `/` | Jump to a task by number (`12`), id (`T12`), id prefix, or title fragment. A task hidden by a filter or phase scope clears them; no match leaves the selection alone. `enter` goes, `esc` cancels |
+| `s` | Steer a running executor. Choose a template (stop and report, run the project checks, stay within scope) or write a custom message, which is queued into its next LLM call. The message goes to the task it was opened on; if that task stops running first, nothing is sent |
 | `F` | Send a follow-up to a live session |
 | `x` | Abort a running executor; its task becomes `cancelled` |
 | `a` | Accept eligible `ready_for_review` work after artifact checks. This bypasses review and is recorded as `approvalKind: "manual"` |

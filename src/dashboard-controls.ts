@@ -7,6 +7,8 @@ export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
 export const DASHBOARD_BINDINGS = [
   { key: "↑↓", context: "Navigation", description: "tasks/phases" },
   { key: "←→", context: "Navigation", description: "levels" },
+  { key: "Home/End", context: "Navigation", description: "first/last" },
+  { key: "/", context: "Navigation", description: "jump to task" },
   { key: "PgUp/PgDn", context: "Navigation", description: "scroll" },
   { key: "esc", context: "Navigation", description: "close" },
   { key: "s", context: "Task", description: "steer" },
