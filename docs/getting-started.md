@@ -27,9 +27,9 @@ pi install /path/to/pi-maestro
 
 A project-scoped install (`pi install -l …`) loads only in projects you have trusted in pi. In a project pi does not trust yet, the command refuses with `Project is not trusted` until you add `--approve`.
 
-### npm, after the first release
+### npm releases
 
-Pi Maestro is not published to npm yet: `npm view @ayagmar/pi-maestro` returns 404, so `pi install npm:@ayagmar/pi-maestro` fails today. Once the first release is out, that command and `pi update npm:@ayagmar/pi-maestro` become the simplest route and this page will lead with them. The package name is scoped because the unscoped `pi-maestro` name on npm belongs to an unrelated project.
+For a published release, use `pi install npm:@ayagmar/pi-maestro`. Update it with `pi update npm:@ayagmar/pi-maestro`. Keep the `@ayagmar/` scope: the unscoped name belongs to an unrelated project.
 
 Requirements: pi 1.5 or newer (tested against `1.5.x`), Node.js 22.19 or newer, and for worktrees and automatic commits a Git repository with at least one commit. `/maestro doctor` reports all of it.
 

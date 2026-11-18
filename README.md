@@ -40,7 +40,7 @@ pi install git:github.com/ayagmar/pi-maestro
 
 This clones the repository and installs its dependencies. Try it for one session with `pi -e git:github.com/ayagmar/pi-maestro`, update with `pi update git:github.com/ayagmar/pi-maestro`, and append `@<ref>` to the source to pin a commit. A project-scoped install (`pi install -l …`) loads only in projects you have trusted in pi; in an untrusted project the command needs `--approve`.
 
-Pi Maestro is not on npm yet: `npm view @ayagmar/pi-maestro` returns 404, so `pi install npm:@ayagmar/pi-maestro` fails today. That command will work once the first release is published. The package is scoped because the unscoped `pi-maestro` name on npm belongs to an unrelated project. To use a local checkout, run `npm install --omit=dev` (or `pnpm install`) in it first, then `pi install /path/to/pi-maestro`; without its dependencies the extension fails to load.
+For a published release, use `pi install npm:@ayagmar/pi-maestro`. The unscoped `pi-maestro` name belongs to an unrelated project. To use a local checkout, run `npm install --omit=dev` (or `pnpm install`) in it first, then `pi install /path/to/pi-maestro`.
 
 ## Compatibility and support
 

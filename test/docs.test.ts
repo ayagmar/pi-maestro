@@ -242,14 +242,17 @@ test("README, getting started, and the landing page lead with the working Git in
   for (const doc of ["README.md", "docs/getting-started.md"]) {
     const text = read(doc);
     assert.ok(text.includes(install), `${doc} must show ${install}`);
-    // The npm command stays documented, but after the working source and as unpublished.
     assert.ok(text.indexOf(install) < text.indexOf(npm), `${doc} must lead with the Git source`);
-    assert.match(text, /not (?:on npm|published to npm) yet/, `${doc} must say npm is unpublished`);
+    assert.doesNotMatch(
+      text,
+      /not (?:on npm|published to npm) yet|returns 404/,
+      `${doc} ships inside the published tarball`
+    );
   }
   const landing = read("src/pages/index.astro");
   assert.match(landing, /data-copy=\{installCommand\}/);
   assert.doesNotMatch(landing, /data-copy="pi install npm:/);
-  assert.match(landing, /does not exist there yet/);
+  assert.match(landing, /\{npmInstallCommand\}/);
 });
 
 test("the landing example board shows what the extension projects for it", () => {

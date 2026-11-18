@@ -38,7 +38,7 @@ const tasks = exampleBoard.tasks.map((task) => ({
           <pre><code>{installCommand}</code></pre>
         </div>
         <p class="hero-note">
-          Installs from GitHub. <code>{npmInstallCommand}</code> will work once the first release is on npm; the package does not exist there yet. Requires pi 1.5 or newer and Node.js 22.19 or newer. MIT licensed.
+          Installs from GitHub. For a published release, use <code>{npmInstallCommand}</code>. Requires pi 1.5 or newer and Node.js 22.19 or newer. MIT licensed.
         </p>
       </div>
       <figure class="board-example">
@@ -184,7 +184,7 @@ const tasks = exampleBoard.tasks.map((task) => ({
   <section class="section install-band">
     <div class="shell install-layout">
       <div>
-        <h2>Install from Git today, npm after the first release</h2>
+        <h2>Install from Git or use a pinned commit</h2>
         <p>The GitHub install tracks the default branch, and <code>pi update</code> pulls newer commits. Add <code>@&lt;ref&gt;</code> to the source to pin a commit. A local checkout needs its dependencies installed first. <a class="text-link" href={url("/docs/getting-started/")}>Every install option</a></p>
       </div>
       <div class="code-block">
