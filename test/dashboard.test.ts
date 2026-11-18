@@ -26,6 +26,7 @@ import {
   taskLaunches,
   wrapText,
 } from "../src/dashboard.js";
+import { type LiveLaunchIdentity } from "../src/dashboard-launches.js";
 import { type Board, type Task } from "../src/types.js";
 
 const fakeTheme = {
@@ -77,14 +78,21 @@ function richTranscriptState(component: unknown, key: string) {
 }
 
 function makeActions(board: Board, overrides: Partial<DashboardActions> = {}): DashboardActions {
-  return {
+  const actions: DashboardActions = {
     getBoard: () => board,
     isLive: () => false,
     liveKind: () => undefined,
+    // One stable launch per live task and kind, so tests that fake only
+    // isLive and liveKind still get a target.
+    liveLaunch: (taskId) => {
+      if (!actions.isLive(taskId)) return undefined;
+      const kind = actions.liveKind(taskId) ?? "execute";
+      return { taskId, kind, logFile: `${taskId}.${kind}.jsonl`, attemptIndex: 1 };
+    },
     liveActivity: () => undefined,
-    steer: () => {},
-    followUp: () => {},
-    abort: () => {},
+    steer: () => true,
+    followUp: () => true,
+    abort: () => true,
     setTaskStatus: () => {},
     hasExecutorSession: () => false,
     hasReviewerSession: () => false,
@@ -95,6 +103,7 @@ function makeActions(board: Board, overrides: Partial<DashboardActions> = {}): D
     requestRender: () => {},
     ...overrides,
   };
+  return actions;
 }
 
 test("dashboard renders header, tasks, and footer within width", () => {
@@ -310,10 +319,11 @@ test("dashboard steer mode routes submitted text to the live run", () => {
     fakeTheme,
     makeActions(board, {
       isLive: () => true,
-      steer: (taskId, message) => steered.push(`${taskId}:${message}`),
+      steer: (launch, message) => Boolean(steered.push(`${launch.taskId}:${message}`)),
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s"); // open steering templates
     dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\x1b[B");
@@ -335,10 +345,11 @@ test("dashboard queues a follow-up for the selected live run", () => {
     fakeTheme,
     makeActions(board, {
       isLive: () => true,
-      followUp: (taskId, message) => followedUp.push(`${taskId}:${message}`),
+      followUp: (launch, message) => Boolean(followedUp.push(`${launch.taskId}:${message}`)),
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("F");
     for (const character of "summarize after checks") dashboard.handleInput(character);
     dashboard.handleInput("\r");
@@ -359,11 +370,13 @@ test("dashboard focuses only its active text input", () => {
     dashboard.focused = true;
     assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: false });
 
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("F");
     assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: true });
     dashboard.handleInput("\x1b");
     assert.deepEqual(inputFocuses(dashboard), { steer: false, followUp: false });
 
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     for (let index = 0; index < 3; index += 1) dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
@@ -383,10 +396,11 @@ test("dashboard sends the selected steering template", () => {
     fakeTheme,
     makeActions(board, {
       isLive: () => true,
-      steer: (taskId, message) => steered.push(`${taskId}:${message}`),
+      steer: (launch, message) => Boolean(steered.push(`${launch.taskId}:${message}`)),
     })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     dashboard.handleInput("\x1b[B");
     dashboard.handleInput("\r");
@@ -409,6 +423,7 @@ test("dashboard keeps every steering template visible at constrained height", ()
     "Custom message...",
   ];
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     for (const option of options) {
       const body = dashboard.render(120).slice(1, 3).join("\n");
@@ -428,6 +443,7 @@ test("dashboard cancels the steering template chooser with escape", () => {
     makeActions(board, { isLive: () => true, close: () => (closed = true) })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("s");
     assert.match(dashboard.render(100).join("\n"), /Custom message\.\.\./);
 
@@ -445,9 +461,13 @@ test("dashboard abort requires y confirmation", () => {
   const aborted: string[] = [];
   const dashboard = new Dashboard(
     fakeTheme,
-    makeActions(board, { isLive: () => true, abort: (taskId) => aborted.push(taskId) })
+    makeActions(board, {
+      isLive: () => true,
+      abort: (launch) => Boolean(aborted.push(launch.taskId)),
+    })
   );
   try {
+    dashboard.render(100); // the frame the key is pressed on
     dashboard.handleInput("x");
     dashboard.handleInput("n"); // decline
     assert.deepEqual(aborted, []);
@@ -1595,17 +1615,525 @@ test("dashboard evidence view keeps the selected task fixed while switching laun
   }
 });
 
-test("dashboard help lists every shared binding at width 80 and closes on the next key", () => {
+/** Page through help with Down and collect every distinct line that was ever visible. */
+function helpTranscript(dashboard: Dashboard, width: number): string {
+  const seen = new Set<string>();
+  for (let step = 0; step < 100; step++) {
+    for (const line of dashboard.render(width)) seen.add(line);
+    dashboard.handleInput("\x1b[6~"); // PgDn
+  }
+  return [...seen].join("\n");
+}
+
+test("dashboard help is scrollable, keeps every binding reachable, and ignores stray keys", () => {
   const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
-  const dashboard = new Dashboard(fakeTheme, makeActions(board));
+  let closed = false;
+  const dashboard = new Dashboard(fakeTheme, makeActions(board, { close: () => (closed = true) }), {
+    getRows: () => 9,
+  });
   try {
     dashboard.handleInput("?");
-    const help = dashboard.render(80).join("\n");
-    for (const binding of DASHBOARD_BINDINGS) {
-      assert.ok(help.includes(binding.key), `missing ${binding.key}`);
-    }
+    const firstPage = dashboard.render(60);
+    assert.equal(firstPage.length, 9);
+    assert.match(firstPage.at(-1) ?? "", /scroll/);
+
     dashboard.handleInput("z");
-    assert.doesNotMatch(dashboard.render(80).join("\n"), /Dashboard help/);
+    dashboard.handleInput("a");
+    assert.match(dashboard.render(60).join("\n"), /Dashboard help/);
+
+    const everything = helpTranscript(dashboard, 60);
+    for (const binding of DASHBOARD_BINDINGS) {
+      assert.ok(everything.includes(binding.description), `missing ${binding.description}`);
+      assert.ok(everything.includes(binding.key), `missing ${binding.key}`);
+    }
+
+    dashboard.handleInput("\x1b[H"); // Home
+    assert.match(dashboard.render(60).join("\n"), /Dashboard help/);
+    dashboard.handleInput("\x1b");
+    assert.equal(closed, false, "esc closes help, not the dashboard");
+    assert.doesNotMatch(dashboard.render(60).join("\n"), /Dashboard help/);
+    dashboard.handleInput("?");
+    dashboard.handleInput("?");
+    assert.doesNotMatch(dashboard.render(60).join("\n"), /Dashboard help/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard help names why an action is unavailable for the selected task", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask({ status: "todo" })] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 80 });
+  try {
+    dashboard.handleInput("?");
+    const help = dashboard.render(100).join("\n");
+    assert.match(help, /steer · unavailable: task is not running/);
+    assert.match(help, /report · unavailable: no report yet/);
+    assert.match(help, /group filter\s*$/m);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard phase footer advertises help and jump", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { initialView: "phase" });
+  try {
+    const footer = dashboard.render(100).at(-1) ?? "";
+    assert.match(footer, /\? help/);
+    assert.match(footer, /\/ jump to task/);
+    assert.match(dashboard.render(100).join("\n"), /phase/i);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard drops a steer when its task stops running instead of sending it elsewhere", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [makeTask(), makeTask({ id: "T2" })],
+  };
+  let live = true;
+  const sent: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: (taskId) => live && taskId === "T1",
+      steer: (launch, message) => Boolean(sent.push(`${launch.taskId}:${message}`)),
+    })
+  );
+  try {
+    dashboard.render(100); // the frame the key is pressed on
+    dashboard.handleInput("s");
+    for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+    for (const ch of "late") dashboard.handleInput(ch);
+    live = false; // the executor finished while the operator was typing
+    dashboard.handleInput("\r");
+
+    assert.deepEqual(sent, []);
+    assert.match(dashboard.render(100).join("\n"), /Nothing sent: T1 executor · attempt 1 ended/);
+    assert.equal(inputFocuses(dashboard).steer, false);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+const EXECUTOR_1: LiveLaunchIdentity = {
+  taskId: "T1",
+  kind: "execute",
+  logFile: "T1.1.aaaa.jsonl",
+  attemptIndex: 1,
+};
+const REVIEWER_1: LiveLaunchIdentity = {
+  taskId: "T1",
+  kind: "review",
+  logFile: "T1-review.1.bbbb.jsonl",
+  attemptIndex: 1,
+};
+// A same-kind replacement: same task, kind and attempt, but a new raw launch.
+const EXECUTOR_1_RELAUNCHED: LiveLaunchIdentity = { ...EXECUTOR_1, logFile: "T1.1.cccc.jsonl" };
+
+const LIVE_ACTIONS = [
+  {
+    name: "steer",
+    key: "s",
+    // Custom message: down to "Custom message...", choose it, type.
+    fill: (dashboard: Dashboard) => {
+      for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
+      dashboard.handleInput("\r");
+      for (const ch of "fix it") dashboard.handleInput(ch);
+    },
+    confirm: "\r",
+    sent: "steer:fix it",
+    prompt: /steer T1 \w+ · attempt 1 ▸/,
+    queued: /Queued steer for T1 executor · attempt 1/,
+    refused: /Nothing sent: T1 executor · attempt 1 ended/,
+  },
+  {
+    name: "steer template",
+    key: "s",
+    fill: () => {},
+    confirm: "\r",
+    sent: "steer:Stop - wrong approach, report current state",
+    prompt: /Steer T1 \w+ · attempt 1:/,
+    queued: /Queued steer for T1 executor · attempt 1/,
+    refused: /Nothing sent: T1 executor · attempt 1 ended/,
+  },
+  {
+    name: "follow-up",
+    key: "F",
+    fill: (dashboard: Dashboard) => {
+      for (const ch of "fix it") dashboard.handleInput(ch);
+    },
+    confirm: "\r",
+    sent: "followUp:fix it",
+    prompt: /follow-up T1 \w+ · attempt 1 ▸/,
+    queued: /Queued follow-up for T1 executor · attempt 1/,
+    refused: /Nothing sent: T1 executor · attempt 1 ended/,
+  },
+  {
+    name: "abort",
+    key: "x",
+    fill: () => {},
+    confirm: "y",
+    sent: "abort",
+    prompt: /Abort T1 \w+ · attempt 1\? Press y/,
+    queued: /Abort requested for T1 executor · attempt 1/,
+    refused: /Nothing aborted: T1 executor · attempt 1 ended/,
+  },
+] as const;
+
+/** Render the frame the operator acts on, press the action key, fill the prompt. */
+function openLiveAction(dashboard: Dashboard, action: (typeof LIVE_ACTIONS)[number]): void {
+  dashboard.render(120);
+  dashboard.handleInput(action.key);
+  action.fill(dashboard);
+}
+
+function launchHarness() {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  let current: LiveLaunchIdentity | undefined = EXECUTOR_1;
+  const dispatched: { action: string; launch: LiveLaunchIdentity }[] = [];
+  const selected: string[] = [];
+  let closed = 0;
+  const record = (action: string) => (launch: LiveLaunchIdentity, message?: string) => {
+    dispatched.push({ action: message === undefined ? action : `${action}:${message}`, launch });
+    return true;
+  };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      // The task stays live across the handoff, as it does when the drive
+      // starts the reviewer straight after the executor ends.
+      isLive: () => current !== undefined,
+      liveKind: () => current?.kind,
+      liveLaunch: () => current,
+      steer: record("steer"),
+      followUp: record("followUp"),
+      abort: record("abort"),
+      hasExecutorSession: () => true,
+      selectTaskAction: (taskId, action) => selected.push(`${taskId}:${action}`),
+      close: () => {
+        closed += 1;
+      },
+    })
+  );
+  return {
+    dashboard,
+    dispatched,
+    selected,
+    closed: () => closed,
+    setCurrent: (launch: LiveLaunchIdentity | undefined) => {
+      current = launch;
+    },
+  };
+}
+
+const TRANSITIONS = [
+  ["an executor-to-reviewer handoff", REVIEWER_1],
+  ["a same-kind replacement", EXECUTOR_1_RELAUNCHED],
+] as const;
+
+for (const action of LIVE_ACTIONS) {
+  test(`dashboard ${action.name} reaches the unchanged launch it was opened on`, () => {
+    const { dashboard, dispatched } = launchHarness();
+    try {
+      openLiveAction(dashboard, action);
+      const lines = dashboard.render(120).join("\n");
+      assert.match(lines, action.prompt);
+      dashboard.handleInput(action.confirm);
+      assert.deepEqual(dispatched, [{ action: action.sent, launch: EXECUTOR_1 }]);
+      assert.match(dashboard.render(120).join("\n"), action.queued);
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  for (const [transition, next] of TRANSITIONS) {
+    test(`dashboard ${action.name} is dropped across ${transition}`, () => {
+      const { dashboard, dispatched, selected, setCurrent } = launchHarness();
+      try {
+        openLiveAction(dashboard, action);
+        dashboard.render(120); // the last frame the operator saw, on the executor
+        setCurrent(next); // no render between the switch and the confirming key
+        dashboard.handleInput(action.confirm);
+        assert.deepEqual(dispatched, [], `${action.name} must not reach ${next.kind}`);
+        assert.deepEqual(selected, [], "the confirming key must not run a browse action");
+        const lines = dashboard.render(120).join("\n");
+        assert.match(lines, action.refused);
+        assert.match(lines, new RegExp(`T1 ${next.kind === "review" ? "reviewer" : "executor"}`));
+        assert.equal(inputFocuses(dashboard).steer || inputFocuses(dashboard).followUp, false);
+      } finally {
+        dashboard.dispose();
+      }
+    });
+
+    test(`dashboard ${action.name} key is not taken for a launch that replaced the one on screen (${transition})`, () => {
+      const { dashboard, dispatched, setCurrent } = launchHarness();
+      try {
+        dashboard.render(120); // the operator sees the executor's controls
+        setCurrent(next); // replaced before the next paint
+        dashboard.handleInput(action.key); // pressed for the executor on screen
+        const lines = dashboard.render(120).join("\n");
+        assert.doesNotMatch(lines, action.prompt);
+        assert.match(lines, action.refused);
+
+        // A press on the refreshed frame reaches the launch it now shows.
+        openLiveAction(dashboard, action);
+        dashboard.handleInput(action.confirm);
+        assert.deepEqual(dispatched, [{ action: action.sent, launch: next }]);
+      } finally {
+        dashboard.dispose();
+      }
+    });
+  }
+
+  test(`dashboard ${action.name} key after a repaint closed its prompt does nothing`, () => {
+    const { dashboard, dispatched, selected, closed, setCurrent } = launchHarness();
+    try {
+      openLiveAction(dashboard, action);
+      setCurrent(undefined); // the last live run ends; its session can be opened
+      const lines = dashboard.render(120).join("\n");
+      assert.doesNotMatch(lines, action.prompt);
+      assert.match(lines, /Nothing (sent|aborted): T1 executor · attempt 1 ended/);
+
+      dashboard.handleInput(action.confirm); // typed for the prompt that just closed
+      dashboard.handleInput("\r"); // a deliberate browse key afterwards still works
+      assert.deepEqual(dispatched, []);
+      assert.equal(closed(), 0);
+      assert.deepEqual(selected, ["T1:open_executor"]);
+    } finally {
+      dashboard.dispose();
+    }
+  });
+}
+
+test("dashboard reports a launch the controller no longer runs instead of claiming it queued", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask()] };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => true,
+      liveLaunch: () => EXECUTOR_1,
+      abort: () => false,
+    })
+  );
+  try {
+    dashboard.render(100); // the frame the key is pressed on
+    dashboard.handleInput("x");
+    dashboard.handleInput("y");
+    const lines = dashboard.render(120).join("\n");
+    assert.match(lines, /Nothing aborted: T1 executor · attempt 1 ended/);
+    assert.doesNotMatch(lines, /Abort requested/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard does not carry a cancelled steer draft or a notice to another task", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 3,
+    tasks: [makeTask(), makeTask({ id: "T2" })],
+  };
+  const sent: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => true,
+      steer: (launch, message) => Boolean(sent.push(`${launch.taskId}:${message}`)),
+    })
+  );
+  try {
+    dashboard.render(100); // the frame the key is pressed on
+    dashboard.handleInput("s");
+    for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+    for (const ch of "draft") dashboard.handleInput(ch);
+    dashboard.handleInput("\x1b"); // abandon the draft
+    dashboard.handleInput("\x1b[B"); // select T2
+
+    dashboard.render(100); // the frame the key is pressed on
+    dashboard.handleInput("s");
+    for (let i = 0; i < 3; i++) dashboard.handleInput("\x1b[B");
+    dashboard.handleInput("\r");
+    assert.doesNotMatch(dashboard.render(100).join("\n"), /draft/);
+    dashboard.handleInput("\r"); // empty custom message sends nothing
+    assert.deepEqual(sent, []);
+
+    dashboard.render(100); // the frame the key is pressed on
+    dashboard.handleInput("s");
+    dashboard.handleInput("\r"); // first template, for T2
+    assert.deepEqual(sent, ["T2:Stop - wrong approach, report current state"]);
+    assert.match(dashboard.render(100).join("\n"), /Queued steer for T2/);
+    dashboard.handleInput("\x1b[A"); // back to T1
+    assert.doesNotMatch(dashboard.render(100).join("\n"), /Queued steer/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard jumps to a task by number, id, or title and widens filters when needed", () => {
+  const tasks = [
+    makeTask({ id: "T1", title: "Alpha", status: "todo" }),
+    makeTask({ id: "T2", title: "Bravo", status: "approved" }),
+    makeTask({ id: "T12", title: "Charlie parser", status: "todo" }),
+  ];
+  const board: Board = { version: 1, nextTaskNumber: 13, tasks };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 40 });
+  const type = (text: string) => {
+    dashboard.handleInput("/");
+    for (const ch of text) dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+  };
+  const selectedHeading = () => dashboard.render(120).find((line) => line.includes("Run ›")) ?? "";
+  try {
+    type("12");
+    assert.match(selectedHeading(), /T12/);
+    type("alp");
+    assert.match(selectedHeading(), /T1\b/);
+
+    dashboard.handleInput("f"); // hide done
+    type("t2"); // T2 is approved, so it is hidden: jumping must reveal it
+    assert.match(selectedHeading(), /T2\b/);
+    assert.match(dashboard.render(120).join("\n"), /Jumped to T2; filters cleared/);
+
+    dashboard.handleInput("/");
+    for (const ch of "zzz") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+    assert.match(dashboard.render(120).at(-1) ?? "", /no task matches "zzz"/);
+    assert.match(selectedHeading(), /T2\b/, "a miss leaves the selection alone");
+    dashboard.handleInput("\x1b");
+    assert.doesNotMatch(dashboard.render(120).at(-1) ?? "", /jump ▸/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard jump prefers a hidden exact id over a visible prefix or title match", () => {
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 121,
+    tasks: [
+      makeTask({ id: "T12", title: "Done work", status: "approved" }),
+      makeTask({ id: "T120", title: "Later work", status: "todo" }),
+      makeTask({ id: "T7", title: "Follow up on T12", status: "todo" }),
+    ],
+  };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 40 });
+  try {
+    dashboard.handleInput("f"); // hide done: T12 leaves the list, T120 and T7 stay
+    assert.doesNotMatch(dashboard.render(120).join("\n"), /T12 Done work/);
+    dashboard.handleInput("/");
+    for (const ch of "T12") dashboard.handleInput(ch);
+    dashboard.handleInput("\r");
+
+    const output = dashboard.render(120).join("\n");
+    assert.match(output, /Run › [^\n]*› T12\n|Run › [^\n]*› T12 /);
+    assert.doesNotMatch(output, /Run › [^\n]*› T120/);
+    assert.match(output, /Jumped to T12; filters cleared/);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard consumes the key that finds its live prompt invalidated", () => {
+  const executorAttempt = {
+    index: 1,
+    sessionFile: "executor.jsonl",
+    logFile: "missing.jsonl",
+    thinking: "medium" as const,
+    startedAt: 0,
+    usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    touchedFiles: [],
+  };
+  const board: Board = {
+    version: 1,
+    nextTaskNumber: 2,
+    tasks: [makeTask({ status: "ready_for_review", attempts: [executorAttempt] })],
+  };
+  let live = true;
+  const selected: string[] = [];
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      isLive: () => live,
+      hasExecutorSession: () => true,
+      selectTaskAction: (taskId, action) => selected.push(`${taskId}:${action}`),
+    })
+  );
+  try {
+    dashboard.render(100); // the frame the key is pressed on
+    dashboard.handleInput("F");
+    for (const ch of "hello") dashboard.handleInput(ch);
+    dashboard.render(100); // the last frame the operator saw, with T1 still live
+    live = false; // T1 settles before the next key arrives
+
+    dashboard.handleInput("\r"); // Enter was meant to submit the follow-up
+    assert.deepEqual(selected, [], "Enter must not open the settled session");
+    assert.match(dashboard.render(100).join("\n"), /Nothing sent: T1 executor · attempt 1 ended/);
+
+    live = true;
+    dashboard.render(100); // the frame the key is pressed on
+    dashboard.handleInput("F");
+    dashboard.handleInput("F"); // still a prompt: types into the follow-up input
+    live = false;
+    dashboard.handleInput("a"); // meant for the prompt; must not start an approval
+    assert.doesNotMatch(dashboard.render(100).at(-1) ?? "", /Approve T1/);
+
+    dashboard.handleInput("\r"); // the next key is a normal browse key again
+    assert.deepEqual(selected, ["T1:open_executor"]);
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard help paging probes each task capability once per frame and none in the footer", () => {
+  const board: Board = { version: 1, nextTaskNumber: 2, tasks: [makeTask({ status: "todo" })] };
+  const calls = { retry: 0, executor: 0, reviewer: 0 };
+  const dashboard = new Dashboard(
+    fakeTheme,
+    makeActions(board, {
+      hasExecutorSession: () => {
+        calls.executor += 1;
+        return false;
+      },
+      hasReviewerSession: () => {
+        calls.reviewer += 1;
+        return false;
+      },
+      retryEligibility: (taskId) => {
+        calls.retry += 1;
+        return humanRetryEligibility(board, taskId, { maxAttempts: 3, isLive: () => false });
+      },
+    }),
+    { getRows: () => 8 }
+  );
+  try {
+    dashboard.handleInput("?");
+    for (const key of ["\x1b[6~", "\x1b[6~", "\x1b[5~"]) {
+      calls.retry = calls.executor = calls.reviewer = 0;
+      dashboard.handleInput(key);
+      dashboard.render(80);
+      assert.deepEqual(calls, { retry: 1, executor: 1, reviewer: 1 }, `after key ${key}`);
+    }
+  } finally {
+    dashboard.dispose();
+  }
+});
+
+test("dashboard Home and End select the first and last task", () => {
+  const tasks = Array.from({ length: 30 }, (_, index) =>
+    makeTask({ id: `T${index + 1}`, status: "todo" })
+  );
+  const board: Board = { version: 1, nextTaskNumber: 31, tasks };
+  const dashboard = new Dashboard(fakeTheme, makeActions(board), { getRows: () => 12 });
+  try {
+    dashboard.handleInput("\x1b[F");
+    assert.match(dashboard.render(120).join("\n"), /T30 Do thing/);
+    dashboard.handleInput("\x1b[H");
+    assert.match(dashboard.render(120).join("\n"), /T1 Do thing/);
   } finally {
     dashboard.dispose();
   }
@@ -2497,23 +3025,223 @@ test("live pane steers and queues follow-up for the selected launch", () => {
     requestRender: () => {},
     onEscape: () => {},
     onCycleVisibility: () => {},
-    onSteer: (launch, message) => steered.push(`${launch.taskId}:${message}`),
-    onFollowUp: (launch, message) => followedUp.push(`${launch.taskId}:${message}`),
+    onSteer: (launch, message) => Boolean(steered.push(`${launch.taskId}:${message}`)),
+    onFollowUp: (launch, message) => Boolean(followedUp.push(`${launch.taskId}:${message}`)),
     height: 10,
   });
   try {
     pane.focused = true;
     pane.handleInput("\x1b[C");
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("s");
     pane.handleInput("\r");
     assert.deepEqual(steered, ["T2:Stop - wrong approach, report current state"]);
     assert.match(pane.render(80).join("\n"), /Queued steer for T2/);
 
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("F");
     for (const character of "summarize later") pane.handleInput(character);
     pane.handleInput("\r");
     assert.deepEqual(followedUp, ["T2:summarize later"]);
     assert.match(pane.render(80).join("\n"), /Queued follow-up for T2/);
+  } finally {
+    pane.dispose();
+  }
+});
+
+const PANE_EXECUTOR: LivePaneLaunch = {
+  key: "T1:execute:1",
+  taskId: "T1",
+  title: "Task T1 · execute #1",
+  kind: "execute",
+  attemptIndex: 1,
+  logFile: "/missing/T1.1.aaaa.jsonl",
+  turns: 0,
+  cost: 0,
+  lastActivity: "working",
+};
+
+for (const [transition, after] of [
+  [
+    "an executor-to-reviewer handoff",
+    [
+      { ...PANE_EXECUTOR, live: false },
+      {
+        ...PANE_EXECUTOR,
+        key: "T1:review:1:1",
+        kind: "review",
+        logFile: "/missing/T1-review.1.bbbb.jsonl",
+        live: true,
+      },
+    ],
+  ],
+  // Same row key and kind, new raw launch: only the log file tells them apart.
+  ["a same-kind replacement", [{ ...PANE_EXECUTOR, logFile: "/missing/T1.1.cccc.jsonl" }]],
+] as const satisfies readonly (readonly [string, readonly LivePaneLaunch[]])[]) {
+  for (const action of ["steer", "follow-up"] as const) {
+    test(`live pane drops a ${action} across ${transition}`, () => {
+      let launches: readonly LivePaneLaunch[] = [PANE_EXECUTOR];
+      const sent: string[] = [];
+      const opened: string[] = [];
+      const pane = new LivePaneComponent(fakeTheme, {
+        getLaunches: () => launches,
+        requestRender: () => {},
+        onEscape: () => {},
+        onCycleVisibility: () => {},
+        onSteer: (launch, message) => Boolean(sent.push(`steer:${launch.logFile}:${message}`)),
+        onFollowUp: (launch, message) => Boolean(sent.push(`follow:${launch.logFile}:${message}`)),
+        onOpenSession: (launch) => opened.push(launch.key),
+        height: 10,
+      });
+      try {
+        pane.focused = true;
+        if (action === "steer") {
+          pane.render(80); // the frame the key is pressed on
+          pane.handleInput("s");
+          for (let i = 0; i < 3; i++) pane.handleInput("\x1b[B");
+          pane.handleInput("\r");
+        } else {
+          pane.render(80); // the frame the key is pressed on
+          pane.handleInput("F");
+        }
+        for (const ch of "fix it") pane.handleInput(ch);
+        assert.match(pane.render(80).join("\n"), new RegExp(`${action} T1 executor · attempt 1 ▸`));
+        launches = after; // no render between the switch and Enter
+        pane.handleInput("\r");
+
+        assert.deepEqual(sent, []);
+        assert.deepEqual(opened, [], "Enter must not open the settled session");
+        assert.match(pane.render(80).join("\n"), /Nothing sent: T1 executor · attempt 1 ended/);
+        assert.deepEqual(inputFocuses(pane), { steer: false, followUp: false });
+      } finally {
+        pane.dispose();
+      }
+    });
+  }
+}
+
+function paneHarness(initial: readonly LivePaneLaunch[]) {
+  let launches = initial;
+  const sent: string[] = [];
+  const opened: string[] = [];
+  let escaped = 0;
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => launches,
+    requestRender: () => {},
+    onEscape: () => {
+      escaped += 1;
+    },
+    onCycleVisibility: () => {},
+    onSteer: (launch, message) => Boolean(sent.push(`steer:${launch.logFile}:${message}`)),
+    onFollowUp: (launch, message) => Boolean(sent.push(`follow:${launch.logFile}:${message}`)),
+    onOpenSession: (launch) => opened.push(launch.key),
+    height: 10,
+  });
+  pane.focused = true;
+  return {
+    pane,
+    sent,
+    opened,
+    escaped: () => escaped,
+    setLaunches: (next: readonly LivePaneLaunch[]) => {
+      launches = next;
+    },
+  };
+}
+
+const PANE_REVIEWER: LivePaneLaunch = {
+  ...PANE_EXECUTOR,
+  key: "T1:review:1:1",
+  title: "Task T1 · review #1",
+  kind: "review",
+  logFile: "/missing/T1-review.1.bbbb.jsonl",
+};
+
+for (const [transition, after, next] of [
+  [
+    "an executor-to-reviewer handoff",
+    [{ ...PANE_EXECUTOR, live: false }, PANE_REVIEWER],
+    PANE_REVIEWER,
+  ],
+  [
+    "a same-kind replacement",
+    [{ ...PANE_EXECUTOR, logFile: "/missing/T1.1.cccc.jsonl" }],
+    { ...PANE_EXECUTOR, logFile: "/missing/T1.1.cccc.jsonl" },
+  ],
+] as const satisfies readonly (readonly [string, readonly LivePaneLaunch[], LivePaneLaunch])[]) {
+  for (const [action, key, prefix] of [
+    ["steer", "s", "steer"],
+    ["follow-up", "F", "follow"],
+  ] as const) {
+    test(`live pane ${action} key is not taken for a launch that replaced the one on screen (${transition})`, () => {
+      const { pane, sent, setLaunches } = paneHarness([PANE_EXECUTOR]);
+      try {
+        pane.render(80); // the operator sees the executor
+        setLaunches(after); // replaced before the next paint
+        pane.handleInput(key);
+        assert.doesNotMatch(
+          pane.render(80).join("\n"),
+          /(steer|follow-up) T1 .*▸|Steer T1|Custom message/
+        );
+
+        // A press on the refreshed frame opens on the launch it now shows.
+        pane.handleInput(key);
+        if (action === "steer") {
+          for (let i = 0; i < 3; i++) pane.handleInput("\x1b[B");
+          pane.handleInput("\r");
+        }
+        for (const ch of "fix it") pane.handleInput(ch);
+        pane.handleInput("\r");
+        assert.deepEqual(sent, [`${prefix}:${next.logFile}:fix it`]);
+      } finally {
+        pane.dispose();
+      }
+    });
+  }
+}
+
+for (const action of ["steer template", "follow-up"] as const) {
+  test(`live pane ${action} Enter after a repaint closed its prompt does nothing`, () => {
+    const { pane, sent, opened, escaped, setLaunches } = paneHarness([PANE_EXECUTOR]);
+    try {
+      pane.render(80);
+      pane.handleInput(action === "follow-up" ? "F" : "s");
+      if (action === "follow-up") for (const ch of "fix it") pane.handleInput(ch);
+      // The launch settles with a session the pane could open on Enter.
+      setLaunches([{ ...PANE_EXECUTOR, live: false, sessionFile: "/missing/T1.session.jsonl" }]);
+      assert.match(pane.render(80).join("\n"), /Nothing sent: T1 executor · attempt 1 ended/);
+
+      pane.handleInput("\r"); // typed for the prompt that just closed
+      assert.deepEqual(sent, []);
+      assert.deepEqual(opened, []);
+      assert.equal(escaped(), 0);
+      pane.handleInput("\r"); // a deliberate Enter afterwards still opens the session
+      assert.deepEqual(opened, [PANE_EXECUTOR.key]);
+    } finally {
+      pane.dispose();
+    }
+  });
+}
+
+test("live pane does not carry a cancelled draft into the next prompt", () => {
+  const pane = new LivePaneComponent(fakeTheme, {
+    getLaunches: () => [PANE_EXECUTOR],
+    requestRender: () => {},
+    onEscape: () => {},
+    onCycleVisibility: () => {},
+    onSteer: () => true,
+    onFollowUp: () => true,
+    height: 10,
+  });
+  try {
+    pane.focused = true;
+    pane.render(80); // the frame the key is pressed on
+    pane.handleInput("F");
+    for (const ch of "draft") pane.handleInput(ch);
+    pane.handleInput("\x1b");
+    pane.render(80); // the frame the key is pressed on
+    pane.handleInput("F");
+    assert.doesNotMatch(pane.render(80).join("\n"), /draft/);
   } finally {
     pane.dispose();
   }
@@ -2535,18 +3263,20 @@ test("live pane focuses only its active text input", () => {
     requestRender: () => {},
     onEscape: () => {},
     onCycleVisibility: () => {},
-    onSteer: () => {},
-    onFollowUp: () => {},
+    onSteer: () => true,
+    onFollowUp: () => true,
   });
   try {
     pane.focused = true;
     assert.deepEqual(inputFocuses(pane), { steer: false, followUp: false });
 
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("F");
     assert.deepEqual(inputFocuses(pane), { steer: false, followUp: true });
     pane.handleInput("\x1b");
     assert.deepEqual(inputFocuses(pane), { steer: false, followUp: false });
 
+    pane.render(80); // the frame the key is pressed on
     pane.handleInput("s");
     for (let index = 0; index < 3; index += 1) pane.handleInput("\x1b[B");
     pane.handleInput("\r");

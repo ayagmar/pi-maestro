@@ -1,5 +1,5 @@
 import { type Theme } from "@earendil-works/pi-coding-agent";
-import { Input, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Input, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { completionFreshness } from "./artifact-policy.js";
 import {
   blockedReason,
@@ -11,9 +11,9 @@ import {
 } from "./board.js";
 import {
   DEFAULT_DASHBOARD_BODY_HEIGHT,
+  liveActionPromptLines,
   REFRESH_MS,
   STEER_OPTIONS,
-  steerTemplateLines,
 } from "./dashboard-controls.js";
 import { projectEvidenceSections } from "./dashboard-evidence.js";
 import {
@@ -27,17 +27,30 @@ import {
   wrapText,
 } from "./dashboard-format.js";
 
-import { type DashboardLaunch, taskLaunches } from "./dashboard-launches.js";
+import {
+  type DashboardLaunch,
+  type LiveLaunchIdentity,
+  launchEndedNotice,
+  launchTargetLabel,
+  sameLaunch,
+  taskLaunches,
+} from "./dashboard-launches.js";
 import {
   DASHBOARD_FILTERS,
   type DashboardFilter,
+  findTaskByExactId,
+  findTaskByFragment,
   stableLaunchSelection,
   stableTaskSelection,
   taskListWindow,
   visibleDashboardTasks,
   visibleSelectionWindow,
 } from "./dashboard-navigation.js";
-import { renderDashboardFooter, renderDashboardHelp } from "./dashboard-render.js";
+import {
+  type DashboardUnavailable,
+  renderDashboardFooter,
+  renderDashboardHelp,
+} from "./dashboard-render.js";
 import {
   boardUsage,
   formatCostSummary,
@@ -86,11 +99,14 @@ export interface DashboardActions {
   getConfig?(): MaestroConfig;
   isLive(taskId: string): boolean;
   liveKind(taskId: string): "execute" | "review" | undefined;
+  /** The launch steer, follow-up and abort address for this task right now. */
+  liveLaunch(taskId: string): LiveLaunchIdentity | undefined;
   liveActivity(taskId: string): string | undefined;
   getLiveRun?(taskId: string): { cost: number; turns: number; lastActivity: string } | undefined;
-  steer(taskId: string, message: string): void;
-  followUp(taskId: string, message: string): void;
-  abort(taskId: string): void;
+  /** Each returns false, doing nothing, when that exact launch is no longer live. */
+  steer(launch: LiveLaunchIdentity, message: string): boolean;
+  followUp(launch: LiveLaunchIdentity, message: string): boolean;
+  abort(launch: LiveLaunchIdentity): boolean;
   setTaskStatus(taskId: string, status: TaskStatus): void;
   hasExecutorSession(taskId: string): boolean;
   hasReviewerSession(taskId: string): boolean;
@@ -118,8 +134,42 @@ type Mode =
   | "manual_status"
   | "confirm_abort"
   | "confirm_accept"
-  | "help";
-type ConfirmAction = "abort" | "accept";
+  | "jump"
+  | "help"
+  /** A repaint closed a prompt; the next key was typed for it and is dropped. */
+  | "prompt_cancelled";
+type LiveAction = "steer" | "follow_up" | "abort";
+/** Keys whose availability depends on the selected task. */
+type TaskActionKey =
+  | "s"
+  | "F"
+  | "x"
+  | "a"
+  | "m"
+  | "r"
+  | "p"
+  | "v"
+  | "o"
+  | "O"
+  | "enter"
+  | "e"
+  | "t";
+const TASK_ACTION_KEYS: readonly TaskActionKey[] = [
+  "s",
+  "F",
+  "x",
+  "a",
+  "m",
+  "r",
+  "p",
+  "v",
+  "o",
+  "O",
+  "enter",
+  "e",
+  "t",
+];
+const TASK_RUNNING = "task is running";
 type NavigationLevel = "phase" | "task" | "launch";
 type DetailView = "transcript" | "timeline" | "summary" | "evidence";
 
@@ -205,6 +255,7 @@ type DashboardFrame = {
   grouped: ReturnType<typeof groupTasks>;
   phases: ReturnType<typeof projectRunPhases>;
   liveKinds: Map<string, "execute" | "review">;
+  liveLaunches: Map<string, LiveLaunchIdentity>;
   staleTaskIds: Set<string>;
   liveRuns: Map<string, { cost: number; turns: number; lastActivity: string }>;
 };
@@ -233,7 +284,7 @@ export class Dashboard {
   private launchIndex = 0;
   private selectedLaunchKey: string | undefined;
   private mode: Mode = "browse";
-  private pendingConfirm: { taskId: string; action: ConfirmAction } | undefined;
+  private pendingAccept: { taskId: string } | undefined;
   private pendingManualStatus:
     | { taskId: string; options: readonly TaskStatus[]; selected: number }
     | undefined;
@@ -244,6 +295,21 @@ export class Dashboard {
   private steerOption = 0;
   private steerInput = new Input();
   private followUpInput = new Input();
+  private jumpInput = new Input();
+  private jumpMiss: string | undefined;
+  /**
+   * The exact launch a steer, follow-up or abort prompt is addressed to,
+   * fixed when the prompt opens. Set exactly while the mode is
+   * steer_templates, steer, follow_up or confirm_abort.
+   */
+  private liveTarget: { launch: LiveLaunchIdentity; action: LiveAction } | undefined;
+  /** The selected task and its live launch as the last render showed them. */
+  private shownTarget: { taskId: string | undefined; launch: LiveLaunchIdentity | undefined } = {
+    taskId: undefined,
+    launch: undefined,
+  };
+  private helpScroll = 0;
+  private helpPageSize = 5;
   private queuedNotice: string | undefined;
   private tails = new Map<string, TranscriptTail>();
   private timer: ReturnType<typeof setInterval>;
@@ -270,15 +336,11 @@ export class Dashboard {
       );
     }
     this.steerInput.onSubmit = (value) => this.submitSteer(value);
-    this.steerInput.onEscape = () => {
-      this.mode = "browse";
-      this.syncInputFocus();
-    };
+    this.steerInput.onEscape = () => this.cancelLiveAction();
     this.followUpInput.onSubmit = (value) => this.submitFollowUp(value);
-    this.followUpInput.onEscape = () => {
-      this.mode = "browse";
-      this.syncInputFocus();
-    };
+    this.followUpInput.onEscape = () => this.cancelLiveAction();
+    this.jumpInput.onSubmit = (value) => this.submitJump(value);
+    this.jumpInput.onEscape = () => this.closeJump();
     this.timer = setInterval(() => actions.requestRender(), REFRESH_MS);
   }
 
@@ -294,6 +356,7 @@ export class Dashboard {
   private syncInputFocus(): void {
     this.steerInput.focused = this._focused && this.mode === "steer";
     this.followUpInput.focused = this._focused && this.mode === "follow_up";
+    this.jumpInput.focused = this._focused && this.mode === "jump";
   }
 
   dispose(): void {
@@ -309,10 +372,13 @@ export class Dashboard {
     const config = this.actions.getConfig?.();
     const liveKinds = new Map<string, "execute" | "review">();
     const liveRuns = new Map<string, { cost: number; turns: number; lastActivity: string }>();
+    const liveLaunches = new Map<string, LiveLaunchIdentity>();
     for (const task of board.tasks) {
       const kind = this.actions.liveKind(task.id);
       if (kind) liveKinds.set(task.id, kind);
       if (!this.actions.isLive(task.id)) continue;
+      const launch = this.actions.liveLaunch(task.id);
+      if (launch) liveLaunches.set(task.id, launch);
       const liveRun = this.actions.getLiveRun?.(task.id);
       if (liveRun) liveRuns.set(task.id, liveRun);
     }
@@ -334,6 +400,7 @@ export class Dashboard {
       grouped: groupTasks(board),
       phases: projectRunPhases(board, liveKinds, config),
       liveKinds,
+      liveLaunches,
       staleTaskIds,
       liveRuns,
     };
@@ -404,22 +471,225 @@ export class Dashboard {
     return tail;
   }
 
-  private submitSteer(value: string): void {
-    const task = this.selectedTask();
+  /**
+   * Open a prompt on the launch the operator saw. If the selection or the
+   * task's live launch changed since the last render, drop the key so the
+   * repaint shows the new launch and the operator presses again.
+   */
+  private beginLiveAction(task: Task, action: LiveAction): void {
+    const launch = this.frame.liveLaunches.get(task.id);
+    if (!launch) return;
+    const shown = this.shownTarget;
+    if (shown.taskId !== task.id || !shown.launch) return;
+    if (!sameLaunch(shown.launch, launch)) {
+      this.queuedNotice = launchEndedNotice(
+        shown.launch,
+        launch,
+        action === "abort" ? "aborted" : "sent"
+      );
+      return;
+    }
+    this.liveTarget = { launch, action };
+    this.mode =
+      action === "steer"
+        ? "steer_templates"
+        : action === "follow_up"
+          ? "follow_up"
+          : "confirm_abort";
+  }
+
+  /** Drop an unsent steer, follow-up or abort, including any draft text. */
+  private cancelLiveAction(notice?: string): void {
+    this.liveTarget = undefined;
     this.mode = "browse";
     this.steerInput.setValue("");
-    if (!task || !value.trim()) return;
-    this.actions.steer(task.id, value.trim());
-    this.queuedNotice = `Queued steer for ${task.id}`;
+    this.followUpInput.setValue("");
+    if (notice) this.queuedNotice = notice;
+    this.syncInputFocus();
+  }
+
+  /**
+   * Why the prompt's launch can no longer receive it: the launch ended, or the
+   * task's live run is now a different launch (its reviewer, or a replacement
+   * of the same kind). Undefined while the launch is still the task's live run.
+   */
+  private staleTargetNotice(target: { launch: LiveLaunchIdentity; action: LiveAction }) {
+    const current = this.actions.liveLaunch(target.launch.taskId);
+    if (current && sameLaunch(current, target.launch)) return undefined;
+    return launchEndedNotice(
+      target.launch,
+      current,
+      target.action === "abort" ? "aborted" : "sent"
+    );
+  }
+
+  /**
+   * A steer, follow-up or abort belongs to the launch it was opened on. If
+   * that launch ends, the task's live run changes to another launch, or the
+   * task leaves the selection while the prompt is open, cancel it rather than
+   * address a different or finished launch. Returns true when it cancelled the
+   * prompt, so the key that found it invalid can be dropped.
+   */
+  private reconcileLiveAction(): boolean {
+    const target = this.liveTarget;
+    const live =
+      this.mode === "steer_templates" ||
+      this.mode === "steer" ||
+      this.mode === "follow_up" ||
+      this.mode === "confirm_abort";
+    if (!live) return false;
+    const stale = target ? this.staleTargetNotice(target) : undefined;
+    if (!target) {
+      this.cancelLiveAction();
+    } else if (stale) {
+      this.cancelLiveAction(stale);
+    } else if (this.selectedTask()?.id === target.launch.taskId) {
+      return false;
+    } else {
+      this.cancelLiveAction();
+    }
+    return true;
+  }
+
+  private sendLiveAction(action: LiveAction, value: string): void {
+    const target = this.liveTarget;
+    const message = value.trim();
+    this.cancelLiveAction();
+    if (!target || target.action !== action || (action !== "abort" && !message)) return;
+    const stale = this.staleTargetNotice(target);
+    if (stale) {
+      this.queuedNotice = stale;
+      return;
+    }
+    const label = launchTargetLabel(target.launch);
+    const dispatched =
+      action === "steer"
+        ? this.actions.steer(target.launch, message)
+        : action === "follow_up"
+          ? this.actions.followUp(target.launch, message)
+          : this.actions.abort(target.launch);
+    if (!dispatched) {
+      this.queuedNotice =
+        this.staleTargetNotice(target) ??
+        launchEndedNotice(target.launch, undefined, action === "abort" ? "aborted" : "sent");
+      return;
+    }
+    this.queuedNotice =
+      action === "steer"
+        ? `Queued steer for ${label}`
+        : action === "follow_up"
+          ? `Queued follow-up for ${label}`
+          : `Abort requested for ${label}`;
+  }
+
+  private submitSteer(value: string): void {
+    this.sendLiveAction("steer", value);
   }
 
   private submitFollowUp(value: string): void {
-    const task = this.selectedTask();
+    this.sendLiveAction("follow_up", value);
+  }
+
+  private openJump(): void {
+    this.jumpInput.setValue("");
+    this.jumpMiss = undefined;
+    this.mode = "jump";
+  }
+
+  private closeJump(): void {
+    this.jumpInput.setValue("");
+    this.jumpMiss = undefined;
     this.mode = "browse";
-    this.followUpInput.setValue("");
-    if (!task || !value.trim()) return;
-    this.actions.followUp(task.id, value.trim());
-    this.queuedNotice = `Queued follow-up for ${task.id}`;
+  }
+
+  /** Select the task a typed id, number, or title fragment names, widening filters if needed. */
+  private submitJump(value: string): void {
+    const query = value.trim();
+    if (!query) {
+      this.closeJump();
+      return;
+    }
+    // An exact id or number names one task wherever it is; only fall back to
+    // fragments, visible tasks first, when no task has that id.
+    const visibleTasks = this.visibleTasks();
+    const match =
+      findTaskByExactId(this.frame.board.tasks, query) ??
+      findTaskByFragment(visibleTasks, query) ??
+      findTaskByFragment(this.frame.board.tasks, query);
+    const widened = match !== undefined && !visibleTasks.some((task) => task.id === match.id);
+    if (widened) {
+      this.filter = "all";
+      this.hideDone = false;
+      this.phaseScoped = false;
+    }
+    if (!match) {
+      this.jumpMiss = query;
+      return;
+    }
+    const index = this.visibleTasks().findIndex((task) => task.id === match.id);
+    this.selected = Math.max(0, index);
+    this.selectedTaskId = match.id;
+    this.navigationLevel = "task";
+    this.resetView();
+    if (widened) this.queuedNotice = `Jumped to ${match.id}; filters cleared`;
+    this.closeJump();
+  }
+
+  /** Scroll and notices belong to the selection they were made on. */
+  private resetView(): void {
+    this.scrollUp = 0;
+    this.queuedNotice = undefined;
+  }
+
+  /** The reason a task-bound key is unusable right now, or undefined when it works. */
+  private actionBlocker(task: Task | undefined, key: TaskActionKey): string | undefined {
+    if (!task) return "open a phase's tasks first (→)";
+    const live = this.actions.isLive(task.id);
+    switch (key) {
+      case "s":
+      case "F":
+      case "x":
+        return live && this.frame.liveLaunches.has(task.id) ? undefined : "task is not running";
+      case "e":
+      case "t":
+        return undefined;
+    }
+    if (live) return TASK_RUNNING;
+    switch (key) {
+      case "a":
+        return task.status === "ready_for_review" ? undefined : "task is not ready for review";
+      case "m":
+        return isManualStatusEligible(task, false) ? undefined : "settled tasks cannot be changed";
+      case "r": {
+        const retry = this.actions.retryEligibility(task.id);
+        return retry.eligible ? undefined : retry.message || "task is not retryable";
+      }
+      case "p":
+        return lastAttemptReport(task) ? undefined : "no report yet";
+      case "v":
+        return task.attempts.at(-1)?.reviewReport ? undefined : "no review verdict yet";
+      case "o":
+      case "enter":
+        return this.actions.hasExecutorSession(task.id)
+          ? undefined
+          : "no executor session available";
+      case "O":
+        return this.actions.hasReviewerSession(task.id)
+          ? undefined
+          : "no reviewer session available";
+    }
+    return undefined;
+  }
+
+  private unavailableBindings(): DashboardUnavailable {
+    const task = this.selectedTask();
+    const unavailable = new Map<string, string>();
+    for (const key of TASK_ACTION_KEYS) {
+      // `enter` is the same action as `o`; probe the session once, not twice.
+      const reason = key === "enter" ? unavailable.get("o") : this.actionBlocker(task, key);
+      if (reason) unavailable.set(key, reason);
+    }
+    return unavailable;
   }
 
   handleInput(data: string): void {
@@ -433,6 +703,13 @@ export class Dashboard {
   private routeInput(data: string): void {
     this.frame = this.buildFrame();
     this.frameFresh = true;
+    if (this.reconcileLiveAction() || this.mode === "prompt_cancelled") {
+      // The key was typed for a prompt that no longer exists; it must not also
+      // run as a browse action on the task that is now selected.
+      if (this.mode === "prompt_cancelled") this.mode = "browse";
+      this.actions.requestRender();
+      return;
+    }
     if (this.mode === "steer_templates") {
       this.handleSteerTemplateInput(data);
       this.actions.requestRender();
@@ -457,22 +734,25 @@ export class Dashboard {
       return;
     }
 
-    if (this.mode === "confirm_abort" || this.mode === "confirm_accept") {
-      const pending = this.pendingConfirm;
+    if (this.mode === "confirm_abort") {
+      if (data === "y" || data === "Y") this.sendLiveAction("abort", "");
+      else this.cancelLiveAction();
+      this.frameFresh = false;
+      this.actions.requestRender();
+      return;
+    }
+
+    if (this.mode === "confirm_accept") {
+      const pending = this.pendingAccept;
       const task = pending ? findTask(this.frame.board, pending.taskId) : undefined;
-      if (data === "y" || data === "Y") {
-        if (pending?.action === "abort" && task && this.actions.isLive(task.id)) {
-          this.actions.abort(task.id);
-        }
-        if (
-          pending?.action === "accept" &&
-          task?.status === "ready_for_review" &&
-          !this.actions.isLive(task.id)
-        ) {
-          this.actions.setTaskStatus(task.id, "approved");
-        }
+      if (
+        (data === "y" || data === "Y") &&
+        task?.status === "ready_for_review" &&
+        !this.actions.isLive(task.id)
+      ) {
+        this.actions.setTaskStatus(task.id, "approved");
       }
-      this.pendingConfirm = undefined;
+      this.pendingAccept = undefined;
       this.mode = "browse";
       this.frameFresh = false;
       this.actions.requestRender();
@@ -480,12 +760,24 @@ export class Dashboard {
     }
 
     if (this.mode === "help") {
-      this.mode = "browse";
+      this.handleHelpInput(data);
+      this.actions.requestRender();
+      return;
+    }
+    if (this.mode === "jump") {
+      this.jumpMiss = undefined;
+      this.jumpInput.handleInput(data);
       this.actions.requestRender();
       return;
     }
     if (data === "?") {
+      this.helpScroll = 0;
       this.mode = "help";
+      this.actions.requestRender();
+      return;
+    }
+    if (data === "/") {
+      this.openJump();
       this.actions.requestRender();
       return;
     }
@@ -510,7 +802,7 @@ export class Dashboard {
         this.navigationLevel = "phase";
         this.phaseScoped = false;
       }
-      this.scrollUp = 0;
+      this.resetView();
     } else if (matchesKey(data, "right")) {
       if (this.navigationLevel === "phase") {
         this.navigationLevel = "task";
@@ -522,43 +814,46 @@ export class Dashboard {
         this.launchIndex = 0;
         this.selectedLaunchKey = undefined;
       }
-      this.scrollUp = 0;
+      this.resetView();
     } else if (matchesKey(data, "up") && this.navigationLevel === "phase") {
       this.phaseIndex = Math.max(0, this.phaseIndex - 1);
-      this.scrollUp = 0;
+      this.resetView();
     } else if (matchesKey(data, "down") && this.navigationLevel === "phase") {
       this.phaseIndex = Math.min(this.phases().length - 1, this.phaseIndex + 1);
-      this.scrollUp = 0;
+      this.resetView();
     } else if (matchesKey(data, "up") && this.navigationLevel === "launch") {
       this.launchIndex = Math.max(0, this.launchIndex - 1);
       this.selectedLaunchKey = task ? taskLaunches(task)[this.launchIndex]?.key : undefined;
-      this.scrollUp = 0;
+      this.resetView();
     } else if (matchesKey(data, "down") && this.navigationLevel === "launch") {
       this.launchIndex = Math.min(
         Math.max(0, task ? taskLaunches(task).length - 1 : 0),
         this.launchIndex + 1
       );
       this.selectedLaunchKey = task ? taskLaunches(task)[this.launchIndex]?.key : undefined;
-      this.scrollUp = 0;
+      this.resetView();
+    } else if (matchesKey(data, "home") || matchesKey(data, "end")) {
+      this.moveToEdge(matchesKey(data, "home") ? "first" : "last", visible, task);
+      this.resetView();
     } else if (matchesKey(data, "up")) {
       this.selected = Math.max(0, this.selected - 1);
       this.selectedTaskId = visible[this.selected]?.id;
-      this.scrollUp = 0;
+      this.resetView();
     } else if (matchesKey(data, "down")) {
       this.selected = Math.min(Math.max(0, visible.length - 1), this.selected + 1);
       this.selectedTaskId = visible[this.selected]?.id;
-      this.scrollUp = 0;
+      this.resetView();
     } else if (data === "f") {
       this.hideDone = !this.hideDone;
       this.selected = 0;
       this.selectedTaskId = undefined;
-      this.scrollUp = 0;
+      this.resetView();
     } else if (data === "g") {
       const current = DASHBOARD_FILTERS.indexOf(this.filter);
       this.filter = DASHBOARD_FILTERS[(current + 1) % DASHBOARD_FILTERS.length] ?? "all";
       this.selected = 0;
       this.selectedTaskId = undefined;
-      this.scrollUp = 0;
+      this.resetView();
     } else if (data === "t") {
       this.detailView =
         this.detailView === "transcript"
@@ -566,73 +861,88 @@ export class Dashboard {
           : this.detailView === "timeline"
             ? "summary"
             : "transcript";
-      this.scrollUp = 0;
+      this.resetView();
     } else if (data === "e") {
       this.detailView = this.detailView === "evidence" ? "transcript" : "evidence";
-      this.scrollUp = 0;
+      this.resetView();
     } else if (matchesKey(data, "pageUp")) {
       this.scrollUp += 10;
     } else if (matchesKey(data, "pageDown")) {
       this.scrollUp = Math.max(0, this.scrollUp - 10);
-    } else if (data === "s" && task && this.actions.isLive(task.id)) {
+    } else if (data === "s" && task && !this.actionBlocker(task, "s")) {
       this.steerOption = 0;
-      this.mode = "steer_templates";
-    } else if (data === "F" && task && this.actions.isLive(task.id)) {
-      this.mode = "follow_up";
-    } else if (data === "x" && task && this.actions.isLive(task.id)) {
-      this.pendingConfirm = { taskId: task.id, action: "abort" };
-      this.mode = "confirm_abort";
-    } else if (
-      data === "a" &&
-      task?.status === "ready_for_review" &&
-      !this.actions.isLive(task.id)
-    ) {
-      this.pendingConfirm = { taskId: task.id, action: "accept" };
+      this.beginLiveAction(task, "steer");
+    } else if (data === "F" && task && !this.actionBlocker(task, "F")) {
+      this.beginLiveAction(task, "follow_up");
+    } else if (data === "x" && task && !this.actionBlocker(task, "x")) {
+      this.beginLiveAction(task, "abort");
+    } else if (data === "a" && task && !this.actionBlocker(task, "a")) {
+      this.pendingAccept = { taskId: task.id };
       this.mode = "confirm_accept";
-    } else if (data === "m" && task && isManualStatusEligible(task, this.actions.isLive(task.id))) {
+    } else if (data === "m" && task && !this.actionBlocker(task, "m")) {
       this.pendingManualStatus = {
         taskId: task.id,
         options: MANUAL_STATUS_OPTIONS.filter((status) => status !== task.status),
         selected: 0,
       };
       this.mode = "manual_status";
-    } else if (
-      data === "r" &&
-      task &&
-      !this.actions.isLive(task.id) &&
-      this.actions.retryEligibility(task.id).eligible
-    ) {
+    } else if (data === "r" && task && !this.actionBlocker(task, "r")) {
       this.actions.selectTaskAction(task.id, "retry");
       return;
-    } else if (data === "p" && task && !this.actions.isLive(task.id) && lastAttemptReport(task)) {
+    } else if (data === "p" && task && !this.actionBlocker(task, "p")) {
       this.actions.selectTaskAction(task.id, "view_report");
       return;
-    } else if (
-      data === "v" &&
-      task &&
-      !this.actions.isLive(task.id) &&
-      task.attempts.at(-1)?.reviewReport
-    ) {
+    } else if (data === "v" && task && !this.actionBlocker(task, "v")) {
       this.actions.selectTaskAction(task.id, "view_review");
       return;
     } else if (
       (matchesKey(data, "return") || data === "o") &&
       task &&
-      !this.actions.isLive(task.id) &&
-      this.actions.hasExecutorSession(task.id)
+      !this.actionBlocker(task, "o")
     ) {
       this.actions.selectTaskAction(task.id, "open_executor");
       return;
-    } else if (
-      data === "O" &&
-      task &&
-      !this.actions.isLive(task.id) &&
-      this.actions.hasReviewerSession(task.id)
-    ) {
+    } else if (data === "O" && task && !this.actionBlocker(task, "O")) {
       this.actions.selectTaskAction(task.id, "open_reviewer");
       return;
     }
     this.actions.requestRender();
+  }
+
+  private moveToEdge(
+    edge: "first" | "last",
+    visible: readonly Task[],
+    task: Task | undefined
+  ): void {
+    const lastOf = (count: number) => Math.max(0, count - 1);
+    if (this.navigationLevel === "phase") {
+      this.phaseIndex = edge === "first" ? 0 : lastOf(this.phases().length);
+    } else if (this.navigationLevel === "launch") {
+      const launches = task ? taskLaunches(task) : [];
+      this.launchIndex = edge === "first" ? 0 : lastOf(launches.length);
+      this.selectedLaunchKey = launches[this.launchIndex]?.key;
+    } else {
+      this.selected = edge === "first" ? 0 : lastOf(visible.length);
+      this.selectedTaskId = visible[this.selected]?.id;
+    }
+  }
+
+  private handleHelpInput(data: string): void {
+    if (matchesKey(data, "escape") || data === "q" || data === "?") {
+      this.mode = "browse";
+    } else if (matchesKey(data, "up") || data === "k") {
+      this.helpScroll = Math.max(0, this.helpScroll - 1);
+    } else if (matchesKey(data, "down") || data === "j") {
+      this.helpScroll += 1;
+    } else if (matchesKey(data, "pageUp")) {
+      this.helpScroll = Math.max(0, this.helpScroll - this.helpPageSize);
+    } else if (matchesKey(data, "pageDown") || data === " ") {
+      this.helpScroll += this.helpPageSize;
+    } else if (matchesKey(data, "home")) {
+      this.helpScroll = 0;
+    } else if (matchesKey(data, "end")) {
+      this.helpScroll = Number.MAX_SAFE_INTEGER;
+    }
   }
 
   private handleManualStatusInput(data: string): void {
@@ -668,7 +978,7 @@ export class Dashboard {
 
   private handleSteerTemplateInput(data: string): void {
     if (matchesKey(data, "escape")) {
-      this.mode = "browse";
+      this.cancelLiveAction();
       return;
     }
     if (matchesKey(data, "up")) {
@@ -694,6 +1004,7 @@ export class Dashboard {
     this.syncInputFocus();
     if (this.frameFresh) this.frameFresh = false;
     else this.frame = this.buildFrame();
+    if (this.reconcileLiveAction()) this.mode = "prompt_cancelled";
     width = Math.max(1, Math.floor(width));
     const theme = this.theme;
     const board = this.frame.board;
@@ -747,11 +1058,25 @@ export class Dashboard {
 
     lines.push(theme.fg("dim", "─".repeat(width)));
     lines.push(this.renderFooter(width));
+    const shown = this.selectedTask();
+    this.shownTarget = {
+      taskId: shown?.id,
+      launch: shown ? this.frame.liveLaunches.get(shown.id) : undefined,
+    };
     return lines.map((line) => truncateToWidth(line, width));
   }
 
   private renderHelp(width: number, height: number): string[] {
-    return renderDashboardHelp(this.theme, width, height);
+    const page = renderDashboardHelp(
+      this.theme,
+      width,
+      height,
+      this.helpScroll,
+      this.unavailableBindings()
+    );
+    this.helpScroll = page.scroll;
+    this.helpPageSize = page.pageSize;
+    return page.lines;
   }
 
   private renderNavigation(tasks: Task[], board: Board, width: number, height: number): string[] {
@@ -1202,49 +1527,67 @@ export class Dashboard {
   }
 
   private renderSteerControls(width: number, height: number): string[] {
-    if (this.mode === "steer") {
-      return [
-        this.theme.fg("accent", "steer ▸ ") +
-          (this.steerInput.render(Math.max(1, width - 8))[0] ?? ""),
-        this.theme.fg("dim", "enter send · esc cancel"),
-      ].slice(0, height);
+    if (
+      this.liveTarget &&
+      (this.mode === "steer_templates" || this.mode === "steer" || this.mode === "follow_up")
+    ) {
+      return liveActionPromptLines(
+        this.theme,
+        {
+          mode: this.mode,
+          target: launchTargetLabel(this.liveTarget.launch),
+          input: this.mode === "follow_up" ? this.followUpInput : this.steerInput,
+          steerOption: this.steerOption,
+        },
+        width,
+        height
+      );
     }
-    if (this.mode === "follow_up") {
-      return [
-        this.theme.fg("accent", "follow-up ▸ ") +
-          (this.followUpInput.render(Math.max(1, width - 12))[0] ?? ""),
-        this.theme.fg("dim", "enter queue · esc cancel"),
-      ].slice(0, height);
-    }
-    if (this.mode === "browse" && this.queuedNotice) {
+    if ((this.mode === "browse" || this.mode === "prompt_cancelled") && this.queuedNotice) {
       return [this.theme.fg("success", truncateToWidth(`✓ ${this.queuedNotice}`, width))].slice(
         0,
         height
       );
     }
-    if (this.mode !== "steer_templates") return [];
-
-    return steerTemplateLines(this.theme, this.steerOption, width, height);
+    return [];
   }
 
   private renderFooter(width: number): string {
-    const task = this.selectedTask();
+    // Help, jump and confirmation footers show no task actions, so skip the
+    // board-wide probes behind them.
+    const showsActions = !["help", "jump", "confirm_abort", "confirm_accept"].includes(this.mode);
+    const task = showsActions ? this.selectedTask() : undefined;
     const live = task ? this.actions.isLive(task.id) : false;
+    const can = (key: TaskActionKey) => Boolean(task) && !this.actionBlocker(task, key);
     return renderDashboardFooter(this.theme, width, {
       mode: this.mode,
-      ...(this.pendingConfirm ? { pendingTaskId: this.pendingConfirm.taskId } : {}),
+      ...(this.mode === "confirm_abort" && this.liveTarget
+        ? { pendingTarget: launchTargetLabel(this.liveTarget.launch) }
+        : this.pendingAccept
+          ? { pendingTarget: this.pendingAccept.taskId }
+          : {}),
+      jumpPrompt: this.renderJumpPrompt(width),
       navigationLevel: this.navigationLevel,
       planPending: this.frame.board.planPending === true,
       live,
       hasTask: task !== undefined,
-      canViewReport: Boolean(!live && task && lastAttemptReport(task)),
-      canViewReview: Boolean(!live && task?.attempts.at(-1)?.reviewReport),
-      canOpenExecutor: Boolean(!live && task && this.actions.hasExecutorSession(task.id)),
-      canOpenReviewer: Boolean(!live && task && this.actions.hasReviewerSession(task.id)),
-      canApprove: !live && task?.status === "ready_for_review",
-      canSetManualStatus: Boolean(!live && task && isManualStatusEligible(task, false)),
-      canRetry: Boolean(!live && task && this.actions.retryEligibility(task.id).eligible),
+      canViewReport: can("p"),
+      canViewReview: can("v"),
+      canOpenExecutor: can("o"),
+      canOpenReviewer: can("O"),
+      canApprove: can("a"),
+      canSetManualStatus: can("m"),
+      canRetry: can("r"),
       groupFilter: this.filter === "all" ? "all" : GROUP_LABELS[this.filter],
     });
+  }
+
+  private renderJumpPrompt(width: number): string {
+    if (this.mode !== "jump") return "";
+    const miss = this.jumpMiss ? `no task matches "${this.jumpMiss}"` : undefined;
+    const suffix = miss ?? "· enter go · esc cancel";
+    // " jump ▸ " plus a space before the suffix; keep at least a few input cells.
+    const input = this.jumpInput.render(Math.max(4, width - 10 - visibleWidth(suffix)))[0] ?? "";
+    return `${input} ${this.theme.fg(miss ? "error" : "dim", suffix)}`;
   }
 }

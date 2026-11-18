@@ -5,21 +5,33 @@ Pi Maestro is a pi package. It adds an orchestrator layer to the session you alr
 ## Install
 
 ```bash
-pi install npm:@ayagmar/pi-maestro
+pi install git:github.com/ayagmar/pi-maestro
 ```
 
-Other sources:
+This clones the repository into pi's package directory and installs its dependencies. It tracks the default branch, so `pi update git:github.com/ayagmar/pi-maestro` pulls newer commits.
+
+Other ways to load it:
 
 ```bash
-pi install git:github.com/ayagmar/pi-maestro   # straight from GitHub
-pi install /path/to/pi-maestro                  # from a local checkout
-pi -e npm:@ayagmar/pi-maestro                   # one session, nothing installed
-pi update npm:@ayagmar/pi-maestro               # update an installed copy
+pi -e git:github.com/ayagmar/pi-maestro                 # one session, nothing added to settings
+pi install git:github.com/ayagmar/pi-maestro@<commit>  # pin a commit instead of tracking the branch
+pi install -l git:github.com/ayagmar/pi-maestro        # this project only, written to .pi/settings.json
 ```
 
-The npm package is scoped because the unscoped `pi-maestro` name on npm belongs to an unrelated project. A project-scoped install (`pi install -l …`) loads only in projects you have trusted in pi.
+A local checkout works too, but its dependencies must be installed first, or the extension fails to load with `Cannot find module '@earendil-works/pi-schema'`:
 
-Requirements: pi 1.5 or newer (tested against `1.5.x`) and Node.js 22.19 or newer.
+```bash
+cd /path/to/pi-maestro && npm install --omit=dev   # or pnpm install
+pi install /path/to/pi-maestro
+```
+
+A project-scoped install (`pi install -l …`) loads only in projects you have trusted in pi. In a project pi does not trust yet, the command refuses with `Project is not trusted` until you add `--approve`.
+
+### npm releases
+
+For a published release, use `pi install npm:@ayagmar/pi-maestro`. Update it with `pi update npm:@ayagmar/pi-maestro`. Keep the `@ayagmar/` scope: the unscoped name belongs to an unrelated project.
+
+Requirements: pi 1.5 or newer (tested against `1.5.x`), Node.js 22.19 or newer, and for worktrees and automatic commits a Git repository with at least one commit. `/maestro doctor` reports all of it.
 
 ## Check the environment
 
@@ -51,7 +63,7 @@ Everything else (approval, pause, abort, recovery, inspection) is a human comman
 
 Give each task one outcome, a bounded write scope, and 1 to 12 observable success criteria. A read-only investigation sets `kind: "investigation"` and an empty scope. If you already have a plan (a design doc, an issue list), paste it and ask the model to turn it into `maestro_plan` tasks. `/maestro start` is for goals that need the expensive model to do the decomposition.
 
-Then start the loop with `/maestro drive`, or let the model call `maestro_drive`. Follow it with `/maestro board` and read the history with `/maestro timeline`; neither calls a model.
+Then start the loop with `/maestro drive`, or let the model call `maestro_drive`. Follow it with `/maestro board` and read the history with `/maestro timeline`; neither calls a model. The board opens on the current phase. Drill into a task and press `e` to see its evidence: for a rejected attempt, each criterion with PASS or FAIL and the reviewer's reason, then a `Next:` line that says what you can do (for a task waiting on changes: `Retry with the reviewer notes (r)`).
 
 ## Approve a plan before it runs
 

@@ -45,10 +45,10 @@ try {
     throw new Error(`pi ${piPkg.version} reported ${extensionErrors.length} extension error(s)`);
   }
   const commands = parseCommands(stdout);
-  console.log(
-    `✓ pi ${piPkg.version} loads the package` +
-      (commands.length > 0 ? ` (commands: ${commands.join(", ")})` : "")
-  );
+  if (!commands.includes("/maestro")) {
+    throw new Error(`pi ${piPkg.version} did not register /maestro`);
+  }
+  console.log(`✓ pi ${piPkg.version} loads the package (commands: ${commands.join(", ")})`);
 } finally {
   await rm(agentDir, { recursive: true, force: true });
 }
@@ -59,7 +59,8 @@ function runRpc(cliPath, dir) {
       process.execPath,
       [cliPath, "--mode", "rpc", "--no-extensions", "--extension", root, "--no-session"],
       {
-        cwd: root,
+        // session_start may recover a board. Never open the developer's checkout as the project.
+        cwd: dir,
         env: {
           PATH: process.env.PATH ?? "",
           HOME: dir,
@@ -104,7 +105,8 @@ function parseMessages(output) {
 
 function parseCommands(output) {
   const response = parseMessages(output).find(
-    (message) => message?.id === "commands" && message.success !== false
+    (message) =>
+      message?.type === "response" && message.id === "commands" && message.success === true
   );
   return (response?.data?.commands ?? [])
     .filter((command) => command.source === "extension")

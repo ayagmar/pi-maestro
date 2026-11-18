@@ -1,0 +1,239 @@
+/* Quickstart and worked example. Shared chrome and tokens live in global.css. */
+.manual {
+  padding-block: clamp(2.5rem, 5vw, 4.75rem);
+}
+.manual-opening,
+.manual-guides {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: clamp(2rem, 6vw, 5rem);
+  row-gap: 2rem;
+  align-items: start;
+}
+.manual h1 {
+  margin: 0;
+  font-size: var(--text-display);
+  letter-spacing: -0.04em;
+}
+.manual h2 {
+  margin: 0;
+  font-size: 1.65rem;
+  letter-spacing: -0.025em;
+}
+.manual p {
+  color: var(--ink-soft);
+}
+.manual .manual-lede {
+  margin: 0.65rem 0 1.1rem;
+  max-width: 29ch;
+  font-size: clamp(1.4rem, 2.25vw, 2rem);
+  line-height: 1.25;
+  text-wrap: balance;
+}
+.manual-intro h2 {
+  margin: 2rem 0 0.75rem;
+  font-size: 1.2rem;
+}
+.manual-install {
+  background: var(--console);
+  border-radius: var(--radius);
+}
+.manual-install pre {
+  white-space: pre-wrap;
+}
+.manual-install code {
+  overflow-wrap: anywhere;
+}
+.manual-install .copy-button {
+  display: none;
+}
+.js .manual-install .copy-button {
+  display: block;
+}
+.manual .requirements {
+  margin: 0.7rem 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+.manual summary {
+  width: fit-content;
+  padding-block: 0.65rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+.manual summary:hover,
+.manual a:hover {
+  color: var(--honey-deep);
+}
+.manual :where(details) p {
+  margin: 0;
+}
+.run-sheet {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.run-sheet figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+  padding: 1rem 1.25rem;
+  background: var(--ink-blue);
+  color: var(--on-dark);
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-weight: 700;
+}
+.run-sheet small {
+  color: var(--on-dark-muted);
+  font-weight: 400;
+}
+.run-sheet table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.run-sheet th,
+.run-sheet td {
+  padding: 0.7rem 0.45rem;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+.run-sheet th:first-child {
+  padding-left: 1.25rem;
+}
+.run-sheet thead th {
+  background: var(--surface);
+  font-weight: 600;
+}
+.run-sheet tbody th {
+  font-weight: 500;
+}
+.run-sheet :where(tbody th) code {
+  background: none;
+  padding: 0 0.7rem 0 0;
+  color: var(--muted);
+}
+.run-sheet tr > :last-child {
+  text-align: right;
+  padding-right: 1.25rem;
+  font-variant-numeric: tabular-nums;
+}
+.run-state {
+  white-space: nowrap;
+  color: var(--muted);
+}
+.state-running {
+  color: var(--ink);
+  font-weight: 700;
+}
+.state-running::before {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-right: 0.4em;
+  border-radius: 50%;
+  background: var(--honey);
+}
+.manual .run-total {
+  margin: 0;
+  padding: 0.75rem 1.25rem;
+  background: var(--console);
+  color: var(--on-dark);
+  line-height: 1.45;
+}
+.run-total code {
+  padding: 0;
+  background: none;
+  font-size: 0.8rem;
+}
+.run-review {
+  padding: 1.25rem;
+}
+.run-review h2 {
+  font-size: 1.1rem;
+}
+.run-review p {
+  margin: 0.45rem 0 0;
+  font-size: var(--text-sm);
+}
+.run-review details {
+  font-size: var(--text-sm);
+}
+.run-review ul {
+  padding-left: 1.25rem;
+  margin-bottom: 0;
+}
+.manual-guides {
+  border-top: 1px solid var(--line);
+  padding-top: 2.5rem;
+  margin-top: clamp(2rem, 5vw, 4rem);
+}
+.run-commands {
+  margin-bottom: 0;
+}
+.run-commands dt {
+  margin-top: 1.25rem;
+  font-weight: 600;
+}
+.run-commands dd {
+  margin: 0.4rem 0 0;
+  color: var(--ink-soft);
+}
+.manual-reference ul {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0;
+}
+.manual-reference li {
+  border-bottom: 1px solid var(--line);
+  padding: 0.25rem 0 0.7rem;
+}
+.manual-reference a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  font-weight: 650;
+}
+.manual-reference li p {
+  margin: -0.2rem 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+@media (max-width: 850px) {
+  .manual {
+    max-width: 42rem;
+  }
+  .manual-opening,
+  .manual-guides {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .manual-install.code-block {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 0;
+    padding: 0.35rem;
+  }
+  .manual-install pre {
+    grid-column: 1;
+    grid-row: 1;
+    padding: 0.7rem;
+    min-width: 0;
+  }
+  .manual-install .copy-button {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
+  }
+  .run-sheet th:first-child {
+    padding-left: 0.75rem;
+  }
+  .run-sheet tr > :last-child {
+    padding-right: 0.75rem;
+  }
+}

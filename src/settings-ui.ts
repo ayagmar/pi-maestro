@@ -13,6 +13,7 @@ import {
   Text,
 } from "@earendil-works/pi-tui";
 import { hint } from "./command-ui.js";
+import { PROJECT_CONFIG_FILE } from "./constants.js";
 import {
   type ConfigScope,
   configFile,
@@ -22,9 +23,9 @@ import {
   matchBareModelPattern,
   matchingPreset,
   PRESETS,
+  previewProjectOverride,
   saveConfig,
   THINKING_LEVELS,
-  validateEffectiveConfig,
 } from "./config.js";
 import { type MaestroConfig } from "./types.js";
 
@@ -187,7 +188,13 @@ export function applySettingsChange(
 
   if (id === "preset") {
     const preset = findPreset(value);
-    return preset ? structuredClone(preset.config) : config;
+    if (!preset) return config;
+    const next = structuredClone(preset.config);
+    // Presets configure agent tiers and run limits, not trusted commands.
+    if (config.verificationProfiles) next.verificationProfiles = config.verificationProfiles;
+    if (config.defaultVerificationProfile)
+      next.defaultVerificationProfile = config.defaultVerificationProfile;
+    return next;
   }
   if (id === "planGate") config.planGate = value === "on";
   else if (id === "livePanes") config.livePanes = value === "on";
@@ -277,17 +284,17 @@ const LIST_ACTIONS = [
 
 /**
  * Interactive settings editor for maestro. Edits are applied to a full
- * resolved config and written to one scope file, so what you see is exactly
- * what future runs use.
+ * resolved config and written to one scope file. The user scope edits the user
+ * file only; a trusted project file that overrides a row is flagged on that
+ * row, because the project value is what future runs use.
  */
 export async function showSettings(
   ctx: ExtensionCommandContext,
   scope: ConfigScope
 ): Promise<void> {
-  let config: MaestroConfig = structuredClone(loadConfig(ctx.cwd));
+  let config: MaestroConfig = structuredClone(loadConfig(ctx.cwd, scope));
   const modelChoices = buildModelChoices(ctx.modelRegistry);
   const preferredProvider = ctx.model?.provider;
-  const persist = () => saveConfig(scope, ctx.cwd, config);
 
   await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
     let settingsFocused = false;
@@ -388,7 +395,7 @@ export async function showSettings(
       };
     };
 
-    const modelItems = (tierNames: string[]): SettingItem[] => {
+    const modelItems = (config: MaestroConfig, tierNames: string[]): SettingItem[] => {
       const items: SettingItem[] = [];
       for (const name of tierNames) {
         const tier = config.tiers[name];
@@ -435,7 +442,7 @@ export async function showSettings(
       return items;
     };
 
-    const buildSectionItems = (section: string): SettingItem[] => {
+    const buildItems = (config: MaestroConfig, section: string): SettingItem[] => {
       if (section === "general") {
         return [
           {
@@ -675,7 +682,10 @@ export async function showSettings(
         ];
       }
       if (section === "tiers") {
-        return modelItems(Object.keys(config.tiers).filter((name) => name !== "review"));
+        return modelItems(
+          config,
+          Object.keys(config.tiers).filter((name) => name !== "review")
+        );
       }
       return [
         {
@@ -752,9 +762,37 @@ export async function showSettings(
           description:
             "Consecutive genuine reviewer rejections before a task escalates instead of retrying.",
         },
-        ...modelItems(config.tiers.review ? ["review"] : []),
+        ...modelItems(config, config.tiers.review ? ["review"] : []),
       ];
     };
+
+    /**
+     * Rows of one section. In user scope, a row whose trusted project value
+     * differs says so on the row and in its description, since the project
+     * value is the one runs use. Read afresh each time so a project file that
+     * changes while the editor is open is reflected.
+     */
+    const buildSectionItems = (section: string): SettingItem[] => {
+      const items = buildItems(config, section);
+      const effective = scope === "user" ? previewProjectOverride(ctx.cwd, config) : undefined;
+      if (!effective) return items;
+      const projectItems = new Map(
+        buildItems(effective, section).map((item) => [item.id, item.currentValue])
+      );
+      return items.map((item) => {
+        const projectValue = projectItems.get(item.id);
+        if (projectValue === undefined || projectValue === item.currentValue) return item;
+        return {
+          ...item,
+          label: `${item.label} · project: ${projectValue}`,
+          description:
+            `Overridden by this project's ${PROJECT_CONFIG_FILE}: runs here use ${projectValue}, not your user value ${item.currentValue}. Changing it here has no effect in this project until that override is removed (/maestro config project edits it). ${item.description ?? ""}`.trim(),
+        };
+      });
+    };
+    const overrideCount = (section: string): number =>
+      buildSectionItems(section).filter((item) => item.description?.startsWith("Overridden by"))
+        .length;
 
     let navigation: SettingsList;
     // One source for each section summary, so a change redraws the same text
@@ -775,7 +813,11 @@ export async function showSettings(
           preferredProvider
         )}`,
     };
-    const navigationSummary = (id: string): string => navigationSummaries[id]?.() ?? "";
+    const navigationSummary = (id: string): string => {
+      const summary = navigationSummaries[id]?.() ?? "";
+      const overridden = overrideCount(id);
+      return overridden > 0 ? `${summary} · ${overridden} overridden by project` : summary;
+    };
     const updateNavigationValues = () => {
       for (const id of Object.keys(navigationSummaries)) {
         navigation.updateValue(id, navigationSummary(id));
@@ -783,22 +825,28 @@ export async function showSettings(
     };
 
     const createSection = (section: string, close: (selectedValue?: string) => void) => {
-      let items = buildSectionItems(section);
+      // The list keeps these objects, so refreshing them in place updates the
+      // labels and descriptions as well as the values.
+      const items = buildSectionItems(section);
       const list = new SettingsList(
         items,
         Math.min(items.length + 2, 15),
         getSettingsListTheme(),
         (id, value) => {
           const updated = applySettingsChange(structuredClone(config), id, value);
-          const error = validateEffectiveConfig(updated);
-          if (error) {
-            ctx.ui.notify(`Setting not saved: ${error}`, "warning");
-            return;
+          try {
+            saveConfig(scope, ctx.cwd, updated);
+            config = updated;
+          } catch (error) {
+            ctx.ui.notify(
+              `Setting not saved: ${error instanceof Error ? error.message : String(error)}`,
+              "warning"
+            );
           }
-          config = updated;
-          persist();
-          items = buildSectionItems(section);
-          for (const item of items) list.updateValue(item.id, item.currentValue);
+          for (const fresh of buildSectionItems(section)) {
+            const item = items.find((candidate) => candidate.id === fresh.id);
+            if (item) Object.assign(item, fresh);
+          }
           updateNavigationValues();
           tui.requestRender();
         },
@@ -912,6 +960,7 @@ export function presetDrift(config: MaestroConfig): string | undefined {
     const reference = preset.config as unknown as Record<string, unknown>;
     const candidate = config as unknown as Record<string, unknown>;
     for (const key of new Set([...Object.keys(reference), ...Object.keys(candidate)])) {
+      if (key === "verificationProfiles" || key === "defaultVerificationProfile") continue;
       if (key === "tiers") {
         const referenceTiers = preset.config.tiers;
         const candidateTiers = config.tiers;

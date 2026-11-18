@@ -16,7 +16,7 @@ import {
 import { loadConfig } from "./config.js";
 import { COMMAND } from "./constants.js";
 import { Dashboard, type DashboardTaskAction } from "./dashboard.js";
-import { type DriveRuntimeController } from "./drive-controller.js";
+import { type DriveRuntimeController, liveLaunchOf } from "./drive-controller.js";
 import { notify } from "./handoff.js";
 import { manuallyApproveTask } from "./manual-approval.js";
 import { pruneTaskLogs } from "./retention.js";
@@ -68,14 +68,26 @@ export async function showDashboard(
             const label = live.kind === "review" ? "reviewing" : "running";
             return `${label} · ${live.turns} turns · ${live.lastActivity}`;
           },
-          steer: (taskId, message) => {
-            driveController.getLiveRun(taskId)?.handle.steer(message);
+          liveLaunch: (taskId) => {
+            const live = driveController.getLiveRun(taskId);
+            return live ? liveLaunchOf(live) : undefined;
           },
-          followUp: (taskId, message) => {
-            driveController.getLiveRun(taskId)?.handle.followUp(message);
+          // Dispatch re-checks that the prompt's exact launch is still live, so
+          // a message never reaches the task's reviewer or a replacement launch.
+          steer: (launch, message) => {
+            const live = driveController.findLiveLaunch(launch);
+            live?.handle.steer(message);
+            return live !== undefined;
           },
-          abort: (taskId) => {
-            driveController.getLiveRun(taskId)?.handle.abort();
+          followUp: (launch, message) => {
+            const live = driveController.findLiveLaunch(launch);
+            live?.handle.followUp(message);
+            return live !== undefined;
+          },
+          abort: (launch) => {
+            const live = driveController.findLiveLaunch(launch);
+            live?.handle.abort();
+            return live !== undefined;
           },
           setTaskStatus: (taskId, status) => {
             try {

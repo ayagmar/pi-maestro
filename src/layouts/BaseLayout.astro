@@ -29,6 +29,7 @@ const repository = "https://github.com/ayagmar/pi-maestro";
     <meta property="og:type" content="website" />
     <meta property="og:url" content={canonicalUrl} />
     <title>{pageTitle}</title>
+    <script is:inline>document.documentElement.classList.add("js");</script>
   </head>
   <body class:list={{ "docs-body": isDocs }}>
     <a class="skip-link" href="#main-content">Skip to content</a>
@@ -45,10 +46,10 @@ const repository = "https://github.com/ayagmar/pi-maestro";
         </nav>
         <div class="header-actions">
           <button class="search-trigger" type="button" data-search-open aria-haspopup="dialog">
-            <span class="search-icon" aria-hidden="true">⌕</span><span class="search-label">Search</span><kbd aria-hidden="true">Ctrl K</kbd>
+            <span class="search-icon" aria-hidden="true">⌕</span><span class="search-label">Search</span><kbd aria-hidden="true" data-search-hint>Ctrl K</kbd>
           </button>
           <a class="header-install" href={url("/docs/getting-started/")}>Install</a>
-          <details class="mobile-menu">
+          <details class="mobile-menu" data-mobile-menu>
             <summary aria-label="Menu"><span class="menu-bar"></span><span class="menu-bar"></span></summary>
             <nav aria-label="Mobile">
               <a class="menu-link" href={url("/")}>Overview</a>
@@ -80,7 +81,7 @@ const repository = "https://github.com/ayagmar/pi-maestro";
     <dialog class="search-dialog" data-search-dialog aria-labelledby="search-title">
       <div class="search-dialog-inner">
         <div class="search-heading"><h2 id="search-title">Search the docs</h2><button class="icon-button" type="button" data-search-close aria-label="Close search">×</button></div>
-        <label class="search-input-wrap"><span class="sr-only">Search</span><span aria-hidden="true">⌕</span><input data-search-input type="search" role="combobox" aria-expanded="true" aria-controls="search-results" aria-autocomplete="list" placeholder="worktrees, budget_blocked, retry" autocomplete="off" /></label>
+        <label class="search-input-wrap"><span class="sr-only">Search</span><span aria-hidden="true">⌕</span><input data-search-input type="search" role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list" placeholder="worktrees, budget_blocked, retry" autocomplete="off" /></label>
         <div class="search-results" id="search-results" role="listbox" aria-label="Results" data-search-results></div>
         <p class="search-status" role="status" data-search-status></p>
       </div>
@@ -92,22 +93,38 @@ const repository = "https://github.com/ayagmar/pi-maestro";
         const list = document.querySelector("[data-search-results]");
         const status = document.querySelector("[data-search-status]");
         let entries;
+        let loadFailed = false;
         let shown = [];
         let active = 0;
 
+        // "budget_blocked" and "budget blocked" should find the same sections.
+        const fold = (text) => text.toLowerCase().replace(/[_-]+/g, " ");
         const load = async () => {
           if (entries) return entries;
           try {
-            entries = await (await fetch(searchIndexUrl)).json();
+            const response = await fetch(searchIndexUrl);
+            if (!response.ok) throw new Error(String(response.status));
+            entries = await response.json();
+            loadFailed = false;
           } catch {
-            entries = [];
-            status.textContent = "Search could not load. Browse the documentation index instead.";
+            // Not cached, so reopening search tries again.
+            loadFailed = true;
+            return [];
           }
           return entries;
         };
+        const snippet = (entry, words) => {
+          const text = entry.text;
+          const folded = fold(text);
+          const hits = words.map((word) => folded.indexOf(word)).filter((index) => index >= 0);
+          let start = hits.length ? Math.max(0, Math.min(...hits) - 30) : 0;
+          // Begin on a word, not in the middle of one.
+          if (start > 0) start = text.indexOf(" ", start) + 1 || start;
+          return `${start > 0 ? "…" : ""}${text.slice(start, start + 120)}`;
+        };
         const score = (entry, words) => {
-          const heading = `${entry.page} ${entry.heading}`.toLowerCase();
-          const body = entry.text.toLowerCase();
+          const heading = fold(`${entry.page} ${entry.heading}`);
+          const body = fold(entry.text);
           let total = 0;
           for (const word of words) {
             if (heading.includes(word)) total += 5;
@@ -116,19 +133,23 @@ const repository = "https://github.com/ayagmar/pi-maestro";
           }
           return total;
         };
+        let query = [];
         const render = () => {
+          input.setAttribute("aria-expanded", String(shown.length > 0));
           list.replaceChildren(
             ...shown.map((entry, index) => {
               const link = document.createElement("a");
               link.className = "search-result";
               link.id = `search-result-${index}`;
               link.setAttribute("role", "option");
+              // Arrow keys move through results; Tab leaves the dialog's search field.
+              link.tabIndex = -1;
               link.setAttribute("aria-selected", String(index === active));
               link.href = `${docsBase}${entry.slug}/${entry.anchor ? `#${entry.anchor}` : ""}`;
               const title = document.createElement("strong");
               title.textContent = entry.heading ? `${entry.page}: ${entry.heading}` : entry.page;
               const detail = document.createElement("small");
-              detail.textContent = entry.text.slice(0, 110);
+              detail.textContent = snippet(entry, query);
               link.append(title, detail);
               return link;
             })
@@ -136,8 +157,11 @@ const repository = "https://github.com/ayagmar/pi-maestro";
           input.setAttribute("aria-activedescendant", shown.length ? `search-result-${active}` : "");
         };
         const search = async () => {
-          const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+          const words = fold(input.value).split(/\s+/).filter(Boolean);
+          query = words;
           const all = await load();
+          // A newer keystroke finished first; let it render.
+          if (words.join(" ") !== query.join(" ")) return;
           shown = words.length
             ? all
                 .map((entry) => ({ entry, rank: score(entry, words) }))
@@ -148,11 +172,19 @@ const repository = "https://github.com/ayagmar/pi-maestro";
             : [];
           active = 0;
           render();
-          status.textContent = !words.length ? "Type a word to search the documentation." : shown.length ? `${shown.length} results` : `No results for "${input.value.trim()}".`;
+          status.textContent = loadFailed
+            ? "Search could not load. Open the documentation index instead."
+            : !words.length
+              ? "Type a word to search the documentation."
+              : shown.length
+                ? `${shown.length} ${shown.length === 1 ? "result" : "results"}`
+                : `No results for "${input.value.trim()}".`;
         };
         const open = () => {
           if (!dialog.open) dialog.showModal();
           input.focus();
+          // Reopening keeps the last query selected, so typing replaces it.
+          input.select();
           void search();
         };
         const move = (offset) => {
@@ -167,11 +199,17 @@ const repository = "https://github.com/ayagmar/pi-maestro";
         dialog.addEventListener("click", (event) => {
           if (event.target === dialog) dialog.close();
         });
+        // A result on the page you are already on only changes the hash, so close the dialog explicitly.
+        list.addEventListener("click", (event) => {
+          if (event.target.closest(".search-result")) dialog.close();
+        });
         input.addEventListener("input", () => void search());
         input.addEventListener("keydown", (event) => {
           if (event.key === "ArrowDown") move(1);
           else if (event.key === "ArrowUp") move(-1);
           else if (event.key === "Enter") document.getElementById(`search-result-${active}`)?.click();
+          // A search field clears itself on Escape first; close the dialog in one press instead.
+          else if (event.key === "Escape") dialog.close();
           else return;
           event.preventDefault();
         });
@@ -180,6 +218,23 @@ const repository = "https://github.com/ayagmar/pi-maestro";
             event.preventDefault();
             open();
           }
+        });
+        if (/mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent)) {
+          document.querySelector("[data-search-hint]").textContent = "⌘ K";
+        }
+
+        // The menu is a <details> so it works without script; script adds Escape and outside tap.
+        const menu = document.querySelector("[data-mobile-menu]");
+        const closeMenu = () => {
+          if (!menu.open) return false;
+          menu.open = false;
+          return true;
+        };
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && !dialog.open && closeMenu()) menu.querySelector("summary").focus();
+        });
+        document.addEventListener("click", (event) => {
+          if (!menu.contains(event.target)) closeMenu();
         });
 
         const copy = async (button, text) => {

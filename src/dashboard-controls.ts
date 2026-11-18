@@ -1,5 +1,5 @@
 import { type Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { type Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export const REFRESH_MS = 500;
 export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
@@ -7,6 +7,8 @@ export const DEFAULT_DASHBOARD_BODY_HEIGHT = 22;
 export const DASHBOARD_BINDINGS = [
   { key: "↑↓", context: "Navigation", description: "tasks/phases" },
   { key: "←→", context: "Navigation", description: "levels" },
+  { key: "Home/End", context: "Navigation", description: "first/last" },
+  { key: "/", context: "Navigation", description: "jump to task" },
   { key: "PgUp/PgDn", context: "Navigation", description: "scroll" },
   { key: "esc", context: "Navigation", description: "close" },
   { key: "s", context: "Task", description: "steer" },
@@ -55,6 +57,45 @@ export function steerTemplateLines(
     lines.push(theme.fg("dim", "↑↓ select · enter choose · esc cancel"));
   }
   return lines;
+}
+
+/**
+ * The open steer or follow-up prompt, naming the launch it is addressed to.
+ * Shared by the board and the agents pane so both word the target the same way.
+ */
+export function liveActionPromptLines(
+  theme: Theme,
+  prompt: {
+    mode: "steer_templates" | "steer" | "follow_up";
+    target: string;
+    input: Input;
+    steerOption: number;
+  },
+  width: number,
+  height: number
+): string[] {
+  if (prompt.mode === "steer_templates") {
+    // The heading only takes a row the templates do not need.
+    const heading =
+      height > STEER_OPTIONS.length
+        ? [theme.fg("accent", truncateToWidth(`Steer ${prompt.target}:`, width))]
+        : [];
+    return [
+      ...heading,
+      ...steerTemplateLines(theme, prompt.steerOption, width, height - heading.length),
+    ];
+  }
+  const verb = prompt.mode === "steer" ? "steer" : "follow-up";
+  // Keep at least a few input cells when the target label is long.
+  const label = truncateToWidth(`${verb} ${prompt.target} ▸ `, Math.max(1, width - 4));
+  return [
+    theme.fg("accent", label) +
+      (prompt.input.render(Math.max(1, width - visibleWidth(label)))[0] ?? ""),
+    theme.fg(
+      "dim",
+      prompt.mode === "steer" ? "enter send · esc cancel" : "enter queue · esc cancel"
+    ),
+  ].slice(0, height);
 }
 
 export function bindingLabel(key: (typeof DASHBOARD_BINDINGS)[number]["key"]): string {

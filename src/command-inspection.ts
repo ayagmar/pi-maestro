@@ -1,5 +1,3 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { completionFreshness } from "./artifact-policy.js";
 import {
@@ -11,15 +9,23 @@ import {
   updateBoard,
   validatePlan,
 } from "./board.js";
-import { configFile, describeConfig, loadConfig, validateConfig } from "./config.js";
-import { activeRunCost, boardUsage, formatCostSummary } from "./format.js";
+import { describeConfig, loadConfig, saveProjectBudget } from "./config.js";
+import {
+  activeRunCost,
+  boardUsage,
+  formatCostSummary,
+  launchBudgetShortfall,
+  runBudgetWarning,
+} from "./format.js";
 import { notify } from "./handoff.js";
 import { deriveModelInsights, formatModelInsights } from "./insights.js";
 import { assertKnownTaskIds } from "./session-control.js";
 import { showSettings } from "./settings-ui.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
-import { type Board } from "./types.js";
+import { type Board, type MaestroConfig } from "./types.js";
 import { simulatePlan } from "./workflow.js";
+import { calculateSchedulingWave } from "./workflow-policy.js";
+import { terminalReviewConvergence } from "./workflow-stop-policy.js";
 import { worktreeRecoveryExists } from "./worktree.js";
 
 export async function handleConfigCommand(
@@ -27,9 +33,9 @@ export async function handleConfigCommand(
   rest: string,
   onChanged: () => void
 ): Promise<void> {
-  const [sub, amountRaw] = rest.split(/\s+/).filter(Boolean);
+  const [sub, ...args] = rest.split(/\s+/).filter(Boolean);
   if (sub === "budget") {
-    handleBudgetCommand(ctx, amountRaw, onChanged);
+    handleBudgetCommand(ctx, args.length ? args.join(" ") : undefined, onChanged);
     return;
   }
   if (ctx.mode !== "tui" || rest === "show") {
@@ -39,6 +45,31 @@ export async function handleConfigCommand(
   const scope = rest === "project" ? "project" : "user";
   await showSettings(ctx, scope);
   onChanged();
+}
+
+/**
+ * What the scheduler would say about the budget right now. It checks the
+ * budget only while work it could dispatch (an executor launch or a review in
+ * `taskIds`' scope, the whole board when undefined) remains, with the same
+ * exceeded and launch-floor predicates the drive uses before it launches.
+ */
+function remainingWorkBudgetBlocker(
+  board: Board,
+  config: MaestroConfig,
+  taskIds?: string[]
+): string | undefined {
+  const wave = calculateSchedulingWave(board, config, taskIds);
+  const reviewable = board.tasks.filter(
+    (task) => wave.reviewableIds.includes(task.id) && !terminalReviewConvergence(task)
+  );
+  if (wave.runnableIds.length === 0 && reviewable.length === 0) return undefined;
+  return (
+    runBudgetWarning(board.tasks, config.maxRunCost) ??
+    launchBudgetShortfall(board.tasks, {
+      maxRunCost: config.maxRunCost,
+      maxCostPerTask: config.maxCostPerTask,
+    })
+  );
 }
 
 /**
@@ -52,13 +83,13 @@ function handleBudgetCommand(
   amountRaw: string | undefined,
   onChanged: () => void
 ): void {
-  const config = loadConfig(ctx.cwd);
   const tasks = loadBoard(ctx.cwd).tasks;
   const total = boardUsage(tasks).cost;
   const sunk = total - activeRunCost(tasks);
   const spendSummary = `board spend $${total.toFixed(4)}${sunk > 0 ? ` ($${sunk.toFixed(4)} sunk in cancelled tasks)` : ""}`;
   if (amountRaw === undefined) {
-    const current = config.maxRunCost === 0 ? "off" : `$${config.maxRunCost}`;
+    const { maxRunCost } = loadConfig(ctx.cwd);
+    const current = maxRunCost === 0 ? "off" : `$${maxRunCost}`;
     notify(
       ctx,
       `Run budget: ${current} · ${spendSummary}. Set it with /maestro config budget <usd> (0 disables).`
@@ -66,43 +97,61 @@ function handleBudgetCommand(
     return;
   }
   const amount = Number(amountRaw.replace(/^\$/, ""));
-  if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000) {
+  if (
+    !/^\$?(?:\d+\.?\d*|\.\d+)$/.test(amountRaw) ||
+    amount > 1_000_000 ||
+    (amount === 0 && /[1-9]/.test(amountRaw))
+  ) {
     notify(ctx, "Budget must be a number of USD from 0 to 1000000 (0 disables).", "warning");
     return;
   }
-  const file = configFile("project", ctx.cwd);
-  let projectSettings: Record<string, unknown> = {};
   try {
-    projectSettings = JSON.parse(readFileSync(file, "utf-8")) as Record<string, unknown>;
-  } catch {
-    // Missing or invalid project config starts from an empty override set.
-  }
-  projectSettings.maxRunCost = amount;
-  const error = validateConfig(projectSettings);
-  if (error) {
-    notify(ctx, `Budget not saved: existing project config is invalid (${error}).`, "warning");
+    saveProjectBudget(ctx.cwd, amount);
+  } catch (error) {
+    notify(
+      ctx,
+      `Budget not saved: ${error instanceof Error ? error.message : String(error)}`,
+      "warning"
+    );
     return;
   }
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify(projectSettings, null, 2)}\n`, "utf-8");
   // The raise is the fix for a pending budget stop: resolve it in the same
   // step so recovery is one command instead of config-edit + decision surgery.
+  // It only counts as a fix when the scheduler would now dispatch, judged on
+  // fresh spend and the saved effective config.
+  const config = loadConfig(ctx.cwd);
   let resolvedDecision = false;
-  if (amount === 0 || amount > total) {
-    updateBoard(ctx.cwd, (board) => {
-      const decision = board.activeDecision;
-      if (!decision || decision.resolution || decision.kind !== "budget_blocked") return false;
-      decision.resolution = { intervention: "resume", resolvedAt: Date.now() };
-      delete decision.deliveryClaim;
-      resolvedDecision = true;
-      return true;
-    });
-  }
+  let hadPendingStop = false;
+  const stop: { reason?: string } = {};
+  updateBoard(ctx.cwd, (board) => {
+    const decision = board.activeDecision;
+    const pending =
+      decision && !decision.resolution && decision.kind === "budget_blocked" ? decision : undefined;
+    hadPendingStop = pending !== undefined;
+    const spent = boardUsage(board.tasks).cost;
+    const blocker = remainingWorkBudgetBlocker(board, config, pending?.taskIds);
+    if (blocker) stop.reason = blocker;
+    else if (pending && amount !== 0 && spent >= amount) {
+      stop.reason = `board spend $${spent.toFixed(4)} is not below the $${amount} budget; set a budget above that, or 0 to turn the cap off`;
+    }
+    if (!pending || stop.reason) return false;
+    pending.resolution = { intervention: "resume", resolvedAt: Date.now() };
+    delete pending.deliveryClaim;
+    resolvedDecision = true;
+    return true;
+  });
   const remaining =
     amount === 0 ? "budget disabled" : `$${Math.max(0, amount - total).toFixed(4)} remaining`;
+  const outcome =
+    stop.reason === undefined
+      ? `${resolvedDecision ? " Pending budget_blocked decision resolved." : ""} Use /maestro resume or /maestro drive to continue.`
+      : hadPendingStop
+        ? ` The budget stop stays pending: ${stop.reason}.`
+        : ` A drive would stop again: ${stop.reason}.`;
   notify(
     ctx,
-    `Run budget → ${amount === 0 ? "off" : `$${amount}`} · ${spendSummary} · ${remaining}.${resolvedDecision ? " Pending budget_blocked decision resolved." : ""} Use /maestro resume or /maestro drive to continue.`
+    `Run budget → ${amount === 0 ? "off" : `$${amount}`} · ${spendSummary} · ${remaining}.${outcome}`,
+    stop.reason === undefined ? "info" : "warning"
   );
   onChanged();
 }

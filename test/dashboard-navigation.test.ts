@@ -3,6 +3,9 @@ import test from "node:test";
 import { createTask, groupTasks } from "../src/board.js";
 import { type DashboardLaunch } from "../src/dashboard-launches.js";
 import {
+  findTaskByExactId,
+  findTaskByFragment,
+  findTaskByQuery,
   stableLaunchSelection,
   stableTaskSelection,
   taskListWindow,
@@ -88,4 +91,97 @@ test("dashboard launch selection remains stable when launches are appended", () 
 
   assert.equal(selection.launch?.key, "review:1");
   assert.equal(selection.index, 1);
+});
+
+/** The original exhaustive search, kept as the specification for the bounded one. */
+function exhaustiveWindow(taskCount: number, selected: number, height: number) {
+  const selectedIndex = Math.min(Math.max(0, selected), taskCount - 1);
+  let best = { start: selectedIndex, end: selectedIndex + 1, count: 0, distance: Infinity };
+  for (let start = 0; start <= selectedIndex; start += 1) {
+    for (let end = selectedIndex + 1; end <= taskCount; end += 1) {
+      const markers = (start > 0 ? 1 : 0) + (end < taskCount ? 1 : 0);
+      if (markers + (end - start) * 2 > height + 1) continue;
+      const distance = Math.abs(selectedIndex - (start + end - 1) / 2);
+      if (end - start > best.count || (end - start === best.count && distance < best.distance)) {
+        best = { start, end, count: end - start, distance };
+      }
+    }
+  }
+  let showTop = best.start > 0;
+  let showBottom = best.end < taskCount;
+  while (Number(showTop) + Number(showBottom) + 1 > height && height >= 1) {
+    if (showBottom) showBottom = false;
+    else showTop = false;
+  }
+  return { start: best.start, end: best.end, showTop, showBottom };
+}
+
+test("dashboard list window picks the same rows as an exhaustive search", () => {
+  for (let count = 1; count <= 14; count++) {
+    for (let selected = 0; selected < count; selected++) {
+      for (let height = 1; height <= 30; height++) {
+        assert.deepEqual(
+          taskListWindow(count, selected, height),
+          exhaustiveWindow(count, selected, height),
+          `count ${count} selected ${selected} height ${height}`
+        );
+      }
+    }
+  }
+});
+
+test("dashboard list window stays cheap for huge boards and terminates on degenerate heights", () => {
+  const started = performance.now();
+  const huge = taskListWindow(200_000, 100_000, 60);
+  assert.ok(huge.start <= 100_000 && huge.end > 100_000);
+  assert.ok((huge.end - huge.start) * 2 + 2 <= 62);
+  for (const height of [0, -5, Number.NaN, Number.NEGATIVE_INFINITY]) {
+    assert.deepEqual(taskListWindow(50, 10, height), {
+      start: 10,
+      end: 10,
+      showTop: false,
+      showBottom: false,
+    });
+  }
+  assert.deepEqual(taskListWindow(0, 0, 10), {
+    start: 0,
+    end: 0,
+    showTop: false,
+    showBottom: false,
+  });
+  const unbounded = taskListWindow(10, 3, Number.POSITIVE_INFINITY);
+  assert.deepEqual([unbounded.start, unbounded.end], [0, 10]);
+  assert.ok(performance.now() - started < 250, "window math must not scale with task count");
+});
+
+test("dashboard selection helpers tolerate empty lists and out-of-range selections", () => {
+  assert.deepEqual(visibleSelectionWindow(["a", "b"], 1, 0), []);
+  assert.deepEqual(visibleSelectionWindow(["a", "b"], 1, -3), []);
+  assert.deepEqual(visibleSelectionWindow([], 0, 5), []);
+  assert.deepEqual(visibleSelectionWindow(["a", "b", "c"], 99, 2), [
+    { item: "b", index: 1 },
+    { item: "c", index: 2 },
+  ]);
+  assert.equal(stableTaskSelection([], "T1", Number.NaN).index, 0);
+  assert.equal(stableTaskSelection(taskBoard().tasks, undefined, Number.NaN).task?.id, "T1");
+});
+
+test("dashboard task query prefers exact ids and bare numbers over fragments", () => {
+  const tasks = taskBoard().tasks;
+  tasks[0] = { ...tasks[0], id: "T10", title: "Ten" } as (typeof tasks)[number];
+  tasks[1] = { ...tasks[1], id: "T1", title: "Parser for T10" } as (typeof tasks)[number];
+  assert.equal(findTaskByQuery(tasks, "1")?.id, "T1");
+  assert.equal(findTaskByQuery(tasks, "t10")?.id, "T10");
+  assert.equal(findTaskByQuery(tasks, "pars")?.id, "T1");
+  assert.equal(findTaskByQuery(tasks, "  "), undefined);
+  assert.equal(findTaskByQuery(tasks, "nothing"), undefined);
+});
+
+test("dashboard exact task lookup ignores fragments so callers can scope them separately", () => {
+  const tasks = taskBoard().tasks;
+  assert.equal(findTaskByExactId(tasks, "2")?.id, "T2");
+  assert.equal(findTaskByExactId(tasks, "T"), undefined);
+  assert.equal(findTaskByExactId(tasks, "sec"), undefined);
+  assert.equal(findTaskByFragment(tasks, "sec")?.id, "T2");
+  assert.equal(findTaskByFragment(tasks, "T"), tasks[0]);
 });

@@ -5064,6 +5064,7 @@ test("passive agent pane and session browser resolve every close", async () => {
         margin: 1,
       });
       viewer.component.handleInput("\x1b[C");
+      viewer.component.render?.(80); // the frame the key is pressed on
       viewer.component.handleInput("s");
       viewer.component.handleInput("\r");
       viewer.component.handleInput("F");
@@ -5236,6 +5237,7 @@ test("review launches update the passive agent pane with transcript actions", as
       const focusedPane = runtime.overlays[1];
       assert.ok(focusedPane);
       assert.equal(focusedPane.focused, true);
+      focusedPane.component.render?.(80); // the frame the key is pressed on
       focusedPane.component.handleInput("s");
       focusedPane.component.handleInput("\r");
       focusedPane.component.handleInput("F");
@@ -5676,8 +5678,11 @@ test("/maestro config budget raises the run budget in one deliberate step", asyn
       assert.match(notices.at(-1) ?? "", /Run budget: \$35/);
       assert.match(notices.at(-1) ?? "", /\$36\.0000 sunk in cancelled tasks/);
 
-      await command.handler("config budget nonsense", ctx);
-      assert.match(notices.at(-1) ?? "", /Budget must be a number/);
+      for (const invalid of ["nonsense", "$", "0x0", "0 typo"]) {
+        await command.handler(`config budget ${invalid}`, ctx);
+        assert.match(notices.at(-1) ?? "", /Budget must be a number/);
+        assert.equal(loadConfig(cwd).maxRunCost, 35);
+      }
 
       await command.handler("config budget 120", ctx);
       assert.match(notices.at(-1) ?? "", /Run budget → \$120/);
@@ -5723,10 +5728,126 @@ test("/maestro config budget resolves a pending budget_blocked decision in the s
       // would come straight back on resume.
       await command.handler("config budget 5", ctx);
       assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      assert.match(
+        notices.at(-1) ?? "",
+        /budget stop stays pending: board spend \$11\.0000 is not below the \$5 budget/
+      );
+      assert.doesNotMatch(notices.at(-1) ?? "", /resume or \/maestro drive/);
+
+      // Equal to spend is still over the line: the cap only clears when exceeded.
+      await command.handler("config budget 11", ctx);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      assert.match(notices.at(-1) ?? "", /stays pending/);
+      await command.handler("config budget 5", ctx);
+
+      setProjectConfigTrust(false);
+      try {
+        await command.handler("config budget 200", ctx);
+        assert.match(notices.at(-1) ?? "", /not trusted/i);
+        assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      } finally {
+        setProjectConfigTrust(true);
+      }
+      assert.equal(loadConfig(cwd).maxRunCost, 5);
+
+      const file = join(cwd, ".pi", "maestro.json");
+      const saved = readFileSync(file, "utf8");
+      writeFileSync(file, "{unfinished");
+      await command.handler("config budget 200", ctx);
+      assert.match(notices.at(-1) ?? "", /Budget not saved/);
+      assert.equal(readFileSync(file, "utf8"), "{unfinished");
+      assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      writeFileSync(file, saved);
 
       await command.handler("config budget 200", ctx);
       assert.match(notices.at(-1) ?? "", /Pending budget_blocked decision resolved/);
       assert.equal(loadBoard(cwd).activeDecision?.resolution?.intervention, "resume");
+    }
+  );
+});
+
+/** $11 sunk in a cancelled task, a $5 per-attempt cap (so a launch needs $1.25), and one task left to run. */
+function budgetFloorBoard(cwd: string, options: { decision: boolean; remainingWork: boolean }) {
+  saveConfig("project", cwd, { ...DEFAULT_CONFIG, maxRunCost: 10, maxCostPerTask: 5 });
+  const board: Board = { version: 1, nextTaskNumber: 1, tasks: [] };
+  const spent = createTask(board, { title: "Spent", brief: "work", tier: "standard" });
+  spent.attempts.push({ ...executorAttempt(), usage: { input: 1, output: 1, cost: 11, turns: 2 } });
+  forceStatus(spent, "cancelled");
+  const next = createTask(board, { title: "Next", brief: "work", tier: "standard" });
+  if (!options.remainingWork) forceStatus(next, "approved");
+  if (options.decision) {
+    board.activeDecision = {
+      id: "budget-decision",
+      ownerSession: "/tmp/dead-session.jsonl",
+      kind: "budget_blocked",
+      taskIds: [next.id],
+      evidence: "run budget exceeded",
+      allowedInterventions: ["handoff", "abort"],
+      createdAt: Date.now(),
+    };
+  }
+  saveBoard(cwd, board);
+}
+
+test("/maestro config budget keeps a stop pending while the remaining budget cannot fund a launch", async () => {
+  await withBoard(
+    (cwd) => budgetFloorBoard(cwd, { decision: true, remainingWork: true }),
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+
+      // Above spend, but $0.01 is below the $1.25 floor the drive requires.
+      await command.handler("config budget 11.01", ctx);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution, undefined);
+      assert.match(notices.at(-1) ?? "", /stays pending.*cannot fund a meaningful launch/);
+      assert.doesNotMatch(notices.at(-1) ?? "", /resume or \/maestro drive/);
+
+      // Exactly the floor is enough.
+      await command.handler("config budget 12.25", ctx);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution?.intervention, "resume");
+      assert.match(notices.at(-1) ?? "", /resolved\. Use \/maestro resume/);
+    }
+  );
+});
+
+test("/maestro config budget off resolves the stop whatever the floor", async () => {
+  await withBoard(
+    (cwd) => budgetFloorBoard(cwd, { decision: true, remainingWork: true }),
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+      await command.handler("config budget 0", ctx);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution?.intervention, "resume");
+      assert.match(notices.at(-1) ?? "", /budget disabled.*resolved\. Use \/maestro resume/);
+    }
+  );
+});
+
+test("/maestro config budget ignores the launch floor when the decision has no work left to launch", async () => {
+  await withBoard(
+    (cwd) => budgetFloorBoard(cwd, { decision: true, remainingWork: false }),
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+      await command.handler("config budget 11.01", ctx);
+      assert.equal(loadBoard(cwd).activeDecision?.resolution?.intervention, "resume");
+      assert.match(notices.at(-1) ?? "", /resolved\. Use \/maestro resume/);
+    }
+  );
+});
+
+test("/maestro config budget warns when the raise saves but a drive would stop again", async () => {
+  await withBoard(
+    (cwd) => budgetFloorBoard(cwd, { decision: false, remainingWork: true }),
+    async (cwd) => {
+      const { ctx, notices, command } = loadMaestro(cwd);
+      await command.handler("config budget 11.01", ctx);
+      assert.equal(loadConfig(cwd).maxRunCost, 11.01);
+      assert.match(
+        notices.at(-1) ?? "",
+        /A drive would stop again.*cannot fund a meaningful launch/
+      );
+      assert.doesNotMatch(notices.at(-1) ?? "", /resume or \/maestro drive/);
+
+      await command.handler("config budget 20", ctx);
+      assert.match(notices.at(-1) ?? "", /Use \/maestro resume/);
     }
   );
 });
