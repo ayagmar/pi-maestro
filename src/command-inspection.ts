@@ -10,14 +10,22 @@ import {
   validatePlan,
 } from "./board.js";
 import { describeConfig, loadConfig, saveProjectBudget } from "./config.js";
-import { activeRunCost, boardUsage, formatCostSummary } from "./format.js";
+import {
+  activeRunCost,
+  boardUsage,
+  formatCostSummary,
+  launchBudgetShortfall,
+  runBudgetWarning,
+} from "./format.js";
 import { notify } from "./handoff.js";
 import { deriveModelInsights, formatModelInsights } from "./insights.js";
 import { assertKnownTaskIds } from "./session-control.js";
 import { showSettings } from "./settings-ui.js";
 import { deriveRunTimeline, formatRunTimeline } from "./timeline.js";
-import { type Board } from "./types.js";
+import { type Board, type MaestroConfig } from "./types.js";
 import { simulatePlan } from "./workflow.js";
+import { calculateSchedulingWave } from "./workflow-policy.js";
+import { terminalReviewConvergence } from "./workflow-stop-policy.js";
 import { worktreeRecoveryExists } from "./worktree.js";
 
 export async function handleConfigCommand(
@@ -37,6 +45,31 @@ export async function handleConfigCommand(
   const scope = rest === "project" ? "project" : "user";
   await showSettings(ctx, scope);
   onChanged();
+}
+
+/**
+ * What the scheduler would say about the budget right now. It checks the
+ * budget only while work it could dispatch (an executor launch or a review in
+ * `taskIds`' scope, the whole board when undefined) remains, with the same
+ * exceeded and launch-floor predicates the drive uses before it launches.
+ */
+function remainingWorkBudgetBlocker(
+  board: Board,
+  config: MaestroConfig,
+  taskIds?: string[]
+): string | undefined {
+  const wave = calculateSchedulingWave(board, config, taskIds);
+  const reviewable = board.tasks.filter(
+    (task) => wave.reviewableIds.includes(task.id) && !terminalReviewConvergence(task)
+  );
+  if (wave.runnableIds.length === 0 && reviewable.length === 0) return undefined;
+  return (
+    runBudgetWarning(board.tasks, config.maxRunCost) ??
+    launchBudgetShortfall(board.tasks, {
+      maxRunCost: config.maxRunCost,
+      maxCostPerTask: config.maxCostPerTask,
+    })
+  );
 }
 
 /**
@@ -84,33 +117,41 @@ function handleBudgetCommand(
   }
   // The raise is the fix for a pending budget stop: resolve it in the same
   // step so recovery is one command instead of config-edit + decision surgery.
+  // It only counts as a fix when the scheduler would now dispatch, judged on
+  // fresh spend and the saved effective config.
+  const config = loadConfig(ctx.cwd);
   let resolvedDecision = false;
-  const stop: { spent?: number } = {};
+  let hadPendingStop = false;
+  const stop: { reason?: string } = {};
   updateBoard(ctx.cwd, (board) => {
     const decision = board.activeDecision;
-    if (!decision || decision.resolution || decision.kind !== "budget_blocked") return false;
+    const pending =
+      decision && !decision.resolution && decision.kind === "budget_blocked" ? decision : undefined;
+    hadPendingStop = pending !== undefined;
     const spent = boardUsage(board.tasks).cost;
-    // Judge against fresh spend: a raise that does not clear it would send the
-    // drive straight back into the same stop.
-    if (amount !== 0 && spent >= amount) {
-      stop.spent = spent;
-      return false;
+    const blocker = remainingWorkBudgetBlocker(board, config, pending?.taskIds);
+    if (blocker) stop.reason = blocker;
+    else if (pending && amount !== 0 && spent >= amount) {
+      stop.reason = `board spend $${spent.toFixed(4)} is not below the $${amount} budget; set a budget above that, or 0 to turn the cap off`;
     }
-    decision.resolution = { intervention: "resume", resolvedAt: Date.now() };
-    delete decision.deliveryClaim;
+    if (!pending || stop.reason) return false;
+    pending.resolution = { intervention: "resume", resolvedAt: Date.now() };
+    delete pending.deliveryClaim;
     resolvedDecision = true;
     return true;
   });
   const remaining =
     amount === 0 ? "budget disabled" : `$${Math.max(0, amount - total).toFixed(4)} remaining`;
   const outcome =
-    stop.spent === undefined
+    stop.reason === undefined
       ? `${resolvedDecision ? " Pending budget_blocked decision resolved." : ""} Use /maestro resume or /maestro drive to continue.`
-      : ` The budget stop stays pending: board spend is $${stop.spent.toFixed(4)}, which this budget does not exceed. Set a budget above that, or 0 to turn the cap off.`;
+      : hadPendingStop
+        ? ` The budget stop stays pending: ${stop.reason}.`
+        : ` A drive would stop again: ${stop.reason}.`;
   notify(
     ctx,
     `Run budget → ${amount === 0 ? "off" : `$${amount}`} · ${spendSummary} · ${remaining}.${outcome}`,
-    stop.spent === undefined ? "info" : "warning"
+    stop.reason === undefined ? "info" : "warning"
   );
   onChanged();
 }
