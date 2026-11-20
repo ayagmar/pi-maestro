@@ -75,7 +75,7 @@
     "astro": "^7.4.12",
     "release-it": "^21.1.2",
     "tsx": "^4.23.15",
-    "typebox": "^1.4.6",
+    "typebox": "^1.4.7",
     "typescript": "^7.0.2"
   },
   "engines": {
